@@ -1,0 +1,49 @@
+position: top
+height: 2
+
+style:
+  rounded: true
+  separator_left: ""
+  separator_right: ""
+
+overflow:
+  mode: scroll
+  indicator: "›"
+
+groups:
+  - name: "StudioDome"
+    pattern: "^SD\\|"
+    theme:
+      bg: "#e74c3c"
+      fg: "#ffffff"
+      active_bg: "#c0392b"
+      active_fg: "#ffffff"
+      icon: ""
+
+  - name: "Gunpowder"
+    pattern: "^GP\\|"
+    theme:
+      bg: "#7f8c8d"
+      fg: "#ecf0f1"
+      active_bg: "#34495e"
+      active_fg: "#ffffff"
+      icon: "🔫"
+
+  - name: "Default"
+    pattern: ".*"
+    theme:
+      bg: "#3498db"
+      fg: "#ecf0f1"
+      active_bg: "#2980b9"
+      active_fg: "#ffffff"
+      icon: ""
+
+bindings:
+  toggle_sidebar: "prefix + Tab"
+  next_tab: "prefix + n"
+  prev_tab: "prefix + p"
+
+sidebar:
+  new_tab_button: true
+  close_button: true
+  sort_by: "group"  # "group" or "index"

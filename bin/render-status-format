@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Simple clickable tab format
+if [ "$1" = "current" ]; then
+    echo "#[fg=white,bg=blue,bold] #{window_index}:#{window_name} "
+else
+    echo "#[fg=default,bg=default] #{window_index}:#{window_name} "
+fi

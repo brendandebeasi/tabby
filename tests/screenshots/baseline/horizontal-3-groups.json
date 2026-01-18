@@ -1,0 +1,8 @@
+{
+  "capture_time": "2026-01-18T06:17:00Z",
+  "session": "tmux-tabs-visual-test",
+  "windows": [
+    {"index": 0, "name": "SD|app", "active": 1},    {"index": 1, "name": "SD|debug", "active": 0},    {"index": 2, "name": "GP|MSG|chat", "active": 0},    {"index": 3, "name": "GP|Arsenal|build", "active": 0},    {"index": 4, "name": "notes", "active": 0},    {"index": 5, "name": "vim", "active": 0}
+  ],
+  "raw_output": "#[fg=colour231,bg=colour167,bold]  0:SD|app #[fg=colour203]🔔#[fg=default] #[fg=colour214]●#[fg=default] #[fg=colour145]🔇#[fg=default]  #[fg=colour231,bg=colour203,nobold] 1:SD|debug #[fg=colour203]🔔#[fg=default] #[fg=colour214]●#[fg=default] #[fg=colour145]🔇#[fg=default] #[fg=colour75]-#[fg=default]  #[fg=colour231,bg=colour109,nobold] 2:GP|MSG|chat #[fg=colour203]🔔#[fg=default] #[fg=colour214]●#[fg=default] #[fg=colour145]🔇#[fg=default] #[fg=colour75]-#[fg=default]  #[fg=colour231,bg=colour109,nobold] 3:GP|Arsenal|build #[fg=colour203]🔔#[fg=default] #[fg=colour214]●#[fg=default] #[fg=colour145]🔇#[fg=default] #[fg=colour75]-#[fg=default]  #[fg=colour231,bg=colour75,nobold] 4:notes #[fg=colour203]🔔#[fg=default] #[fg=colour214]●#[fg=default] #[fg=colour145]🔇#[fg=default] #[fg=colour75]-#[fg=default]  #[fg=colour231,bg=colour75,nobold] 5:vim #[fg=colour203]🔔#[fg=default] #[fg=colour214]●#[fg=default] #[fg=colour145]🔇#[fg=default] #[fg=colour75]-#[fg=default]  #[default]"
+}
