@@ -589,19 +589,24 @@ func (m model) showContextMenu(win *tmux.Window) {
 	if baseName != win.Name && strings.HasSuffix(win.Name, baseName) {
 		prefix = win.Name[:len(win.Name)-len(baseName)]
 	}
+	// Rename command - also disables automatic-rename to lock the manual name
 	var menuCmd string
 	if prefix != "" {
-		// Prepend prefix to whatever user types
-		menuCmd = fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%s%%%%'\"", baseName, win.Index, prefix)
+		// Prepend prefix to whatever user types, then lock auto-rename
+		menuCmd = fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%s%%%%' ; set-window-option -t :%d automatic-rename off\"", baseName, win.Index, prefix, win.Index)
 	} else {
-		menuCmd = fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%'\"", baseName, win.Index)
+		menuCmd = fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d automatic-rename off\"", baseName, win.Index, win.Index)
 	}
 	args = append(args, "Rename", "r", menuCmd)
+
+	// Unlock auto-rename option (restore automatic naming)
+	unlockCmd := fmt.Sprintf("set-window-option -t :%d automatic-rename on", win.Index)
+	args = append(args, "Auto-name", "a", unlockCmd)
 
 	// Separator
 	args = append(args, "", "", "")
 
-	// Move to Group submenu - add each group as an option
+	// Move to Group submenu - add each group as an option (locks auto-rename)
 	args = append(args, "-Move to Group", "", "")
 	for i, group := range m.config.Groups {
 		if group.Name == "Default" {
@@ -612,14 +617,15 @@ func (m model) showContextMenu(win *tmux.Window) {
 		newName := groupPrefix + baseName
 		key := fmt.Sprintf("%d", i+1)
 		if i < 9 {
-			renameCmd := fmt.Sprintf("rename-window -t :%d -- '%s'", win.Index, newName)
+			// Rename and lock auto-rename to preserve group prefix
+			renameCmd := fmt.Sprintf("rename-window -t :%d -- '%s' ; set-window-option -t :%d automatic-rename off", win.Index, newName, win.Index)
 			args = append(args, fmt.Sprintf("  %s %s", group.Theme.Icon, group.Name), key, renameCmd)
 		}
 	}
 
-	// Option to remove prefix (move to Default)
+	// Option to remove prefix (move to Default) - enables auto-rename
 	if baseName != win.Name {
-		removeCmd := fmt.Sprintf("rename-window -t :%d -- '%s'", win.Index, baseName)
+		removeCmd := fmt.Sprintf("rename-window -t :%d -- '%s' ; set-window-option -t :%d automatic-rename on", win.Index, baseName, win.Index)
 		args = append(args, "  Remove Prefix", "0", removeCmd)
 	}
 

@@ -18,10 +18,11 @@ fi
 # Auto-renumber windows when one is closed (keeps indices sequential)
 tmux set-option -g renumber-windows on
 
-# Disable automatic window renaming to preserve group prefixes in window names
-# This prevents tmux from renaming windows when the active pane changes
-tmux set-option -g automatic-rename off
-tmux set-option -g allow-rename off
+# Enable automatic window renaming by default (shows running command/SSH host)
+# Windows with group prefixes or manual names get locked via @tabby_locked
+tmux set-option -g automatic-rename on
+tmux set-option -g allow-rename on
+tmux set-option -g automatic-rename-format '#{pane_current_command}'
 
 # Terminal title configuration
 # Read from config.yaml or use defaults

@@ -11,6 +11,9 @@ TABBAR_HEIGHT=2  # 2 lines: 1 for tabs, 1 for panes (shown when >1 pane)
 # Get current window to return to (before any pane changes)
 CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
 
+# Renumber windows to ensure sequential indices (0, 1, 2, ...)
+tmux move-window -r 2>/dev/null || true
+
 # Kill any sidebar panes first
 while IFS= read -r line; do
     pane_id=$(echo "$line" | cut -d'|' -f2)

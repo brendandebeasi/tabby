@@ -8,6 +8,9 @@ SESSION_ID=$(tmux display-message -p '#{session_id}')
 SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
 SIDEBAR_WIDTH=25
 
+# Renumber windows to ensure sequential indices (0, 1, 2, ...)
+tmux move-window -r 2>/dev/null || true
+
 # Check if any sidebar exists in session
 SIDEBAR_EXISTS=$(tmux list-panes -s -F "#{pane_current_command}" 2>/dev/null | grep -c "^sidebar$" || echo "0")
 

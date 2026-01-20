@@ -10,6 +10,9 @@ SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
 # Get current window to return to (before any pane changes)
 CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
 
+# Renumber windows to ensure sequential indices (0, 1, 2, ...)
+tmux move-window -r 2>/dev/null || true
+
 # Kill any tabbar panes first
 while IFS= read -r line; do
     pane_id=$(echo "$line" | cut -d'|' -f2)
