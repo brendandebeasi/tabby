@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -74,26 +76,42 @@ func (m *model) buildWindowRefs() {
 	m.windowRefs = make([]windowRef, 0)
 	m.paneRefs = make([]paneRef, 0)
 	line := 0
-	for gi := range m.grouped {
-		line++ // Group header line
-		for wi := range m.grouped[gi].Windows {
-			win := &m.grouped[gi].Windows[wi]
-			m.windowRefs = append(m.windowRefs, windowRef{
-				window: win,
-				line:   line,
-			})
-			line++
-			// Track pane lines if window has multiple panes
-			if len(win.Panes) > 1 {
-				for pi := range win.Panes {
-					m.paneRefs = append(m.paneRefs, paneRef{
-						pane:      &win.Panes[pi],
-						window:    win,
-						windowIdx: win.Index,
-						line:      line,
-					})
-					line++
-				}
+
+	// Sort windows by index to match View() display order
+	sortedWindows := make([]tmux.Window, len(m.windows))
+	copy(sortedWindows, m.windows)
+	sort.Slice(sortedWindows, func(i, j int) bool {
+		return sortedWindows[i].Index < sortedWindows[j].Index
+	})
+
+	// Track group headers to match View() exactly
+	lastGroupName := ""
+	for wi := range sortedWindows {
+		win := &sortedWindows[wi]
+		groupName, _ := findWindowGroup(win.Name, m.config.Groups)
+
+		// Group header line when group changes
+		if groupName != lastGroupName {
+			line++ // Group header
+			lastGroupName = groupName
+		}
+
+		m.windowRefs = append(m.windowRefs, windowRef{
+			window: win,
+			line:   line,
+		})
+		line++
+
+		// Track pane lines if window has multiple panes
+		if len(win.Panes) > 1 {
+			for pi := range win.Panes {
+				m.paneRefs = append(m.paneRefs, paneRef{
+					pane:      &win.Panes[pi],
+					window:    win,
+					windowIdx: win.Index,
+					line:      line,
+				})
+				line++
 			}
 		}
 	}
@@ -375,183 +393,193 @@ func (m model) View() string {
 
 	var s string
 	sidebarWidth := 25
-	indentWidth := 5
-	contentWidth := sidebarWidth - indentWidth
+	contentWidth := sidebarWidth - 4 // Space for tree chars and arrow
 
-	// Display grouped windows (groups sorted by lowest window index)
-	for _, group := range m.grouped {
-		// Group header
-		headerStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(group.Theme.Fg)).
-			Background(lipgloss.Color(group.Theme.Bg)).
-			Bold(true).
-			Width(sidebarWidth - 1)
-		icon := group.Theme.Icon
-		if icon != "" {
-			icon += " "
+	// Sort windows by index for strict 0, 1, 2, 3... order
+	sortedWindows := make([]tmux.Window, len(m.windows))
+	copy(sortedWindows, m.windows)
+	sort.Slice(sortedWindows, func(i, j int) bool {
+		return sortedWindows[i].Index < sortedWindows[j].Index
+	})
+
+	// Display windows in strict index order with inline group headers
+	lastGroupName := ""
+	for wi, win := range sortedWindows {
+		// Find which group this window belongs to
+		groupName, theme := findWindowGroup(win.Name, m.config.Groups)
+
+		// Show group header when group changes
+		if groupName != lastGroupName {
+			headerStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color(theme.Fg)).
+				Background(lipgloss.Color(theme.Bg)).
+				Bold(true).
+				Width(sidebarWidth - 1)
+			icon := theme.Icon
+			if icon != "" {
+				icon += " "
+			}
+			s += headerStyle.Render(icon+groupName) + "\n"
+			lastGroupName = groupName
 		}
-		s += headerStyle.Render(icon+group.Name) + "\n"
 
-		// Windows in this group (already sorted by index in grouper)
-		for wi, win := range group.Windows {
-			isActive := win.Active
-			isLastWindow := wi == len(group.Windows)-1
+		isActive := win.Active
+		isLastWindow := wi == len(sortedWindows)-1
 
-			// Choose colors - custom color overrides group theme
-			var bgColor, fgColor string
-			if win.CustomColor != "" {
-				if isActive {
-					bgColor = win.CustomColor
-				} else {
-					bgColor = grouping.ShadeColorByIndex(win.CustomColor, 1)
-				}
-				fgColor = "#ffffff"
-			} else if isActive {
-				bgColor = group.Theme.ActiveBg
-				if bgColor == "" {
-					bgColor = group.Theme.Bg
-				}
-				fgColor = group.Theme.ActiveFg
-				if fgColor == "" {
-					fgColor = group.Theme.Fg
-				}
+		// Choose colors - custom color overrides group theme
+		var bgColor, fgColor string
+		if win.CustomColor != "" {
+			if isActive {
+				bgColor = win.CustomColor
 			} else {
-				bgColor = group.Theme.Bg
-				fgColor = group.Theme.Fg
+				bgColor = grouping.ShadeColorByIndex(win.CustomColor, 1)
 			}
+			fgColor = "#ffffff"
+		} else if isActive {
+			bgColor = theme.ActiveBg
+			if bgColor == "" {
+				bgColor = theme.Bg
+			}
+			fgColor = theme.ActiveFg
 			if fgColor == "" {
-				fgColor = "#ffffff"
+				fgColor = theme.Fg
 			}
+		} else {
+			bgColor = theme.Bg
+			fgColor = theme.Fg
+		}
+		if fgColor == "" {
+			fgColor = "#ffffff"
+		}
 
-			// Build style
-			style := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(fgColor)).
-				Background(lipgloss.Color(bgColor))
-			if isActive {
-				style = style.Bold(true)
-			}
+		// Build style
+		style := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(fgColor)).
+			Background(lipgloss.Color(bgColor))
+		if isActive {
+			style = style.Bold(true)
+		}
 
-			// Get display name (strip group prefix)
-			displayName := stripGroupPrefix(win.Name, group.Name, m.config.Groups)
+		// Get display name (strip group prefix)
+		displayName := getBaseWindowName(win.Name, m.config.Groups)
 
-			// Build alert indicator (shown at start of tab if any alert)
-			alertIcon := " "
-			ind := m.config.Indicators
-			if ind.Bell.Enabled && win.Bell {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
-				alertIcon = alertStyle.Render(ind.Bell.Icon)
-			} else if ind.Activity.Enabled && win.Activity {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
-				alertIcon = alertStyle.Render(ind.Activity.Icon)
-			} else if ind.Silence.Enabled && win.Silence {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
-				alertIcon = alertStyle.Render(ind.Silence.Icon)
-			}
+		// Build alert indicator (shown at start of tab if any alert)
+		alertIcon := " "
+		ind := m.config.Indicators
+		if ind.Bell.Enabled && win.Bell {
+			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
+			alertIcon = alertStyle.Render(ind.Bell.Icon)
+		} else if ind.Activity.Enabled && win.Activity {
+			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
+			alertIcon = alertStyle.Render(ind.Activity.Icon)
+		} else if ind.Silence.Enabled && win.Silence {
+			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
+			alertIcon = alertStyle.Render(ind.Silence.Icon)
+		}
 
-			// Build tab content
-			baseContent := fmt.Sprintf("%d. %s", win.Index, displayName)
-			availableWidth := contentWidth - 1
-			if lipgloss.Width(baseContent) > availableWidth {
-				truncated := ""
-				for _, r := range baseContent {
-					if lipgloss.Width(truncated+string(r)) > availableWidth-1 {
-						break
-					}
-					truncated += string(r)
+		// Build tab content
+		baseContent := fmt.Sprintf("%d. %s", win.Index, displayName)
+		availableWidth := contentWidth - 1
+		if lipgloss.Width(baseContent) > availableWidth {
+			truncated := ""
+			for _, r := range baseContent {
+				if lipgloss.Width(truncated+string(r)) > availableWidth-1 {
+					break
 				}
-				baseContent = truncated + "~"
+				truncated += string(r)
 			}
-			tabContent := alertIcon + baseContent
+			baseContent = truncated + "~"
+		}
+		tabContent := alertIcon + baseContent
 
-			// Render with tree formatting
-			var treeChar string
-			if isLastWindow {
-				treeChar = "└─"
+		// Render with tree formatting
+		var treeChar string
+		if isLastWindow {
+			treeChar = "└─"
+		} else {
+			treeChar = "├─"
+		}
+
+		fullWidthStyle := style.Width(contentWidth)
+		if isActive {
+			s += treeChar + ">" + fullWidthStyle.Render(tabContent) + "\n"
+		} else {
+			s += treeChar + " " + fullWidthStyle.Render(tabContent) + "\n"
+		}
+
+		// Show panes if window has multiple panes
+		if len(win.Panes) > 1 {
+			var paneBg, paneFg, activePaneBg string
+			if win.CustomColor != "" {
+				paneBg = grouping.LightenColor(win.CustomColor, 0.3)
+				activePaneBg = win.CustomColor
+				paneFg = "#ffffff"
 			} else {
-				treeChar = "├─"
-			}
-
-			fullWidthStyle := style.Width(contentWidth)
-			if isActive {
-				s += treeChar + ">" + fullWidthStyle.Render(tabContent) + "\n"
-			} else {
-				s += treeChar + " " + fullWidthStyle.Render(tabContent) + "\n"
-			}
-
-			// Show panes if window has multiple panes
-			if len(win.Panes) > 1 {
-				var paneBg, paneFg, activePaneBg string
-				if win.CustomColor != "" {
-					paneBg = grouping.LightenColor(win.CustomColor, 0.3)
-					activePaneBg = win.CustomColor
+				paneBg = grouping.LightenColor(theme.Bg, 0.3)
+				activePaneBg = theme.ActiveBg
+				paneFg = theme.Fg
+				if paneFg == "" {
 					paneFg = "#ffffff"
+				}
+			}
+
+			paneStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color(paneFg)).
+				Background(lipgloss.Color(paneBg))
+
+			activePaneStyle := paneStyle
+			if isActive {
+				activePaneFg := "#ffffff"
+				if win.CustomColor == "" && theme.ActiveFg != "" {
+					activePaneFg = theme.ActiveFg
+				}
+				activePaneStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color(activePaneFg)).
+					Background(lipgloss.Color(activePaneBg)).
+					Bold(true)
+			}
+
+			// Tree continuation character
+			var treeContinue string
+			if isLastWindow {
+				treeContinue = "   "
+			} else {
+				treeContinue = "│  "
+			}
+
+			for pi, pane := range win.Panes {
+				var paneTreeChar string
+				if pi == len(win.Panes)-1 {
+					paneTreeChar = "└─"
 				} else {
-					paneBg = grouping.LightenColor(group.Theme.Bg, 0.3)
-					activePaneBg = group.Theme.ActiveBg
-					paneFg = group.Theme.Fg
-					if paneFg == "" {
-						paneFg = "#ffffff"
-					}
+					paneTreeChar = "├─"
 				}
 
-				paneStyle := lipgloss.NewStyle().
-					Foreground(lipgloss.Color(paneFg)).
-					Background(lipgloss.Color(paneBg))
-
-				activePaneStyle := paneStyle
-				if isActive {
-					activePaneFg := "#ffffff"
-					if win.CustomColor == "" && group.Theme.ActiveFg != "" {
-						activePaneFg = group.Theme.ActiveFg
-					}
-					activePaneStyle = lipgloss.NewStyle().
-						Foreground(lipgloss.Color(activePaneFg)).
-						Background(lipgloss.Color(activePaneBg)).
-						Bold(true)
+				paneNum := fmt.Sprintf("%d.%d", win.Index, pane.Index)
+				paneLabel := pane.Command
+				if pane.Title != "" && pane.Title != pane.Command {
+					paneLabel = pane.Title
 				}
+				paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
 
-				// Tree continuation character based on whether this is the last window
-				var treeContinue string
-				if isLastWindow {
-					treeContinue = "   "
+				paneIndentWidth := 8
+				paneContentWidth := sidebarWidth - paneIndentWidth
+
+				var paneContent string
+				if pane.Active {
+					paneContent = "► " + paneText
 				} else {
-					treeContinue = "│  "
+					paneContent = "  " + paneText
+				}
+				if len(paneContent) > paneContentWidth {
+					paneContent = paneContent[:paneContentWidth-1] + "~"
 				}
 
-				for pi, pane := range win.Panes {
-					var paneTreeChar string
-					if pi == len(win.Panes)-1 {
-						paneTreeChar = "└─"
-					} else {
-						paneTreeChar = "├─"
-					}
-
-					paneNum := fmt.Sprintf("%d.%d", win.Index, pane.Index)
-					paneLabel := pane.Command
-					if pane.Title != "" && pane.Title != pane.Command {
-						paneLabel = pane.Title
-					}
-					paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
-
-					paneIndentWidth := 8
-					paneContentWidth := sidebarWidth - paneIndentWidth
-
-					var paneContent string
-					if pane.Active {
-						paneContent = "► " + paneText
-					} else {
-						paneContent = "  " + paneText
-					}
-					if len(paneContent) > paneContentWidth {
-						paneContent = paneContent[:paneContentWidth-1] + "~"
-					}
-
-					if pane.Active && isActive {
-						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-						s += treeContinue + paneTreeChar + fullWidthPaneStyle.Render(paneContent) + "\n"
-					} else {
-						s += treeContinue + paneTreeChar + paneStyle.Render(paneContent) + "\n"
-					}
+				if pane.Active && isActive {
+					fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
+					s += treeContinue + paneTreeChar + fullWidthPaneStyle.Render(paneContent) + "\n"
+				} else {
+					s += treeContinue + paneTreeChar + paneStyle.Render(paneContent) + "\n"
 				}
 			}
 		}
@@ -751,6 +779,35 @@ func getBaseWindowName(windowName string, groups []config.Group) string {
 		}
 	}
 	return windowName
+}
+
+// findWindowGroup returns the group name and theme for a window based on pattern matching
+func findWindowGroup(windowName string, groups []config.Group) (string, config.Theme) {
+	var defaultTheme config.Theme
+	defaultName := "Default"
+	for _, group := range groups {
+		if group.Name == "Default" {
+			defaultTheme = group.Theme
+			continue
+		}
+		re, err := regexp.Compile(group.Pattern)
+		if err != nil {
+			continue
+		}
+		if re.MatchString(windowName) {
+			return group.Name, group.Theme
+		}
+	}
+	// Return default
+	if defaultTheme.Bg != "" {
+		return defaultName, defaultTheme
+	}
+	return defaultName, config.Theme{
+		Bg:       "#3498db",
+		Fg:       "#ffffff",
+		ActiveBg: "#2980b9",
+		ActiveFg: "#ffffff",
+	}
 }
 
 func buildIndicators(win tmux.Window, cfg *config.Config) string {
