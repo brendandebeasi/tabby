@@ -158,9 +158,17 @@ func (m model) buildTabs() []tabEntry {
 			win := &group.Windows[wi]
 			displayName := stripGroupPrefix(win.Name, group.Name, m.config.Groups)
 
-			// Choose colors
+			// Choose colors - custom color overrides group theme
 			var bg, fg string
-			if win.Active {
+			if win.CustomColor != "" {
+				// Custom color set by user
+				if win.Active {
+					bg = win.CustomColor
+				} else {
+					bg = grouping.ShadeColorByIndex(win.CustomColor, 1)
+				}
+				fg = "#ffffff"
+			} else if win.Active {
 				bg = group.Theme.ActiveBg
 				fg = group.Theme.ActiveFg
 			} else {
@@ -323,11 +331,24 @@ func (m model) buildPaneBar() string {
 		return ""
 	}
 
-	// Use lighter version of group colors for pane styling
-	paneBg := grouping.LightenColor(activeGroup.Theme.Bg, 0.3)
-	paneFg := activeGroup.Theme.Fg
-	if paneFg == "" {
+	// Use lighter version of colors for pane styling - prefer custom color
+	var paneBg, paneFg, activePaneBg, activePaneFg string
+	if activeWindow.CustomColor != "" {
+		paneBg = grouping.LightenColor(activeWindow.CustomColor, 0.3)
+		activePaneBg = activeWindow.CustomColor
 		paneFg = "#ffffff"
+		activePaneFg = "#ffffff"
+	} else {
+		paneBg = grouping.LightenColor(activeGroup.Theme.Bg, 0.3)
+		activePaneBg = activeGroup.Theme.ActiveBg
+		paneFg = activeGroup.Theme.Fg
+		activePaneFg = activeGroup.Theme.ActiveFg
+		if paneFg == "" {
+			paneFg = "#ffffff"
+		}
+		if activePaneFg == "" {
+			activePaneFg = "#ffffff"
+		}
 	}
 
 	paneStyle := lipgloss.NewStyle().
@@ -336,8 +357,8 @@ func (m model) buildPaneBar() string {
 		Padding(0, 1)
 
 	activePaneStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(activeGroup.Theme.ActiveFg)).
-		Background(lipgloss.Color(activeGroup.Theme.ActiveBg)).
+		Foreground(lipgloss.Color(activePaneFg)).
+		Background(lipgloss.Color(activePaneBg)).
 		Bold(true).
 		Padding(0, 1)
 
@@ -497,6 +518,34 @@ func (m model) showContextMenu(win *tmux.Window) {
 		removeCmd := fmt.Sprintf("rename-window -t :%d -- '%s'", win.Index, baseName)
 		args = append(args, "  Remove Prefix", "0", removeCmd)
 	}
+
+	// Separator
+	args = append(args, "", "", "")
+
+	// Set Color submenu
+	args = append(args, "-Set Tab Color", "", "")
+	colorOptions := []struct {
+		name string
+		hex  string
+		key  string
+	}{
+		{"Red", "#e74c3c", "r"},
+		{"Orange", "#e67e22", "o"},
+		{"Yellow", "#f1c40f", "y"},
+		{"Green", "#27ae60", "g"},
+		{"Blue", "#3498db", "b"},
+		{"Purple", "#9b59b6", "p"},
+		{"Pink", "#e91e63", "i"},
+		{"Cyan", "#00bcd4", "c"},
+		{"Gray", "#7f8c8d", "a"},
+	}
+	for _, color := range colorOptions {
+		setColorCmd := fmt.Sprintf("set-window-option -t :%d @tabby_color '%s'", win.Index, color.hex)
+		args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
+	}
+	// Reset option
+	resetColorCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_color", win.Index)
+	args = append(args, "  Reset to Default", "d", resetColorCmd)
 
 	// Separator
 	args = append(args, "", "", "")

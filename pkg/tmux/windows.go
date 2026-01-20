@@ -8,8 +8,11 @@ import (
 	"strings"
 )
 
-// ansiEscapeRegex matches ANSI escape sequences
-var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(?:\x07|\x1b\\)`)
+// ansiEscapeRegex matches ANSI escape sequences including:
+// - Standard CSI sequences: \x1b[...m (colors, styles)
+// - OSC sequences: \x1b]...BEL or \x1b]...\x1b\ (titles, etc)
+// - Partial/orphaned CSI: \[[0-9;]+[a-zA-Z] (missing ESC char)
+var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;:]*[a-zA-Z]|\x1b\].*?(?:\x07|\x1b\\)|\[[0-9;:]+[a-zA-Z]`)
 
 // stripANSI removes ANSI escape sequences from a string
 func stripANSI(s string) string {
@@ -25,20 +28,21 @@ type Pane struct {
 }
 
 type Window struct {
-	ID       string
-	Index    int
-	Name     string
-	Active   bool
-	Activity bool // Window has unseen activity (monitor-activity)
-	Bell     bool // Window has triggered bell
-	Silence  bool // Window has been silent (monitor-silence)
-	Last     bool // Window was the last active window
-	Panes    []Pane
+	ID          string
+	Index       int
+	Name        string
+	Active      bool
+	Activity    bool   // Window has unseen activity (monitor-activity)
+	Bell        bool   // Window has triggered bell
+	Silence     bool   // Window has been silent (monitor-silence)
+	Last        bool   // Window was the last active window
+	CustomColor string // User-defined tab color (set via @tabby_color option)
+	Panes       []Pane
 }
 
 func ListWindows() ([]Window, error) {
 	cmd := exec.Command("tmux", "list-windows", "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -58,15 +62,20 @@ func ListWindows() ([]Window, error) {
 		if err != nil {
 			continue
 		}
+		customColor := ""
+		if len(parts) >= 9 {
+			customColor = strings.TrimSpace(parts[8])
+		}
 		windows = append(windows, Window{
-			ID:       parts[0],
-			Index:    index,
-			Name:     stripANSI(parts[2]),
-			Active:   parts[3] == "1",
-			Activity: parts[4] == "1",
-			Bell:     parts[5] == "1",
-			Silence:  parts[6] == "1",
-			Last:     parts[7] == "1",
+			ID:          parts[0],
+			Index:       index,
+			Name:        stripANSI(parts[2]),
+			Active:      parts[3] == "1",
+			Activity:    parts[4] == "1",
+			Bell:        parts[5] == "1",
+			Silence:     parts[6] == "1",
+			Last:        parts[7] == "1",
+			CustomColor: customColor,
 		})
 	}
 

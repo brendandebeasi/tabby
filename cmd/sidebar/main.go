@@ -397,9 +397,17 @@ func (m model) View() string {
 			isSelected := line == m.cursor
 			isActive := win.Active
 
-			// Choose colors based on active state
+			// Choose colors - custom color overrides group theme
 			var bgColor, fgColor string
-			if isActive {
+			if win.CustomColor != "" {
+				// Custom color set by user
+				if isActive {
+					bgColor = win.CustomColor
+				} else {
+					bgColor = grouping.ShadeColorByIndex(win.CustomColor, 1)
+				}
+				fgColor = "#ffffff"
+			} else if isActive {
 				// Active window uses prominent active colors
 				bgColor = group.Theme.ActiveBg
 				if bgColor == "" {
@@ -433,31 +441,45 @@ func (m model) View() string {
 				style = style.Underline(true)
 			}
 
-			// Format window entry with clear active indicator
-			var activeMarker string
-			if isActive {
-				activeMarker = ">>> " // Very visible active marker
-			} else {
-				activeMarker = "    " // Spacing for alignment
-			}
-
 			// Strip group prefix from window name for cleaner display
 			displayName := stripGroupPrefix(win.Name, group.Name, m.config.Groups)
 
 			// Build indicators
 			indicators := buildIndicators(win, m.config)
 
-			windowText := fmt.Sprintf("%s%d. %s%s", activeMarker, win.Index, displayName, indicators)
-			s += style.Render(windowText) + "\n"
+			// Both active and inactive tabs have indentation prefix with plain background
+			// Active tab's colored content extends to the right edge
+			sidebarWidth := 25 // sidebar pane width
+			indentWidth := 4   // ">>> " or "    "
+			contentWidth := sidebarWidth - indentWidth
+
+			tabContent := fmt.Sprintf("%d. %s%s", win.Index, displayName, indicators)
+			if isActive {
+				// Active: indent plain, content extends to right edge
+				fullWidthStyle := style.Width(contentWidth)
+				s += ">>> " + fullWidthStyle.Render(tabContent) + "\n"
+			} else {
+				// Inactive: indent plain, content doesn't need to extend
+				s += "    " + style.Render(tabContent) + "\n"
+			}
 			line++ // Increment AFTER rendering (must match buildWindowRefs order)
 
 			// Show panes if window has multiple panes
 			if len(win.Panes) > 1 {
-				// Use lighter version of group background for pane styling
-				paneBg := grouping.LightenColor(group.Theme.Bg, 0.3)
-				paneFg := group.Theme.Fg
-				if paneFg == "" {
+				// Use lighter version of background for pane styling
+				// Prefer custom color if set
+				var paneBg, paneFg, activePaneBg string
+				if win.CustomColor != "" {
+					paneBg = grouping.LightenColor(win.CustomColor, 0.3)
+					activePaneBg = win.CustomColor
 					paneFg = "#ffffff"
+				} else {
+					paneBg = grouping.LightenColor(group.Theme.Bg, 0.3)
+					activePaneBg = group.Theme.ActiveBg
+					paneFg = group.Theme.Fg
+					if paneFg == "" {
+						paneFg = "#ffffff"
+					}
 				}
 
 				paneStyle := lipgloss.NewStyle().
@@ -467,18 +489,23 @@ func (m model) View() string {
 				// Active pane only highlighted if window is also active
 				activePaneStyle := paneStyle
 				if isActive {
+					activePaneFg := "#ffffff"
+					if win.CustomColor == "" && group.Theme.ActiveFg != "" {
+						activePaneFg = group.Theme.ActiveFg
+					}
 					activePaneStyle = lipgloss.NewStyle().
-						Foreground(lipgloss.Color(group.Theme.ActiveFg)).
-						Background(lipgloss.Color(group.Theme.ActiveBg)).
+						Foreground(lipgloss.Color(activePaneFg)).
+						Background(lipgloss.Color(activePaneBg)).
 						Bold(true)
 				}
 
 				for pi, pane := range win.Panes {
-					var prefix string
+					// Tree prefix characters
+					var treeChar string
 					if pi == len(win.Panes)-1 {
-						prefix = "   └─ "
+						treeChar = "└─ "
 					} else {
-						prefix = "   ├─ "
+						treeChar = "├─ "
 					}
 
 					// Show pane number as window.pane (e.g., 0.1, 0.2)
@@ -489,12 +516,22 @@ func (m model) View() string {
 						paneLabel = pane.Title
 					}
 					paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
+
+					// Active pane: tree prefix plain, colored content extends to right edge
+					// Pane indent is "   └─ " = 6 chars
+					paneIndentWidth := 6
+					paneContentWidth := sidebarWidth - paneIndentWidth
+
 					if pane.Active && isActive {
-						s += activePaneStyle.Render(prefix+"► "+paneText) + "\n"
+						// Active pane in active window: content extends to right
+						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
+						s += "   " + treeChar + fullWidthPaneStyle.Render("► "+paneText) + "\n"
 					} else if pane.Active {
-						s += paneStyle.Render(prefix+"► "+paneText) + "\n"
+						// Pane is active but window is not
+						s += "   " + treeChar + paneStyle.Render("► "+paneText) + "\n"
 					} else {
-						s += paneStyle.Render(prefix+"  "+paneText) + "\n"
+						// Inactive pane
+						s += "   " + treeChar + paneStyle.Render("  "+paneText) + "\n"
 					}
 					line++
 				}
@@ -559,6 +596,34 @@ func (m model) showContextMenu(win *tmux.Window) {
 		removeCmd := fmt.Sprintf("rename-window -t :%d -- '%s'", win.Index, baseName)
 		args = append(args, "  Remove Prefix", "0", removeCmd)
 	}
+
+	// Separator
+	args = append(args, "", "", "")
+
+	// Set Color submenu
+	args = append(args, "-Set Tab Color", "", "")
+	colorOptions := []struct {
+		name string
+		hex  string
+		key  string
+	}{
+		{"Red", "#e74c3c", "r"},
+		{"Orange", "#e67e22", "o"},
+		{"Yellow", "#f1c40f", "y"},
+		{"Green", "#27ae60", "g"},
+		{"Blue", "#3498db", "b"},
+		{"Purple", "#9b59b6", "p"},
+		{"Pink", "#e91e63", "i"},
+		{"Cyan", "#00bcd4", "c"},
+		{"Gray", "#7f8c8d", "a"},
+	}
+	for _, color := range colorOptions {
+		setColorCmd := fmt.Sprintf("set-window-option -t :%d @tabby_color '%s'", win.Index, color.hex)
+		args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
+	}
+	// Reset option
+	resetColorCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_color", win.Index)
+	args = append(args, "  Reset to Default", "d", resetColorCmd)
 
 	// Separator
 	args = append(args, "", "", "")
