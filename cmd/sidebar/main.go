@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
+	"github.com/muesli/termenv"
 
 	"github.com/b/tmux-tabs/pkg/config"
 	"github.com/b/tmux-tabs/pkg/grouping"
@@ -373,34 +374,32 @@ func (m model) View() string {
 	}
 
 	var s string
-	line := 0
-	for _, group := range m.grouped {
-		// Group header - use active colors for emphasis
-		headerFg := group.Theme.ActiveFg
-		if headerFg == "" {
-			headerFg = group.Theme.Fg
-		}
-		if headerFg == "" {
-			headerFg = "#ffffff"
-		}
-		headerStyle := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color(headerFg)).
-			Background(lipgloss.Color(group.Theme.Bg)).
-			Padding(0, 1)
-		s += headerStyle.Render(fmt.Sprintf("%s %s", group.Theme.Icon, group.Name)) + "\n"
-		line++
+	sidebarWidth := 25
+	indentWidth := 5
+	contentWidth := sidebarWidth - indentWidth
 
-		// Windows in group
-		for i, win := range group.Windows {
-			// Determine if this line is selected (check BEFORE incrementing)
-			isSelected := line == m.cursor
+	// Display grouped windows (groups sorted by lowest window index)
+	for _, group := range m.grouped {
+		// Group header
+		headerStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(group.Theme.Fg)).
+			Background(lipgloss.Color(group.Theme.Bg)).
+			Bold(true).
+			Width(sidebarWidth - 1)
+		icon := group.Theme.Icon
+		if icon != "" {
+			icon += " "
+		}
+		s += headerStyle.Render(icon+group.Name) + "\n"
+
+		// Windows in this group (already sorted by index in grouper)
+		for wi, win := range group.Windows {
 			isActive := win.Active
+			isLastWindow := wi == len(group.Windows)-1
 
 			// Choose colors - custom color overrides group theme
 			var bgColor, fgColor string
 			if win.CustomColor != "" {
-				// Custom color set by user
 				if isActive {
 					bgColor = win.CustomColor
 				} else {
@@ -408,7 +407,6 @@ func (m model) View() string {
 				}
 				fgColor = "#ffffff"
 			} else if isActive {
-				// Active window uses prominent active colors
 				bgColor = group.Theme.ActiveBg
 				if bgColor == "" {
 					bgColor = group.Theme.Bg
@@ -418,56 +416,70 @@ func (m model) View() string {
 					fgColor = group.Theme.Fg
 				}
 			} else {
-				// Inactive windows use shaded background
-				bgColor = grouping.ShadeColorByIndex(group.Theme.Bg, i)
+				bgColor = group.Theme.Bg
 				fgColor = group.Theme.Fg
 			}
 			if fgColor == "" {
 				fgColor = "#ffffff"
 			}
 
-			// Build style with theme-aware colors
+			// Build style
 			style := lipgloss.NewStyle().
 				Foreground(lipgloss.Color(fgColor)).
 				Background(lipgloss.Color(bgColor))
-
-			// Active window: bold with distinct marker
 			if isActive {
 				style = style.Bold(true)
 			}
 
-			// Selected (cursor) uses underline to avoid washing out project colors
-			if isSelected {
-				style = style.Underline(true)
-			}
-
-			// Strip group prefix from window name for cleaner display
+			// Get display name (strip group prefix)
 			displayName := stripGroupPrefix(win.Name, group.Name, m.config.Groups)
 
-			// Build indicators
-			indicators := buildIndicators(win, m.config)
-
-			// Both active and inactive tabs have indentation prefix with plain background
-			// Active tab's colored content extends to the right edge
-			sidebarWidth := 25 // sidebar pane width
-			indentWidth := 4   // ">>> " or "    "
-			contentWidth := sidebarWidth - indentWidth
-
-			tabContent := fmt.Sprintf("%d. %s%s", win.Index, displayName, indicators)
-			if isActive {
-				// Active: indent plain, content extends to right edge
-				fullWidthStyle := style.Width(contentWidth)
-				s += ">>> " + fullWidthStyle.Render(tabContent) + "\n"
-			} else {
-				// Inactive: indent plain, content doesn't need to extend
-				s += "    " + style.Render(tabContent) + "\n"
+			// Build alert indicator (shown at start of tab if any alert)
+			alertIcon := " "
+			ind := m.config.Indicators
+			if ind.Bell.Enabled && win.Bell {
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
+				alertIcon = alertStyle.Render(ind.Bell.Icon)
+			} else if ind.Activity.Enabled && win.Activity {
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
+				alertIcon = alertStyle.Render(ind.Activity.Icon)
+			} else if ind.Silence.Enabled && win.Silence {
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
+				alertIcon = alertStyle.Render(ind.Silence.Icon)
 			}
-			line++ // Increment AFTER rendering (must match buildWindowRefs order)
+
+			// Build tab content
+			baseContent := fmt.Sprintf("%d. %s", win.Index, displayName)
+			availableWidth := contentWidth - 1
+			if lipgloss.Width(baseContent) > availableWidth {
+				truncated := ""
+				for _, r := range baseContent {
+					if lipgloss.Width(truncated+string(r)) > availableWidth-1 {
+						break
+					}
+					truncated += string(r)
+				}
+				baseContent = truncated + "~"
+			}
+			tabContent := alertIcon + baseContent
+
+			// Render with tree formatting
+			var treeChar string
+			if isLastWindow {
+				treeChar = "└─"
+			} else {
+				treeChar = "├─"
+			}
+
+			fullWidthStyle := style.Width(contentWidth)
+			if isActive {
+				s += treeChar + ">" + fullWidthStyle.Render(tabContent) + "\n"
+			} else {
+				s += treeChar + " " + fullWidthStyle.Render(tabContent) + "\n"
+			}
 
 			// Show panes if window has multiple panes
 			if len(win.Panes) > 1 {
-				// Use lighter version of background for pane styling
-				// Prefer custom color if set
 				var paneBg, paneFg, activePaneBg string
 				if win.CustomColor != "" {
 					paneBg = grouping.LightenColor(win.CustomColor, 0.3)
@@ -486,7 +498,6 @@ func (m model) View() string {
 					Foreground(lipgloss.Color(paneFg)).
 					Background(lipgloss.Color(paneBg))
 
-				// Active pane only highlighted if window is also active
 				activePaneStyle := paneStyle
 				if isActive {
 					activePaneFg := "#ffffff"
@@ -499,41 +510,48 @@ func (m model) View() string {
 						Bold(true)
 				}
 
+				// Tree continuation character based on whether this is the last window
+				var treeContinue string
+				if isLastWindow {
+					treeContinue = "   "
+				} else {
+					treeContinue = "│  "
+				}
+
 				for pi, pane := range win.Panes {
-					// Tree prefix characters
-					var treeChar string
+					var paneTreeChar string
 					if pi == len(win.Panes)-1 {
-						treeChar = "└─ "
+						paneTreeChar = "└─"
 					} else {
-						treeChar = "├─ "
+						paneTreeChar = "├─"
 					}
 
-					// Show pane number as window.pane (e.g., 0.1, 0.2)
 					paneNum := fmt.Sprintf("%d.%d", win.Index, pane.Index)
-					// Show title if set, otherwise show command
 					paneLabel := pane.Command
 					if pane.Title != "" && pane.Title != pane.Command {
 						paneLabel = pane.Title
 					}
 					paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
 
-					// Active pane: tree prefix plain, colored content extends to right edge
-					// Pane indent is "   └─ " = 6 chars
-					paneIndentWidth := 6
+					paneIndentWidth := 8
 					paneContentWidth := sidebarWidth - paneIndentWidth
 
-					if pane.Active && isActive {
-						// Active pane in active window: content extends to right
-						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-						s += "   " + treeChar + fullWidthPaneStyle.Render("► "+paneText) + "\n"
-					} else if pane.Active {
-						// Pane is active but window is not
-						s += "   " + treeChar + paneStyle.Render("► "+paneText) + "\n"
+					var paneContent string
+					if pane.Active {
+						paneContent = "► " + paneText
 					} else {
-						// Inactive pane
-						s += "   " + treeChar + paneStyle.Render("  "+paneText) + "\n"
+						paneContent = "  " + paneText
 					}
-					line++
+					if len(paneContent) > paneContentWidth {
+						paneContent = paneContent[:paneContentWidth-1] + "~"
+					}
+
+					if pane.Active && isActive {
+						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
+						s += treeContinue + paneTreeChar + fullWidthPaneStyle.Render(paneContent) + "\n"
+					} else {
+						s += treeContinue + paneTreeChar + paneStyle.Render(paneContent) + "\n"
+					}
 				}
 			}
 		}
@@ -565,8 +583,19 @@ func (m model) showContextMenu(win *tmux.Window) {
 		"-y", "M",
 	}
 
-	// Rename option
-	menuCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%'\"", win.Name, win.Index)
+	// Rename option - show base name (without group prefix) so prefix is preserved
+	baseName := getBaseWindowName(win.Name, m.config.Groups)
+	prefix := ""
+	if baseName != win.Name && strings.HasSuffix(win.Name, baseName) {
+		prefix = win.Name[:len(win.Name)-len(baseName)]
+	}
+	var menuCmd string
+	if prefix != "" {
+		// Prepend prefix to whatever user types
+		menuCmd = fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%s%%%%'\"", baseName, win.Index, prefix)
+	} else {
+		menuCmd = fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%'\"", baseName, win.Index)
+	}
 	args = append(args, "Rename", "r", menuCmd)
 
 	// Separator
@@ -578,11 +607,9 @@ func (m model) showContextMenu(win *tmux.Window) {
 		if group.Name == "Default" {
 			continue // Skip default group in the submenu
 		}
-		// Extract prefix from pattern
-		prefix := extractPrefixFromPattern(group.Pattern)
-		// Get base name without any existing prefix
-		baseName := getBaseWindowName(win.Name, m.config.Groups)
-		newName := prefix + baseName
+		// Extract prefix from pattern and combine with base name
+		groupPrefix := extractPrefixFromPattern(group.Pattern)
+		newName := groupPrefix + baseName
 		key := fmt.Sprintf("%d", i+1)
 		if i < 9 {
 			renameCmd := fmt.Sprintf("rename-window -t :%d -- '%s'", win.Index, newName)
@@ -591,7 +618,6 @@ func (m model) showContextMenu(win *tmux.Window) {
 	}
 
 	// Option to remove prefix (move to Default)
-	baseName := getBaseWindowName(win.Name, m.config.Groups)
 	if baseName != win.Name {
 		removeCmd := fmt.Sprintf("rename-window -t :%d -- '%s'", win.Index, baseName)
 		args = append(args, "  Remove Prefix", "0", removeCmd)
@@ -740,11 +766,6 @@ func buildIndicators(win tmux.Window, cfg *config.Config) string {
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
 		indicators.WriteString(style.Render(ind.Silence.Icon))
 	}
-	if ind.Last.Enabled && win.Last && !win.Active {
-		indicators.WriteString(" ")
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Last.Color))
-		indicators.WriteString(style.Render(ind.Last.Icon))
-	}
 
 	return indicators.String()
 }
@@ -797,6 +818,9 @@ func watchConfig(p *tea.Program, configPath string) {
 }
 
 func main() {
+	// Force ANSI256 color mode to avoid partial 24-bit escape code issues
+	lipgloss.SetColorProfile(termenv.ANSI256)
+
 	cfg, _ := config.LoadConfig(config.DefaultConfigPath())
 	windows, _ := tmux.ListWindowsWithPanes()
 	grouped := grouping.GroupWindows(windows, cfg.Groups)

@@ -57,17 +57,13 @@ sidebar:
 indicators:
   activity:
     enabled: true
-    icon: "*"
+    icon: "●"
     color: "#f39c12"
   bell:
     enabled: true
-    icon: "!"
+    icon: "◆"
     color: "#e74c3c"
   silence:
     enabled: true
-    icon: "~"
+    icon: "○"
     color: "#95a5a6"
-  last:
-    enabled: true
-    icon: "-"
-    color: "#3498db"

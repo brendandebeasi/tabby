@@ -3,6 +3,7 @@ package grouping
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 
 	"github.com/b/tmux-tabs/pkg/config"
@@ -52,6 +53,10 @@ func GroupWindows(windows []tmux.Window, groups []config.Group) []GroupedWindows
 	var nonEmpty []GroupedWindows
 	for _, group := range result {
 		if len(group.Windows) > 0 {
+			// Sort windows by index within each group
+			sort.Slice(group.Windows, func(i, j int) bool {
+				return group.Windows[i].Index < group.Windows[j].Index
+			})
 			nonEmpty = append(nonEmpty, *group)
 		}
 	}
