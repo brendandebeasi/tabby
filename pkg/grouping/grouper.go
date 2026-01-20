@@ -61,6 +61,12 @@ func GroupWindows(windows []tmux.Window, groups []config.Group) []GroupedWindows
 		}
 	}
 
+	// Sort groups by their lowest window index so display order is 0, 1, 2...
+	sort.Slice(nonEmpty, func(i, j int) bool {
+		// Each group has at least one window (we filtered above)
+		return nonEmpty[i].Windows[0].Index < nonEmpty[j].Windows[0].Index
+	})
+
 	return nonEmpty
 }
 
