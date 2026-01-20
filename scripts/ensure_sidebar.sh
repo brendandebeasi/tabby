@@ -16,13 +16,15 @@ fi
 
 if [ "$MODE" = "enabled" ]; then
     # Check if CURRENT window has a sidebar
-    SIDEBAR_COUNT=$(tmux list-panes -F "#{pane_current_command}" 2>/dev/null | grep -c "^sidebar$" || echo "0")
+    HAS_SIDEBAR=$(tmux list-panes -F "#{pane_current_command}" 2>/dev/null | grep -q "^sidebar$" && echo "yes" || echo "no")
 
-    if [ "$SIDEBAR_COUNT" -eq 0 ]; then
+    if [ "$HAS_SIDEBAR" = "no" ]; then
         # No sidebar in current window - add one
-        FIRST_PANE=$(tmux list-panes -F "#{pane_id}" 2>/dev/null | head -1)
-        if [ -n "$FIRST_PANE" ]; then
-            tmux split-window -t "$FIRST_PANE" -h -b -l "$SIDEBAR_WIDTH" "exec \"$CURRENT_DIR/bin/sidebar\"" || true
+        # Find the rightmost pane (main content) to split from
+        MAIN_PANE=$(tmux list-panes -F "#{pane_id}" 2>/dev/null | tail -1)
+        if [ -n "$MAIN_PANE" ]; then
+            tmux split-window -t "$MAIN_PANE" -h -b -l "$SIDEBAR_WIDTH" "exec \"$CURRENT_DIR/bin/sidebar\"" || true
+            # Focus the main content pane (right side)
             tmux select-pane -t "{right}" 2>/dev/null || true
         fi
     fi
