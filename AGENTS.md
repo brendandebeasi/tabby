@@ -1,0 +1,113 @@
+# AGENTS.md - Claude Code Guide
+
+## Project Overview
+
+**Tabby** is a modern tmux tab bar plugin written in Go with shell scripts for tmux integration. It provides both horizontal (status bar) and vertical (sidebar) modes with tab grouping, theming, and mouse support.
+
+## Architecture
+
+```
+tabby/
+├── cmd/                    # Go binaries
+│   ├── render-status/      # Renders individual tabs for horizontal status bar
+│   ├── render-tab/         # Tab rendering helper
+│   ├── sidebar/            # BubbleTea TUI app for vertical sidebar
+│   └── tabbar/             # Horizontal tabbar TUI (alternative to status bar)
+├── pkg/                    # Shared Go packages
+│   ├── config/             # YAML config loading (config.yaml)
+│   ├── grouping/           # Window grouping logic and color utilities
+│   └── tmux/               # Tmux command wrappers (list windows, panes, etc.)
+├── scripts/                # Shell scripts for tmux integration
+│   ├── toggle_sidebar.sh   # Toggle vertical sidebar on/off
+│   ├── ensure_sidebar.sh   # Add sidebar to windows that don't have one
+│   ├── switch_to_*.sh      # Mode switching (vertical/horizontal)
+│   └── cleanup_*.sh        # Cleanup orphan panes
+├── config.yaml             # User configuration (groups, themes, indicators)
+└── tabby.tmux              # Plugin entry point (sets hooks, keybindings)
+```
+
+## Key Concepts
+
+### Display Modes
+- **Vertical sidebar** (`enabled`): Full TUI sidebar on left side of each window
+- **Horizontal tabbar** (`horizontal`): Pane at top of each window
+- **Disabled**: No custom UI, uses tmux's built-in status bar
+
+### Window Grouping
+Windows are grouped by name patterns (regex). Each group has a theme (colors, icon). Windows display in **strict index order** (0, 1, 2...) with group headers appearing inline when the group changes.
+
+### State Management
+- State stored in tmux option `@tmux-tabs-sidebar` and file `/tmp/tmux-tabs-sidebar-${SESSION_ID}.state`
+- The tmux option is the source of truth for toggle behavior
+
+## Building
+
+```bash
+# Build all binaries
+go build -o bin/sidebar ./cmd/sidebar/
+go build -o bin/tabbar ./cmd/tabbar/
+go build -o bin/render-status ./cmd/render-status/
+go build -o bin/render-tab ./cmd/render-tab/
+
+# Or use the install script
+./scripts/install.sh
+```
+
+## Key Files to Understand
+
+| File | Purpose |
+|------|---------|
+| `cmd/sidebar/main.go` | Main sidebar TUI - handles View(), Update(), mouse/keyboard |
+| `pkg/grouping/grouper.go` | Groups windows by pattern, provides color utilities |
+| `pkg/tmux/tmux.go` | Wraps tmux commands to list windows/panes |
+| `scripts/toggle_sidebar.sh` | Toggles sidebar on/off using state |
+| `tabby.tmux` | Sets up tmux hooks, keybindings, options |
+| `config.yaml` | User-editable configuration |
+
+## Common Patterns
+
+### Adding a new feature to sidebar
+1. Update `model` struct in `cmd/sidebar/main.go` if new state needed
+2. Handle in `Update()` for keyboard/mouse events
+3. Render in `View()` using lipgloss styles
+4. Update `buildWindowRefs()` if display layout changes (for click targets)
+
+### Modifying window display order
+- `View()` iterates `m.windows` sorted by index
+- `buildWindowRefs()` must match View() exactly for click targets to work
+- Both use `findWindowGroup()` to determine group headers
+
+### Shell script conventions
+- Use `set -eu` for error handling
+- Get session ID: `SESSION_ID=$(tmux display-message -p '#{session_id}')`
+- State file: `/tmp/tmux-tabs-sidebar-${SESSION_ID}.state`
+- Use process substitution `< <(cmd)` instead of `cmd | while` to avoid subshell issues
+
+## Testing
+
+```bash
+# Manual testing - enable the plugin
+tmux set-option -g @tmux_tabs_test 1
+tmux source ~/.tmux.conf
+
+# Toggle sidebar
+# prefix + Tab
+
+# Check sidebar state
+tmux show-options -v @tmux-tabs-sidebar
+```
+
+## Common Issues
+
+1. **Sidebar disappears**: Check state with `tmux show-options -v @tmux-tabs-sidebar`
+2. **Click targets wrong**: Ensure `buildWindowRefs()` matches `View()` display order
+3. **Windows out of order**: Check sorting in both `View()` and `buildWindowRefs()`
+4. **ANSI codes visible**: Use `lipgloss.Width()` for ANSI-aware string measurement
+
+## Dependencies
+
+- Go 1.21+
+- [BubbleTea](https://github.com/charmbracelet/bubbletea) - TUI framework
+- [Lipgloss](https://github.com/charmbracelet/lipgloss) - Styling
+- [fsnotify](https://github.com/fsnotify/fsnotify) - Config file watching
+- tmux 3.2+ (for Unicode support)

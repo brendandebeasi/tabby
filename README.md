@@ -9,10 +9,13 @@ Modern, groupable tab bar plugin for tmux with horizontal and vertical modes. Fe
 - **Horizontal tab bar** with overflow scrolling
 - **Vertical sidebar** with persistent state across windows
 - **Tab grouping** with customizable themes and icons
+- **Automatic window naming** - shows running command (ssh, vim, etc.), locks on manual rename
+- **Strict index ordering** - windows always display 0, 1, 2... from top to bottom
 - **Window indicators** for activity, bell, and silence
 - **Keyboard navigation** with intuitive shortcuts
-- **Tab overflow** with scroll indicators
-- **Visual close buttons** and new tab button
+- **Mouse support** - click to switch, right-click context menu, middle-click close
+- **Custom tab colors** - set per-window colors via context menu
+- **Auto-renumbering** - windows renumber when closed or on mode switch
 
 ## Installation
 
@@ -56,13 +59,19 @@ set -g @tmux_tabs_test 1  # Currently gated - required for activation
 | `Alt + q` | Display pane numbers |
 | `Alt + 1-9,0` | Switch to window by number |
 
-### Mouse Support (Vertical Sidebar Only)
+### Mouse Support (Vertical Sidebar)
 
-- **Left click**: Switch to window
-- **Middle click**: Close window  
-- **Right click**: Context menu (rename, etc.)
+- **Left click**: Switch to window/pane
+- **Middle click**: Close window (with confirmation)
+- **Right click**: Context menu with options:
+  - Rename (preserves group prefix)
+  - Auto-name (re-enable automatic naming)
+  - Move to Group (apply group prefix)
+  - Set Tab Color (custom colors)
+  - Split Horizontal/Vertical
+  - Kill window
 
-Note: Horizontal tabs do not support mouse clicks due to tmux limitations with custom status formats.
+Note: Horizontal tabs have limited mouse support due to tmux status bar limitations.
 
 ## Configuration
 
