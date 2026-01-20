@@ -3,8 +3,17 @@ package main
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
+
+// ansiEscapeRegex matches ANSI escape sequences
+var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(?:\x07|\x1b\\)`)
+
+// stripANSI removes ANSI escape sequences from a string
+func stripANSI(s string) string {
+	return ansiEscapeRegex.ReplaceAllString(s, "")
+}
 
 func main() {
 	if len(os.Args) < 4 {
@@ -13,7 +22,7 @@ func main() {
 
 	mode := os.Args[1]
 	index := os.Args[2]
-	name := os.Args[3]
+	name := stripANSI(os.Args[3])
 	flags := ""
 	if len(os.Args) > 4 {
 		flags = os.Args[4]

@@ -32,17 +32,43 @@ if [ -n "$SIDEBAR_PANE" ]; then
             tmux kill-pane -t "$pane_id" 2>/dev/null || true
         done
     echo "disabled" > "$SIDEBAR_STATE_FILE"
+    # Persist to tmux option (survives detach/reattach)
+    tmux set-option @tmux-tabs-sidebar "disabled"
+    # Re-enable tmux status bar when sidebar is disabled
+    tmux set-option -g status on
 else
-    # No sidebar - open one and mark as enabled
+    # No sidebar - open one in EVERY window so switching windows keeps sidebar visible
     echo "enabled" > "$SIDEBAR_STATE_FILE"
-    tmux split-window -h -b -l 25 "exec \"$CURRENT_DIR/bin/sidebar\""
-    
+    # Persist to tmux option (survives detach/reattach)
+    tmux set-option @tmux-tabs-sidebar "enabled"
+
+    # Close any tabbar panes first
+    tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | \
+        grep "^tabbar|" | \
+        cut -d'|' -f2 | \
+        while read -r pane_id; do
+            tmux kill-pane -t "$pane_id" 2>/dev/null || true
+        done
+
+    # Disable tmux status bar (sidebar provides navigation)
+    tmux set-option -g status off
+
+    # Get current window to return to it after
+    CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
+
     # Open sidebar in all existing windows
     tmux list-windows -F "#{window_id}" | while read -r window_id; do
-        if ! tmux list-panes -t "$window_id" -F "#{pane_current_command}" | grep -q "^sidebar$"; then
-            tmux split-window -t "$window_id" -h -b -l 25 "exec \"$CURRENT_DIR/bin/sidebar\"" 2>/dev/null || true
+        # Check if this window already has a sidebar pane
+        if ! tmux list-panes -t "$window_id" -F "#{pane_current_command}" 2>/dev/null | grep -q "^sidebar$"; then
+            # Get the first pane in the window to split from (ensures sidebar is always on the left)
+            FIRST_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}" | head -1)
+            tmux split-window -t "$FIRST_PANE" -h -b -l 25 "exec \"$CURRENT_DIR/bin/sidebar\"" 2>/dev/null || true
         fi
     done
+
+    # Return to original window and focus the main pane (pane 1 = first non-sidebar pane)
+    tmux select-window -t "$CURRENT_WINDOW"
+    tmux select-pane -t :.1
 fi
 
 exit 0

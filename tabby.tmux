@@ -15,6 +15,24 @@ if [ ! -f "$CURRENT_DIR/bin/render-status" ]; then
     "$CURRENT_DIR/scripts/install.sh" || true
 fi
 
+# Auto-renumber windows when one is closed (keeps indices sequential)
+tmux set-option -g renumber-windows on
+
+# Disable automatic window renaming to preserve group prefixes in window names
+# This prevents tmux from renaming windows when the active pane changes
+tmux set-option -g automatic-rename off
+tmux set-option -g allow-rename off
+
+# Terminal title configuration
+# Read from config.yaml or use defaults
+TITLE_ENABLED=$(grep -A2 "^terminal_title:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "enabled:" | awk '{print $2}' || echo "true")
+TITLE_FORMAT=$(grep -A2 "^terminal_title:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "format:" | sed 's/.*format: *"\([^"]*\)".*/\1/' || echo "tmux #{window_index}.#{pane_index} #{window_name} #{pane_current_command}")
+
+if [[ "$TITLE_ENABLED" != "false" ]]; then
+    tmux set-option -g set-titles on
+    tmux set-option -g set-titles-string "$TITLE_FORMAT"
+fi
+
 # Read configuration
 POSITION=$(grep "^position:" "$CURRENT_DIR/config.yaml" 2>/dev/null | awk '{print $2}' || echo "top")
 POSITION=${POSITION:-top}
@@ -85,14 +103,37 @@ REFRESH_STATUS_SCRIPT="$CURRENT_DIR/scripts/refresh_status.sh"
 # Helper script to ensure sidebar persistence
 ENSURE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/ensure_sidebar.sh"
 
+# Helper script to restore sidebar on session reattach
+RESTORE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/restore_sidebar.sh"
+chmod +x "$RESTORE_SIDEBAR_SCRIPT"
+
+# Helper script to update pane bar (horizontal mode second line)
+UPDATE_PANE_BAR_SCRIPT="$CURRENT_DIR/scripts/update_pane_bar.sh"
+chmod +x "$UPDATE_PANE_BAR_SCRIPT"
+
 # Set up hooks for window events
 # These hooks trigger both sidebar and status bar refresh
-tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'"
+tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 tmux set-hook -g window-renamed "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 tmux set-hook -g window-unlinked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 tmux set-hook -g after-new-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'"
-tmux set-hook -g after-select-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell 'tmux refresh-client -S'"
+tmux set-hook -g after-select-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'; run-shell 'tmux refresh-client -S'"
 tmux set-hook -g after-rename-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
+
+# Refresh sidebar and pane bar when pane focus changes
+tmux set-hook -g after-select-pane "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'"
+tmux set-hook -g pane-focus-in "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'"
+
+# Update pane bar when panes are split
+tmux set-hook -g after-split-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'"
+
+# Close window if only sidebar/tabbar remains after main pane exits
+CLEANUP_SCRIPT="$CURRENT_DIR/scripts/cleanup_orphan_sidebar.sh"
+chmod +x "$CLEANUP_SCRIPT"
+tmux set-hook -g pane-exited "run-shell '$CLEANUP_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'"
+
+# Restore sidebar when client reattaches to session
+tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'"
 
 # Configure sidebar toggle keybinding
 TOGGLE_KEY=$(grep "toggle_sidebar:" "$CURRENT_DIR/config.yaml" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "prefix + Tab")

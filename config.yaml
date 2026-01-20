@@ -1,6 +1,12 @@
 position: top
 height: 2
 
+# Terminal title - passed to terminal emulator
+terminal_title:
+  enabled: true
+  # Format: #{window_index}.#{pane_index} #{window_name} #{pane_current_command}
+  format: "tmux #{window_index}.#{pane_index} #{window_name} #{pane_current_command}"
+
 style:
   rounded: true
   separator_left: ""
@@ -45,5 +51,23 @@ bindings:
 
 sidebar:
   new_tab_button: true
-  close_button: true
+  close_button: false
   sort_by: "group"  # "group" or "index"
+
+indicators:
+  activity:
+    enabled: true
+    icon: "*"
+    color: "#f39c12"
+  bell:
+    enabled: true
+    icon: "!"
+    color: "#e74c3c"
+  silence:
+    enabled: true
+    icon: "~"
+    color: "#95a5a6"
+  last:
+    enabled: true
+    icon: "-"
+    color: "#3498db"

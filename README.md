@@ -1,6 +1,8 @@
-# Tmux Tabs
+# Tabby
 
-A modern, groupable tab bar plugin for tmux with horizontal and vertical modes. Features tab overflow handling, visual indicators, and comprehensive keyboard shortcuts.
+A friendly cat watching over your tmux tabs.
+
+Modern, groupable tab bar plugin for tmux with horizontal and vertical modes. Features tab overflow handling, visual indicators, and comprehensive keyboard shortcuts.
 
 ## Features
 
@@ -17,7 +19,7 @@ A modern, groupable tab bar plugin for tmux with horizontal and vertical modes. 
 ### Via TPM (Tmux Plugin Manager)
 Add to your `~/.tmux.conf`:
 ```bash
-set -g @plugin 'b/tmux-tabs'
+set -g @plugin 'brendandebeasi/tabby'
 set -g @tmux_tabs_test 1  # Currently gated - required for activation
 ```
 
@@ -29,14 +31,14 @@ tmux source ~/.tmux.conf
 
 ### Manual Installation
 ```bash
-git clone https://github.com/b/tmux-tabs ~/.tmux/plugins/tmux-tabs
-cd ~/.tmux/plugins/tmux-tabs
+git clone https://github.com/brendandebeasi/tabby ~/.tmux/plugins/tabby
+cd ~/.tmux/plugins/tabby
 ./scripts/install.sh
 ```
 
 Add to your `~/.tmux.conf`:
 ```bash
-run-shell ~/.tmux/plugins/tmux-tabs/tmux-tabs.tmux
+run-shell ~/.tmux/plugins/tabby/tabby.tmux
 set -g @tmux_tabs_test 1  # Currently gated - required for activation
 ```
 
@@ -64,7 +66,7 @@ Note: Horizontal tabs do not support mouse clicks due to tmux limitations with c
 
 ## Configuration
 
-Edit `~/.tmux/plugins/tmux-tabs/config.yaml`:
+Edit `~/.tmux/plugins/tabby/config.yaml`:
 
 ```yaml
 # Tab bar position: top, bottom, or off
@@ -141,7 +143,7 @@ When you have many windows, tabs automatically scroll to keep the active window 
 
 ### Building from Source
 ```bash
-cd ~/.tmux/plugins/tmux-tabs
+cd ~/.tmux/plugins/tabby
 ./scripts/install.sh
 ```
 
@@ -159,10 +161,11 @@ cd ~/.tmux/plugins/tmux-tabs
 
 ### Project Structure
 ```
-tmux-tabs/
+tabby/
 ├── cmd/
 │   ├── render-status/   # Horizontal tab rendering
-│   └── sidebar/         # Vertical sidebar app
+│   ├── sidebar/         # Vertical sidebar app
+│   └── tabbar/          # Horizontal tabbar TUI
 ├── pkg/
 │   ├── config/         # Configuration loading
 │   ├── grouping/       # Tab grouping logic
@@ -170,10 +173,10 @@ tmux-tabs/
 ├── scripts/
 │   ├── install.sh      # Build and install
 │   ├── toggle_sidebar.sh
-│   └── refresh_status.sh
+│   └── ensure_sidebar.sh
 ├── tests/              # Test suites
 ├── config.yaml         # User configuration
-└── tmux-tabs.tmux      # Plugin entry point
+└── tabby.tmux          # Plugin entry point
 ```
 
 ## Known Limitations
@@ -187,7 +190,7 @@ tmux-tabs/
 ### Tabs not appearing
 - Ensure `@tmux_tabs_test` is set to `1` in your tmux config
 - Run `tmux source ~/.tmux.conf` to reload
-- Check if binaries exist: `ls ~/.tmux/plugins/tmux-tabs/bin/`
+- Check if binaries exist: `ls ~/.tmux/plugins/tabby/bin/`
 
 ### Sidebar not toggling
 - Verify the toggle key binding: `tmux list-keys | grep toggle_sidebar`

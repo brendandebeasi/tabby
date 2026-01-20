@@ -104,3 +104,39 @@ func ShadeColorByIndex(baseColor string, index int) string {
 
 	return fmt.Sprintf("#%02x%02x%02x", nr, ng, nb)
 }
+
+// LightenColor lightens a hex color by the given amount (0.0 to 1.0)
+func LightenColor(baseColor string, amount float64) string {
+	hex := baseColor
+	if len(hex) > 0 && hex[0] == '#' {
+		hex = hex[1:]
+	}
+	if len(hex) != 6 {
+		return baseColor
+	}
+
+	r, errR := strconv.ParseInt(hex[0:2], 16, 64)
+	g, errG := strconv.ParseInt(hex[2:4], 16, 64)
+	b, errB := strconv.ParseInt(hex[4:6], 16, 64)
+	if errR != nil || errG != nil || errB != nil {
+		return baseColor
+	}
+
+	// Lighten by moving towards white (255)
+	nr := r + int64(float64(255-r)*amount)
+	ng := g + int64(float64(255-g)*amount)
+	nb := b + int64(float64(255-b)*amount)
+
+	// Clamp to 255
+	if nr > 255 {
+		nr = 255
+	}
+	if ng > 255 {
+		ng = 255
+	}
+	if nb > 255 {
+		nb = 255
+	}
+
+	return fmt.Sprintf("#%02x%02x%02x", nr, ng, nb)
+}

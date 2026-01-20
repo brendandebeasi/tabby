@@ -42,6 +42,33 @@ func calculateTabWidth(win tmux.Window, group grouping.GroupedWindows, cfg *conf
 	return baseLen + 2
 }
 
+// stripGroupPrefix removes the group prefix from window names for cleaner display
+func stripGroupPrefix(windowName string, groups []config.Group) string {
+	for _, g := range groups {
+		if g.Name == "Default" {
+			continue
+		}
+		prefix := extractPrefixFromPattern(g.Pattern)
+		if prefix != "" && strings.HasPrefix(windowName, prefix) {
+			return strings.TrimPrefix(windowName, prefix)
+		}
+	}
+	return windowName
+}
+
+// extractPrefixFromPattern extracts the literal prefix from a regex pattern
+func extractPrefixFromPattern(pattern string) string {
+	if len(pattern) > 0 && pattern[0] == '^' {
+		pattern = pattern[1:]
+	}
+	pattern = strings.ReplaceAll(pattern, "\\|", "|")
+	pattern = strings.ReplaceAll(pattern, "\\.", ".")
+	pattern = strings.ReplaceAll(pattern, "\\-", "-")
+	pattern = strings.ReplaceAll(pattern, ".*", "")
+	pattern = strings.ReplaceAll(pattern, ".+", "")
+	return pattern
+}
+
 func buildIndicators(win tmux.Window, cfg *config.Config) string {
 	var indicators strings.Builder
 	ind := cfg.Indicators
@@ -184,32 +211,26 @@ func main() {
 
 		bg := colors.HexToTmuxColor(group.Theme.Bg)
 		activeBg := colors.HexToTmuxColor(group.Theme.ActiveBg)
+		fg := colors.HexToTmuxColor(group.Theme.Fg)
+		activeFg := colors.HexToTmuxColor(group.Theme.ActiveFg)
 
+		// Strip group prefix from window name
+		displayName := stripGroupPrefix(win.Name, cfg.Groups)
 		indicators := buildIndicators(win, cfg)
 
-		if win.Active {
-			if group.Theme.Icon != "" {
-				sb.WriteString(fmt.Sprintf("#[fg=%s,bg=default,bold] %s %d:%s%s #[fg=%s][x] ",
-					activeBg, group.Theme.Icon, win.Index, win.Name, indicators,
-					"#e74c3c"))
-			} else {
-				sb.WriteString(fmt.Sprintf("#[fg=%s,bg=default,bold] %d:%s%s #[fg=%s][x] ",
-					activeBg, win.Index, win.Name, indicators,
-					"#e74c3c"))
-			}
-		} else {
-			iconStr := ""
-			if group.Theme.Icon != "" {
-				iconStr = group.Theme.Icon + " "
-			}
-			sb.WriteString(fmt.Sprintf("#[fg=%s,bg=default,nobold] %s%d:%s%s #[fg=%s][x] ",
-				bg, iconStr, win.Index, win.Name, indicators,
-				"#95a5a6"))
+		iconStr := ""
+		if group.Theme.Icon != "" {
+			iconStr = group.Theme.Icon + " "
 		}
 
-		if i < endIdx-1 && cfg.Style.SeparatorRight != "" {
-			sb.WriteString(cfg.Style.SeparatorRight)
-			sb.WriteString(" ")
+		if win.Active {
+			// Active tab: prominent background and foreground
+			sb.WriteString(fmt.Sprintf("#[fg=%s,bg=%s,bold] %s%s%s ",
+				activeFg, activeBg, iconStr, displayName, indicators))
+		} else {
+			// Inactive tab: subtle styling
+			sb.WriteString(fmt.Sprintf("#[fg=%s,bg=%s,nobold] %s%s%s ",
+				fg, bg, iconStr, displayName, indicators))
 		}
 	}
 

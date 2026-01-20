@@ -1,0 +1,27 @@
+# Binaries
+bin/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+tests/screenshots/current/
+tests/screenshots/diff/
+
+# Temp files
+*.tmp
+/tmp/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib

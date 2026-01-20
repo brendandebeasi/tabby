@@ -8,7 +8,9 @@ GOMOD=$(GOCMD) mod
 
 # Binary names
 RENDER_STATUS=bin/render-status
+RENDER_TAB=bin/render-tab
 SIDEBAR=bin/sidebar
+TABBAR=bin/tabbar
 
 # Directories
 BIN_DIR=bin
@@ -20,15 +22,23 @@ SCREENSHOT_DIR=$(TEST_DIR)/screenshots
 all: build
 
 # Build all binaries
-build: $(RENDER_STATUS) $(SIDEBAR)
+build: $(RENDER_STATUS) $(RENDER_TAB) $(SIDEBAR) $(TABBAR)
 
 $(RENDER_STATUS): cmd/render-status/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -o $@ ./cmd/render-status
 
+$(RENDER_TAB): cmd/render-tab/main.go
+	@mkdir -p $(BIN_DIR)
+	$(GOBUILD) -o $@ ./cmd/render-tab
+
 $(SIDEBAR): cmd/sidebar/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -o $@ ./cmd/sidebar
+
+$(TABBAR): cmd/tabbar/main.go pkg/**/*.go
+	@mkdir -p $(BIN_DIR)
+	$(GOBUILD) -o $@ ./cmd/tabbar
 
 # Download dependencies
 deps:
@@ -64,7 +74,9 @@ install: build
 	@mkdir -p ~/.tmux/plugins/tmux-tabs/bin
 	@mkdir -p ~/.tmux/plugins/tmux-tabs/scripts
 	@cp $(RENDER_STATUS) ~/.tmux/plugins/tmux-tabs/bin/
+	@cp $(RENDER_TAB) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp $(SIDEBAR) ~/.tmux/plugins/tmux-tabs/bin/
+	@cp $(TABBAR) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp scripts/*.sh ~/.tmux/plugins/tmux-tabs/scripts/
 	@cp tmux-tabs.tmux ~/.tmux/plugins/tmux-tabs/
 	@cp config.yaml ~/.tmux/plugins/tmux-tabs/
@@ -76,7 +88,9 @@ install: build
 # Sync development to install location
 sync: build
 	@cp $(RENDER_STATUS) ~/.tmux/plugins/tmux-tabs/bin/
+	@cp $(RENDER_TAB) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp $(SIDEBAR) ~/.tmux/plugins/tmux-tabs/bin/
+	@cp $(TABBAR) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp scripts/*.sh ~/.tmux/plugins/tmux-tabs/scripts/
 	@cp tmux-tabs.tmux ~/.tmux/plugins/tmux-tabs/
 	@cp config.yaml ~/.tmux/plugins/tmux-tabs/
