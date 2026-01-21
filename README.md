@@ -4,11 +4,11 @@ A modern tab manager for tmux with grouping, a clickable vertical sidebar, and d
 
 ```
 +---------------------------+----------------------------------------+
-| StudioDome                |                                        |
+| Frontend                  |                                        |
 |   0. dashboard            |  $ vim src/app.tsx                     |
-|   1. api                  |                                        |
-| Gunpowder                 |                                        |
-|   2. backend              |                                        |
+|   1. components           |                                        |
+| Backend                   |                                        |
+|   2. api                  |                                        |
 |   3. tests                |                                        |
 | Default                   |                                        |
 | > 4. vim  <-- active      |                                        |
@@ -111,36 +111,33 @@ Edit `~/.tmux/plugins/tabby/config.yaml`:
 # Tab bar position: top, bottom, or off
 position: top
 
-# Tab grouping rules
-grouping:
-  enabled: true
-  rules:
-    - name: "StudioDome"
-      pattern: "SD|*"
-      theme:
-        bg: "#e74c3c"
-        fg: "#ffffff"
-        active_bg: "colour203"
-        active_fg: "#ffffff"
-        icon: ""
+# Tab grouping rules (first match wins)
+groups:
+  - name: "Frontend"
+    pattern: "^FE|"
+    theme:
+      bg: "#e74c3c"
+      fg: "#ffffff"
+      active_bg: "#c0392b"
+      active_fg: "#ffffff"
+      icon: ""
 
-    - name: "Gunpowder"  
-      pattern: "GP|*"
-      theme:
-        bg: "#7f8c8d"
-        fg: "#ffffff"
-        active_bg: "colour60"
-        active_fg: "#ffffff"
-        icon: "🔫"
+  - name: "Backend"
+    pattern: "^BE|"
+    theme:
+      bg: "#27ae60"
+      fg: "#ffffff"
+      active_bg: "#1e8449"
+      active_fg: "#ffffff"
+      icon: ""
 
-    - name: "Default"
-      pattern: "*"
-      theme:
-        bg: "#3498db"
-        fg: "#ffffff"
-        active_bg: "colour38"
-        active_fg: "#ffffff"
-        icon: ""
+  - name: "Default"
+    pattern: ".*"
+    theme:
+      bg: "#3498db"
+      fg: "#ffffff"
+      active_bg: "#2980b9"
+      active_fg: "#ffffff"
 
 # Indicators
 indicators:
@@ -161,15 +158,41 @@ sidebar:
 
 ## Tab Grouping
 
-Windows are automatically grouped based on their names:
-- Names starting with `SD|` → StudioDome group (red)
-- Names starting with `GP|` → Gunpowder group (gray with 🔫 icon)
-- All others → Default group (blue)
+Windows are organized into groups based on name patterns or manual assignment:
 
-Example window names:
-- `SD|frontend` - StudioDome frontend window
-- `GP|MSG|service` - Gunpowder MSG service
-- `my-project` - Default group
+```
++---------------------------+
+|  SIDEBAR                  |      SESSION
+|                           |         |
+|  Frontend  [group]        |         +-- Frontend (group)
+|    0. dashboard           |         |     +-- 0. dashboard (window)
+|    1. components          |         |     |     +-- pane 0: vim
+|                           |         |     |     +-- pane 1: terminal
+|  Backend   [group]        |         |     +-- 1. components (window)
+|    2. api                 |         |           +-- pane 0: npm run dev
+|    3. tests               |         |
+|                           |         +-- Backend (group)
+|  Default   [group]        |         |     +-- 2. api (window)
+|  > 4. vim                 |         |     +-- 3. tests (window)
+|    5. notes               |         |
+|                           |         +-- Default (group)
+|  [+] New Tab              |               +-- 4. vim (window) <- active
++---------------------------+               +-- 5. notes (window)
+```
+
+### Assigning Groups
+
+**By pattern** - Windows matching a regex are auto-grouped:
+- `^FE|` matches `FE|dashboard`, `FE|components`
+- `^BE|` matches `BE|api`, `BE|tests`
+- `.*` catches everything else in Default
+
+**By right-click menu** - Select "Move to Group" to manually assign
+
+**By tmux option** - Set programmatically:
+```bash
+tmux set-window-option -t :0 @tabby_group "Frontend"
+```
 
 ## Tab Overflow
 
