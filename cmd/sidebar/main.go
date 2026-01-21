@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -461,17 +460,20 @@ func (m model) View() string {
 			displayName := win.Name
 
 			// Build alert indicator (shown at start of tab if any alert)
+			// Skip indicators for active window - you're already looking at it
 			alertIcon := " "
 			ind := m.config.Indicators
-			if ind.Bell.Enabled && win.Bell {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
-				alertIcon = alertStyle.Render(ind.Bell.Icon)
-			} else if ind.Activity.Enabled && win.Activity {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
-				alertIcon = alertStyle.Render(ind.Activity.Icon)
-			} else if ind.Silence.Enabled && win.Silence {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
-				alertIcon = alertStyle.Render(ind.Silence.Icon)
+			if !isActive {
+				if ind.Bell.Enabled && win.Bell {
+					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
+					alertIcon = alertStyle.Render(ind.Bell.Icon)
+				} else if ind.Activity.Enabled && win.Activity {
+					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
+					alertIcon = alertStyle.Render(ind.Activity.Icon)
+				} else if ind.Silence.Enabled && win.Silence {
+					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
+					alertIcon = alertStyle.Render(ind.Silence.Icon)
+				}
 			}
 
 			// Build tab content
@@ -776,28 +778,6 @@ func findWindowGroup(win *tmux.Window, groups []config.Group) (string, config.Th
 	}
 }
 
-func buildIndicators(win tmux.Window, cfg *config.Config) string {
-	var indicators strings.Builder
-	ind := cfg.Indicators
-
-	if ind.Bell.Enabled && win.Bell {
-		indicators.WriteString(" ")
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
-		indicators.WriteString(style.Render(ind.Bell.Icon))
-	}
-	if ind.Activity.Enabled && win.Activity {
-		indicators.WriteString(" ")
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
-		indicators.WriteString(style.Render(ind.Activity.Icon))
-	}
-	if ind.Silence.Enabled && win.Silence {
-		indicators.WriteString(" ")
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
-		indicators.WriteString(style.Render(ind.Silence.Icon))
-	}
-
-	return indicators.String()
-}
 
 
 func watchConfig(p *tea.Program, configPath string) {
