@@ -18,8 +18,7 @@ fi
 # Auto-renumber windows when one is closed (keeps indices sequential)
 tmux set-option -g renumber-windows on
 
-# Enable activity monitoring for indicators
-tmux set-option -g monitor-activity on
+# Bell monitoring for notifications (activity monitoring is too noisy)
 tmux set-option -g monitor-bell on
 
 # New panes/windows open in the current pane's directory
