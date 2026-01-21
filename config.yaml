@@ -60,6 +60,11 @@ pane_header:
   inactive_fg: "#cccccc"
   inactive_bg: "#333333"
   command_fg: "#aaaaaa"
+  border_from_tab: true  # Use the tab's color for active pane border
+  # Border line style: single, double, heavy, simple, number
+  border_lines: heavy
+  # Border style for inactive panes (fg color)
+  border_fg: "#444444"
 
 # Prompt styling (for rename dialogs, etc.)
 prompt:
@@ -74,13 +79,18 @@ terminal_app: Ghostty
 indicators:
   activity:
     enabled: true
-    icon: "●"
-    color: "#f39c12"
+    icon: "!"
+    color: "#000000"
   bell:
     enabled: true
     icon: "◆"
-    color: "#e74c3c"
+    color: "#000000"
   silence:
     enabled: true
     icon: "○"
-    color: "#95a5a6"
+    color: "#000000"
+  busy:
+    enabled: true
+    icon: "◐"
+    color: "#000000"
+    frames: ["◐", "◓", "◑", "◒"]  # Animation frames (cycles through these)

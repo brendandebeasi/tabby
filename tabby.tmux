@@ -18,7 +18,8 @@ fi
 # Auto-renumber windows when one is closed (keeps indices sequential)
 tmux set-option -g renumber-windows on
 
-# Bell monitoring for notifications (activity monitoring is too noisy)
+# Bell monitoring for notifications (activity is too noisy - triggers on any output)
+tmux set-option -g monitor-activity off
 tmux set-option -g monitor-bell on
 
 # New panes/windows open in the current pane's directory
@@ -54,6 +55,19 @@ tmux set-option -g @tabby_pane_inactive_fg "$PANE_INACTIVE_FG"
 tmux set-option -g @tabby_pane_inactive_bg_default "$PANE_INACTIVE_BG"
 tmux set-option -g @tabby_pane_command_fg "$PANE_COMMAND_FG"
 
+# Read border_from_tab option (use tab color for active pane border)
+BORDER_FROM_TAB=$(grep -A15 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "border_from_tab:" | awk '{print $2}' || echo "false")
+BORDER_FROM_TAB=${BORDER_FROM_TAB:-false}
+tmux set-option -g @tabby_border_from_tab "$BORDER_FROM_TAB"
+
+# Read border line style: single, double, heavy, simple, number
+BORDER_LINES=$(grep -A15 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "border_lines:" | awk '{print $2}' || echo "single")
+BORDER_LINES=${BORDER_LINES:-single}
+
+# Read border foreground color
+BORDER_FG=$(grep -A15 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "border_fg:" | awk '{print $2}' | tr -d '"' || echo "#444444")
+BORDER_FG=${BORDER_FG:-#444444}
+
 # Read prompt style colors from config (with defaults)
 PROMPT_FG=$(grep -A5 "^prompt:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  fg:" | awk '{print $2}' | tr -d '"' || echo "")
 PROMPT_BG=$(grep -A5 "^prompt:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  bg:" | awk '{print $2}' | tr -d '"' || echo "")
@@ -75,8 +89,9 @@ tmux set-option -g message-style "$PROMPT_STYLE"
 
 # Pane border styling - colored headers with info
 tmux set-option -g pane-border-status top
-tmux set-option -g pane-border-lines single
-tmux set-option -g pane-border-style "fg=#444444"
+tmux set-option -g pane-border-lines "$BORDER_LINES"
+# BOTH borders use SAME color - prevents half/half on shared edges
+tmux set-option -g pane-border-style "fg=$PANE_ACTIVE_BG"
 tmux set-option -g pane-active-border-style "fg=$PANE_ACTIVE_BG"
 
 # Pane header format: hide for utility panes (sidebar, pane-bar, tabbar)
@@ -197,15 +212,15 @@ chmod +x "$SIGNAL_PANE_BAR_SCRIPT"
 # Set up hooks for window events
 # These hooks trigger both sidebar and status bar refresh
 tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
-# Lock window name on manual rename (disable automatic-rename for that window)
-tmux set-hook -g window-renamed "run-shell 'tmux set-window-option -t \"#{window_id}\" automatic-rename off'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 tmux set-hook -g window-unlinked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 tmux set-hook -g after-new-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'"
 # Combined script to reduce latency
 ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
 chmod +x "$ON_WINDOW_SELECT_SCRIPT"
 tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'"
-tmux set-hook -g after-rename-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
+# Lock window name on manual rename (disable automatic-rename for that window)
+ON_RENAME_SCRIPT="$CURRENT_DIR/scripts/on_window_rename.sh"
+tmux set-hook -g after-rename-window "run-shell '$ON_RENAME_SCRIPT'"
 
 # Refresh sidebar and pane bar when pane focus changes
 ON_PANE_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_pane_select.sh"
@@ -225,6 +240,11 @@ tmux set-hook -g pane-exited "run-shell '$CLEANUP_SCRIPT'; run-shell '$ENSURE_SI
 
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'"
+
+# Maintain sidebar width after terminal resize
+RESIZE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/resize_sidebar.sh"
+chmod +x "$RESIZE_SIDEBAR_SCRIPT"
+tmux set-hook -g client-resized "run-shell '$RESIZE_SIDEBAR_SCRIPT'"
 
 # Configure sidebar toggle keybinding
 TOGGLE_KEY=$(grep "toggle_sidebar:" "$CURRENT_DIR/config.yaml" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "prefix + Tab")

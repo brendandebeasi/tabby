@@ -25,6 +25,18 @@ type Pane struct {
 	Active  bool
 	Command string // Current command running in pane
 	Title   string // Pane title if set
+	Busy    bool   // Pane has a foreground process (not shell)
+}
+
+// shellCommands are shells that indicate "idle" state (not busy)
+var shellCommands = map[string]bool{
+	"bash": true, "zsh": true, "fish": true, "sh": true, "dash": true,
+	"tcsh": true, "csh": true, "ksh": true, "ash": true,
+}
+
+// isPaneBusy returns true if the command is not a shell (i.e., something is running)
+func isPaneBusy(command string) bool {
+	return !shellCommands[command]
 }
 
 type Window struct {
@@ -36,6 +48,7 @@ type Window struct {
 	Bell        bool   // Window has triggered bell
 	Silence     bool   // Window has been silent (monitor-silence)
 	Last        bool   // Window was the last active window
+	Busy        bool   // Window is busy (set via @tabby_busy option by the running process)
 	CustomColor string // User-defined tab color (set via @tabby_color option)
 	Group       string // User-assigned group name (set via @tabby_group option)
 	Panes       []Pane
@@ -43,7 +56,7 @@ type Window struct {
 
 func ListWindows() ([]Window, error) {
 	cmd := exec.Command("tmux", "list-windows", "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -71,6 +84,12 @@ func ListWindows() ([]Window, error) {
 		if len(parts) >= 10 {
 			group = strings.TrimSpace(parts[9])
 		}
+		busy := false
+		if len(parts) >= 11 {
+			// @tabby_busy can be "1", "true", or any non-empty value
+			busyVal := strings.TrimSpace(parts[10])
+			busy = busyVal == "1" || busyVal == "true"
+		}
 		windows = append(windows, Window{
 			ID:          parts[0],
 			Index:       index,
@@ -80,6 +99,7 @@ func ListWindows() ([]Window, error) {
 			Bell:        parts[5] == "1",
 			Silence:     parts[6] == "1",
 			Last:        parts[7] == "1",
+			Busy:        busy,
 			CustomColor: customColor,
 			Group:       group,
 		})
@@ -115,12 +135,14 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		if parts[3] == "sidebar" || parts[3] == "tabbar" {
 			continue
 		}
+		command := stripANSI(parts[3])
 		panes = append(panes, Pane{
 			ID:      parts[0],
 			Index:   index,
 			Active:  parts[2] == "1",
-			Command: stripANSI(parts[3]),
+			Command: command,
 			Title:   stripANSI(parts[4]),
+			Busy:    isPaneBusy(command),
 		})
 	}
 	return panes, nil
@@ -136,6 +158,16 @@ func ListWindowsWithPanes() ([]Window, error) {
 	for i := range windows {
 		panes, _ := ListPanesForWindow(windows[i].Index)
 		windows[i].Panes = panes
+		// Auto-detect busy from ACTIVE pane state only (not background panes like dev servers)
+		// Only check if @tabby_busy not explicitly set
+		if !windows[i].Busy {
+			for _, pane := range panes {
+				if pane.Active && pane.Busy {
+					windows[i].Busy = true
+					break
+				}
+			}
+		}
 	}
 
 	return windows, nil

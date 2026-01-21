@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +19,16 @@ import (
 	"github.com/b/tmux-tabs/pkg/grouping"
 	"github.com/b/tmux-tabs/pkg/tmux"
 )
+
+// getCurrentDir returns the directory containing the sidebar binary
+func getCurrentDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "."
+	}
+	// Go up one level from bin/ to the plugin root
+	return filepath.Dir(filepath.Dir(exe))
+}
 
 // windowRef stores both visual position and window reference
 // Fixes BUG-005: cursor vs window index confusion
@@ -33,6 +45,15 @@ type paneRef struct {
 	line       int
 }
 
+// groupRef stores visual position and group reference
+type groupRef struct {
+	group *grouping.GroupedWindows
+	line  int
+}
+
+// Default spinner frames if not configured
+var defaultSpinnerFrames = []string{"◐", "◓", "◑", "◒"}
+
 type model struct {
 	windows    []tmux.Window
 	grouped    []grouping.GroupedWindows
@@ -40,16 +61,29 @@ type model struct {
 	cursor     int         // Visual line position of cursor
 	windowRefs []windowRef // Maps visual lines to windows
 	paneRefs   []paneRef   // Maps visual lines to panes
+	groupRefs  []groupRef  // Maps visual lines to groups
 	totalLines int         // Total number of visual lines
+
+	// Terminal size
+	width  int // Terminal width (for dynamic resizing)
+	height int // Terminal height
 
 	// Confirmation dialog state
 	confirmClose  bool         // Whether we're showing close confirmation
 	confirmWindow *tmux.Window // Window pending close confirmation
+
+	// Spinner animation state
+	spinnerFrame  int  // Current frame index for busy spinner
+	spinnerActive bool // Whether spinner ticker is running
 }
 
 type refreshMsg struct{}
 
 type reloadConfigMsg struct{}
+
+type spinnerTickMsg struct{}
+
+type periodicRefreshMsg struct{}
 
 // triggerRefresh returns a command that triggers a refresh
 func triggerRefresh() tea.Cmd {
@@ -65,13 +99,68 @@ func delayedRefresh() tea.Cmd {
 	})
 }
 
+// signalSidebarsDelayed signals all sidebars to refresh after a short delay
+// This runs in a goroutine to avoid blocking the UI
+func signalSidebarsDelayed() {
+	time.Sleep(100 * time.Millisecond)
+	_ = exec.Command("bash", "-c", `
+		for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
+			kill -USR1 "$pid" 2>/dev/null || true
+		done
+	`).Run()
+}
+
+// spinnerTick schedules the next spinner frame update
+func spinnerTick() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+		return spinnerTickMsg{}
+	})
+}
+
+// periodicRefresh schedules periodic data refresh (for pane titles, etc.)
+func periodicRefresh() tea.Cmd {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
+		return periodicRefreshMsg{}
+	})
+}
+
+// hasBusyWindows checks if any window has the busy flag set
+func (m model) hasBusyWindows() bool {
+	for _, w := range m.windows {
+		if w.Busy {
+			return true
+		}
+	}
+	return false
+}
+
+// getIndicatorIcon returns the icon for an indicator, using animation frames if available
+func (m model) getIndicatorIcon(ind config.Indicator) string {
+	// If frames are configured, use the current animation frame
+	if len(ind.Frames) > 0 {
+		return ind.Frames[m.spinnerFrame%len(ind.Frames)]
+	}
+	// Fall back to single icon
+	return ind.Icon
+}
+
+// getBusyFrames returns the spinner frames for the busy indicator
+func (m model) getBusyFrames() []string {
+	if len(m.config.Indicators.Busy.Frames) > 0 {
+		return m.config.Indicators.Busy.Frames
+	}
+	return defaultSpinnerFrames
+}
+
 func (m model) Init() tea.Cmd {
-	return nil
+	// Start periodic refresh for pane titles, etc.
+	return periodicRefresh()
 }
 
 func (m *model) buildWindowRefs() {
 	m.windowRefs = make([]windowRef, 0)
 	m.paneRefs = make([]paneRef, 0)
+	m.groupRefs = make([]groupRef, 0)
 	line := 0
 
 	// Iterate over grouped windows - this keeps each group together
@@ -79,7 +168,11 @@ func (m *model) buildWindowRefs() {
 	for gi := range m.grouped {
 		group := &m.grouped[gi]
 
-		// Group header line
+		// Group header line - track for right-click menu
+		m.groupRefs = append(m.groupRefs, groupRef{
+			group: group,
+			line:  line,
+		})
 		line++
 
 		for wi := range group.Windows {
@@ -124,6 +217,16 @@ func (m model) getPaneAtLine(y int) (*paneRef, bool) {
 	for i, ref := range m.paneRefs {
 		if ref.line == y {
 			return &m.paneRefs[i], true
+		}
+	}
+	return nil, false
+}
+
+// getGroupAtLine returns the group at the given visual line number
+func (m model) getGroupAtLine(y int) (*groupRef, bool) {
+	for i, ref := range m.groupRefs {
+		if ref.line == y {
+			return &m.groupRefs[i], true
 		}
 	}
 	return nil, false
@@ -175,11 +278,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.confirmClose && m.confirmWindow != nil {
 			switch msg.String() {
 			case "y", "Y":
-				// Confirmed - kill the window and signal all sidebars
+				// Confirmed - kill the window and switch to last window
 				windowIdx := m.confirmWindow.Index
 				m.confirmClose = false
 				m.confirmWindow = nil
-				_ = exec.Command("tmux", "kill-window", "-t", fmt.Sprintf(":%d", windowIdx)).Run()
+				// Kill window, switch to last window, then focus main pane
+				_ = exec.Command("bash", "-c", fmt.Sprintf(`
+					tmux kill-window -t :%d
+					tmux last-window 2>/dev/null || tmux select-window -t :0
+					main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
+					if [ -n "$main_pane" ]; then
+						tmux select-pane -t "$main_pane"
+					fi
+				`, windowIdx)).Run()
 				// Signal all sidebars to refresh after brief delay
 				go func() {
 					time.Sleep(100 * time.Millisecond)
@@ -260,7 +371,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = exec.Command("bash", "-c", `
 				main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
 				if [ -n "$main_pane" ]; then
-					tmux split-window -h -t "$main_pane"
+					tmux split-window -h -t "$main_pane" -c "#{pane_current_path}"
 				fi
 			`).Run()
 			return m, nil
@@ -269,7 +380,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = exec.Command("bash", "-c", `
 				main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
 				if [ -n "$main_pane" ]; then
-					tmux split-window -v -t "$main_pane"
+					tmux split-window -v -t "$main_pane" -c "#{pane_current_path}"
 				fi
 			`).Run()
 			return m, nil
@@ -290,32 +401,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.MouseButtonLeft:
 				// Check if clicking on a pane first
 				if paneRef, ok := m.getPaneAtLine(msg.Y); ok {
-					// Click on pane - switch to window first, then select pane
-					_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", paneRef.windowIdx)).Run()
-					_ = exec.Command("tmux", "select-pane", "-t", paneRef.pane.ID).Run()
-					// Signal ALL sidebars to refresh after a delay (lets tmux clear bell/activity flags)
-					_ = exec.Command("bash", "-c", `
-						(sleep 0.15; for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
-							kill -USR1 "$pid" 2>/dev/null || true
-						done) &
-					`).Run()
+					// Click on pane - switch to window and select pane in one command
+					_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", paneRef.windowIdx), ";",
+						"select-pane", "-t", paneRef.pane.ID).Run()
+					// Signal sidebars to refresh in background
+					go signalSidebarsDelayed()
 					return m, nil
 				} else if clicked != nil {
-					// Click on window - select it and focus the main content pane
-					_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", clicked.Index)).Run()
-					// Select the pane that isn't running sidebar (main content pane)
-					_ = exec.Command("bash", "-c", `
+					// Click on window - select it and focus the main content pane in one command
+					_ = exec.Command("bash", "-c", fmt.Sprintf(`
+						tmux select-window -t :%d
 						main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
-						if [ -n "$main_pane" ]; then
-							tmux select-pane -t "$main_pane"
-						fi
-					`).Run()
-					// Signal ALL sidebars to refresh after delay (lets tmux clear bell/activity flags)
-					_ = exec.Command("bash", "-c", `
-						(sleep 0.15; for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
-							kill -USR1 "$pid" 2>/dev/null || true
-						done) &
-					`).Run()
+						[ -n "$main_pane" ] && tmux select-pane -t "$main_pane"
+					`, clicked.Index)).Run()
+					// Signal sidebars to refresh in background
+					go signalSidebarsDelayed()
 					return m, nil
 				} else if m.config.Sidebar.NewTabButton && msg.Y == newTabLine {
 					// Just create new window - the after-new-window hook adds the sidebar
@@ -337,12 +437,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			case tea.MouseButtonRight:
-				// Check if clicking on a pane first
+				// Check if clicking on a group header first
+				if groupRef, ok := m.getGroupAtLine(msg.Y); ok {
+					m.showGroupContextMenu(groupRef)
+					return m, triggerRefresh()
+				}
+				// Check if clicking on a pane
 				if paneRef, ok := m.getPaneAtLine(msg.Y); ok {
 					m.showPaneContextMenu(paneRef)
 					return m, triggerRefresh()
 				}
-				// Otherwise check for window
+				// Check if right-clicking on indicator column (X=0) with an alert
+				if clicked != nil && msg.X == 0 && (clicked.Activity || clicked.Bell || clicked.Busy) {
+					m.showAlertPopup(clicked)
+					return m, nil
+				}
+				// Otherwise check for window context menu
 				if clicked != nil {
 					m.showContextMenu(clicked)
 					return m, triggerRefresh()
@@ -351,19 +461,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case refreshMsg:
-		oldCount := len(m.windows)
 		windows, _ := tmux.ListWindowsWithPanes()
 		m.windows = windows
 		m.grouped = grouping.GroupWindows(windows, m.config.Groups)
-		// Only update pane colors if window count changed (new/closed window)
-		if len(windows) != oldCount {
-			updatePaneHeaderColors(m.grouped)
-		}
+		// Always update pane colors (custom colors can change anytime)
+		updatePaneHeaderColors(m.grouped)
 		m.buildWindowRefs()
 		// Ensure cursor is still on a valid window line
 		if !m.isWindowLine(m.cursor) && len(m.windowRefs) > 0 {
 			m.cursor = m.windowRefs[0].line
 		}
+		// Start spinner animation if any windows are busy and not already running
+		if m.hasBusyWindows() && !m.spinnerActive {
+			m.spinnerActive = true
+			return m, spinnerTick()
+		}
+		return m, nil
+
+	case spinnerTickMsg:
+		// Advance spinner frame
+		busyFrames := m.getBusyFrames()
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(busyFrames)
+		// Continue animation if still have busy windows
+		if m.hasBusyWindows() {
+			return m, spinnerTick()
+		}
+		// Stop animation
+		m.spinnerActive = false
 		return m, nil
 
 	case reloadConfigMsg:
@@ -374,6 +498,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			updatePaneHeaderColors(m.grouped)
 			m.buildWindowRefs()
 		}
+		return m, nil
+
+	case periodicRefreshMsg:
+		// Periodic refresh for pane titles and other dynamic data
+		windows, _ := tmux.ListWindowsWithPanes()
+		m.windows = windows
+		m.grouped = grouping.GroupWindows(windows, m.config.Groups)
+		updatePaneHeaderColors(m.grouped)
+		m.buildWindowRefs()
+		// Schedule next periodic refresh
+		return m, periodicRefresh()
+
+	case tea.WindowSizeMsg:
+		// Update terminal size for dynamic resizing
+		m.width = msg.Width
+		m.height = msg.Height
 		return m, nil
 	}
 	return m, nil
@@ -398,7 +538,11 @@ func (m model) View() string {
 	}
 
 	var s string
-	sidebarWidth := 25
+	// Use terminal width if available, otherwise default to 25
+	sidebarWidth := m.width
+	if sidebarWidth < 20 {
+		sidebarWidth = 25 // Default minimum width
+	}
 	contentWidth := sidebarWidth - 4 // Space for tree chars and arrow
 
 	// Iterate over grouped windows - keeps each group together
@@ -417,10 +561,15 @@ func (m model) View() string {
 		}
 		s += headerStyle.Render(icon+group.Name) + "\n"
 
+		// Tree characters - no background, just foreground color
+		treeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+		arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Bold(true)
+
 		// Show windows in this group
+		numWindows := len(group.Windows)
 		for wi, win := range group.Windows {
 			isActive := win.Active
-			isLastInGroup := wi == len(group.Windows)-1
+			isLastInGroup := wi == numWindows-1
 
 			// Choose colors - custom color overrides group theme
 			var bgColor, fgColor string
@@ -460,25 +609,32 @@ func (m model) View() string {
 			displayName := win.Name
 
 			// Build alert indicator (shown at start of tab if any alert)
-			// Skip indicators for active window - you're already looking at it
-			alertIcon := " "
+			// Busy indicator always shown (even for active window - you're waiting for it)
+			// Other indicators skipped for active window - you're already looking at it
+			alertIcon := ""
 			ind := m.config.Indicators
-			if !isActive {
+			if ind.Busy.Enabled && win.Busy {
+				// Busy indicator shown even for active window
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
+				busyFrames := m.getBusyFrames()
+				alertIcon = alertStyle.Render(busyFrames[m.spinnerFrame%len(busyFrames)])
+			} else if !isActive {
+				// Other indicators only for inactive windows
 				if ind.Bell.Enabled && win.Bell {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
-					alertIcon = alertStyle.Render(ind.Bell.Icon)
+					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Bell))
 				} else if ind.Activity.Enabled && win.Activity {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
-					alertIcon = alertStyle.Render(ind.Activity.Icon)
+					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Activity))
 				} else if ind.Silence.Enabled && win.Silence {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
-					alertIcon = alertStyle.Render(ind.Silence.Icon)
+					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Silence))
 				}
 			}
 
 			// Build tab content
 			baseContent := fmt.Sprintf("%d. %s", win.Index, displayName)
-			availableWidth := contentWidth - 1
+			availableWidth := contentWidth - 2 // space for indicator
 			if lipgloss.Width(baseContent) > availableWidth {
 				truncated := ""
 				for _, r := range baseContent {
@@ -489,21 +645,38 @@ func (m model) View() string {
 				}
 				baseContent = truncated + "~"
 			}
-			tabContent := alertIcon + baseContent
 
-			// Render with tree formatting
-			var treeChar string
-			if isLastInGroup {
-				treeChar = "└─"
+			// Render indicator at far left
+			var indicatorPart string
+			if alertIcon != "" {
+				indicatorPart = alertIcon
 			} else {
-				treeChar = "├─"
+				indicatorPart = " "
 			}
 
-			fullWidthStyle := style.Width(contentWidth)
-			if isActive {
-				s += treeChar + ">" + fullWidthStyle.Render(tabContent) + "\n"
+			// Window tree branch
+			var treeBranch string
+			if isLastInGroup {
+				treeBranch = "└─"
 			} else {
-				s += treeChar + " " + fullWidthStyle.Render(tabContent) + "\n"
+				treeBranch = "├─"
+			}
+
+			// Window line - use ┬ if has panes (connects down to pane tree)
+			hasPanes := len(win.Panes) > 1
+			var windowEnd string
+			if hasPanes {
+				windowEnd = "┬" // Branches down to panes
+			} else {
+				windowEnd = "─"
+			}
+
+			if isActive && !hasPanes {
+				// Active without panes: ├─▶
+				s += indicatorPart + treeStyle.Render(treeBranch) + arrowStyle.Render("▶") + style.Render(baseContent) + "\n"
+			} else {
+				// Windows with panes (active or not): ├─┬, without panes: ├──
+				s += indicatorPart + treeStyle.Render(treeBranch+windowEnd) + style.Render(baseContent) + "\n"
 			}
 
 			// Show panes if window has multiple panes
@@ -538,20 +711,24 @@ func (m model) View() string {
 						Bold(true)
 				}
 
-				// Tree continuation character
+				// Tree continuation: │ if more windows below, space if last window
 				var treeContinue string
 				if isLastInGroup {
-					treeContinue = "   "
+					treeContinue = " " // No more windows below
 				} else {
-					treeContinue = "│  "
+					treeContinue = treeStyle.Render("│") // More windows below
 				}
 
+				numPanes := len(win.Panes)
 				for pi, pane := range win.Panes {
-					var paneTreeChar string
-					if pi == len(win.Panes)-1 {
-						paneTreeChar = "└─"
+					isLastPane := pi == numPanes-1
+
+					// Pane branch: └─ for last pane, ├─ for others
+					var paneCorner string
+					if isLastPane {
+						paneCorner = "└"
 					} else {
-						paneTreeChar = "├─"
+						paneCorner = "├"
 					}
 
 					paneNum := fmt.Sprintf("%d.%d", win.Index, pane.Index)
@@ -561,24 +738,21 @@ func (m model) View() string {
 					}
 					paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
 
-					paneIndentWidth := 8
+					paneIndentWidth := 6 // space(1) + windowCont(1) + space(1) + corner(1) + connector(2 or 1+▶)
 					paneContentWidth := sidebarWidth - paneIndentWidth
 
-					var paneContent string
-					if pane.Active {
-						paneContent = "► " + paneText
-					} else {
-						paneContent = "  " + paneText
-					}
-					if len(paneContent) > paneContentWidth {
-						paneContent = paneContent[:paneContentWidth-1] + "~"
+					// Truncate content if needed
+					if len(paneText) > paneContentWidth {
+						paneText = paneText[:paneContentWidth-1] + "~"
 					}
 
+					// Active pane gets arrow, inactive gets extended pipe
 					if pane.Active && isActive {
 						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-						s += treeContinue + paneTreeChar + fullWidthPaneStyle.Render(paneContent) + "\n"
+						s += " " + treeContinue + treeStyle.Render(" "+paneCorner+"─") + arrowStyle.Render("▶") + fullWidthPaneStyle.Render(paneText) + "\n"
 					} else {
-						s += treeContinue + paneTreeChar + paneStyle.Render(paneContent) + "\n"
+						// Extend pipe to connect: ├── or └──
+						s += " " + treeContinue + treeStyle.Render(" "+paneCorner+"──") + paneStyle.Render(paneText) + "\n"
 					}
 				}
 			}
@@ -616,9 +790,9 @@ func (m model) showContextMenu(win *tmux.Window) {
 	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d automatic-rename off\"", win.Name, win.Index, win.Index)
 	args = append(args, "Rename", "r", renameCmd)
 
-	// Unlock auto-rename option (restore automatic naming)
+	// Unlock name option (restore automatic naming)
 	unlockCmd := fmt.Sprintf("set-window-option -t :%d automatic-rename on", win.Index)
-	args = append(args, "Auto-name", "a", unlockCmd)
+	args = append(args, "Unlock Name", "u", unlockCmd)
 
 	// Separator
 	args = append(args, "", "", "")
@@ -677,8 +851,8 @@ func (m model) showContextMenu(win *tmux.Window) {
 	args = append(args, "", "", "")
 
 	// Split options - target pane 1 (sidebar is pane 0, main content is pane 1+)
-	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t :%d.1 ; split-window -h", win.Index, win.Index)
-	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t :%d.1 ; split-window -v", win.Index, win.Index)
+	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t :%d.1 ; split-window -h -c '#{pane_current_path}'", win.Index, win.Index)
+	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t :%d.1 ; split-window -v -c '#{pane_current_path}'", win.Index, win.Index)
 	args = append(args, "Split Horizontal │", "|", splitHCmd)
 	args = append(args, "Split Vertical ─", "-", splitVCmd)
 
@@ -692,8 +866,8 @@ func (m model) showContextMenu(win *tmux.Window) {
 	// Separator
 	args = append(args, "", "", "")
 
-	// Kill option - kill window and signal all sidebars to refresh after brief delay
-	killCmd := fmt.Sprintf("kill-window -t :%d ; run-shell 'sleep 0.1; for pid in $(tmux list-panes -s -F \"#{pane_current_command}|#{pane_pid}\" | grep \"^sidebar|\" | cut -d\"|\" -f2); do kill -USR1 \"$pid\" 2>/dev/null; done'", win.Index)
+	// Kill option - uses helper script to avoid complex quoting issues
+	killCmd := fmt.Sprintf("run-shell '%s/scripts/kill_window.sh %d'", getCurrentDir(), win.Index)
 	args = append(args, "Kill", "k", killCmd)
 
 	_ = exec.Command("tmux", args...).Run()
@@ -722,12 +896,16 @@ func (m model) showPaneContextMenu(pr *paneRef) {
 	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"select-pane -t %s -T '%%%%'\"", currentTitle, pr.pane.ID)
 	args = append(args, "Rename", "r", renameCmd)
 
+	// Reset title option (clear custom title, show command instead)
+	resetTitleCmd := fmt.Sprintf("select-pane -t %s -T ''", pr.pane.ID)
+	args = append(args, "Reset Title", "u", resetTitleCmd)
+
 	// Separator
 	args = append(args, "", "", "")
 
 	// Split options for this pane
-	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h", pr.windowIdx, pr.pane.ID)
-	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v", pr.windowIdx, pr.pane.ID)
+	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", pr.windowIdx, pr.pane.ID)
+	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", pr.windowIdx, pr.pane.ID)
 	args = append(args, "Split Horizontal │", "|", splitHCmd)
 	args = append(args, "Split Vertical ─", "-", splitVCmd)
 
@@ -755,6 +933,92 @@ func (m model) showPaneContextMenu(pr *paneRef) {
 	_ = exec.Command("tmux", args...).Run()
 }
 
+// showAlertPopup shows recent output from a window with an alert indicator
+func (m model) showAlertPopup(win *tmux.Window) {
+	// Determine alert type for title
+	alertType := "Activity"
+	if win.Bell {
+		alertType = "Bell"
+	} else if win.Busy {
+		alertType = "Busy"
+	}
+
+	// Use tmux popup to show recent output captured from the window's main pane
+	// Find the non-sidebar pane in the target window
+	// Use less with -R for colors, ESC or q to quit
+	popupCmd := fmt.Sprintf(`
+		target_pane=$(tmux list-panes -t :%d -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
+		if [ -n "$target_pane" ]; then
+			tmux capture-pane -t "$target_pane" -p -e -S -50 > /tmp/tabby-alert-$$.txt
+			tmux display-popup -w 80 -h 25 -T " %s: %s (ESC/q to close) " -E "less -R +G /tmp/tabby-alert-$$.txt; rm -f /tmp/tabby-alert-$$.txt"
+		fi
+	`, win.Index, alertType, win.Name)
+
+	_ = exec.Command("bash", "-c", popupCmd).Run()
+}
+
+// showGroupContextMenu shows a context menu for a group header
+func (m model) showGroupContextMenu(gr *groupRef) {
+	args := []string{
+		"display-menu",
+		"-O",
+		"-T", fmt.Sprintf("Group: %s (%d windows)", gr.group.Name, len(gr.group.Windows)),
+		"-x", "M",
+		"-y", "M",
+	}
+
+	// Build list of window indices in this group
+	var indices []string
+	for _, win := range gr.group.Windows {
+		indices = append(indices, fmt.Sprintf("%d", win.Index))
+	}
+	indicesStr := strings.Join(indices, " ")
+
+	// Close all windows in this group - pass window indices directly
+	closeAllCmd := fmt.Sprintf("run-shell '%s/scripts/kill_windows.sh %s'", getCurrentDir(), indicesStr)
+	args = append(args, "Close All Windows", "x", closeAllCmd)
+
+	// Separator
+	args = append(args, "", "", "")
+
+	// Add new window - for named groups, look for a pattern in config
+	var prefix string
+	for _, cfgGroup := range m.config.Groups {
+		if cfgGroup.Name == gr.group.Name && cfgGroup.Pattern != ".*" {
+			prefix = extractGroupPrefix(cfgGroup.Pattern)
+			break
+		}
+	}
+
+	if prefix != "" {
+		newWindowCmd := fmt.Sprintf("new-window -n '%s' -c '#{pane_current_path}'", prefix)
+		args = append(args, fmt.Sprintf("New %s Window", gr.group.Name), "n", newWindowCmd)
+	} else {
+		args = append(args, "New Window", "n", "new-window -c '#{pane_current_path}'")
+	}
+
+	_ = exec.Command("tmux", args...).Run()
+}
+
+// extractGroupPrefix extracts the window name prefix from a regex pattern
+// e.g., "^SD\\|" -> "SD|", "^GP\\|" -> "GP|"
+func extractGroupPrefix(pattern string) string {
+	if len(pattern) < 2 {
+		return ""
+	}
+	// Remove leading ^ if present
+	if pattern[0] == '^' {
+		pattern = pattern[1:]
+	}
+	// Unescape common patterns
+	pattern = strings.ReplaceAll(pattern, "\\|", "|")
+	pattern = strings.ReplaceAll(pattern, "\\.", ".")
+	// If it still has regex chars, it's not a simple prefix
+	if strings.ContainsAny(pattern, ".*+?[](){}$") {
+		return ""
+	}
+	return pattern
+}
 
 // findWindowGroup returns the group name and theme for a window based on @tabby_group option
 func findWindowGroup(win *tmux.Window, groups []config.Group) (string, config.Theme) {

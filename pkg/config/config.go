@@ -25,11 +25,14 @@ type PromptStyle struct {
 }
 
 type PaneHeader struct {
-	ActiveFg   string `yaml:"active_fg"`   // Active pane header text (default: #ffffff)
-	ActiveBg   string `yaml:"active_bg"`   // Active pane header bg fallback (default: #3498db)
-	InactiveFg string `yaml:"inactive_fg"` // Inactive pane header text (default: #cccccc)
-	InactiveBg string `yaml:"inactive_bg"` // Inactive pane header bg fallback (default: #333333)
-	CommandFg  string `yaml:"command_fg"`  // Command text color (default: #aaaaaa)
+	ActiveFg      string `yaml:"active_fg"`       // Active pane header text (default: #ffffff)
+	ActiveBg      string `yaml:"active_bg"`       // Active pane header bg fallback (default: #3498db)
+	InactiveFg    string `yaml:"inactive_fg"`     // Inactive pane header text (default: #cccccc)
+	InactiveBg    string `yaml:"inactive_bg"`     // Inactive pane header bg fallback (default: #333333)
+	CommandFg     string `yaml:"command_fg"`      // Command text color (default: #aaaaaa)
+	BorderFromTab bool   `yaml:"border_from_tab"` // Use tab's color for active pane border (default: false)
+	BorderLines   string `yaml:"border_lines"`    // Border style: single, double, heavy, simple, number (default: single)
+	BorderFg      string `yaml:"border_fg"`       // Border foreground color (default: #444444)
 }
 
 type Sidebar struct {
@@ -82,12 +85,14 @@ type Indicators struct {
 	Bell     Indicator `yaml:"bell"`
 	Silence  Indicator `yaml:"silence"`
 	Last     Indicator `yaml:"last"`
+	Busy     Indicator `yaml:"busy"` // Foreground process running (auto-detected)
 }
 
 type Indicator struct {
-	Enabled bool   `yaml:"enabled"`
-	Icon    string `yaml:"icon"`
-	Color   string `yaml:"color"`
+	Enabled bool     `yaml:"enabled"`
+	Icon    string   `yaml:"icon"`
+	Color   string   `yaml:"color"`
+	Frames  []string `yaml:"frames,omitempty"` // Animation frames (if set, animates through these)
 }
 
 func DefaultConfigPath() string {
