@@ -685,6 +685,13 @@ func (m model) showContextMenu(win *tmux.Window) {
 	// Separator
 	args = append(args, "", "", "")
 
+	// Open in Finder - opens the pane's current directory
+	openFinderCmd := fmt.Sprintf("run-shell 'open \"#{pane_current_path}\"'")
+	args = append(args, "Open in Finder", "o", openFinderCmd)
+
+	// Separator
+	args = append(args, "", "", "")
+
 	// Kill option - kill window and signal all sidebars to refresh after brief delay
 	killCmd := fmt.Sprintf("kill-window -t :%d ; run-shell 'sleep 0.1; for pid in $(tmux list-panes -s -F \"#{pane_current_command}|#{pane_pid}\" | grep \"^sidebar|\" | cut -d\"|\" -f2); do kill -USR1 \"$pid\" 2>/dev/null; done'", win.Index)
 	args = append(args, "Kill", "k", killCmd)
@@ -734,6 +741,10 @@ func (m model) showPaneContextMenu(pr *paneRef) {
 	// Break pane to new window
 	breakCmd := fmt.Sprintf("break-pane -s %s", pr.pane.ID)
 	args = append(args, "Break to New Window", "b", breakCmd)
+
+	// Open in Finder - opens this pane's current directory
+	openFinderCmd := fmt.Sprintf("run-shell 'open \"#(tmux display-message -t %s -p \"#{pane_current_path}\")\"'", pr.pane.ID)
+	args = append(args, "Open in Finder", "o", openFinderCmd)
 
 	// Separator
 	args = append(args, "", "", "")
