@@ -1,21 +1,51 @@
 # Tabby
 
-A friendly cat watching over your tmux tabs.
+A modern tab manager for tmux with grouping, a clickable vertical sidebar, and deep linking for notifications.
 
-Modern, groupable tab bar plugin for tmux with horizontal and vertical modes. Features tab overflow handling, visual indicators, and comprehensive keyboard shortcuts.
+```
++---------------------------+----------------------------------------+
+| StudioDome                |                                        |
+|   0. dashboard            |  $ vim src/app.tsx                     |
+|   1. api                  |                                        |
+| Gunpowder                 |                                        |
+|   2. backend              |                                        |
+|   3. tests                |                                        |
+| Default                   |                                        |
+| > 4. vim  <-- active      |                                        |
+|   5. notes                |                                        |
+|                           |                                        |
+| [+] New Tab               |                                        |
++---------------------------+----------------------------------------+
+```
 
-## Features
+## Key Features
 
-- **Horizontal tab bar** with overflow scrolling
-- **Vertical sidebar** with persistent state across windows
-- **Tab grouping** with customizable themes and icons
-- **Automatic window naming** - shows running command (ssh, vim, etc.), locks on manual rename
-- **Strict index ordering** - windows always display 0, 1, 2... from top to bottom
-- **Window indicators** for activity, bell, and silence
-- **Keyboard navigation** with intuitive shortcuts
-- **Mouse support** - click to switch, right-click context menu, middle-click close
-- **Custom tab colors** - set per-window colors via context menu
-- **Auto-renumbering** - windows renumber when closed or on mode switch
+### Vertical Sidebar
+A persistent, clickable sidebar that works across all your windows. Left-click to switch, right-click for context menus, middle-click to close. Full mouse support that tmux's native status bar can't provide.
+
+### Window Grouping
+Organize windows by project with color-coded groups. Windows are automatically grouped by pattern matching or manually assigned via right-click menu. Each group has its own theme colors and optional icon.
+
+### Deep Links for Notifications
+Click a notification to jump directly to the right tmux session, window, and pane. Perfect for long-running tasks - get notified when done and click to return instantly.
+
+```bash
+# Example: notification that deep-links back to tmux
+terminal-notifier -title "Build Done" -message "Click to return" \
+  -execute "~/.tmux/plugins/tabby/scripts/focus_pane.sh main:2.1"
+```
+
+## All Features
+
+- **Vertical sidebar** - clickable, persistent across windows
+- **Window grouping** - color-coded project organization
+- **Deep link navigation** - click notifications to jump to exact pane
+- **Horizontal tab bar** - alternative mode with overflow scrolling
+- **Automatic window naming** - shows running command, locks on manual rename
+- **Activity indicators** - bell, activity, and silence alerts
+- **Mouse support** - click, right-click menus, middle-click close
+- **Custom tab colors** - per-window color overrides
+- **Keyboard navigation** - intuitive shortcuts for everything
 
 ## Installation
 
