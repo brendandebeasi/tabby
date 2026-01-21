@@ -70,8 +70,13 @@ $TMUX_CMD select-window -t "$WINDOW_TARGET" 2>>"$LOG" || echo "  select-window f
 echo "  Selecting pane: $PANE_TARGET" >> "$LOG"
 $TMUX_CMD select-pane -t "$PANE_TARGET" 2>>"$LOG" || echo "  select-pane failed" >> "$LOG"
 
+# Small delay to ensure tmux has processed the window/pane switch
+sleep 0.1
+
 # Signal sidebar to refresh (so tab bar shows correct active tab)
-SESSION_ID=$($TMUX_CMD display-message -p '#{session_id}' 2>/dev/null)
+# Get session ID from the target session, not current client
+SESSION_ID=$($TMUX_CMD display-message -t "$SESSION" -p '#{session_id}' 2>/dev/null)
+echo "  Session ID for refresh: $SESSION_ID" >> "$LOG"
 PID_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.pid"
 if [ -f "$PID_FILE" ]; then
     SIDEBAR_PID=$(cat "$PID_FILE")
@@ -79,7 +84,13 @@ if [ -f "$PID_FILE" ]; then
         echo "  Signaling sidebar (PID $SIDEBAR_PID)" >> "$LOG"
         kill -USR1 "$SIDEBAR_PID" 2>/dev/null || true
     fi
+else
+    echo "  No sidebar PID file at $PID_FILE" >> "$LOG"
 fi
+
+# Also refresh the status bar (for horizontal mode)
+$TMUX_CMD refresh-client -t "$SESSION" -S 2>/dev/null || true
+echo "  Refreshed tmux client status bar" >> "$LOG"
 
 # Bring terminal to foreground using AppleScript
 echo "  Running: osascript to activate $TERMINAL_APP" >> "$LOG"
