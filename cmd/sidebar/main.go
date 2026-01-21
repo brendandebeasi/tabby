@@ -293,11 +293,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Click on pane - switch to window first, then select pane
 					_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", paneRef.windowIdx)).Run()
 					_ = exec.Command("tmux", "select-pane", "-t", paneRef.pane.ID).Run()
-					// Signal ALL sidebars to refresh
+					// Signal ALL sidebars to refresh after a delay (lets tmux clear bell/activity flags)
 					_ = exec.Command("bash", "-c", `
-						for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
+						(sleep 0.15; for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
 							kill -USR1 "$pid" 2>/dev/null || true
-						done
+						done) &
 					`).Run()
 					return m, nil
 				} else if clicked != nil {
@@ -310,11 +310,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							tmux select-pane -t "$main_pane"
 						fi
 					`).Run()
-					// Signal ALL sidebars to refresh (we switched windows, so a different sidebar is now visible)
+					// Signal ALL sidebars to refresh after delay (lets tmux clear bell/activity flags)
 					_ = exec.Command("bash", "-c", `
-						for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
+						(sleep 0.15; for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
 							kill -USR1 "$pid" 2>/dev/null || true
-						done
+						done) &
 					`).Run()
 					return m, nil
 				} else if m.config.Sidebar.NewTabButton && msg.Y == newTabLine {
