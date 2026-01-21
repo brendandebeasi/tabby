@@ -49,7 +49,7 @@ func GroupWindows(windows []tmux.Window, groups []config.Group) []GroupedWindows
 		}
 	}
 
-	// Collect non-empty groups, keeping Default first for stability
+	// Collect non-empty groups: Default first, then others alphabetically
 	var defaultGroup *GroupedWindows
 	var otherGroups []GroupedWindows
 
@@ -68,7 +68,12 @@ func GroupWindows(windows []tmux.Window, groups []config.Group) []GroupedWindows
 		}
 	}
 
-	// Default group first (if exists), then other groups in config order
+	// Sort other groups alphabetically by name
+	sort.Slice(otherGroups, func(i, j int) bool {
+		return otherGroups[i].Name < otherGroups[j].Name
+	})
+
+	// Default first, then alphabetical
 	var nonEmpty []GroupedWindows
 	if defaultGroup != nil {
 		nonEmpty = append(nonEmpty, *defaultGroup)

@@ -28,15 +28,20 @@ type Pane struct {
 	Busy    bool   // Pane has a foreground process (not shell)
 }
 
-// shellCommands are shells that indicate "idle" state (not busy)
-var shellCommands = map[string]bool{
+// idleCommands are processes that indicate "idle" state (not busy)
+// Includes shells and long-running daemon-like processes
+var idleCommands = map[string]bool{
+	// Shells
 	"bash": true, "zsh": true, "fish": true, "sh": true, "dash": true,
 	"tcsh": true, "csh": true, "ksh": true, "ash": true,
+	// Long-running processes that are often idle
+	"node": true, "python": true, "python3": true, "python3.11": true, "python3.12": true,
+	"ruby": true, "nvim": true, "vim": true, "emacs": true,
 }
 
-// isPaneBusy returns true if the command is not a shell (i.e., something is running)
+// isPaneBusy returns true if the command is not an idle/shell process
 func isPaneBusy(command string) bool {
-	return !shellCommands[command]
+	return !idleCommands[command]
 }
 
 type Window struct {

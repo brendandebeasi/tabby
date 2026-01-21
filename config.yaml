@@ -78,7 +78,7 @@ terminal_app: Ghostty
 
 indicators:
   activity:
-    enabled: true
+    enabled: false  # Requires monitor-activity on (currently off - too noisy)
     icon: "!"
     color: "#000000"
   bell:
@@ -92,5 +92,5 @@ indicators:
   busy:
     enabled: true
     icon: "◐"
-    color: "#000000"
+    color: "#ff0000"  # Bright red for visibility
     frames: ["◐", "◓", "◑", "◒"]  # Animation frames (cycles through these)

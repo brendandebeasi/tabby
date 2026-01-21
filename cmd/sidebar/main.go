@@ -545,6 +545,9 @@ func (m model) View() string {
 	}
 	contentWidth := sidebarWidth - 4 // Space for tree chars and arrow
 
+	// Visual position counter (0-n from top to bottom)
+	visualPos := 0
+
 	// Iterate over grouped windows - keeps each group together
 	for _, group := range m.grouped {
 		theme := group.Theme
@@ -632,8 +635,8 @@ func (m model) View() string {
 				}
 			}
 
-			// Build tab content
-			baseContent := fmt.Sprintf("%d. %s", win.Index, displayName)
+			// Build tab content (use visual position, not tmux index)
+			baseContent := fmt.Sprintf("%d. %s", visualPos, displayName)
 			availableWidth := contentWidth - 2 // space for indicator
 			if lipgloss.Width(baseContent) > availableWidth {
 				truncated := ""
@@ -731,7 +734,7 @@ func (m model) View() string {
 						paneCorner = "├"
 					}
 
-					paneNum := fmt.Sprintf("%d.%d", win.Index, pane.Index)
+					paneNum := fmt.Sprintf("%d.%d", visualPos, pane.Index)
 					paneLabel := pane.Command
 					if pane.Title != "" && pane.Title != pane.Command {
 						paneLabel = pane.Title
@@ -756,6 +759,9 @@ func (m model) View() string {
 					}
 				}
 			}
+
+			// Increment visual position for next window
+			visualPos++
 		}
 	}
 
