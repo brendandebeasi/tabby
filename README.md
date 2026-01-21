@@ -235,26 +235,122 @@ terminal-notifier -title "Task Done" -message "Click to return" \
 
 ### Integration with Claude Code
 
-Create a notification hook script for Claude Code that includes deep links:
+Claude Code hooks run as subprocesses, so you need to capture the correct pane - not the currently focused one. The key is using the `TMUX_PANE` environment variable with `tmux display-message -t`.
+
+**Important:** Using `tmux display-message -p` (without `-t`) returns the *currently focused* pane, which may have changed while Claude was working. Using `-t "$TMUX_PANE"` queries the *specific pane* where the hook originated.
+
+#### Hook Configuration
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/your/claude-stop-notify.sh"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/your/claude-notification.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### Example Hook Script
 
 ```bash
 #!/usr/bin/env bash
-# ~/.claude/hooks/notify.sh
+# claude-stop-notify.sh - Notification with deep link to correct pane
 
-MESSAGE="${1:-Task complete}"
 TABBY_DIR="${HOME}/.tmux/plugins/tabby"
 
-if [ -n "$TMUX" ]; then
-  # Capture current tmux location for deep link
-  TARGET=$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}')
-  terminal-notifier \
-    -title "Claude Code" \
-    -message "$MESSAGE" \
-    -sound default \
-    -execute "$TABBY_DIR/scripts/focus_pane.sh $TARGET"
+# Read hook JSON from stdin (Claude provides session info)
+HOOK_JSON=$(cat)
+TRANSCRIPT_PATH=$(echo "$HOOK_JSON" | jq -r '.transcript_path // empty')
+
+# Get tmux info for the SPECIFIC pane where Claude runs
+# CRITICAL: Use -t "$TMUX_PANE" to query the originating pane, not current focus
+if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then
+    WINDOW_NAME=$(tmux display-message -t "$TMUX_PANE" -p '#W')
+    TMUX_TARGET=$(tmux display-message -t "$TMUX_PANE" -p '#{session_name}:#{window_index}.#{pane_index}')
+    WINDOW_INDEX=$(tmux display-message -t "$TMUX_PANE" -p '#I')
+    PANE_NUM=$(tmux display-message -t "$TMUX_PANE" -p '#P')
+elif [[ -n "${TMUX:-}" ]]; then
+    # Fallback (shouldn't happen in normal tmux usage)
+    WINDOW_NAME=$(tmux display-message -p '#W')
+    TMUX_TARGET=$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}')
+    WINDOW_INDEX=$(tmux display-message -p '#I')
+    PANE_NUM=$(tmux display-message -p '#P')
 else
-  terminal-notifier -title "Claude Code" -message "$MESSAGE" -sound default
+    WINDOW_NAME="no-tmux"
+    TMUX_TARGET=""
+    WINDOW_INDEX="?"
+    PANE_NUM="0"
 fi
+
+# Extract Claude's last message from transcript (optional)
+MESSAGE="Session complete"
+if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
+    LAST_MSG=$(tac "$TRANSCRIPT_PATH" | grep -m1 '"type":"assistant"' | jq -r '
+        .message.content |
+        if type == "array" then
+            [.[] | select(.type == "text") | .text] | join(" ")
+        elif type == "string" then .
+        else empty end
+    ' 2>/dev/null)
+    if [[ -n "$LAST_MSG" && "$LAST_MSG" != "null" ]]; then
+        MESSAGE=$(echo "$LAST_MSG" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-200)
+    fi
+fi
+
+# Send notification with click-to-focus
+if [[ -n "$TMUX_TARGET" ]]; then
+    terminal-notifier \
+        -title "Claude [$WINDOW_NAME]" \
+        -subtitle "Window ${WINDOW_INDEX}:${PANE_NUM}" \
+        -message "$MESSAGE" \
+        -sound default \
+        -group "claude-${WINDOW_INDEX}" \
+        -execute "$TABBY_DIR/scripts/focus_pane.sh $TMUX_TARGET"
+else
+    terminal-notifier \
+        -title "Claude" \
+        -message "$MESSAGE" \
+        -sound default
+fi
+```
+
+#### Notification Persistence
+
+By default, macOS banner notifications disappear after ~5 seconds. To make them persist until clicked:
+
+1. Open **System Settings** -> **Notifications** -> **terminal-notifier**
+2. Change notification style from **Banners** to **Alerts**
+
+#### Disabling Claude's Built-in Notifications
+
+To avoid duplicate notifications (your custom hook + Claude's default), add to `~/.claude.json`:
+
+```json
+{
+  "preferredNotifChannel": "none"
+}
 ```
 
 ## Known Limitations
