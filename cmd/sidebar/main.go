@@ -5,8 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"regexp"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -77,41 +75,34 @@ func (m *model) buildWindowRefs() {
 	m.paneRefs = make([]paneRef, 0)
 	line := 0
 
-	// Sort windows by index to match View() display order
-	sortedWindows := make([]tmux.Window, len(m.windows))
-	copy(sortedWindows, m.windows)
-	sort.Slice(sortedWindows, func(i, j int) bool {
-		return sortedWindows[i].Index < sortedWindows[j].Index
-	})
+	// Iterate over grouped windows - this keeps each group together
+	// Windows within each group are already sorted by index
+	for gi := range m.grouped {
+		group := &m.grouped[gi]
 
-	// Track group headers to match View() exactly
-	lastGroupName := ""
-	for wi := range sortedWindows {
-		win := &sortedWindows[wi]
-		groupName, _ := findWindowGroup(win.Name, m.config.Groups)
-
-		// Group header line when group changes
-		if groupName != lastGroupName {
-			line++ // Group header
-			lastGroupName = groupName
-		}
-
-		m.windowRefs = append(m.windowRefs, windowRef{
-			window: win,
-			line:   line,
-		})
+		// Group header line
 		line++
 
-		// Track pane lines if window has multiple panes
-		if len(win.Panes) > 1 {
-			for pi := range win.Panes {
-				m.paneRefs = append(m.paneRefs, paneRef{
-					pane:      &win.Panes[pi],
-					window:    win,
-					windowIdx: win.Index,
-					line:      line,
-				})
-				line++
+		for wi := range group.Windows {
+			win := &group.Windows[wi]
+
+			m.windowRefs = append(m.windowRefs, windowRef{
+				window: win,
+				line:   line,
+			})
+			line++
+
+			// Track pane lines if window has multiple panes
+			if len(win.Panes) > 1 {
+				for pi := range win.Panes {
+					m.paneRefs = append(m.paneRefs, paneRef{
+						pane:      &win.Panes[pi],
+						window:    win,
+						windowIdx: win.Index,
+						line:      line,
+					})
+					line++
+				}
 			}
 		}
 	}
@@ -185,10 +176,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.confirmClose && m.confirmWindow != nil {
 			switch msg.String() {
 			case "y", "Y":
-				// Confirmed - kill the window
-				_ = exec.Command("tmux", "kill-window", "-t", fmt.Sprintf(":%d", m.confirmWindow.Index)).Run()
+				// Confirmed - kill the window and signal all sidebars
+				windowIdx := m.confirmWindow.Index
 				m.confirmClose = false
 				m.confirmWindow = nil
+				_ = exec.Command("tmux", "kill-window", "-t", fmt.Sprintf(":%d", windowIdx)).Run()
+				// Signal all sidebars to refresh after brief delay
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					_ = exec.Command("bash", "-c", `
+						for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
+							kill -USR1 "$pid" 2>/dev/null || true
+						done
+					`).Run()
+				}()
 				return m, delayedRefresh()
 			case "n", "N", "esc", "escape":
 				// Cancelled
@@ -351,9 +352,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case refreshMsg:
+		oldCount := len(m.windows)
 		windows, _ := tmux.ListWindowsWithPanes()
 		m.windows = windows
 		m.grouped = grouping.GroupWindows(windows, m.config.Groups)
+		// Only update pane colors if window count changed (new/closed window)
+		if len(windows) != oldCount {
+			updatePaneHeaderColors(m.grouped)
+		}
 		m.buildWindowRefs()
 		// Ensure cursor is still on a valid window line
 		if !m.isWindowLine(m.cursor) && len(m.windowRefs) > 0 {
@@ -366,6 +372,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err == nil {
 			m.config = cfg
 			m.grouped = grouping.GroupWindows(m.windows, m.config.Groups)
+			updatePaneHeaderColors(m.grouped)
 			m.buildWindowRefs()
 		}
 		return m, nil
@@ -395,191 +402,182 @@ func (m model) View() string {
 	sidebarWidth := 25
 	contentWidth := sidebarWidth - 4 // Space for tree chars and arrow
 
-	// Sort windows by index for strict 0, 1, 2, 3... order
-	sortedWindows := make([]tmux.Window, len(m.windows))
-	copy(sortedWindows, m.windows)
-	sort.Slice(sortedWindows, func(i, j int) bool {
-		return sortedWindows[i].Index < sortedWindows[j].Index
-	})
+	// Iterate over grouped windows - keeps each group together
+	for _, group := range m.grouped {
+		theme := group.Theme
 
-	// Display windows in strict index order with inline group headers
-	lastGroupName := ""
-	for wi, win := range sortedWindows {
-		// Find which group this window belongs to
-		groupName, theme := findWindowGroup(win.Name, m.config.Groups)
-
-		// Show group header when group changes
-		if groupName != lastGroupName {
-			headerStyle := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(theme.Fg)).
-				Background(lipgloss.Color(theme.Bg)).
-				Bold(true).
-				Width(sidebarWidth - 1)
-			icon := theme.Icon
-			if icon != "" {
-				icon += " "
-			}
-			s += headerStyle.Render(icon+groupName) + "\n"
-			lastGroupName = groupName
+		// Show group header
+		headerStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(theme.Fg)).
+			Background(lipgloss.Color(theme.Bg)).
+			Bold(true).
+			Width(sidebarWidth - 1)
+		icon := theme.Icon
+		if icon != "" {
+			icon += " "
 		}
+		s += headerStyle.Render(icon+group.Name) + "\n"
 
-		isActive := win.Active
-		isLastWindow := wi == len(sortedWindows)-1
+		// Show windows in this group
+		for wi, win := range group.Windows {
+			isActive := win.Active
+			isLastInGroup := wi == len(group.Windows)-1
 
-		// Choose colors - custom color overrides group theme
-		var bgColor, fgColor string
-		if win.CustomColor != "" {
-			if isActive {
-				bgColor = win.CustomColor
+			// Choose colors - custom color overrides group theme
+			var bgColor, fgColor string
+			if win.CustomColor != "" {
+				if isActive {
+					bgColor = win.CustomColor
+				} else {
+					bgColor = grouping.ShadeColorByIndex(win.CustomColor, 1)
+				}
+				fgColor = "#ffffff"
+			} else if isActive {
+				bgColor = theme.ActiveBg
+				if bgColor == "" {
+					bgColor = theme.Bg
+				}
+				fgColor = theme.ActiveFg
+				if fgColor == "" {
+					fgColor = theme.Fg
+				}
 			} else {
-				bgColor = grouping.ShadeColorByIndex(win.CustomColor, 1)
-			}
-			fgColor = "#ffffff"
-		} else if isActive {
-			bgColor = theme.ActiveBg
-			if bgColor == "" {
 				bgColor = theme.Bg
-			}
-			fgColor = theme.ActiveFg
-			if fgColor == "" {
 				fgColor = theme.Fg
 			}
-		} else {
-			bgColor = theme.Bg
-			fgColor = theme.Fg
-		}
-		if fgColor == "" {
-			fgColor = "#ffffff"
-		}
-
-		// Build style
-		style := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(fgColor)).
-			Background(lipgloss.Color(bgColor))
-		if isActive {
-			style = style.Bold(true)
-		}
-
-		// Get display name (strip group prefix)
-		displayName := getBaseWindowName(win.Name, m.config.Groups)
-
-		// Build alert indicator (shown at start of tab if any alert)
-		alertIcon := " "
-		ind := m.config.Indicators
-		if ind.Bell.Enabled && win.Bell {
-			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
-			alertIcon = alertStyle.Render(ind.Bell.Icon)
-		} else if ind.Activity.Enabled && win.Activity {
-			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
-			alertIcon = alertStyle.Render(ind.Activity.Icon)
-		} else if ind.Silence.Enabled && win.Silence {
-			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
-			alertIcon = alertStyle.Render(ind.Silence.Icon)
-		}
-
-		// Build tab content
-		baseContent := fmt.Sprintf("%d. %s", win.Index, displayName)
-		availableWidth := contentWidth - 1
-		if lipgloss.Width(baseContent) > availableWidth {
-			truncated := ""
-			for _, r := range baseContent {
-				if lipgloss.Width(truncated+string(r)) > availableWidth-1 {
-					break
-				}
-				truncated += string(r)
-			}
-			baseContent = truncated + "~"
-		}
-		tabContent := alertIcon + baseContent
-
-		// Render with tree formatting
-		var treeChar string
-		if isLastWindow {
-			treeChar = "└─"
-		} else {
-			treeChar = "├─"
-		}
-
-		fullWidthStyle := style.Width(contentWidth)
-		if isActive {
-			s += treeChar + ">" + fullWidthStyle.Render(tabContent) + "\n"
-		} else {
-			s += treeChar + " " + fullWidthStyle.Render(tabContent) + "\n"
-		}
-
-		// Show panes if window has multiple panes
-		if len(win.Panes) > 1 {
-			var paneBg, paneFg, activePaneBg string
-			if win.CustomColor != "" {
-				paneBg = grouping.LightenColor(win.CustomColor, 0.3)
-				activePaneBg = win.CustomColor
-				paneFg = "#ffffff"
-			} else {
-				paneBg = grouping.LightenColor(theme.Bg, 0.3)
-				activePaneBg = theme.ActiveBg
-				paneFg = theme.Fg
-				if paneFg == "" {
-					paneFg = "#ffffff"
-				}
+			if fgColor == "" {
+				fgColor = "#ffffff"
 			}
 
-			paneStyle := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(paneFg)).
-				Background(lipgloss.Color(paneBg))
-
-			activePaneStyle := paneStyle
+			// Build style
+			style := lipgloss.NewStyle().
+				Foreground(lipgloss.Color(fgColor)).
+				Background(lipgloss.Color(bgColor))
 			if isActive {
-				activePaneFg := "#ffffff"
-				if win.CustomColor == "" && theme.ActiveFg != "" {
-					activePaneFg = theme.ActiveFg
-				}
-				activePaneStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color(activePaneFg)).
-					Background(lipgloss.Color(activePaneBg)).
-					Bold(true)
+				style = style.Bold(true)
 			}
 
-			// Tree continuation character
-			var treeContinue string
-			if isLastWindow {
-				treeContinue = "   "
+			// Display name is the window name
+			displayName := win.Name
+
+			// Build alert indicator (shown at start of tab if any alert)
+			alertIcon := " "
+			ind := m.config.Indicators
+			if ind.Bell.Enabled && win.Bell {
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
+				alertIcon = alertStyle.Render(ind.Bell.Icon)
+			} else if ind.Activity.Enabled && win.Activity {
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
+				alertIcon = alertStyle.Render(ind.Activity.Icon)
+			} else if ind.Silence.Enabled && win.Silence {
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
+				alertIcon = alertStyle.Render(ind.Silence.Icon)
+			}
+
+			// Build tab content
+			baseContent := fmt.Sprintf("%d. %s", win.Index, displayName)
+			availableWidth := contentWidth - 1
+			if lipgloss.Width(baseContent) > availableWidth {
+				truncated := ""
+				for _, r := range baseContent {
+					if lipgloss.Width(truncated+string(r)) > availableWidth-1 {
+						break
+					}
+					truncated += string(r)
+				}
+				baseContent = truncated + "~"
+			}
+			tabContent := alertIcon + baseContent
+
+			// Render with tree formatting
+			var treeChar string
+			if isLastInGroup {
+				treeChar = "└─"
 			} else {
-				treeContinue = "│  "
+				treeChar = "├─"
 			}
 
-			for pi, pane := range win.Panes {
-				var paneTreeChar string
-				if pi == len(win.Panes)-1 {
-					paneTreeChar = "└─"
+			fullWidthStyle := style.Width(contentWidth)
+			if isActive {
+				s += treeChar + ">" + fullWidthStyle.Render(tabContent) + "\n"
+			} else {
+				s += treeChar + " " + fullWidthStyle.Render(tabContent) + "\n"
+			}
+
+			// Show panes if window has multiple panes
+			if len(win.Panes) > 1 {
+				var paneBg, paneFg, activePaneBg string
+				if win.CustomColor != "" {
+					paneBg = grouping.LightenColor(win.CustomColor, 0.3)
+					activePaneBg = win.CustomColor
+					paneFg = "#ffffff"
 				} else {
-					paneTreeChar = "├─"
+					paneBg = grouping.LightenColor(theme.Bg, 0.3)
+					activePaneBg = theme.ActiveBg
+					paneFg = theme.Fg
+					if paneFg == "" {
+						paneFg = "#ffffff"
+					}
 				}
 
-				paneNum := fmt.Sprintf("%d.%d", win.Index, pane.Index)
-				paneLabel := pane.Command
-				if pane.Title != "" && pane.Title != pane.Command {
-					paneLabel = pane.Title
+				paneStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color(paneFg)).
+					Background(lipgloss.Color(paneBg))
+
+				activePaneStyle := paneStyle
+				if isActive {
+					activePaneFg := "#ffffff"
+					if win.CustomColor == "" && theme.ActiveFg != "" {
+						activePaneFg = theme.ActiveFg
+					}
+					activePaneStyle = lipgloss.NewStyle().
+						Foreground(lipgloss.Color(activePaneFg)).
+						Background(lipgloss.Color(activePaneBg)).
+						Bold(true)
 				}
-				paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
 
-				paneIndentWidth := 8
-				paneContentWidth := sidebarWidth - paneIndentWidth
-
-				var paneContent string
-				if pane.Active {
-					paneContent = "► " + paneText
+				// Tree continuation character
+				var treeContinue string
+				if isLastInGroup {
+					treeContinue = "   "
 				} else {
-					paneContent = "  " + paneText
-				}
-				if len(paneContent) > paneContentWidth {
-					paneContent = paneContent[:paneContentWidth-1] + "~"
+					treeContinue = "│  "
 				}
 
-				if pane.Active && isActive {
-					fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-					s += treeContinue + paneTreeChar + fullWidthPaneStyle.Render(paneContent) + "\n"
-				} else {
-					s += treeContinue + paneTreeChar + paneStyle.Render(paneContent) + "\n"
+				for pi, pane := range win.Panes {
+					var paneTreeChar string
+					if pi == len(win.Panes)-1 {
+						paneTreeChar = "└─"
+					} else {
+						paneTreeChar = "├─"
+					}
+
+					paneNum := fmt.Sprintf("%d.%d", win.Index, pane.Index)
+					paneLabel := pane.Command
+					if pane.Title != "" && pane.Title != pane.Command {
+						paneLabel = pane.Title
+					}
+					paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
+
+					paneIndentWidth := 8
+					paneContentWidth := sidebarWidth - paneIndentWidth
+
+					var paneContent string
+					if pane.Active {
+						paneContent = "► " + paneText
+					} else {
+						paneContent = "  " + paneText
+					}
+					if len(paneContent) > paneContentWidth {
+						paneContent = paneContent[:paneContentWidth-1] + "~"
+					}
+
+					if pane.Active && isActive {
+						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
+						s += treeContinue + paneTreeChar + fullWidthPaneStyle.Render(paneContent) + "\n"
+					} else {
+						s += treeContinue + paneTreeChar + paneStyle.Render(paneContent) + "\n"
+					}
 				}
 			}
 		}
@@ -611,21 +609,10 @@ func (m model) showContextMenu(win *tmux.Window) {
 		"-y", "M",
 	}
 
-	// Rename option - show base name (without group prefix) so prefix is preserved
-	baseName := getBaseWindowName(win.Name, m.config.Groups)
-	prefix := ""
-	if baseName != win.Name && strings.HasSuffix(win.Name, baseName) {
-		prefix = win.Name[:len(win.Name)-len(baseName)]
-	}
-	// Rename command - also disables automatic-rename to lock the manual name
-	var menuCmd string
-	if prefix != "" {
-		// Prepend prefix to whatever user types, then lock auto-rename
-		menuCmd = fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%s%%%%' ; set-window-option -t :%d automatic-rename off\"", baseName, win.Index, prefix, win.Index)
-	} else {
-		menuCmd = fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d automatic-rename off\"", baseName, win.Index, win.Index)
-	}
-	args = append(args, "Rename", "r", menuCmd)
+	// Rename option - simple rename without prefix manipulation
+	// Group assignment is now handled by @tabby_group option, not window name prefixes
+	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d automatic-rename off\"", win.Name, win.Index, win.Index)
+	args = append(args, "Rename", "r", renameCmd)
 
 	// Unlock auto-rename option (restore automatic naming)
 	unlockCmd := fmt.Sprintf("set-window-option -t :%d automatic-rename on", win.Index)
@@ -634,27 +621,26 @@ func (m model) showContextMenu(win *tmux.Window) {
 	// Separator
 	args = append(args, "", "", "")
 
-	// Move to Group submenu - add each group as an option (locks auto-rename)
+	// Move to Group submenu - sets @tabby_group window option
 	args = append(args, "-Move to Group", "", "")
-	for i, group := range m.config.Groups {
+	keyNum := 1
+	for _, group := range m.config.Groups {
 		if group.Name == "Default" {
-			continue // Skip default group in the submenu
+			continue // Skip default group in the submenu (use "Remove from Group" instead)
 		}
-		// Extract prefix from pattern and combine with base name
-		groupPrefix := extractPrefixFromPattern(group.Pattern)
-		newName := groupPrefix + baseName
-		key := fmt.Sprintf("%d", i+1)
-		if i < 9 {
-			// Rename and lock auto-rename to preserve group prefix
-			renameCmd := fmt.Sprintf("rename-window -t :%d -- '%s' ; set-window-option -t :%d automatic-rename off", win.Index, newName, win.Index)
-			args = append(args, fmt.Sprintf("  %s %s", group.Theme.Icon, group.Name), key, renameCmd)
+		key := fmt.Sprintf("%d", keyNum)
+		keyNum++
+		if keyNum <= 10 {
+			// Set the @tabby_group window option
+			setGroupCmd := fmt.Sprintf("set-window-option -t :%d @tabby_group '%s'", win.Index, group.Name)
+			args = append(args, fmt.Sprintf("  %s %s", group.Theme.Icon, group.Name), key, setGroupCmd)
 		}
 	}
 
-	// Option to remove prefix (move to Default) - enables auto-rename
-	if baseName != win.Name {
-		removeCmd := fmt.Sprintf("rename-window -t :%d -- '%s' ; set-window-option -t :%d automatic-rename on", win.Index, baseName, win.Index)
-		args = append(args, "  Remove Prefix", "0", removeCmd)
+	// Option to remove from group (move to Default) - unsets @tabby_group
+	if win.Group != "" {
+		removeCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_group", win.Index)
+		args = append(args, "  Remove from Group", "0", removeCmd)
 	}
 
 	// Separator
@@ -697,8 +683,9 @@ func (m model) showContextMenu(win *tmux.Window) {
 	// Separator
 	args = append(args, "", "", "")
 
-	// Kill option
-	args = append(args, "Kill", "k", fmt.Sprintf("kill-window -t :%d", win.Index))
+	// Kill option - kill window and signal all sidebars to refresh after brief delay
+	killCmd := fmt.Sprintf("kill-window -t :%d ; run-shell 'sleep 0.1; for pid in $(tmux list-panes -s -F \"#{pane_current_command}|#{pane_pid}\" | grep \"^sidebar|\" | cut -d\"|\" -f2); do kill -USR1 \"$pid\" 2>/dev/null; done'", win.Index)
+	args = append(args, "Kill", "k", killCmd)
 
 	_ = exec.Command("tmux", args...).Run()
 }
@@ -742,6 +729,10 @@ func (m model) showPaneContextMenu(pr *paneRef) {
 	focusCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s", pr.windowIdx, pr.pane.ID)
 	args = append(args, "Focus", "f", focusCmd)
 
+	// Break pane to new window
+	breakCmd := fmt.Sprintf("break-pane -s %s", pr.pane.ID)
+	args = append(args, "Break to New Window", "b", breakCmd)
+
 	// Separator
 	args = append(args, "", "", "")
 
@@ -751,54 +742,29 @@ func (m model) showPaneContextMenu(pr *paneRef) {
 	_ = exec.Command("tmux", args...).Run()
 }
 
-// extractPrefixFromPattern extracts the literal prefix from a regex pattern
-// e.g., "^SD\\|" -> "SD|"
-func extractPrefixFromPattern(pattern string) string {
-	if len(pattern) > 0 && pattern[0] == '^' {
-		pattern = pattern[1:]
-	}
-	// Unescape common regex escapes
-	pattern = strings.ReplaceAll(pattern, "\\|", "|")
-	pattern = strings.ReplaceAll(pattern, "\\.", ".")
-	pattern = strings.ReplaceAll(pattern, "\\-", "-")
-	// Remove regex wildcards
-	pattern = strings.ReplaceAll(pattern, ".*", "")
-	pattern = strings.ReplaceAll(pattern, ".+", "")
-	return pattern
-}
 
-// getBaseWindowName strips any known group prefix from the window name
-func getBaseWindowName(windowName string, groups []config.Group) string {
-	for _, g := range groups {
-		if g.Name == "Default" {
-			continue
-		}
-		prefix := extractPrefixFromPattern(g.Pattern)
-		if prefix != "" && strings.HasPrefix(windowName, prefix) {
-			return strings.TrimPrefix(windowName, prefix)
-		}
-	}
-	return windowName
-}
-
-// findWindowGroup returns the group name and theme for a window based on pattern matching
-func findWindowGroup(windowName string, groups []config.Group) (string, config.Theme) {
+// findWindowGroup returns the group name and theme for a window based on @tabby_group option
+func findWindowGroup(win *tmux.Window, groups []config.Group) (string, config.Theme) {
 	var defaultTheme config.Theme
 	defaultName := "Default"
+
+	// Get group name from window option (set via @tabby_group)
+	groupName := win.Group
+	if groupName == "" {
+		groupName = "Default"
+	}
+
+	// Find the matching group config
 	for _, group := range groups {
 		if group.Name == "Default" {
 			defaultTheme = group.Theme
-			continue
 		}
-		re, err := regexp.Compile(group.Pattern)
-		if err != nil {
-			continue
-		}
-		if re.MatchString(windowName) {
+		if group.Name == groupName {
 			return group.Name, group.Theme
 		}
 	}
-	// Return default
+
+	// Group not found in config, fall back to Default
 	if defaultTheme.Bg != "" {
 		return defaultName, defaultTheme
 	}
@@ -833,32 +799,6 @@ func buildIndicators(win tmux.Window, cfg *config.Config) string {
 	return indicators.String()
 }
 
-// stripGroupPrefix removes the group prefix (e.g., "SD|", "GP|") from window names
-// for cleaner display since the group header already shows the category
-func stripGroupPrefix(windowName, groupName string, groups []config.Group) string {
-	// Find the matching group's pattern
-	for _, g := range groups {
-		if g.Name == groupName {
-			// Extract prefix from pattern like "^SD\\|" -> "SD|"
-			// or "^GP\\|" -> "GP|"
-			pattern := g.Pattern
-			if len(pattern) > 0 && pattern[0] == '^' {
-				pattern = pattern[1:] // Remove anchor
-			}
-			// Unescape common regex escapes
-			pattern = strings.ReplaceAll(pattern, "\\|", "|")
-			pattern = strings.ReplaceAll(pattern, "\\.", ".")
-			pattern = strings.ReplaceAll(pattern, "\\-", "-")
-
-			// If the window name starts with this prefix, strip it
-			if strings.HasPrefix(windowName, pattern) {
-				return strings.TrimPrefix(windowName, pattern)
-			}
-			break
-		}
-	}
-	return windowName
-}
 
 func watchConfig(p *tea.Program, configPath string) {
 	watcher, err := fsnotify.NewWatcher()
@@ -880,6 +820,24 @@ func watchConfig(p *tea.Program, configPath string) {
 	}()
 }
 
+// updatePaneHeaderColors sets pane header colors on each window for pane-border-format
+func updatePaneHeaderColors(grouped []grouping.GroupedWindows) {
+	for _, group := range grouped {
+		baseColor := group.Theme.Bg
+		for _, win := range group.Windows {
+			// Use window custom color if set, otherwise group color
+			color := baseColor
+			if win.CustomColor != "" {
+				color = win.CustomColor
+			}
+			// Set both active and inactive colors
+			_ = exec.Command("tmux", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", color).Run()
+			inactive := grouping.LightenColor(color, 0.15)
+			_ = exec.Command("tmux", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", inactive).Run()
+		}
+	}
+}
+
 func main() {
 	// Force ANSI256 color mode to avoid partial 24-bit escape code issues
 	lipgloss.SetColorProfile(termenv.ANSI256)
@@ -887,6 +845,9 @@ func main() {
 	cfg, _ := config.LoadConfig(config.DefaultConfigPath())
 	windows, _ := tmux.ListWindowsWithPanes()
 	grouped := grouping.GroupWindows(windows, cfg.Groups)
+
+	// Set initial pane header colors
+	updatePaneHeaderColors(grouped)
 
 	m := model{windows: windows, grouped: grouped, config: cfg}
 	m.buildWindowRefs()

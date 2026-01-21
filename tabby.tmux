@@ -18,11 +18,62 @@ fi
 # Auto-renumber windows when one is closed (keeps indices sequential)
 tmux set-option -g renumber-windows on
 
+# New panes/windows open in the current pane's directory
+tmux bind-key '"' split-window -v -c "#{pane_current_path}"
+tmux bind-key '%' split-window -h -c "#{pane_current_path}"
+tmux bind-key 'c' new-window -c "#{pane_current_path}"
+
 # Enable automatic window renaming by default (shows running command/SSH host)
 # Windows with group prefixes or manual names get locked via @tabby_locked
 tmux set-option -g automatic-rename on
 tmux set-option -g allow-rename on
 tmux set-option -g automatic-rename-format '#{pane_current_command}'
+
+# Read pane header colors from config (with defaults)
+# Use exact match with leading spaces to avoid substring matches
+PANE_ACTIVE_FG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  active_fg:" | awk '{print $2}' | tr -d '"' || echo "")
+PANE_ACTIVE_BG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  active_bg:" | awk '{print $2}' | tr -d '"' || echo "")
+PANE_INACTIVE_FG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  inactive_fg:" | awk '{print $2}' | tr -d '"' || echo "")
+PANE_INACTIVE_BG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  inactive_bg:" | awk '{print $2}' | tr -d '"' || echo "")
+PANE_COMMAND_FG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  command_fg:" | awk '{print $2}' | tr -d '"' || echo "")
+
+# Apply defaults if not set
+PANE_ACTIVE_FG=${PANE_ACTIVE_FG:-#ffffff}
+PANE_ACTIVE_BG=${PANE_ACTIVE_BG:-#3498db}
+PANE_INACTIVE_FG=${PANE_INACTIVE_FG:-#cccccc}
+PANE_INACTIVE_BG=${PANE_INACTIVE_BG:-#333333}
+PANE_COMMAND_FG=${PANE_COMMAND_FG:-#aaaaaa}
+
+# Set global tmux options for pane header colors
+tmux set-option -g @tabby_pane_active_fg "$PANE_ACTIVE_FG"
+tmux set-option -g @tabby_pane_active_bg_default "$PANE_ACTIVE_BG"
+tmux set-option -g @tabby_pane_inactive_fg "$PANE_INACTIVE_FG"
+tmux set-option -g @tabby_pane_inactive_bg_default "$PANE_INACTIVE_BG"
+tmux set-option -g @tabby_pane_command_fg "$PANE_COMMAND_FG"
+
+# Pane border styling - colored headers with info
+tmux set-option -g pane-border-status top
+tmux set-option -g pane-border-lines single
+tmux set-option -g pane-border-style "fg=#444444"
+tmux set-option -g pane-active-border-style "fg=$PANE_ACTIVE_BG"
+
+# Pane header format: hide for utility panes (sidebar, pane-bar, tabbar)
+# Shows window.pane number, title and command - right-click border for pane actions menu
+# Uses @tabby_pane_active and @tabby_pane_inactive for per-window dynamic coloring
+tmux set-option -g pane-border-format "#{?#{||:#{||:#{==:#{pane_current_command},sidebar},#{==:#{pane_current_command},pane-bar}},#{==:#{pane_current_command},tabbar}},,#{?pane_active,#[fg=#{@tabby_pane_active_fg}#,bg=#{?#{@tabby_pane_active},#{@tabby_pane_active},#{@tabby_pane_active_bg_default}}#,bold],#[fg=#{@tabby_pane_inactive_fg}#,bg=#{?#{@tabby_pane_inactive},#{@tabby_pane_inactive},#{@tabby_pane_inactive_bg_default}}]} #{window_index}.#{pane_index} #{pane_title} #[fg=#{@tabby_pane_command_fg}]#{pane_current_command} }"
+
+# Right-click on pane border shows context menu (left-click+drag resizes panes)
+tmux unbind-key -T root MouseDown1Border 2>/dev/null || true
+tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M \
+    "Split Vertical" "|" "split-window -h -c '#{pane_current_path}'" \
+    "Split Horizontal" "-" "split-window -v -c '#{pane_current_path}'" \
+    "" \
+    "Break to New Window" "b" "break-pane" \
+    "Swap Up" "u" "swap-pane -U" \
+    "Swap Down" "d" "swap-pane -D" \
+    "" \
+    "Kill Pane" "x" "kill-pane"
+
 
 # Terminal title configuration
 # Read from config.yaml or use defaults
@@ -45,8 +96,12 @@ if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
         tmux set-option -gu status-format[$i] 2>/dev/null || true
     done
     tmux set-option -gu status-format 2>/dev/null || true
-    
-    tmux set-option -g status on
+
+    # Only enable status bar if sidebar mode is NOT active
+    SIDEBAR_STATE=$(tmux show-options -qv @tmux-tabs-sidebar 2>/dev/null || echo "")
+    if [ "$SIDEBAR_STATE" != "enabled" ]; then
+        tmux set-option -g status on
+    fi
     tmux set-option -g status-position "$POSITION"
     tmux set-option -g status-interval 1
     tmux set-option -g status-style "bg=default"
@@ -77,7 +132,7 @@ if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
 fi
 
 # Helper script to signal sidebar refresh
-# Uses session-based state file instead of broken $$ PID
+# Sends SIGUSR1 to sidebar process via PID file
 SIGNAL_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/signal_sidebar.sh"
 
 # Create the signal helper script
@@ -85,14 +140,13 @@ cat > "$SIGNAL_SIDEBAR_SCRIPT" << 'SCRIPT_EOF'
 #!/usr/bin/env bash
 # Signal sidebar to refresh window list
 SESSION_ID=$(tmux display-message -p '#{session_id}')
-STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
+PID_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.pid"
 
-if [ -f "$STATE_FILE" ]; then
-    SIDEBAR_PANE=$(cat "$STATE_FILE")
-    if [ -n "$SIDEBAR_PANE" ]; then
-        # Send refresh signal to sidebar pane via tmux
-        # The sidebar binary listens for SIGUSR1
-        tmux send-keys -t "$SIDEBAR_PANE" "" 2>/dev/null || true
+if [ -f "$PID_FILE" ]; then
+    SIDEBAR_PID=$(cat "$PID_FILE")
+    if [ -n "$SIDEBAR_PID" ] && kill -0 "$SIDEBAR_PID" 2>/dev/null; then
+        # Send SIGUSR1 to trigger refresh
+        kill -USR1 "$SIDEBAR_PID" 2>/dev/null || true
     fi
 fi
 SCRIPT_EOF
@@ -112,26 +166,40 @@ chmod +x "$RESTORE_SIDEBAR_SCRIPT"
 UPDATE_PANE_BAR_SCRIPT="$CURRENT_DIR/scripts/update_pane_bar.sh"
 chmod +x "$UPDATE_PANE_BAR_SCRIPT"
 
+# Helper scripts for clickable pane-bar TUI
+ENSURE_PANE_BAR_SCRIPT="$CURRENT_DIR/scripts/ensure_pane_bar.sh"
+chmod +x "$ENSURE_PANE_BAR_SCRIPT"
+SIGNAL_PANE_BAR_SCRIPT="$CURRENT_DIR/scripts/signal_pane_bar.sh"
+chmod +x "$SIGNAL_PANE_BAR_SCRIPT"
+
 # Set up hooks for window events
 # These hooks trigger both sidebar and status bar refresh
 tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
-tmux set-hook -g window-renamed "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
+# Lock window name on manual rename (disable automatic-rename for that window)
+tmux set-hook -g window-renamed "run-shell 'tmux set-window-option -t \"#{window_id}\" automatic-rename off'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 tmux set-hook -g window-unlinked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 tmux set-hook -g after-new-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'"
-tmux set-hook -g after-select-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'; run-shell 'tmux refresh-client -S'"
+# Combined script to reduce latency
+ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
+chmod +x "$ON_WINDOW_SELECT_SCRIPT"
+tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'"
 tmux set-hook -g after-rename-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 
 # Refresh sidebar and pane bar when pane focus changes
-tmux set-hook -g after-select-pane "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'"
-tmux set-hook -g pane-focus-in "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'"
+ON_PANE_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_pane_select.sh"
+chmod +x "$ON_PANE_SELECT_SCRIPT"
+tmux set-hook -g after-select-pane "run-shell '$ON_PANE_SELECT_SCRIPT'"
+tmux set-hook -g pane-focus-in "run-shell '$ON_PANE_SELECT_SCRIPT'"
 
-# Update pane bar when panes are split
-tmux set-hook -g after-split-window "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'"
+# Update pane bar when panes are split, and preserve group prefixes
+PRESERVE_NAME_SCRIPT="$CURRENT_DIR/scripts/preserve_window_name.sh"
+chmod +x "$PRESERVE_NAME_SCRIPT"
+tmux set-hook -g after-split-window "run-shell '$PRESERVE_NAME_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'"
 
 # Close window if only sidebar/tabbar remains after main pane exits
 CLEANUP_SCRIPT="$CURRENT_DIR/scripts/cleanup_orphan_sidebar.sh"
 chmod +x "$CLEANUP_SCRIPT"
-tmux set-hook -g pane-exited "run-shell '$CLEANUP_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$UPDATE_PANE_BAR_SCRIPT'"
+tmux set-hook -g pane-exited "run-shell '$CLEANUP_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'"
 
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'"

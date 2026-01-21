@@ -13,12 +13,28 @@ type Config struct {
 	Groups     []Group    `yaml:"groups"`
 	Bindings   Bindings   `yaml:"bindings"`
 	Sidebar    Sidebar    `yaml:"sidebar"`
+	PaneHeader PaneHeader `yaml:"pane_header"`
 	Indicators Indicators `yaml:"indicators"`
 }
 
+type PaneHeader struct {
+	ActiveFg   string `yaml:"active_fg"`   // Active pane header text (default: #ffffff)
+	ActiveBg   string `yaml:"active_bg"`   // Active pane header bg fallback (default: #3498db)
+	InactiveFg string `yaml:"inactive_fg"` // Inactive pane header text (default: #cccccc)
+	InactiveBg string `yaml:"inactive_bg"` // Inactive pane header bg fallback (default: #333333)
+	CommandFg  string `yaml:"command_fg"`  // Command text color (default: #aaaaaa)
+}
+
 type Sidebar struct {
-	NewTabButton bool `yaml:"new_tab_button"`
-	CloseButton  bool `yaml:"close_button"`
+	NewTabButton bool          `yaml:"new_tab_button"`
+	CloseButton  bool          `yaml:"close_button"`
+	Colors       SidebarColors `yaml:"colors"`
+}
+
+type SidebarColors struct {
+	HeaderFg   string `yaml:"header_fg"`   // Group header text (default: #000000)
+	ActiveFg   string `yaml:"active_fg"`   // Active tab text (default: #ffffff)
+	InactiveFg string `yaml:"inactive_fg"` // Inactive tab text (default: #cccccc)
 }
 
 type Style struct {
@@ -39,11 +55,13 @@ type Group struct {
 }
 
 type Theme struct {
-	Bg       string `yaml:"bg"`
-	Fg       string `yaml:"fg"`
-	ActiveBg string `yaml:"active_bg"`
-	ActiveFg string `yaml:"active_fg"`
-	Icon     string `yaml:"icon"`
+	Bg         string `yaml:"bg"`
+	Fg         string `yaml:"fg"`
+	ActiveBg   string `yaml:"active_bg"`
+	ActiveFg   string `yaml:"active_fg"`
+	InactiveBg string `yaml:"inactive_bg"` // Inactive tab background (default: computed from bg)
+	InactiveFg string `yaml:"inactive_fg"` // Inactive tab text
+	Icon       string `yaml:"icon"`
 }
 
 type Bindings struct {

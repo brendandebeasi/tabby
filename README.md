@@ -188,6 +188,75 @@ tabby/
 └── tabby.tmux          # Plugin entry point
 ```
 
+## macOS Notifications with Deep Links
+
+Tabby includes a helper script for creating notifications that deep-link back to specific tmux windows/panes. When clicked, the notification brings your terminal to the foreground and navigates to the target location.
+
+### Requirements
+
+1. Install terminal-notifier via Homebrew:
+```bash
+brew install terminal-notifier
+```
+
+2. Configure your terminal app in `config.yaml`:
+```yaml
+# Options: Ghostty, iTerm, Terminal, Alacritty, kitty, WezTerm
+terminal_app: Ghostty
+```
+
+### Basic Usage
+
+The `focus_pane.sh` script activates your terminal and navigates tmux:
+
+```bash
+# Focus window 2, pane 0
+~/.tmux/plugins/tabby/scripts/focus_pane.sh 2
+
+# Focus window 1, pane 2
+~/.tmux/plugins/tabby/scripts/focus_pane.sh 1.2
+
+# Focus specific session, window, and pane
+~/.tmux/plugins/tabby/scripts/focus_pane.sh main:2.1
+```
+
+### Sending Notifications with Deep Links
+
+```bash
+# Simple notification that jumps to window 2
+terminal-notifier -title "Build Complete" -message "Click to view" \
+  -execute "$HOME/.tmux/plugins/tabby/scripts/focus_pane.sh 2"
+
+# Notification with current location (useful in scripts/hooks)
+TARGET=$(tmux display-message -p '#{window_index}.#{pane_index}')
+terminal-notifier -title "Task Done" -message "Click to return" \
+  -execute "$HOME/.tmux/plugins/tabby/scripts/focus_pane.sh $TARGET"
+```
+
+### Integration with Claude Code
+
+Create a notification hook script for Claude Code that includes deep links:
+
+```bash
+#!/usr/bin/env bash
+# ~/.claude/hooks/notify.sh
+
+MESSAGE="${1:-Task complete}"
+TABBY_DIR="${HOME}/.tmux/plugins/tabby"
+
+if [ -n "$TMUX" ]; then
+  # Capture current tmux location for deep link
+  TARGET=$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}')
+  terminal-notifier \
+    -title "Claude Code" \
+    -message "$MESSAGE" \
+    -sound default \
+    -execute "$TABBY_DIR/scripts/focus_pane.sh $TARGET"
+else
+  terminal-notifier -title "Claude Code" -message "$MESSAGE" -sound default
+fi
+```
+
 ## Known Limitations
 
 1. **Horizontal tabs are not clickable** - This is a tmux limitation. Custom status formats don't support mouse events. Use keyboard shortcuts or the vertical sidebar for mouse support.

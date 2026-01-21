@@ -42,33 +42,6 @@ func calculateTabWidth(win tmux.Window, group grouping.GroupedWindows, cfg *conf
 	return baseLen + 2
 }
 
-// stripGroupPrefix removes the group prefix from window names for cleaner display
-func stripGroupPrefix(windowName string, groups []config.Group) string {
-	for _, g := range groups {
-		if g.Name == "Default" {
-			continue
-		}
-		prefix := extractPrefixFromPattern(g.Pattern)
-		if prefix != "" && strings.HasPrefix(windowName, prefix) {
-			return strings.TrimPrefix(windowName, prefix)
-		}
-	}
-	return windowName
-}
-
-// extractPrefixFromPattern extracts the literal prefix from a regex pattern
-func extractPrefixFromPattern(pattern string) string {
-	if len(pattern) > 0 && pattern[0] == '^' {
-		pattern = pattern[1:]
-	}
-	pattern = strings.ReplaceAll(pattern, "\\|", "|")
-	pattern = strings.ReplaceAll(pattern, "\\.", ".")
-	pattern = strings.ReplaceAll(pattern, "\\-", "-")
-	pattern = strings.ReplaceAll(pattern, ".*", "")
-	pattern = strings.ReplaceAll(pattern, ".+", "")
-	return pattern
-}
-
 func buildIndicators(win tmux.Window, cfg *config.Config) string {
 	var indicators strings.Builder
 	ind := cfg.Indicators
@@ -214,8 +187,8 @@ func main() {
 		fg := colors.HexToTmuxColor(group.Theme.Fg)
 		activeFg := colors.HexToTmuxColor(group.Theme.ActiveFg)
 
-		// Strip group prefix from window name
-		displayName := stripGroupPrefix(win.Name, cfg.Groups)
+		// Window name is now clean (no prefix stripping needed - groups use @tabby_group option)
+		displayName := win.Name
 		indicators := buildIndicators(win, cfg)
 
 		iconStr := ""

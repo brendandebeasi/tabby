@@ -20,9 +20,9 @@ groups:
   - name: "StudioDome"
     pattern: "^SD\\|"
     theme:
-      bg: "#e74c3c"
+      bg: "#8b1a1a"
       fg: "#ffffff"
-      active_bg: "#c0392b"
+      active_bg: "#6b0f0f"
       active_fg: "#ffffff"
       icon: ""
 
@@ -40,7 +40,7 @@ groups:
     theme:
       bg: "#3498db"
       fg: "#ecf0f1"
-      active_bg: "#2980b9"
+      active_bg: "#3498db"
       active_fg: "#ffffff"
       icon: ""
 
@@ -53,6 +53,17 @@ sidebar:
   new_tab_button: true
   close_button: false
   sort_by: "group"  # "group" or "index"
+
+pane_header:
+  active_fg: "#ffffff"
+  active_bg: "#3498db"
+  inactive_fg: "#cccccc"
+  inactive_bg: "#333333"
+  command_fg: "#aaaaaa"
+
+# Terminal app for notifications deep-linking (used by focus_pane.sh)
+# Options: Ghostty, iTerm, Terminal, Alacritty, kitty, WezTerm
+terminal_app: Ghostty
 
 indicators:
   activity:

@@ -37,12 +37,13 @@ type Window struct {
 	Silence     bool   // Window has been silent (monitor-silence)
 	Last        bool   // Window was the last active window
 	CustomColor string // User-defined tab color (set via @tabby_color option)
+	Group       string // User-assigned group name (set via @tabby_group option)
 	Panes       []Pane
 }
 
 func ListWindows() ([]Window, error) {
 	cmd := exec.Command("tmux", "list-windows", "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -66,6 +67,10 @@ func ListWindows() ([]Window, error) {
 		if len(parts) >= 9 {
 			customColor = strings.TrimSpace(parts[8])
 		}
+		group := ""
+		if len(parts) >= 10 {
+			group = strings.TrimSpace(parts[9])
+		}
 		windows = append(windows, Window{
 			ID:          parts[0],
 			Index:       index,
@@ -76,6 +81,7 @@ func ListWindows() ([]Window, error) {
 			Silence:     parts[6] == "1",
 			Last:        parts[7] == "1",
 			CustomColor: customColor,
+			Group:       group,
 		})
 	}
 

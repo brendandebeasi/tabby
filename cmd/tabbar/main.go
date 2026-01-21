@@ -156,7 +156,7 @@ func (m model) buildTabs() []tabEntry {
 		group := &m.grouped[gi]
 		for wi := range group.Windows {
 			win := &group.Windows[wi]
-			displayName := stripGroupPrefix(win.Name, group.Name, m.config.Groups)
+			displayName := win.Name // No prefix stripping needed - groups use @tabby_group option
 
 			// Choose colors - custom color overrides group theme
 			var bg, fg string
@@ -484,39 +484,42 @@ func (m model) getPaneAtX(x int) *tmux.Pane {
 func (m model) showContextMenu(win *tmux.Window) {
 	args := []string{
 		"display-menu",
+		"-O",
 		"-T", fmt.Sprintf("Window %d: %s", win.Index, win.Name),
 		"-x", "M",
 		"-y", "M",
 	}
 
-	// Rename option
-	menuCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%'\"", win.Name, win.Index)
-	args = append(args, "Rename", "r", menuCmd)
+	// Rename option - simple rename, group assignment uses @tabby_group option
+	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d automatic-rename off\"", win.Name, win.Index, win.Index)
+	args = append(args, "Rename", "r", renameCmd)
+
+	// Unlock auto-rename option
+	unlockCmd := fmt.Sprintf("set-window-option -t :%d automatic-rename on", win.Index)
+	args = append(args, "Auto-name", "a", unlockCmd)
 
 	// Separator
 	args = append(args, "", "", "")
 
-	// Move to Group submenu
+	// Move to Group submenu - sets @tabby_group window option
 	args = append(args, "-Move to Group", "", "")
-	for i, group := range m.config.Groups {
+	keyNum := 1
+	for _, group := range m.config.Groups {
 		if group.Name == "Default" {
-			continue
+			continue // Skip default group in the submenu
 		}
-		prefix := extractPrefixFromPattern(group.Pattern)
-		baseName := getBaseWindowName(win.Name, m.config.Groups)
-		newName := prefix + baseName
-		key := fmt.Sprintf("%d", i+1)
-		if i < 9 {
-			renameCmd := fmt.Sprintf("rename-window -t :%d -- '%s'", win.Index, newName)
-			args = append(args, fmt.Sprintf("  %s %s", group.Theme.Icon, group.Name), key, renameCmd)
+		key := fmt.Sprintf("%d", keyNum)
+		keyNum++
+		if keyNum <= 10 {
+			setGroupCmd := fmt.Sprintf("set-window-option -t :%d @tabby_group '%s'", win.Index, group.Name)
+			args = append(args, fmt.Sprintf("  %s %s", group.Theme.Icon, group.Name), key, setGroupCmd)
 		}
 	}
 
-	// Option to remove prefix
-	baseName := getBaseWindowName(win.Name, m.config.Groups)
-	if baseName != win.Name {
-		removeCmd := fmt.Sprintf("rename-window -t :%d -- '%s'", win.Index, baseName)
-		args = append(args, "  Remove Prefix", "0", removeCmd)
+	// Option to remove from group (move to Default) - unsets @tabby_group
+	if win.Group != "" {
+		removeCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_group", win.Index)
+		args = append(args, "  Remove from Group", "0", removeCmd)
 	}
 
 	// Separator
@@ -554,50 +557,6 @@ func (m model) showContextMenu(win *tmux.Window) {
 	args = append(args, "Kill", "k", fmt.Sprintf("kill-window -t :%d", win.Index))
 
 	_ = exec.Command("tmux", args...).Run()
-}
-
-func extractPrefixFromPattern(pattern string) string {
-	if len(pattern) > 0 && pattern[0] == '^' {
-		pattern = pattern[1:]
-	}
-	pattern = strings.ReplaceAll(pattern, "\\|", "|")
-	pattern = strings.ReplaceAll(pattern, "\\.", ".")
-	pattern = strings.ReplaceAll(pattern, "\\-", "-")
-	pattern = strings.ReplaceAll(pattern, ".*", "")
-	pattern = strings.ReplaceAll(pattern, ".+", "")
-	return pattern
-}
-
-func getBaseWindowName(windowName string, groups []config.Group) string {
-	for _, g := range groups {
-		if g.Name == "Default" {
-			continue
-		}
-		prefix := extractPrefixFromPattern(g.Pattern)
-		if prefix != "" && strings.HasPrefix(windowName, prefix) {
-			return strings.TrimPrefix(windowName, prefix)
-		}
-	}
-	return windowName
-}
-
-func stripGroupPrefix(windowName, groupName string, groups []config.Group) string {
-	for _, g := range groups {
-		if g.Name == groupName {
-			pattern := g.Pattern
-			if len(pattern) > 0 && pattern[0] == '^' {
-				pattern = pattern[1:]
-			}
-			pattern = strings.ReplaceAll(pattern, "\\|", "|")
-			pattern = strings.ReplaceAll(pattern, "\\.", ".")
-			pattern = strings.ReplaceAll(pattern, "\\-", "-")
-			if strings.HasPrefix(windowName, pattern) {
-				return strings.TrimPrefix(windowName, pattern)
-			}
-			break
-		}
-	}
-	return windowName
 }
 
 func triggerRefresh() tea.Cmd {
