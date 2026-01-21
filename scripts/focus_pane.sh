@@ -73,20 +73,17 @@ $TMUX_CMD select-pane -t "$PANE_TARGET" 2>>"$LOG" || echo "  select-pane failed"
 # Small delay to ensure tmux has processed the window/pane switch
 sleep 0.1
 
-# Signal sidebar to refresh (so tab bar shows correct active tab)
-# Get session ID from the target session, not current client
-SESSION_ID=$($TMUX_CMD display-message -t "$SESSION" -p '#{session_id}' 2>/dev/null)
-echo "  Session ID for refresh: $SESSION_ID" >> "$LOG"
-PID_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.pid"
-if [ -f "$PID_FILE" ]; then
-    SIDEBAR_PID=$(cat "$PID_FILE")
-    if [ -n "$SIDEBAR_PID" ] && kill -0 "$SIDEBAR_PID" 2>/dev/null; then
-        echo "  Signaling sidebar (PID $SIDEBAR_PID)" >> "$LOG"
-        kill -USR1 "$SIDEBAR_PID" 2>/dev/null || true
+# Signal all sidebars in the session to refresh
+# Use tmux list-panes to find sidebar processes directly (more reliable than PID files)
+echo "  Signaling all sidebars in session $SESSION" >> "$LOG"
+SIGNALED=0
+while IFS='|' read -r cmd pid; do
+    if [ "$cmd" = "sidebar" ] && [ -n "$pid" ]; then
+        echo "    Sending SIGUSR1 to sidebar PID $pid" >> "$LOG"
+        kill -USR1 "$pid" 2>/dev/null && ((SIGNALED++)) || true
     fi
-else
-    echo "  No sidebar PID file at $PID_FILE" >> "$LOG"
-fi
+done < <($TMUX_CMD list-panes -s -t "$SESSION" -F '#{pane_current_command}|#{pane_pid}' 2>/dev/null)
+echo "  Signaled $SIGNALED sidebar(s)" >> "$LOG"
 
 # Also refresh the status bar (for horizontal mode)
 $TMUX_CMD refresh-client -t "$SESSION" -S 2>/dev/null || true
