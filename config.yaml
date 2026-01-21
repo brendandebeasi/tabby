@@ -61,6 +61,12 @@ pane_header:
   inactive_bg: "#333333"
   command_fg: "#aaaaaa"
 
+# Prompt styling (for rename dialogs, etc.)
+prompt:
+  fg: "#000000"      # Black text for legibility
+  bg: "#f0f0f0"      # Light gray background
+  bold: true
+
 # Terminal app for notifications deep-linking (used by focus_pane.sh)
 # Options: Ghostty, iTerm, Terminal, Alacritty, kitty, WezTerm
 terminal_app: Ghostty

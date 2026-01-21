@@ -51,6 +51,25 @@ tmux set-option -g @tabby_pane_inactive_fg "$PANE_INACTIVE_FG"
 tmux set-option -g @tabby_pane_inactive_bg_default "$PANE_INACTIVE_BG"
 tmux set-option -g @tabby_pane_command_fg "$PANE_COMMAND_FG"
 
+# Read prompt style colors from config (with defaults)
+PROMPT_FG=$(grep -A5 "^prompt:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  fg:" | awk '{print $2}' | tr -d '"' || echo "")
+PROMPT_BG=$(grep -A5 "^prompt:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  bg:" | awk '{print $2}' | tr -d '"' || echo "")
+PROMPT_BOLD=$(grep -A5 "^prompt:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  bold:" | awk '{print $2}' || echo "")
+
+# Apply defaults if not set - black text on light gray background for legibility
+PROMPT_FG=${PROMPT_FG:-#000000}
+PROMPT_BG=${PROMPT_BG:-#f0f0f0}
+PROMPT_BOLD=${PROMPT_BOLD:-true}
+
+# Build message-style string
+PROMPT_STYLE="fg=$PROMPT_FG,bg=$PROMPT_BG"
+if [[ "$PROMPT_BOLD" == "true" ]]; then
+    PROMPT_STYLE="$PROMPT_STYLE,bold"
+fi
+
+# Apply message-style for command prompts (rename, etc.)
+tmux set-option -g message-style "$PROMPT_STYLE"
+
 # Pane border styling - colored headers with info
 tmux set-option -g pane-border-status top
 tmux set-option -g pane-border-lines single

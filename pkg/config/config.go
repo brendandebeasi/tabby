@@ -6,15 +6,22 @@ import (
 )
 
 type Config struct {
-	Position   string     `yaml:"position"`
-	Height     int        `yaml:"height"`
-	Style      Style      `yaml:"style"`
-	Overflow   Overflow   `yaml:"overflow"`
-	Groups     []Group    `yaml:"groups"`
-	Bindings   Bindings   `yaml:"bindings"`
-	Sidebar    Sidebar    `yaml:"sidebar"`
-	PaneHeader PaneHeader `yaml:"pane_header"`
-	Indicators Indicators `yaml:"indicators"`
+	Position   string      `yaml:"position"`
+	Height     int         `yaml:"height"`
+	Style      Style       `yaml:"style"`
+	Overflow   Overflow    `yaml:"overflow"`
+	Groups     []Group     `yaml:"groups"`
+	Bindings   Bindings    `yaml:"bindings"`
+	Sidebar    Sidebar     `yaml:"sidebar"`
+	PaneHeader PaneHeader  `yaml:"pane_header"`
+	Indicators Indicators  `yaml:"indicators"`
+	Prompt     PromptStyle `yaml:"prompt"`
+}
+
+type PromptStyle struct {
+	Fg   string `yaml:"fg"`   // Prompt text color (default: #000000)
+	Bg   string `yaml:"bg"`   // Prompt background (default: #f0f0f0)
+	Bold bool   `yaml:"bold"` // Bold text (default: true)
 }
 
 type PaneHeader struct {
