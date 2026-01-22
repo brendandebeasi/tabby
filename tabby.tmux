@@ -21,6 +21,7 @@ tmux set-option -g renumber-windows on
 # Bell monitoring for notifications (activity is too noisy - triggers on any output)
 tmux set-option -g monitor-activity off
 tmux set-option -g monitor-bell on
+tmux set-option -g bell-action other  # Flag bells from non-active windows
 
 # New panes/windows open in the current pane's directory
 tmux bind-key '"' split-window -v -c "#{pane_current_path}"
