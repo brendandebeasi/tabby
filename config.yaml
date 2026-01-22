@@ -63,7 +63,7 @@ sidebar:
     disclosure_expanded: "⊟"        # Expanded state icon (boxed minus)
     disclosure_collapsed: "⊞"       # Collapsed state icon (boxed plus)
     active_indicator: "●"           # Active window/pane indicator (filled circle)
-    active_indicator_fg: "#000000"  # Active indicator color
+    active_indicator_fg: "auto"     # Active indicator color ("auto" uses window/group bg color)
     tree_fg: "#888888"              # Tree branch color
     tree_branch: "├─"               # Branch connector
     tree_branch_last: "└─"          # Last branch connector
