@@ -1106,7 +1106,30 @@ func (m model) View() string {
 				// Get first char of tree branch (├ or └)
 				treeBranchRunes := []rune(treeBranch)
 				treeBranchFirst := string(treeBranchRunes[0])
-				s += indicatorPart + treeStyle.Render(treeBranchFirst) + arrowStyle.Render(activeIndicator) + contentStyle.Render(contentText) + "\n"
+
+				// Determine indicator background - "auto" uses window/group color
+				indicatorBgConfig := m.config.Sidebar.Colors.ActiveIndicatorBg
+				var indicatorBg string
+				if indicatorBgConfig == "" || indicatorBgConfig == "auto" {
+					indicatorBg = bgColor
+					if indicatorBg == "" {
+						indicatorBg = theme.Bg // fallback to group theme
+					}
+				} else {
+					indicatorBg = indicatorBgConfig
+				}
+
+				// Determine indicator foreground - "auto" uses same as bg (solid color block)
+				indicatorFgConfig := m.config.Sidebar.Colors.ActiveIndicatorFg
+				var indicatorFg string
+				if indicatorFgConfig == "" || indicatorFgConfig == "auto" {
+					indicatorFg = indicatorBg // Same as bg = solid color block
+				} else {
+					indicatorFg = indicatorFgConfig
+				}
+
+				activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Background(lipgloss.Color(indicatorBg)).Bold(true)
+				s += indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator) + contentStyle.Render(contentText) + "\n"
 			} else {
 				// Inactive single-pane: ├─ content
 				s += indicatorPart + treeStyle.Render(treeBranch) + contentStyle.Render(contentText) + "\n"

@@ -62,9 +62,9 @@ sidebar:
     disclosure_fg: "#000000"        # Disclosure icon color
     disclosure_expanded: "⊟"        # Expanded state icon (boxed minus)
     disclosure_collapsed: "⊞"       # Collapsed state icon (boxed plus)
-    active_indicator: "●"           # Active window/pane indicator (filled circle)
-    active_indicator_fg: "#ffffff"  # Active indicator foreground color ("auto" = window/group bg)
-    active_indicator_bg: ""         # Active indicator background (empty = transparent)
+    active_indicator: "●"           # Active window/pane indicator character
+    active_indicator_fg: "auto"     # Foreground: "auto" = same as bg (solid block), or hex color
+    active_indicator_bg: "auto"     # Background: "auto" = window/group color, or hex color
     tree_fg: "#888888"              # Tree branch color
     tree_branch: "├─"               # Branch connector
     tree_branch_last: "└─"          # Last branch connector
