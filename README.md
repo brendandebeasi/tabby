@@ -37,14 +37,17 @@ terminal-notifier -title "Build Done" -message "Click to return" \
 
 ## All Features
 
-- **Vertical sidebar** - clickable, persistent across windows
-- **Window grouping** - color-coded project organization
+- **Vertical sidebar** - clickable, persistent across windows with collapse/expand
+- **Window grouping** - color-coded project organization with working directories
 - **Deep link navigation** - click notifications to jump to exact pane
 - **Horizontal tab bar** - alternative mode with overflow scrolling
 - **Automatic window naming** - shows running command, locks on manual rename
-- **Activity indicators** - bell, activity, and silence alerts
-- **Mouse support** - click, right-click menus, middle-click close
-- **Custom tab colors** - per-window color overrides
+- **Activity indicators** - bell, activity, silence, busy, and input alerts
+- **Mouse support** - click, right-click menus, middle-click close, double-click to collapse
+- **Custom tab colors** - per-window color overrides, including transparent mode
+- **Pane management** - rename panes with title locking
+- **Group management** - create, rename, color, collapse, and set working directories
+- **SSH bell notifications** - auto-enable bells on remote command completion
 - **Keyboard navigation** - intuitive shortcuts for everything
 
 ## Installation
@@ -82,6 +85,7 @@ set -g @tmux_tabs_test 1  # Currently gated - required for activation
 | Key | Action |
 |-----|--------|
 | `prefix + Tab` | Toggle vertical sidebar |
+| `Ctrl + <` or `Alt + <` | Collapse/expand sidebar |
 | `Alt + h` | Previous window |
 | `Alt + l` | Next window |
 | `Alt + n` | Create new window |
@@ -92,16 +96,80 @@ set -g @tmux_tabs_test 1  # Currently gated - required for activation
 ### Mouse Support (Vertical Sidebar)
 
 - **Left click**: Switch to window/pane
+- **Double-click**: Collapse/expand sidebar
+- **Click right edge**: Click the divider to collapse sidebar
 - **Middle click**: Close window (with confirmation)
-- **Right click**: Context menu with options:
-  - Rename (preserves group prefix)
-  - Auto-name (re-enable automatic naming)
-  - Move to Group (apply group prefix)
-  - Set Tab Color (custom colors)
+- **Right click on window**: Context menu with options:
+  - Rename (with title locking)
+  - Unlock Name (restore automatic naming)
+  - Collapse/Expand Panes
+  - Move to Group
+  - Set Tab Color (including transparent)
   - Split Horizontal/Vertical
+  - Open in Finder
   - Kill window
+- **Right click on pane**: Pane-specific options:
+  - Rename pane (with title locking)
+  - Unlock pane name
+  - Split pane
+  - Focus pane
+  - Break to new window
+  - Close pane
+- **Right click on group**: Group management:
+  - New window in group
+  - Collapse/Expand group
+  - Rename group
+  - Change group color
+  - Set working directory
+  - Delete group
+  - Close all windows in group
 
 Note: Horizontal tabs have limited mouse support due to tmux status bar limitations.
+
+### Sidebar Collapse
+
+The sidebar can be collapsed to maximize screen space:
+
+- **Double-click** anywhere on the sidebar to toggle collapse/expand
+- **Click the right edge** (divider area) to collapse
+- **Keyboard**: `Ctrl+<` or `Alt+<` to toggle
+- **Collapsed state**: Shows `>` down the entire height - click anywhere to expand
+
+When collapsed, the sidebar takes only 2 characters of width. When expanded, it restores to your configured width.
+
+### SSH Bell Notifications
+
+Automatically receive bell notifications when commands complete in SSH sessions.
+
+#### Auto-enable for all SSH connections
+
+Add to your `~/.ssh/config`:
+
+```ssh
+Host *
+  RemoteCommand bash -c 'PROMPT_COMMAND="printf \"\a\""; exec bash -l'
+  RequestTTY force
+```
+
+This works by injecting a bell into the remote shell's prompt, so you get a notification after every command.
+
+**Note:** This uses `RemoteCommand` which may interfere with tools like `scp`, `rsync`, and `git` over SSH. If you encounter issues, override for specific hosts:
+
+```ssh
+Host github.com gitlab.com bitbucket.org
+  RemoteCommand none
+  RequestTTY auto
+```
+
+#### Alternative: Add to remote servers
+
+If you control the remote servers, add this to `~/.bashrc` on each server:
+
+```bash
+export PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }printf '\a'"
+```
+
+This approach doesn't require SSH config changes and won't interfere with other tools.
 
 ## Configuration
 
@@ -115,6 +183,7 @@ position: top
 groups:
   - name: "Frontend"
     pattern: "^FE|"
+    working_dir: "~/projects/frontend"  # Default dir for new windows
     theme:
       bg: "#e74c3c"
       fg: "#ffffff"
@@ -124,6 +193,7 @@ groups:
 
   - name: "Backend"
     pattern: "^BE|"
+    working_dir: "~/projects/backend"
     theme:
       bg: "#27ae60"
       fg: "#ffffff"
@@ -141,9 +211,30 @@ groups:
 
 # Indicators
 indicators:
-  activity: true   # Show 🔔 for windows with activity
-  bell: true       # Show ● for bell alerts
-  silence: true    # Show 🔇 for silent windows
+  activity:
+    enabled: false
+    icon: "!"
+    color: "#000000"
+  bell:
+    enabled: true
+    icon: "◆"
+    color: "#000000"
+    bg: "#ffff00"  # Yellow background for visibility
+  silence:
+    enabled: true
+    icon: "○"
+    color: "#000000"
+  busy:
+    enabled: true
+    icon: "◐"
+    color: "#ff0000"
+    frames: ["◐", "◓", "◑", "◒"]  # Animation frames
+  input:
+    enabled: true
+    icon: "?"
+    color: "#ffffff"
+    bg: "#9b59b6"  # Purple - needs attention
+    frames: ["?", "?"]  # Can add blinking: ["?", " "]
 
 # Tab overflow behavior
 overflow:
@@ -152,8 +243,17 @@ overflow:
 
 # Vertical sidebar settings
 sidebar:
-  width: 25
-  position: left
+  new_tab_button: true
+  new_group_button: true
+  show_empty_groups: true
+  close_button: false
+  sort_by: "group"  # "group" or "index"
+  colors:
+    disclosure_fg: "#000000"
+    disclosure_expanded: "⊟"
+    disclosure_collapsed: "⊞"
+    active_indicator: "◀"  # Active window/pane indicator
+    active_indicator_fg: "auto"  # "auto" uses group/window bg color
 ```
 
 ## Tab Grouping
@@ -192,6 +292,62 @@ Windows are organized into groups based on name patterns or manual assignment:
 **By tmux option** - Set programmatically:
 ```bash
 tmux set-window-option -t :0 @tabby_group "Frontend"
+```
+
+### Custom Colors and Transparent Mode
+
+Set custom colors for individual windows or groups:
+
+**Window colors** - Right-click window → Set Tab Color:
+- Predefined colors: Red, Orange, Yellow, Green, Blue, Purple, Pink, Cyan, Gray
+- **Transparent**: No background, simple text color (minimal visual)
+- Reset to default group color
+
+**Group colors** - Right-click group → Edit Group → Change Color:
+- Same color options as windows
+- **Transparent**: Clean text-only display for the entire group
+- Affects all windows in the group (unless they have custom colors)
+
+**Set programmatically**:
+```bash
+# Set window to transparent
+tmux set-window-option -t :0 @tabby_color "transparent"
+
+# Set window to custom color
+tmux set-window-option -t :0 @tabby_color "#e91e63"
+
+# Reset to group color
+tmux set-window-option -t :0 -u @tabby_color
+```
+
+### Group Working Directories
+
+Set a default working directory for each group. New windows created in the group will automatically use this directory:
+
+**Via context menu**: Right-click group → Edit Group → Set Working Directory
+
+**In config.yaml**:
+```yaml
+groups:
+  - name: "MyProject"
+    working_dir: "~/projects/myproject"
+    # ...
+```
+
+### Pane Management
+
+**Rename panes** with title locking (like window names):
+- Right-click pane → Rename
+- Locked titles persist until manually unlocked
+- Right-click pane → Unlock Name to restore automatic naming
+
+**Set programmatically**:
+```bash
+# Set locked pane title
+tmux set-option -p -t %123 @tabby_pane_title "My Pane"
+
+# Clear locked title
+tmux set-option -p -t %123 -u @tabby_pane_title
 ```
 
 ## Tab Overflow
