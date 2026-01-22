@@ -259,8 +259,11 @@ tmux bind-key "$KEY" run-shell "$CURRENT_DIR/scripts/toggle_sidebar.sh"
 
 # Mode toggle and switching
 tmux bind-key M run-shell "$CURRENT_DIR/scripts/toggle_mode.sh"
-tmux bind-key V run-shell "$CURRENT_DIR/scripts/switch_to_vertical.sh" 
+tmux bind-key V run-shell "$CURRENT_DIR/scripts/switch_to_vertical.sh"
 tmux bind-key H run-shell "$CURRENT_DIR/scripts/switch_to_horizontal.sh"
+
+# New Group shortcut (prefix + G)
+tmux bind-key G command-prompt -p 'New group name:' "run-shell '$CURRENT_DIR/scripts/new_group.sh %%'"
 
 # Set up keyboard shortcuts for tab navigation
 tmux bind-key -n M-h previous-window

@@ -17,7 +17,13 @@ type GroupedWindows struct {
 
 // GroupWindows organizes windows into groups based on the @tabby_group window option.
 // Windows without a group assignment go to "Default".
+// If includeEmpty is true, groups with no windows are also included.
 func GroupWindows(windows []tmux.Window, groups []config.Group) []GroupedWindows {
+	return GroupWindowsWithOptions(windows, groups, false)
+}
+
+// GroupWindowsWithOptions is like GroupWindows but allows including empty groups.
+func GroupWindowsWithOptions(windows []tmux.Window, groups []config.Group, includeEmpty bool) []GroupedWindows {
 	var result []*GroupedWindows
 	groupMap := make(map[string]*GroupedWindows)
 
@@ -49,16 +55,18 @@ func GroupWindows(windows []tmux.Window, groups []config.Group) []GroupedWindows
 		}
 	}
 
-	// Collect non-empty groups: Default first, then others alphabetically
+	// Collect groups: Default first, then others alphabetically
 	var defaultGroup *GroupedWindows
 	var otherGroups []GroupedWindows
 
 	for _, group := range result {
-		if len(group.Windows) > 0 {
-			// Sort windows by index within each group
-			sort.Slice(group.Windows, func(i, j int) bool {
-				return group.Windows[i].Index < group.Windows[j].Index
-			})
+		// Sort windows by index within each group
+		sort.Slice(group.Windows, func(i, j int) bool {
+			return group.Windows[i].Index < group.Windows[j].Index
+		})
+
+		// Include group if it has windows OR if includeEmpty is true
+		if len(group.Windows) > 0 || includeEmpty {
 			if group.Name == "Default" {
 				g := *group
 				defaultGroup = &g
@@ -74,13 +82,13 @@ func GroupWindows(windows []tmux.Window, groups []config.Group) []GroupedWindows
 	})
 
 	// Default first, then alphabetical
-	var nonEmpty []GroupedWindows
+	var grouped []GroupedWindows
 	if defaultGroup != nil {
-		nonEmpty = append(nonEmpty, *defaultGroup)
+		grouped = append(grouped, *defaultGroup)
 	}
-	nonEmpty = append(nonEmpty, otherGroups...)
+	grouped = append(grouped, otherGroups...)
 
-	return nonEmpty
+	return grouped
 }
 
 func FindGroupTheme(groupName string, groups []config.Group) config.Theme {

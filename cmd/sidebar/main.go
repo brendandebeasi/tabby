@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,6 +21,35 @@ import (
 	"github.com/b/tmux-tabs/pkg/grouping"
 	"github.com/b/tmux-tabs/pkg/tmux"
 )
+
+var debugLog *log.Logger
+var debugEnabled bool
+
+// abs returns absolute value of an int
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func initDebugLog(enabled bool) {
+	debugEnabled = enabled
+	if !enabled {
+		return
+	}
+	f, err := os.OpenFile("/tmp/tabby-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return
+	}
+	debugLog = log.New(f, "", log.Ltime|log.Lmicroseconds)
+}
+
+func debug(format string, args ...interface{}) {
+	if debugEnabled && debugLog != nil {
+		debugLog.Printf(format, args...)
+	}
+}
 
 // getCurrentDir returns the directory containing the sidebar binary
 func getCurrentDir() string {
@@ -75,6 +106,16 @@ type model struct {
 	// Spinner animation state
 	spinnerFrame  int  // Current frame index for busy spinner
 	spinnerActive bool // Whether spinner ticker is running
+
+	// Collapse state
+	collapsedGroups      map[string]bool // groupName -> isCollapsed
+	sidebarCollapsed     bool            // Whether the sidebar itself is collapsed to 1 char
+	sidebarExpandedWidth int             // Remembered width when expanded
+
+	// Double-click tracking
+	lastClickTime time.Time
+	lastClickX    int
+	lastClickY    int
 }
 
 type refreshMsg struct{}
@@ -124,14 +165,100 @@ func periodicRefresh() tea.Cmd {
 	})
 }
 
-// hasBusyWindows checks if any window has the busy flag set
-func (m model) hasBusyWindows() bool {
+// hasAnimatedIndicators checks if any window has an animated indicator (busy or input with frames)
+func (m model) hasAnimatedIndicators() bool {
 	for _, w := range m.windows {
 		if w.Busy {
 			return true
 		}
+		// Input indicator is animated if it has frames configured
+		if w.Input && len(m.config.Indicators.Input.Frames) > 0 {
+			return true
+		}
 	}
 	return false
+}
+
+// loadCollapsedGroups reads collapsed group state from tmux session option @tabby_collapsed_groups
+// Returns a map of group names to collapsed state
+func loadCollapsedGroups() map[string]bool {
+	result := make(map[string]bool)
+	out, err := exec.Command("tmux", "show-options", "-v", "-q", "@tabby_collapsed_groups").Output()
+	if err != nil || len(out) == 0 {
+		return result
+	}
+	var groups []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &groups); err != nil {
+		return result
+	}
+	for _, g := range groups {
+		result[g] = true
+	}
+	return result
+}
+
+// saveCollapsedGroups writes collapsed group state to tmux session option @tabby_collapsed_groups
+func saveCollapsedGroups(collapsed map[string]bool) {
+	var groups []string
+	for name, isCollapsed := range collapsed {
+		if isCollapsed {
+			groups = append(groups, name)
+		}
+	}
+	if len(groups) == 0 {
+		// Clear the option if nothing is collapsed
+		_ = exec.Command("tmux", "set-option", "-u", "@tabby_collapsed_groups").Run()
+		return
+	}
+	data, err := json.Marshal(groups)
+	if err != nil {
+		return
+	}
+	_ = exec.Command("tmux", "set-option", "@tabby_collapsed_groups", string(data)).Run()
+}
+
+// toggleGroupCollapse toggles the collapsed state for a group
+func (m *model) toggleGroupCollapse(groupName string) {
+	if m.collapsedGroups == nil {
+		m.collapsedGroups = make(map[string]bool)
+	}
+	m.collapsedGroups[groupName] = !m.collapsedGroups[groupName]
+	saveCollapsedGroups(m.collapsedGroups)
+}
+
+// isGroupCollapsed returns whether a group is collapsed
+func (m model) isGroupCollapsed(groupName string) bool {
+	if m.collapsedGroups == nil {
+		return false
+	}
+	return m.collapsedGroups[groupName]
+}
+
+// toggleSidebarCollapse collapses or expands the sidebar
+func (m *model) toggleSidebarCollapse() {
+	if m.sidebarCollapsed {
+		// Expand: restore previous width
+		width := m.sidebarExpandedWidth
+		if width < 20 {
+			width = 25 // Default width
+		}
+		_ = exec.Command("tmux", "resize-pane", "-x", fmt.Sprintf("%d", width)).Run()
+		m.sidebarCollapsed = false
+	} else {
+		// Collapse: save current width and shrink to 2 chars
+		m.sidebarExpandedWidth = m.width
+		_ = exec.Command("tmux", "resize-pane", "-x", "2").Run()
+		m.sidebarCollapsed = true
+	}
+}
+
+// toggleWindowCollapse toggles the collapsed state for a window (hides/shows panes)
+func toggleWindowCollapse(windowIndex int, collapsed bool) {
+	if collapsed {
+		_ = exec.Command("tmux", "set-window-option", "-t", fmt.Sprintf(":%d", windowIndex), "@tabby_collapsed", "1").Run()
+	} else {
+		_ = exec.Command("tmux", "set-window-option", "-t", fmt.Sprintf(":%d", windowIndex), "-u", "@tabby_collapsed").Run()
+	}
 }
 
 // getIndicatorIcon returns the icon for an indicator, using animation frames if available
@@ -175,6 +302,11 @@ func (m *model) buildWindowRefs() {
 		})
 		line++
 
+		// Skip windows if group is collapsed
+		if m.isGroupCollapsed(group.Name) {
+			continue
+		}
+
 		for wi := range group.Windows {
 			win := &group.Windows[wi]
 
@@ -184,8 +316,8 @@ func (m *model) buildWindowRefs() {
 			})
 			line++
 
-			// Track pane lines if window has multiple panes
-			if len(win.Panes) > 1 {
+			// Track pane lines if window has multiple panes and window is not collapsed
+			if len(win.Panes) > 1 && !win.Collapsed {
 				for pi := range win.Panes {
 					m.paneRefs = append(m.paneRefs, paneRef{
 						pane:      &win.Panes[pi],
@@ -253,16 +385,22 @@ func (m model) isWindowLine(y int) bool {
 	return false
 }
 
-// calculateButtonLines returns the line numbers for New Tab and Close Tab buttons
-func (m model) calculateButtonLines() (newTabLine, closeTabLine int) {
+// calculateButtonLines returns the line numbers for New Tab, New Group, and Close Tab buttons
+func (m model) calculateButtonLines() (newTabLine, newGroupLine, closeTabLine, collapseLine int) {
 	// Buttons appear after all groups with a blank line
 	baseLine := m.totalLines + 1 // +1 for blank line
 
 	newTabLine = -1
+	newGroupLine = -1
 	closeTabLine = -1
+	collapseLine = -1 // Not used but kept for compatibility
 
 	if m.config.Sidebar.NewTabButton {
 		newTabLine = baseLine
+		baseLine++
+	}
+	if m.config.Sidebar.NewGroupButton {
+		newGroupLine = baseLine
 		baseLine++
 	}
 	if m.config.Sidebar.CloseButton {
@@ -384,21 +522,72 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				fi
 			`).Run()
 			return m, nil
+		case "ctrl+<", "ctrl+[", "alt+<", "alt+[":
+			// Collapse/expand sidebar (requires modifier key)
+			m.toggleSidebarCollapse()
+			return m, nil
 		}
 
 	case tea.MouseMsg:
+		// If sidebar is collapsed, any click expands it
+		if m.sidebarCollapsed {
+			if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+				m.toggleSidebarCollapse()
+				return m, nil
+			}
+			return m, nil // Ignore other mouse events when collapsed
+		}
+
 		// Update cursor on hover if it's a window line
 		if m.isWindowLine(msg.Y) {
 			m.cursor = msg.Y
 		}
 
 		clicked := m.getWindowAtLine(msg.Y)
-		newTabLine, closeTabLine := m.calculateButtonLines()
+		newTabLine, newGroupLine, closeTabLine, _ := m.calculateButtonLines()
+
+		// Check for double-click to toggle sidebar collapse
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			now := time.Now()
+			// Double-click if within 400ms and same position (or close)
+			if now.Sub(m.lastClickTime) < 400*time.Millisecond &&
+				abs(msg.X-m.lastClickX) <= 2 && abs(msg.Y-m.lastClickY) <= 1 {
+				// Double-click detected - toggle sidebar collapse
+				m.toggleSidebarCollapse()
+				m.lastClickTime = time.Time{} // Reset to prevent triple-click
+				return m, nil
+			}
+			m.lastClickTime = now
+			m.lastClickX = msg.X
+			m.lastClickY = msg.Y
+		}
+
+		// Check for click on right edge (divider area) - collapse sidebar
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if m.width > 0 && msg.X >= m.width-1 {
+				m.toggleSidebarCollapse()
+				return m, nil
+			}
+		}
 
 		// Handle mouse clicks - check for press action
 		if msg.Action == tea.MouseActionPress {
 			switch msg.Button {
 			case tea.MouseButtonLeft:
+				// Check if clicking on group header collapse toggle (first 2 chars)
+				if groupRef, ok := m.getGroupAtLine(msg.Y); ok && msg.X < 2 {
+					m.toggleGroupCollapse(groupRef.group.Name)
+					m.buildWindowRefs()
+					return m, nil
+				}
+				// Check if clicking on window collapse toggle (chars 3-4, after tree branch)
+				// This only works for windows that have multiple panes
+				if clicked != nil && msg.X >= 3 && msg.X <= 4 && len(clicked.Panes) > 1 {
+					toggleWindowCollapse(clicked.Index, !clicked.Collapsed)
+					// Signal all sidebars to refresh
+					go signalSidebarsDelayed()
+					return m, delayedRefresh()
+				}
 				// Check if clicking on a pane first
 				if paneRef, ok := m.getPaneAtLine(msg.Y); ok {
 					// Click on pane - switch to window and select pane in one command
@@ -421,6 +610,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Just create new window - the after-new-window hook adds the sidebar
 					_ = exec.Command("tmux", "new-window").Run()
 					return m, delayedRefresh()
+				} else if m.config.Sidebar.NewGroupButton && msg.Y == newGroupLine {
+					// Open new group prompt
+					m.showNewGroupPrompt()
+					return m, nil
 				} else if m.config.Sidebar.CloseButton && msg.Y == closeTabLine {
 					// Close currently selected window (cursor position) - with confirmation
 					if win := m.getSelectedWindow(); win != nil {
@@ -469,7 +662,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.windows = windows
-		m.grouped = grouping.GroupWindows(windows, m.config.Groups)
+		m.grouped = grouping.GroupWindowsWithOptions(windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
 		// Always update pane colors (custom colors can change anytime)
 		updatePaneHeaderColors(m.grouped)
 		m.buildWindowRefs()
@@ -478,7 +671,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = m.windowRefs[0].line
 		}
 		// Start spinner animation if any windows are busy and not already running
-		if m.hasBusyWindows() && !m.spinnerActive {
+		if m.hasAnimatedIndicators() && !m.spinnerActive {
 			m.spinnerActive = true
 			return m, spinnerTick()
 		}
@@ -489,7 +682,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		busyFrames := m.getBusyFrames()
 		m.spinnerFrame = (m.spinnerFrame + 1) % len(busyFrames)
 		// Continue animation if still have busy windows
-		if m.hasBusyWindows() {
+		if m.hasAnimatedIndicators() {
 			return m, spinnerTick()
 		}
 		// Stop animation
@@ -500,7 +693,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cfg, err := config.LoadConfig(config.DefaultConfigPath())
 		if err == nil {
 			m.config = cfg
-			m.grouped = grouping.GroupWindows(m.windows, m.config.Groups)
+			m.grouped = grouping.GroupWindowsWithOptions(m.windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
 			updatePaneHeaderColors(m.grouped)
 			m.buildWindowRefs()
 		}
@@ -516,7 +709,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.windows = windows
-		m.grouped = grouping.GroupWindows(windows, m.config.Groups)
+		m.grouped = grouping.GroupWindowsWithOptions(windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
 		updatePaneHeaderColors(m.grouped)
 		m.buildWindowRefs()
 		// Schedule next periodic refresh
@@ -549,6 +742,22 @@ func (m model) View() string {
 			promptStyle.Render("  Press y to confirm, n to cancel")
 	}
 
+	debug("--- View() render ---")
+
+	// Show collapsed view if sidebar is collapsed
+	if m.sidebarCollapsed {
+		// Render vertical ">" characters down the sidebar
+		expandIcon := ">"
+		style := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#888888")).
+			Bold(true)
+		var s string
+		for i := 0; i < m.height; i++ {
+			s += style.Render(expandIcon) + "\n"
+		}
+		return s
+	}
+
 	var s string
 	// Use terminal width if available, otherwise default to 25
 	sidebarWidth := m.width
@@ -563,22 +772,86 @@ func (m model) View() string {
 	// Iterate over grouped windows - keeps each group together
 	for _, group := range m.grouped {
 		theme := group.Theme
+		isCollapsed := m.isGroupCollapsed(group.Name)
 
-		// Show group header
+		// Show group header with collapse indicator at start
 		headerStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color(theme.Fg)).
 			Background(lipgloss.Color(theme.Bg)).
-			Bold(true).
-			Width(sidebarWidth - 1)
+			Bold(true)
+
+		// Collapse indicator: ⊟ expanded, ⊞ collapsed (at start)
+		expandedIcon := m.config.Sidebar.Colors.DisclosureExpanded
+		if expandedIcon == "" {
+			expandedIcon = "⊟"
+		}
+		collapsedIcon := m.config.Sidebar.Colors.DisclosureCollapsed
+		if collapsedIcon == "" {
+			collapsedIcon = "⊞"
+		}
+		collapseIcon := expandedIcon
+		if isCollapsed {
+			collapseIcon = collapsedIcon
+		}
+		disclosureColor := m.config.Sidebar.Colors.DisclosureFg
+		if disclosureColor == "" {
+			disclosureColor = "#000000"
+		}
+		collapseStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(disclosureColor)).
+			Background(lipgloss.Color(theme.Bg))
+
 		icon := theme.Icon
 		if icon != "" {
 			icon += " "
 		}
-		s += headerStyle.Render(icon+group.Name) + "\n"
 
-		// Tree characters - no background, just foreground color
-		treeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
-		arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Bold(true)
+		// Build header: [collapse] [icon] Name [count if collapsed]
+		headerText := icon + group.Name
+		if isCollapsed && len(group.Windows) > 0 {
+			headerText += fmt.Sprintf(" (%d)", len(group.Windows))
+		}
+
+		// Width: 2 for collapse icon + space, rest for content
+		headerContentStyle := headerStyle.Width(sidebarWidth - 2)
+		s += collapseStyle.Render(collapseIcon+" ") + headerContentStyle.Render(headerText) + "\n"
+
+		// Skip windows if group is collapsed
+		if isCollapsed {
+			continue
+		}
+
+		// Tree characters - configurable color
+		treeFg := m.config.Sidebar.Colors.TreeFg
+		if treeFg == "" {
+			treeFg = "#888888"
+		}
+		treeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(treeFg))
+
+		// Active indicator color (can be "auto" to use window/group bg color)
+		activeIndFgConfig := m.config.Sidebar.Colors.ActiveIndicatorFg
+
+		// Tree branch characters
+		treeBranchChar := m.config.Sidebar.Colors.TreeBranch
+		if treeBranchChar == "" {
+			treeBranchChar = "├─"
+		}
+		treeBranchLastChar := m.config.Sidebar.Colors.TreeBranchLast
+		if treeBranchLastChar == "" {
+			treeBranchLastChar = "└─"
+		}
+		treeConnectorChar := m.config.Sidebar.Colors.TreeConnector
+		if treeConnectorChar == "" {
+			treeConnectorChar = "─"
+		}
+		treeConnectorPanesChar := m.config.Sidebar.Colors.TreeConnectorPanes
+		if treeConnectorPanesChar == "" {
+			treeConnectorPanesChar = "┬"
+		}
+		treeContinueChar := m.config.Sidebar.Colors.TreeContinue
+		if treeContinueChar == "" {
+			treeContinueChar = "│"
+		}
 
 		// Show windows in this group
 		numWindows := len(group.Windows)
@@ -588,7 +861,16 @@ func (m model) View() string {
 
 			// Choose colors - custom color overrides group theme
 			var bgColor, fgColor string
-			if win.CustomColor != "" {
+			isTransparent := win.CustomColor == "transparent"
+			if isTransparent {
+				// Transparent mode: no background, just text color
+				bgColor = ""
+				if isActive {
+					fgColor = "#ffffff"
+				} else {
+					fgColor = "#888888"
+				}
+			} else if win.CustomColor != "" {
 				if isActive {
 					bgColor = win.CustomColor
 				} else {
@@ -613,9 +895,10 @@ func (m model) View() string {
 			}
 
 			// Build style
-			style := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(fgColor)).
-				Background(lipgloss.Color(bgColor))
+			style := lipgloss.NewStyle().Foreground(lipgloss.Color(fgColor))
+			if bgColor != "" {
+				style = style.Background(lipgloss.Color(bgColor))
+			}
 			if isActive {
 				style = style.Bold(true)
 			}
@@ -628,7 +911,16 @@ func (m model) View() string {
 			// Other indicators skipped for active window - you're already looking at it
 			alertIcon := ""
 			ind := m.config.Indicators
+
+			// Debug: log window state
+			debug("Window %d (%s): Active=%v, Busy=%v (panes: %d), Bell=%v, Activity=%v, Silence=%v",
+				win.Index, win.Name, isActive, win.Busy, len(win.Panes), win.Bell, win.Activity, win.Silence)
+			for _, p := range win.Panes {
+				debug("  Pane %d: cmd=%s, busy=%v, active=%v", p.Index, p.Command, p.Busy, p.Active)
+			}
+
 			if ind.Busy.Enabled && win.Busy {
+				debug("  -> BUSY indicator (Busy.Enabled=%v, win.Busy=%v)", ind.Busy.Enabled, win.Busy)
 				// Busy indicator shown even for active window
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
 				if ind.Busy.Bg != "" {
@@ -636,27 +928,51 @@ func (m model) View() string {
 				}
 				busyFrames := m.getBusyFrames()
 				alertIcon = alertStyle.Render(busyFrames[m.spinnerFrame%len(busyFrames)])
+			} else if ind.Input.Enabled && win.Input {
+				debug("  -> INPUT indicator (needs user input)")
+				// Input indicator shown even for active window - important to see
+				inputIcon := ind.Input.Icon
+				if inputIcon == "" {
+					inputIcon = "?"
+				}
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Input.Color))
+				if ind.Input.Bg != "" {
+					alertStyle = alertStyle.Background(lipgloss.Color(ind.Input.Bg))
+				}
+				// Support animation frames for input indicator
+				if len(ind.Input.Frames) > 0 {
+					alertIcon = alertStyle.Render(ind.Input.Frames[m.spinnerFrame%len(ind.Input.Frames)])
+				} else {
+					alertIcon = alertStyle.Render(inputIcon)
+				}
 			} else if !isActive {
 				// Other indicators only for inactive windows
 				if ind.Bell.Enabled && win.Bell {
+					debug("  -> BELL indicator")
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
 					if ind.Bell.Bg != "" {
 						alertStyle = alertStyle.Background(lipgloss.Color(ind.Bell.Bg))
 					}
 					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Bell))
 				} else if ind.Activity.Enabled && win.Activity {
+					debug("  -> ACTIVITY indicator")
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
 					if ind.Activity.Bg != "" {
 						alertStyle = alertStyle.Background(lipgloss.Color(ind.Activity.Bg))
 					}
 					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Activity))
 				} else if ind.Silence.Enabled && win.Silence {
+					debug("  -> SILENCE indicator")
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
 					if ind.Silence.Bg != "" {
 						alertStyle = alertStyle.Background(lipgloss.Color(ind.Silence.Bg))
 					}
 					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Silence))
+				} else {
+					debug("  -> no indicator")
 				}
+			} else {
+				debug("  -> no indicator (active window, not busy)")
 			}
 
 			// Build tab content (use visual position, not tmux index)
@@ -684,30 +1000,115 @@ func (m model) View() string {
 			// Window tree branch
 			var treeBranch string
 			if isLastInGroup {
-				treeBranch = "└─"
+				treeBranch = treeBranchLastChar
 			} else {
-				treeBranch = "├─"
+				treeBranch = treeBranchChar
 			}
 
-			// Window line - use ┬ if has panes (connects down to pane tree)
+			// Window line - show collapse indicator if has panes
 			hasPanes := len(win.Panes) > 1
-			var windowEnd string
+			isWindowCollapsed := win.Collapsed
+			var windowCollapseIcon string
+
+			// Get configurable icons
+			expandedIcon := m.config.Sidebar.Colors.DisclosureExpanded
+			if expandedIcon == "" {
+				expandedIcon = "⊟"
+			}
+			collapsedIcon := m.config.Sidebar.Colors.DisclosureCollapsed
+			if collapsedIcon == "" {
+				collapsedIcon = "⊞"
+			}
+
 			if hasPanes {
-				windowEnd = "┬" // Branches down to panes
-			} else {
-				windowEnd = "─"
+				if isWindowCollapsed {
+					windowCollapseIcon = collapsedIcon // Collapsed - click to expand
+				} else {
+					windowCollapseIcon = expandedIcon // Expanded - click to collapse
+				}
 			}
 
-			if isActive && !hasPanes {
-				// Active without panes: ├─▶
-				s += indicatorPart + treeStyle.Render(treeBranch) + arrowStyle.Render("▶") + style.Render(baseContent) + "\n"
-			} else {
-				// Windows with panes (active or not): ├─┬, without panes: ├──
-				s += indicatorPart + treeStyle.Render(treeBranch+windowEnd) + style.Render(baseContent) + "\n"
+			// Add pane count to window name if collapsed and has multiple panes
+			displayContent := baseContent
+			if hasPanes && isWindowCollapsed {
+				displayContent = fmt.Sprintf("%s (%d)", baseContent, len(win.Panes))
 			}
 
-			// Show panes if window has multiple panes
-			if len(win.Panes) > 1 {
+			// Style for window collapse icon (configurable color on window bg)
+			disclosureColor := m.config.Sidebar.Colors.DisclosureFg
+			if disclosureColor == "" {
+				disclosureColor = "#000000"
+			}
+			windowCollapseStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(disclosureColor))
+			if bgColor != "" {
+				windowCollapseStyle = windowCollapseStyle.Background(lipgloss.Color(bgColor))
+			}
+
+			// Calculate content width
+			// Layout: indicator(1) + tree(2) + extras + content
+			prefixWidth := 3 // indicator + tree branch
+			if hasPanes {
+				prefixWidth += 2 // collapse icon + space
+			} else {
+				prefixWidth += 0 // single-pane windows: no extra indent
+			}
+			windowContentWidth := sidebarWidth - prefixWidth
+
+			// Truncate content if needed
+			contentText := displayContent
+			contentLen := lipgloss.Width(contentText)
+			if contentLen > windowContentWidth {
+				truncated := ""
+				for _, r := range contentText {
+					if lipgloss.Width(truncated+string(r)) > windowContentWidth-1 {
+						break
+					}
+					truncated += string(r)
+				}
+				contentText = truncated + "~"
+				contentLen = lipgloss.Width(contentText)
+			}
+			// Pad to fill width
+			contentStyle := style.Width(windowContentWidth)
+
+			// Get active indicator icon and style
+			activeIndicator := m.config.Sidebar.Colors.ActiveIndicator
+			if activeIndicator == "" {
+				activeIndicator = "◀"
+			}
+
+			// Determine active indicator color - "auto" uses window/group bg
+			var activeIndFg string
+			if activeIndFgConfig == "auto" || activeIndFgConfig == "" {
+				if bgColor != "" {
+					activeIndFg = bgColor
+				} else {
+					activeIndFg = "#ffffff" // Default for transparent
+				}
+			} else {
+				activeIndFg = activeIndFgConfig
+			}
+			arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(activeIndFg)).Bold(true)
+
+			debug("  Rendering: hasPanes=%v, isActive=%v, windowCollapseIcon='%s'", hasPanes, isActive, windowCollapseIcon)
+
+			if hasPanes {
+				// Windows with panes: ├─⊟ content (collapse icon after tree)
+				debug("    -> hasPanes branch: icon='%s'", windowCollapseIcon)
+				s += indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(contentText) + "\n"
+			} else if isActive {
+				// Active single-pane: ├● content (last char becomes indicator)
+				// Get first char of tree branch (├ or └)
+				treeBranchRunes := []rune(treeBranch)
+				treeBranchFirst := string(treeBranchRunes[0])
+				s += indicatorPart + treeStyle.Render(treeBranchFirst) + arrowStyle.Render(activeIndicator) + contentStyle.Render(contentText) + "\n"
+			} else {
+				// Inactive single-pane: ├─ content
+				s += indicatorPart + treeStyle.Render(treeBranch) + contentStyle.Render(contentText) + "\n"
+			}
+
+			// Show panes if window has multiple panes and is not collapsed
+			if len(win.Panes) > 1 && !isWindowCollapsed {
 				var paneBg, paneFg, activePaneBg string
 				if win.CustomColor != "" {
 					paneBg = grouping.LightenColor(win.CustomColor, 0.3)
@@ -743,29 +1144,39 @@ func (m model) View() string {
 				if isLastInGroup {
 					treeContinue = " " // No more windows below
 				} else {
-					treeContinue = treeStyle.Render("│") // More windows below
+					treeContinue = treeStyle.Render(treeContinueChar) // More windows below
 				}
 
 				numPanes := len(win.Panes)
 				for pi, pane := range win.Panes {
 					isLastPane := pi == numPanes-1
 
-					// Pane branch: └─ for last pane, ├─ for others
-					var paneCorner string
+					// Pane branch: use first char of tree branch chars
+					var paneBranch string
 					if isLastPane {
-						paneCorner = "└"
+						// Use first rune from treeBranchLastChar
+						for _, r := range treeBranchLastChar {
+							paneBranch = string(r)
+							break
+						}
 					} else {
-						paneCorner = "├"
+						// Use first rune from treeBranchChar
+						for _, r := range treeBranchChar {
+							paneBranch = string(r)
+							break
+						}
 					}
 
 					paneNum := fmt.Sprintf("%d.%d", visualPos, pane.Index)
 					paneLabel := pane.Command
-					if pane.Title != "" && pane.Title != pane.Command {
+					if pane.LockedTitle != "" {
+						paneLabel = pane.LockedTitle
+					} else if pane.Title != "" && pane.Title != pane.Command {
 						paneLabel = pane.Title
 					}
 					paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
 
-					paneIndentWidth := 6 // space(1) + windowCont(1) + space(1) + corner(1) + connector(2 or 1+▶)
+					paneIndentWidth := 6 // space(1) + windowCont(1) + space(1) + corner(1) + connector(2 or 1+indicator)
 					paneContentWidth := sidebarWidth - paneIndentWidth
 
 					// Truncate content if needed
@@ -773,13 +1184,17 @@ func (m model) View() string {
 						paneText = paneText[:paneContentWidth-1] + "~"
 					}
 
-					// Active pane gets arrow, inactive gets extended pipe
+					// Active pane gets indicator, inactive gets extended pipe
+					paneActiveIndicator := m.config.Sidebar.Colors.ActiveIndicator
+					if paneActiveIndicator == "" {
+						paneActiveIndicator = "◀"
+					}
 					if pane.Active && isActive {
 						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-						s += " " + treeContinue + treeStyle.Render(" "+paneCorner+"─") + arrowStyle.Render("▶") + fullWidthPaneStyle.Render(paneText) + "\n"
+						s += " " + treeContinue + treeStyle.Render(" "+paneBranch+treeConnectorChar) + arrowStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText) + "\n"
 					} else {
-						// Extend pipe to connect: ├── or └──
-						s += " " + treeContinue + treeStyle.Render(" "+paneCorner+"──") + paneStyle.Render(paneText) + "\n"
+						// Extend pipe to connect
+						s += " " + treeContinue + treeStyle.Render(" "+paneBranch+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText) + "\n"
 					}
 				}
 			}
@@ -794,6 +1209,14 @@ func (m model) View() string {
 		s += "\n"
 		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#27ae60"))
 		s += buttonStyle.Render("[+] New Tab") + "\n"
+	}
+
+	if m.config.Sidebar.NewGroupButton {
+		if !m.config.Sidebar.NewTabButton {
+			s += "\n" // Add blank line if New Tab button isn't there
+		}
+		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9b59b6"))
+		s += buttonStyle.Render("[+] New Group") + "\n"
 	}
 
 	if m.config.Sidebar.CloseButton {
@@ -823,6 +1246,18 @@ func (m model) showContextMenu(win *tmux.Window) {
 	// Unlock name option (restore automatic naming)
 	unlockCmd := fmt.Sprintf("set-window-option -t :%d automatic-rename on", win.Index)
 	args = append(args, "Unlock Name", "u", unlockCmd)
+
+	// Collapse/Expand panes option (only for windows with multiple panes)
+	if len(win.Panes) > 1 {
+		args = append(args, "", "", "") // Separator
+		if win.Collapsed {
+			expandCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_collapsed", win.Index)
+			args = append(args, "Expand Panes", "e", expandCmd)
+		} else {
+			collapseCmd := fmt.Sprintf("set-window-option -t :%d @tabby_collapsed 1", win.Index)
+			args = append(args, "Collapse Panes", "c", collapseCmd)
+		}
+	}
 
 	// Separator
 	args = append(args, "", "", "")
@@ -868,6 +1303,7 @@ func (m model) showContextMenu(win *tmux.Window) {
 		{"Pink", "#e91e63", "i"},
 		{"Cyan", "#00bcd4", "c"},
 		{"Gray", "#7f8c8d", "a"},
+		{"Transparent", "transparent", "t"},
 	}
 	for _, color := range colorOptions {
 		setColorCmd := fmt.Sprintf("set-window-option -t :%d @tabby_color '%s'", win.Index, color.hex)
@@ -904,9 +1340,11 @@ func (m model) showContextMenu(win *tmux.Window) {
 }
 
 func (m model) showPaneContextMenu(pr *paneRef) {
-	// Use title if set, otherwise command for display
+	// Use locked title, then title, then command for display
 	paneLabel := pr.pane.Command
-	if pr.pane.Title != "" && pr.pane.Title != pr.pane.Command {
+	if pr.pane.LockedTitle != "" {
+		paneLabel = pr.pane.LockedTitle
+	} else if pr.pane.Title != "" && pr.pane.Title != pr.pane.Command {
 		paneLabel = pr.pane.Title
 	}
 
@@ -918,17 +1356,21 @@ func (m model) showPaneContextMenu(pr *paneRef) {
 		"-y", "M",
 	}
 
-	// Rename option - use command-prompt to get new title
-	currentTitle := pr.pane.Title
+	// Rename option - sets @tabby_pane_title to lock the name
+	currentTitle := pr.pane.LockedTitle
+	if currentTitle == "" {
+		currentTitle = pr.pane.Title
+	}
 	if currentTitle == "" {
 		currentTitle = pr.pane.Command
 	}
-	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"select-pane -t %s -T '%%%%'\"", currentTitle, pr.pane.ID)
+	// Use helper script to handle the rename and lock
+	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"run-shell '%s/scripts/rename_pane.sh %s \\\"%%%%\\\"'\"", currentTitle, getCurrentDir(), pr.pane.ID)
 	args = append(args, "Rename", "r", renameCmd)
 
-	// Reset title option (clear custom title, show command instead)
-	resetTitleCmd := fmt.Sprintf("select-pane -t %s -T ''", pr.pane.ID)
-	args = append(args, "Reset Title", "u", resetTitleCmd)
+	// Unlock name option (clear locked title, show command instead)
+	unlockCmd := fmt.Sprintf("set-option -p -t %s -u @tabby_pane_title ; select-pane -t %s -T ''", pr.pane.ID, pr.pane.ID)
+	args = append(args, "Unlock Name", "u", unlockCmd)
 
 	// Separator
 	args = append(args, "", "", "")
@@ -1004,30 +1446,115 @@ func (m model) showGroupContextMenu(gr *groupRef) {
 	}
 	indicesStr := strings.Join(indices, " ")
 
-	// Close all windows in this group - pass window indices directly
-	closeAllCmd := fmt.Sprintf("run-shell '%s/scripts/kill_windows.sh %s'", getCurrentDir(), indicesStr)
-	args = append(args, "Close All Windows", "x", closeAllCmd)
-
-	// Separator
-	args = append(args, "", "", "")
-
-	// Add new window - for named groups, look for a pattern in config
-	var prefix string
+	// Add new window in this group - set @tabby_group option and use working_dir if configured
+	var workingDir string
 	for _, cfgGroup := range m.config.Groups {
-		if cfgGroup.Name == gr.group.Name && cfgGroup.Pattern != ".*" {
-			prefix = extractGroupPrefix(cfgGroup.Pattern)
+		if cfgGroup.Name == gr.group.Name && cfgGroup.WorkingDir != "" {
+			workingDir = cfgGroup.WorkingDir
 			break
 		}
 	}
 
-	if prefix != "" {
-		newWindowCmd := fmt.Sprintf("new-window -n '%s' -c '#{pane_current_path}'", prefix)
+	// Use configured working_dir, or fall back to current pane's path
+	dirArg := "'#{pane_current_path}'"
+	if workingDir != "" {
+		dirArg = fmt.Sprintf("'%s'", workingDir)
+	}
+
+	if gr.group.Name != "Default" {
+		newWindowCmd := fmt.Sprintf("new-window -c %s ; set-window-option @tabby_group '%s'", dirArg, gr.group.Name)
 		args = append(args, fmt.Sprintf("New %s Window", gr.group.Name), "n", newWindowCmd)
 	} else {
-		args = append(args, "New Window", "n", "new-window -c '#{pane_current_path}'")
+		newWindowCmd := fmt.Sprintf("new-window -c %s", dirArg)
+		args = append(args, "New Window", "n", newWindowCmd)
+	}
+
+	// Separator
+	args = append(args, "", "", "")
+
+	// Collapse/Expand option
+	if m.isGroupCollapsed(gr.group.Name) {
+		expandCmd := fmt.Sprintf("run-shell '%s/scripts/toggle_group_collapse.sh \"%s\" expand'", getCurrentDir(), gr.group.Name)
+		args = append(args, "Expand Group", "e", expandCmd)
+	} else {
+		collapseCmd := fmt.Sprintf("run-shell '%s/scripts/toggle_group_collapse.sh \"%s\" collapse'", getCurrentDir(), gr.group.Name)
+		args = append(args, "Collapse Group", "c", collapseCmd)
+	}
+
+	// Only show Edit/Delete for non-Default groups
+	if gr.group.Name != "Default" {
+		// Separator
+		args = append(args, "", "", "")
+
+		// Edit Group submenu
+		args = append(args, "-Edit Group", "", "")
+
+		// Rename
+		renameCmd := fmt.Sprintf("command-prompt -I '%s' -p 'New name:' \"run-shell '%s/scripts/rename_group.sh %s %%%%'\"",
+			gr.group.Name, getCurrentDir(), gr.group.Name)
+		args = append(args, "  Rename", "r", renameCmd)
+
+		// Change Color submenu
+		args = append(args, "  -Change Color", "", "")
+		colorOptions := []struct {
+			name string
+			hex  string
+			key  string
+		}{
+			{"Red", "#e74c3c", "r"},
+			{"Orange", "#e67e22", "o"},
+			{"Yellow", "#f1c40f", "y"},
+			{"Green", "#27ae60", "g"},
+			{"Blue", "#3498db", "b"},
+			{"Purple", "#9b59b6", "p"},
+			{"Pink", "#e91e63", "i"},
+			{"Cyan", "#00bcd4", "c"},
+			{"Gray", "#7f8c8d", "a"},
+			{"Transparent", "transparent", "t"},
+		}
+		for _, color := range colorOptions {
+			setColorCmd := fmt.Sprintf("run-shell '%s/scripts/set_group_color.sh \"%s\" \"%s\"'",
+				getCurrentDir(), gr.group.Name, color.hex)
+			args = append(args, fmt.Sprintf("    %s", color.name), color.key, setColorCmd)
+		}
+
+		// Set Working Directory option
+		currentWorkingDir := workingDir
+		if currentWorkingDir == "" {
+			currentWorkingDir = "~"
+		}
+		setWorkingDirCmd := fmt.Sprintf("command-prompt -I '%s' -p 'Working directory:' \"run-shell '%s/scripts/set_group_working_dir.sh \\\"%s\\\" \\\"%%%%\\\"'\"",
+			currentWorkingDir, getCurrentDir(), gr.group.Name)
+		args = append(args, "  Set Working Directory", "w", setWorkingDirCmd)
+
+		// Separator before Delete
+		args = append(args, "", "", "")
+
+		// Delete Group
+		deleteCmd := fmt.Sprintf("confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s/scripts/delete_group.sh %s'\"",
+			gr.group.Name, getCurrentDir(), gr.group.Name)
+		args = append(args, "Delete Group", "d", deleteCmd)
+	}
+
+	// Separator
+	args = append(args, "", "", "")
+
+	// Close all windows in this group - pass window indices directly
+	if len(indices) > 0 {
+		closeAllCmd := fmt.Sprintf("run-shell '%s/scripts/kill_windows.sh %s'", getCurrentDir(), indicesStr)
+		args = append(args, "Close All Windows", "x", closeAllCmd)
 	}
 
 	_ = exec.Command("tmux", args...).Run()
+}
+
+// showNewGroupPrompt shows a prompt to create a new group
+func (m model) showNewGroupPrompt() {
+	// Use tmux command-prompt to get the group name
+	// The script will add the group to config.yaml and trigger a config reload
+	scriptPath := getCurrentDir() + "/scripts/new_group.sh"
+	promptCmd := fmt.Sprintf("command-prompt -p 'New group name:' \"run-shell '%s %%%%'\"", scriptPath)
+	_ = exec.Command("tmux", "run-shell", "-b", fmt.Sprintf("tmux %s", promptCmd)).Run()
 }
 
 // extractGroupPrefix extracts the window name prefix from a regex pattern
@@ -1128,13 +1655,22 @@ func main() {
 	lipgloss.SetColorProfile(termenv.ANSI256)
 
 	cfg, _ := config.LoadConfig(config.DefaultConfigPath())
+
+	// Initialize debug logging based on config
+	initDebugLog(cfg.Sidebar.Debug)
+	debug("=== Sidebar starting ===")
 	windows, _ := tmux.ListWindowsWithPanes()
-	grouped := grouping.GroupWindows(windows, cfg.Groups)
+	grouped := grouping.GroupWindowsWithOptions(windows, cfg.Groups, cfg.Sidebar.ShowEmptyGroups)
 
 	// Set initial pane header colors
 	updatePaneHeaderColors(grouped)
 
-	m := model{windows: windows, grouped: grouped, config: cfg}
+	m := model{
+		windows:         windows,
+		grouped:         grouped,
+		config:          cfg,
+		collapsedGroups: loadCollapsedGroups(),
+	}
 	m.buildWindowRefs()
 
 	// Set initial cursor to first window

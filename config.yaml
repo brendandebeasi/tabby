@@ -19,6 +19,7 @@ overflow:
 groups:
   - name: "StudioDome"
     pattern: "^SD\\|"
+    working_dir: "~/git/studiodome"
     theme:
       bg: "#8b1a1a"
       fg: "#ffffff"
@@ -28,6 +29,7 @@ groups:
 
   - name: "Gunpowder"
     pattern: "^GP\\|"
+    working_dir: "~/git/gunpowder"
     theme:
       bg: "#7f8c8d"
       fg: "#ecf0f1"
@@ -51,8 +53,23 @@ bindings:
 
 sidebar:
   new_tab_button: true
+  new_group_button: true
+  show_empty_groups: true
   close_button: false
   sort_by: "group"  # "group" or "index"
+  debug: true  # Enable debug logging to /tmp/tabby-debug.log
+  colors:
+    disclosure_fg: "#000000"        # Disclosure icon color
+    disclosure_expanded: "⊟"        # Expanded state icon (boxed minus)
+    disclosure_collapsed: "⊞"       # Collapsed state icon (boxed plus)
+    active_indicator: "●"           # Active window/pane indicator (filled circle)
+    active_indicator_fg: "#000000"  # Active indicator color
+    tree_fg: "#888888"              # Tree branch color
+    tree_branch: "├─"               # Branch connector
+    tree_branch_last: "└─"          # Last branch connector
+    tree_connector: "─"             # Horizontal connector
+    tree_connector_panes: "┬"       # Connector when has panes
+    tree_continue: "│"              # Vertical continuation
 
 pane_header:
   active_fg: "#ffffff"
@@ -95,3 +112,9 @@ indicators:
     icon: "◐"
     color: "#ff0000"  # Bright red for visibility
     frames: ["◐", "◓", "◑", "◒"]  # Animation frames (cycles through these)
+  input:
+    enabled: true
+    icon: "?"
+    color: "#ffffff"
+    bg: "#9b59b6"  # Purple background - needs attention
+    frames: ["?", "?"]  # Can add animation frames like ["?", " "] for blinking

@@ -23,13 +23,37 @@ mkdir -p "$STATE_DIR" 2>/dev/null
 
 SESSION=$(tmux display-message -p '#{session_name}' 2>/dev/null)
 
-# Get the window for this Claude session using TMUX_PANE
-# TMUX_PANE is inherited from Claude Code and identifies the correct pane
+# Get the window for this Claude session
+# Strategy: Use TMUX_PANE if valid, otherwise try to find our parent's pane
+CLAUDE_WIN=""
+
+# First, verify TMUX_PANE points to an existing pane
 if [ -n "$TMUX_PANE" ]; then
-    # Use the pane ID to get its window (works regardless of which window is "active")
-    CLAUDE_WIN=$(tmux display-message -t "$TMUX_PANE" -p '#{window_index}' 2>/dev/null)
-else
-    # Fallback to active window if TMUX_PANE not set
+    # Check if this pane still exists
+    if tmux display-message -t "$TMUX_PANE" -p '#{pane_id}' &>/dev/null; then
+        CLAUDE_WIN=$(tmux display-message -t "$TMUX_PANE" -p '#{window_index}' 2>/dev/null)
+    fi
+fi
+
+# Fallback: try to find pane by walking up process tree to find tmux client
+if [ -z "$CLAUDE_WIN" ]; then
+    # Get our parent PID chain and find which pane we're in
+    CURRENT_PID=$$
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        # Check if this PID is a tmux pane's shell
+        FOUND_PANE=$(tmux list-panes -a -F '#{pane_pid}:#{window_index}' 2>/dev/null | grep "^${CURRENT_PID}:" | cut -d: -f2)
+        if [ -n "$FOUND_PANE" ]; then
+            CLAUDE_WIN="$FOUND_PANE"
+            break
+        fi
+        # Move to parent
+        CURRENT_PID=$(ps -o ppid= -p "$CURRENT_PID" 2>/dev/null | tr -d ' ')
+        [ -z "$CURRENT_PID" ] && break
+    done
+fi
+
+# Final fallback: use active window
+if [ -z "$CLAUDE_WIN" ]; then
     CLAUDE_WIN=$(tmux display-message -p '#{window_index}' 2>/dev/null)
 fi
 
@@ -87,6 +111,21 @@ case "$INDICATOR" in
             [ -n "$CLAUDE_WIN" ] && tmux set-option -t ":$CLAUDE_WIN" -w @tabby_silence 1 2>/dev/null
         else
             [ -n "$CLAUDE_WIN" ] && tmux set-option -t ":$CLAUDE_WIN" -wu @tabby_silence 2>/dev/null
+        fi
+        ;;
+    input)
+        if [ "$VALUE" = "1" ]; then
+            # Set input needed indicator
+            if [ -n "$CLAUDE_WIN" ]; then
+                tmux set-option -t ":$CLAUDE_WIN" -w @tabby_input 1 2>/dev/null
+                echo "Set input on window $CLAUDE_WIN" >> /tmp/tabby-indicator-debug.log
+            fi
+        else
+            # Clear input indicator
+            if [ -n "$CLAUDE_WIN" ]; then
+                tmux set-option -t ":$CLAUDE_WIN" -wu @tabby_input 2>/dev/null
+                echo "Cleared input on window $CLAUDE_WIN" >> /tmp/tabby-indicator-debug.log
+            fi
         fi
         ;;
 esac

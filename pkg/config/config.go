@@ -36,15 +36,30 @@ type PaneHeader struct {
 }
 
 type Sidebar struct {
-	NewTabButton bool          `yaml:"new_tab_button"`
-	CloseButton  bool          `yaml:"close_button"`
-	Colors       SidebarColors `yaml:"colors"`
+	NewTabButton    bool          `yaml:"new_tab_button"`
+	CloseButton     bool          `yaml:"close_button"`
+	NewGroupButton  bool          `yaml:"new_group_button"`
+	ShowEmptyGroups bool          `yaml:"show_empty_groups"`
+	SortBy          string        `yaml:"sort_by"`
+	Debug           bool          `yaml:"debug"` // Enable debug logging to /tmp/tabby-debug.log
+	Colors          SidebarColors `yaml:"colors"`
 }
 
 type SidebarColors struct {
-	HeaderFg   string `yaml:"header_fg"`   // Group header text (default: #000000)
-	ActiveFg   string `yaml:"active_fg"`   // Active tab text (default: #ffffff)
-	InactiveFg string `yaml:"inactive_fg"` // Inactive tab text (default: #cccccc)
+	HeaderFg            string `yaml:"header_fg"`            // Group header text (default: #000000)
+	ActiveFg            string `yaml:"active_fg"`            // Active tab text (default: #ffffff)
+	InactiveFg          string `yaml:"inactive_fg"`          // Inactive tab text (default: #cccccc)
+	DisclosureFg        string `yaml:"disclosure_fg"`        // Disclosure icon color (default: #000000)
+	DisclosureExpanded  string `yaml:"disclosure_expanded"`  // Expanded state icon (default: ⊟)
+	DisclosureCollapsed string `yaml:"disclosure_collapsed"` // Collapsed state icon (default: ⊞)
+	ActiveIndicator     string `yaml:"active_indicator"`     // Active window/pane icon (default: ●)
+	ActiveIndicatorFg   string `yaml:"active_indicator_fg"`  // Active indicator color (default: #000000)
+	TreeFg              string `yaml:"tree_fg"`              // Tree branch color (default: #888888)
+	TreeBranch          string `yaml:"tree_branch"`          // Branch connector: ├─ (default: ├─)
+	TreeBranchLast      string `yaml:"tree_branch_last"`     // Last branch: └─ (default: └─)
+	TreeConnector       string `yaml:"tree_connector"`       // Horizontal connector (default: ─)
+	TreeConnectorPanes  string `yaml:"tree_connector_panes"` // Connector when has panes (default: ┬)
+	TreeContinue        string `yaml:"tree_continue"`        // Vertical continuation (default: │)
 }
 
 type Style struct {
@@ -59,9 +74,10 @@ type Overflow struct {
 }
 
 type Group struct {
-	Name    string `yaml:"name"`
-	Pattern string `yaml:"pattern"`
-	Theme   Theme  `yaml:"theme"`
+	Name       string `yaml:"name"`
+	Pattern    string `yaml:"pattern"`
+	Theme      Theme  `yaml:"theme"`
+	WorkingDir string `yaml:"working_dir"` // Default directory for new windows/panes in this group
 }
 
 type Theme struct {
@@ -85,7 +101,8 @@ type Indicators struct {
 	Bell     Indicator `yaml:"bell"`
 	Silence  Indicator `yaml:"silence"`
 	Last     Indicator `yaml:"last"`
-	Busy     Indicator `yaml:"busy"` // Foreground process running (auto-detected)
+	Busy     Indicator `yaml:"busy"`  // Foreground process running (auto-detected)
+	Input    Indicator `yaml:"input"` // Waiting for user input (e.g., Claude needs response)
 }
 
 type Indicator struct {

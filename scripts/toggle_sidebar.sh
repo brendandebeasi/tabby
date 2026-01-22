@@ -8,9 +8,6 @@ SESSION_ID=$(tmux display-message -p '#{session_id}')
 SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
 SIDEBAR_WIDTH=25
 
-# Renumber windows to ensure sequential indices (0, 1, 2, ...)
-tmux move-window -r 2>/dev/null || true
-
 # Get current state from tmux option (most reliable) or state file
 CURRENT_STATE=$(tmux show-options -qv @tmux-tabs-sidebar 2>/dev/null || echo "")
 if [ -z "$CURRENT_STATE" ] && [ -f "$SIDEBAR_STATE_FILE" ]; then
