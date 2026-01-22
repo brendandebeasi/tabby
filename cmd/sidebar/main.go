@@ -1089,6 +1089,11 @@ func (m model) View() string {
 				activeIndFg = activeIndFgConfig
 			}
 			arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(activeIndFg)).Bold(true)
+			// Add background if configured
+			activeIndBgConfig := m.config.Sidebar.Colors.ActiveIndicatorBg
+			if activeIndBgConfig != "" {
+				arrowStyle = arrowStyle.Background(lipgloss.Color(activeIndBgConfig))
+			}
 
 			debug("  Rendering: hasPanes=%v, isActive=%v, windowCollapseIcon='%s'", hasPanes, isActive, windowCollapseIcon)
 
