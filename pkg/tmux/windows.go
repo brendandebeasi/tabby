@@ -61,7 +61,7 @@ type Window struct {
 
 func ListWindows() ([]Window, error) {
 	cmd := exec.Command("tmux", "list-windows", "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -103,14 +103,30 @@ func ListWindows() ([]Window, error) {
 				bell = true
 			}
 		}
+		// Activity can be from tmux's window_activity_flag OR our custom @tabby_activity option
+		activity := parts[4] == "1"
+		if len(parts) >= 13 {
+			tabbyActivity := strings.TrimSpace(parts[12])
+			if tabbyActivity == "1" || tabbyActivity == "true" {
+				activity = true
+			}
+		}
+		// Silence can be from tmux's window_silence_flag OR our custom @tabby_silence option
+		silence := parts[6] == "1"
+		if len(parts) >= 14 {
+			tabbySilence := strings.TrimSpace(parts[13])
+			if tabbySilence == "1" || tabbySilence == "true" {
+				silence = true
+			}
+		}
 		windows = append(windows, Window{
 			ID:          parts[0],
 			Index:       index,
 			Name:        stripANSI(parts[2]),
 			Active:      parts[3] == "1",
-			Activity:    parts[4] == "1",
+			Activity:    activity,
 			Bell:        bell,
-			Silence:     parts[6] == "1",
+			Silence:     silence,
 			Last:        parts[7] == "1",
 			Busy:        busy,
 			CustomColor: customColor,
