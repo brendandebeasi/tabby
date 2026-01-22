@@ -91,7 +91,8 @@ type Indicators struct {
 type Indicator struct {
 	Enabled bool     `yaml:"enabled"`
 	Icon    string   `yaml:"icon"`
-	Color   string   `yaml:"color"`
+	Color   string   `yaml:"color"`            // Foreground color
+	Bg      string   `yaml:"bg,omitempty"`     // Background color (optional, for visibility)
 	Frames  []string `yaml:"frames,omitempty"` // Animation frames (if set, animates through these)
 }
 

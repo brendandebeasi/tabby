@@ -462,6 +462,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshMsg:
 		windows, _ := tmux.ListWindowsWithPanes()
+		// Clear bell flag for active windows (user has seen it)
+		for _, w := range windows {
+			if w.Active && w.Bell {
+				_ = exec.Command("tmux", "set-option", "-t", fmt.Sprintf(":%d", w.Index), "-wu", "@tabby_bell").Run()
+			}
+		}
 		m.windows = windows
 		m.grouped = grouping.GroupWindows(windows, m.config.Groups)
 		// Always update pane colors (custom colors can change anytime)
@@ -503,6 +509,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case periodicRefreshMsg:
 		// Periodic refresh for pane titles and other dynamic data
 		windows, _ := tmux.ListWindowsWithPanes()
+		// Clear bell flag for active windows (user has seen it)
+		for _, w := range windows {
+			if w.Active && w.Bell {
+				_ = exec.Command("tmux", "set-option", "-t", fmt.Sprintf(":%d", w.Index), "-wu", "@tabby_bell").Run()
+			}
+		}
 		m.windows = windows
 		m.grouped = grouping.GroupWindows(windows, m.config.Groups)
 		updatePaneHeaderColors(m.grouped)
@@ -619,18 +631,30 @@ func (m model) View() string {
 			if ind.Busy.Enabled && win.Busy {
 				// Busy indicator shown even for active window
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
+				if ind.Busy.Bg != "" {
+					alertStyle = alertStyle.Background(lipgloss.Color(ind.Busy.Bg))
+				}
 				busyFrames := m.getBusyFrames()
 				alertIcon = alertStyle.Render(busyFrames[m.spinnerFrame%len(busyFrames)])
 			} else if !isActive {
 				// Other indicators only for inactive windows
 				if ind.Bell.Enabled && win.Bell {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
+					if ind.Bell.Bg != "" {
+						alertStyle = alertStyle.Background(lipgloss.Color(ind.Bell.Bg))
+					}
 					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Bell))
 				} else if ind.Activity.Enabled && win.Activity {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
+					if ind.Activity.Bg != "" {
+						alertStyle = alertStyle.Background(lipgloss.Color(ind.Activity.Bg))
+					}
 					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Activity))
 				} else if ind.Silence.Enabled && win.Silence {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
+					if ind.Silence.Bg != "" {
+						alertStyle = alertStyle.Background(lipgloss.Color(ind.Silence.Bg))
+					}
 					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Silence))
 				}
 			}

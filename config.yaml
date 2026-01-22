@@ -85,6 +85,7 @@ indicators:
     enabled: true
     icon: "◆"
     color: "#000000"
+    bg: "#ffff00"  # Yellow background for visibility
   silence:
     enabled: true
     icon: "○"

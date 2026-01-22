@@ -61,7 +61,7 @@ type Window struct {
 
 func ListWindows() ([]Window, error) {
 	cmd := exec.Command("tmux", "list-windows", "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -95,13 +95,21 @@ func ListWindows() ([]Window, error) {
 			busyVal := strings.TrimSpace(parts[10])
 			busy = busyVal == "1" || busyVal == "true"
 		}
+		// Bell can be from tmux's window_bell_flag OR our custom @tabby_bell option
+		bell := parts[5] == "1"
+		if len(parts) >= 12 {
+			tabbyBell := strings.TrimSpace(parts[11])
+			if tabbyBell == "1" || tabbyBell == "true" {
+				bell = true
+			}
+		}
 		windows = append(windows, Window{
 			ID:          parts[0],
 			Index:       index,
 			Name:        stripANSI(parts[2]),
 			Active:      parts[3] == "1",
 			Activity:    parts[4] == "1",
-			Bell:        parts[5] == "1",
+			Bell:        bell,
 			Silence:     parts[6] == "1",
 			Last:        parts[7] == "1",
 			Busy:        busy,
