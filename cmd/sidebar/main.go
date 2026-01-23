@@ -376,20 +376,43 @@ func (m model) getBusyFrames() []string {
 	return defaultSpinnerFrames
 }
 
-// lineSpacing returns extra newlines for touch mode / line_height setting
-// Auto-enables touch mode for narrow terminals (< 40 cols) for phone access
-func (m model) lineSpacing() string {
+// isTouchMode returns true if touch mode is active
+func (m model) isTouchMode() bool {
 	// Auto-detect phone: narrow terminal or env override
 	autoTouch := m.width > 0 && m.width < 40
 	envTouch := os.Getenv("TABBY_TOUCH") == "1"
+	return m.config.Sidebar.TouchMode || autoTouch || envTouch
+}
 
-	if m.config.Sidebar.TouchMode || autoTouch || envTouch {
+// lineSpacing returns extra newlines for touch mode / line_height setting
+func (m model) lineSpacing() string {
+	if m.isTouchMode() {
 		return "\n" // Extra line in touch mode
 	}
 	if m.config.Sidebar.LineHeight > 0 {
 		return strings.Repeat("\n", m.config.Sidebar.LineHeight)
 	}
 	return ""
+}
+
+// touchDivider returns a horizontal divider line for touch mode
+func (m model) touchDivider(color string) string {
+	if !m.isTouchMode() {
+		return ""
+	}
+	if color == "" {
+		color = "#444444"
+	}
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+	return style.Render(strings.Repeat("─", m.width)) + "\n"
+}
+
+// touchGroupEnd returns spacing after the last item in a group
+func (m model) touchGroupEnd() string {
+	if !m.isTouchMode() {
+		return ""
+	}
+	return "\n" // Blank line between groups
 }
 
 func (m model) Init() tea.Cmd {
@@ -1061,10 +1084,13 @@ func (m model) View() string {
 
 		// Width: 2 for collapse icon + space, rest for content
 		headerContentStyle := headerStyle.Width(sidebarWidth - 2)
-		s += collapseStyle.Render(collapseIcon+" ") + headerContentStyle.Render(headerText) + "\n" + m.lineSpacing()
+		s += collapseStyle.Render(collapseIcon+" ") + headerContentStyle.Render(headerText) + "\n"
+		s += m.touchDivider(theme.Bg) // Divider under group header in touch mode
+		s += m.lineSpacing()
 
 		// Skip windows if group is collapsed
 		if isCollapsed {
+			s += m.touchGroupEnd() // Space after collapsed group
 			continue
 		}
 
@@ -1331,6 +1357,11 @@ func (m model) View() string {
 				arrowStyle = arrowStyle.Background(lipgloss.Color(activeIndBgConfig))
 			}
 
+			// In touch mode, add padding above each tab for larger tap target
+			if m.isTouchMode() {
+				s += "\n"
+			}
+
 			if hasPanes {
 				// Windows with panes: ├─⊟ content (collapse icon after tree)
 				s += indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(contentText) + "\n" + m.lineSpacing()
@@ -1485,26 +1516,46 @@ func (m model) View() string {
 			// Increment visual position for next window
 			visualPos++
 		}
+		// Add spacing after each group in touch mode
+		s += m.touchGroupEnd()
 	}
 
 	// Buttons
-	if m.config.Sidebar.NewTabButton {
+	if m.config.Sidebar.NewTabButton || m.config.Sidebar.NewGroupButton || m.config.Sidebar.CloseButton {
+		s += m.touchDivider("#444444") // Divider before buttons in touch mode
 		s += "\n"
+	}
+
+	if m.config.Sidebar.NewTabButton {
 		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#27ae60"))
-		s += buttonStyle.Render("[+] New Tab") + "\n" + m.lineSpacing()
+		if m.isTouchMode() {
+			// Taller button with padding
+			s += "\n"
+			s += buttonStyle.Render("  [+] New Tab") + "\n"
+			s += "\n"
+		} else {
+			s += buttonStyle.Render("[+] New Tab") + "\n" + m.lineSpacing()
+		}
 	}
 
 	if m.config.Sidebar.NewGroupButton {
-		if !m.config.Sidebar.NewTabButton {
-			s += "\n" // Add blank line if New Tab button isn't there
-		}
 		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9b59b6"))
-		s += buttonStyle.Render("[+] New Group") + "\n" + m.lineSpacing()
+		if m.isTouchMode() {
+			s += buttonStyle.Render("  [+] New Group") + "\n"
+			s += "\n"
+		} else {
+			s += buttonStyle.Render("[+] New Group") + "\n" + m.lineSpacing()
+		}
 	}
 
 	if m.config.Sidebar.CloseButton {
 		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e74c3c"))
-		s += buttonStyle.Render("[x] Close Tab") + "\n" + m.lineSpacing()
+		if m.isTouchMode() {
+			s += buttonStyle.Render("  [x] Close Tab") + "\n"
+			s += "\n"
+		} else {
+			s += buttonStyle.Render("[x] Close Tab") + "\n" + m.lineSpacing()
+		}
 	}
 
 	// Clock widget (bottom position)
