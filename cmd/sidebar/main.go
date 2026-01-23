@@ -1504,10 +1504,10 @@ func (m model) renderClockWidget() string {
 	clock := m.config.Widgets.Clock
 	now := time.Now()
 
-	// Default format
+	// Default format (with seconds)
 	timeFormat := clock.Format
 	if timeFormat == "" {
-		timeFormat = "15:04"
+		timeFormat = "15:04:05"
 	}
 
 	// Build style
@@ -1520,16 +1520,38 @@ func (m model) renderClockWidget() string {
 		style = style.Background(lipgloss.Color(clock.Bg))
 	}
 
+	// Divider style
+	dividerFg := clock.DividerFg
+	if dividerFg == "" {
+		dividerFg = "#444444"
+	}
+	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(dividerFg))
+
 	var result string
-	result += "\n" // Separator line
+
+	// Margin top
+	for i := 0; i < clock.MarginTop; i++ {
+		result += "\n"
+	}
+
+	// Divider (top of widget)
+	if clock.Divider != "" {
+		dividerLine := strings.Repeat(clock.Divider, m.width/len(clock.Divider))
+		result += dividerStyle.Render(dividerLine) + "\n"
+	}
+
+	// Padding top
+	for i := 0; i < clock.PaddingTop; i++ {
+		result += "\n"
+	}
 
 	// Render time centered
 	timeStr := now.Format(timeFormat)
-	padding := (m.width - len(timeStr)) / 2
-	if padding < 0 {
-		padding = 0
+	timePadding := (m.width - len(timeStr)) / 2
+	if timePadding < 0 {
+		timePadding = 0
 	}
-	result += style.Render(strings.Repeat(" ", padding) + timeStr) + "\n"
+	result += style.Render(strings.Repeat(" ", timePadding) + timeStr) + "\n"
 
 	// Optionally show date
 	if clock.ShowDate {
@@ -1543,6 +1565,16 @@ func (m model) renderClockWidget() string {
 			datePadding = 0
 		}
 		result += style.Render(strings.Repeat(" ", datePadding) + dateStr) + "\n"
+	}
+
+	// Padding bottom
+	for i := 0; i < clock.PaddingBot; i++ {
+		result += "\n"
+	}
+
+	// Margin bottom
+	for i := 0; i < clock.MarginBot; i++ {
+		result += "\n"
 	}
 
 	return result

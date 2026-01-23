@@ -24,13 +24,19 @@ type Widgets struct {
 }
 
 type ClockWidget struct {
-	Enabled  bool   `yaml:"enabled"`
-	Format   string `yaml:"format"`    // Go time format (default: "15:04")
-	ShowDate bool   `yaml:"show_date"` // Show date below time
-	DateFmt  string `yaml:"date_format"` // Date format (default: "Mon Jan 2")
-	Fg       string `yaml:"fg"`        // Text color
-	Bg       string `yaml:"bg"`        // Background color
-	Position string `yaml:"position"`  // "top" or "bottom" (default: bottom)
+	Enabled     bool   `yaml:"enabled"`
+	Format      string `yaml:"format"`       // Go time format (default: "15:04:05")
+	ShowDate    bool   `yaml:"show_date"`    // Show date below time
+	DateFmt     string `yaml:"date_format"`  // Date format (default: "Mon Jan 2")
+	Fg          string `yaml:"fg"`           // Text color
+	Bg          string `yaml:"bg"`           // Background color
+	Position    string `yaml:"position"`     // "top" or "bottom" (default: bottom)
+	Divider     string `yaml:"divider"`      // Divider line above/below widget (e.g., "─", "━", "=")
+	DividerFg   string `yaml:"divider_fg"`   // Divider color
+	PaddingTop  int    `yaml:"padding_top"`  // Blank lines above widget
+	PaddingBot  int    `yaml:"padding_bottom"` // Blank lines below widget
+	MarginTop   int    `yaml:"margin_top"`   // Lines above divider (if any)
+	MarginBot   int    `yaml:"margin_bottom"` // Lines below divider (if any)
 }
 
 type PromptStyle struct {

@@ -126,9 +126,15 @@ indicators:
 widgets:
   clock:
     enabled: true
-    format: "15:04"        # Go time format (24h)
+    format: "15:04:05"     # Go time format (with seconds)
     show_date: true
     date_format: "Mon Jan 2"
     fg: "#888888"
     # bg: "#1a1a1a"        # Optional background
     position: bottom       # "top" or "bottom"
+    divider: "─"           # Divider line (─, ━, =, -)
+    divider_fg: "#444444"
+    margin_top: 1          # Blank lines before divider
+    margin_bottom: 0
+    padding_top: 0         # Blank lines after divider, before content
+    padding_bottom: 0
