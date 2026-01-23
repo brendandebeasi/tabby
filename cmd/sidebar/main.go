@@ -26,6 +26,10 @@ import (
 var debugLog *log.Logger
 var debugEnabled bool
 
+// clickDebugEnabled enables detailed click/view logging to /tmp/tabby-click.log
+// Set TABBY_CLICK_DEBUG=1 to enable
+var clickDebugEnabled = os.Getenv("TABBY_CLICK_DEBUG") == "1"
+
 // abs returns absolute value of an int
 func abs(x int) int {
 	if x < 0 {
@@ -50,6 +54,75 @@ func debug(format string, args ...interface{}) {
 	if debugEnabled && debugLog != nil {
 		debugLog.Printf(format, args...)
 	}
+}
+
+// Shared state file for broadcasting active window across all sidebars
+// This allows instant updates when switching windows without waiting for tmux hooks
+var sharedStateFile string
+
+// sharedState represents the active window broadcast from any sidebar
+type sharedState struct {
+	Timestamp int64 `json:"t"`
+	WindowIdx int   `json:"w"`
+}
+
+func initSharedState() {
+	// Get tmux session ID to make file unique per session
+	out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+	if err != nil {
+		sharedStateFile = "/tmp/tabby-active"
+	} else {
+		sessionID := strings.TrimSpace(string(out))
+		sessionID = strings.ReplaceAll(sessionID, "$", "")
+		sharedStateFile = fmt.Sprintf("/tmp/tabby-active-%s", sessionID)
+	}
+}
+
+// writeSharedActive broadcasts the new active window to all sidebars
+func writeSharedActive(windowIdx int) {
+	if sharedStateFile == "" {
+		initSharedState()
+	}
+	state := sharedState{
+		Timestamp: time.Now().UnixMilli(),
+		WindowIdx: windowIdx,
+	}
+	data, _ := json.Marshal(state)
+	_ = os.WriteFile(sharedStateFile, data, 0644)
+	if clickDebugEnabled {
+		if f, err := os.OpenFile("/tmp/tabby-click.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			fmt.Fprintf(f, "%s [%d] BROADCAST: active=%d to %s\n", time.Now().Format("15:04:05.000"), os.Getpid(), windowIdx, sharedStateFile)
+			f.Close()
+		}
+	}
+}
+
+// readSharedActive reads the broadcasted active window if it's recent (< 500ms old)
+// Returns the window index and true if valid, or -1 and false if no valid state
+func readSharedActive() (int, bool) {
+	if sharedStateFile == "" {
+		initSharedState()
+	}
+	data, err := os.ReadFile(sharedStateFile)
+	if err != nil {
+		return -1, false
+	}
+	var state sharedState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return -1, false
+	}
+	// Only use if less than 500ms old
+	age := time.Now().UnixMilli() - state.Timestamp
+	if age > 500 {
+		return -1, false
+	}
+	if clickDebugEnabled {
+		if f, err := os.OpenFile("/tmp/tabby-click.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			fmt.Fprintf(f, "%s [%d] READ_SHARED: active=%d age=%dms\n", time.Now().Format("15:04:05.000"), os.Getpid(), state.WindowIdx, age)
+			f.Close()
+		}
+	}
+	return state.WindowIdx, true
 }
 
 // getCurrentDir returns the directory containing the sidebar binary
@@ -117,6 +190,9 @@ type model struct {
 	lastClickTime time.Time
 	lastClickX    int
 	lastClickY    int
+
+	// Refresh suppression - after optimistic UI, ignore redundant USR1 signals
+	lastOptimisticUpdate time.Time
 }
 
 type refreshMsg struct{}
@@ -126,6 +202,9 @@ type reloadConfigMsg struct{}
 type spinnerTickMsg struct{}
 
 type periodicRefreshMsg struct{}
+
+// sharedStateTickMsg is for fast shared state checks (30fps)
+type sharedStateTickMsg struct{}
 
 // triggerRefresh returns a command that triggers a refresh
 func triggerRefresh() tea.Cmd {
@@ -161,8 +240,15 @@ func spinnerTick() tea.Cmd {
 
 // periodicRefresh schedules periodic data refresh (for pane titles, etc.)
 func periodicRefresh() tea.Cmd {
-	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return periodicRefreshMsg{}
+	})
+}
+
+// sharedStateTick schedules fast shared state checks (30fps for responsive UI)
+func sharedStateTick() tea.Cmd {
+	return tea.Tick(32*time.Millisecond, func(t time.Time) tea.Msg {
+		return sharedStateTickMsg{}
 	})
 }
 
@@ -281,8 +367,8 @@ func (m model) getBusyFrames() []string {
 }
 
 func (m model) Init() tea.Cmd {
-	// Start periodic refresh for pane titles, etc.
-	return periodicRefresh()
+	// Start periodic refresh for pane titles, and fast shared state checks for responsive UI
+	return tea.Batch(periodicRefresh(), sharedStateTick())
 }
 
 func (m *model) buildWindowRefs() {
@@ -411,6 +497,21 @@ func (m model) calculateButtonLines() (newTabLine, newGroupLine, closeTabLine, c
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Log message types when TABBY_CLICK_DEBUG=1
+	if clickDebugEnabled {
+		if f, err := os.OpenFile("/tmp/tabby-click.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			activeIdx := -1
+			for _, w := range m.windows {
+				if w.Active {
+					activeIdx = w.Index
+					break
+				}
+			}
+			fmt.Fprintf(f, "%s [%d] UPDATE: msg=%T active=%d\n", time.Now().Format("15:04:05.000"), os.Getpid(), msg, activeIdx)
+			f.Close()
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		// Handle confirmation dialog first
@@ -477,20 +578,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if win := m.getSelectedWindow(); win != nil {
-				_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", win.Index)).Run()
-				// Select the pane that isn't running sidebar
-				_ = exec.Command("bash", "-c", `
-					main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
-					if [ -n "$main_pane" ]; then
-						tmux select-pane -t "$main_pane"
-					fi
-				`).Run()
-				// Signal ALL sidebars to refresh
-				_ = exec.Command("bash", "-c", `
-					for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
-						kill -USR1 "$pid" 2>/dev/null || true
-					done
-				`).Run()
+				// OPTIMISTIC UI: Update local state immediately for instant feedback
+				selectedIndex := win.Index
+				for i := range m.windows {
+					m.windows[i].Active = (m.windows[i].Index == selectedIndex)
+				}
+				// Broadcast to all sidebars via shared state file
+				writeSharedActive(selectedIndex)
+				m.grouped = grouping.GroupWindowsWithOptions(m.windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
+				m.buildWindowRefs()
+				m.lastOptimisticUpdate = time.Now() // Suppress redundant USR1 refresh
+
+				// Run tmux commands async - tmux hooks will signal sidebars
+				go func(idx int) {
+					exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", idx)).Run()
+					// Select the pane that isn't running sidebar
+					exec.Command("bash", "-c", `
+						main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
+						if [ -n "$main_pane" ]; then
+							tmux select-pane -t "$main_pane"
+						fi
+					`).Run()
+				}(selectedIndex)
 				return m, nil
 			}
 		case "d", "x":
@@ -547,6 +656,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		clicked := m.getWindowAtLine(msg.Y)
 		newTabLine, newGroupLine, closeTabLine, _ := m.calculateButtonLines()
 
+		// Log mouse events when TABBY_CLICK_DEBUG=1
+		if clickDebugEnabled {
+			if f, err := os.OpenFile("/tmp/tabby-click.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+				fmt.Fprintf(f, "%s MOUSE: action=%v button=%v x=%d y=%d\n", time.Now().Format("15:04:05.000"), msg.Action, msg.Button, msg.X, msg.Y)
+				f.Close()
+			}
+		}
+
 		// Check for double-click to toggle sidebar collapse
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
 			now := time.Now()
@@ -601,35 +718,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.windows[i].Panes[j].Active = (m.windows[i].Panes[j].ID == paneID)
 						}
 					}
+					// Broadcast to all sidebars via shared state file
+					writeSharedActive(windowIdx)
 					m.grouped = grouping.GroupWindowsWithOptions(m.windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
 					m.buildWindowRefs()
+					m.lastOptimisticUpdate = time.Now() // Suppress redundant USR1 refresh
 
-					// Send tmux command asynchronously
-					go func() {
-						_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", windowIdx), ";",
-							"select-pane", "-t", paneID).Run()
-						signalSidebarsDelayed()
-					}()
+					// Send tmux command async - tmux hooks will signal sidebars
+					go exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", windowIdx), ";",
+						"select-pane", "-t", paneID).Run()
 					return m, nil
 				} else if clicked != nil {
 					// OPTIMISTIC UI: Update local state immediately for instant feedback
 					clickedIndex := clicked.Index
+					if clickDebugEnabled {
+						if f, err := os.OpenFile("/tmp/tabby-click.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+							fmt.Fprintf(f, "%s CLICK: window %d, updating Active states\n", time.Now().Format("15:04:05.000"), clickedIndex)
+							f.Close()
+						}
+					}
 					for i := range m.windows {
 						m.windows[i].Active = (m.windows[i].Index == clickedIndex)
 					}
+					// Broadcast to all sidebars via shared state file
+					writeSharedActive(clickedIndex)
 					// Recompute grouped state with optimistic update
 					m.grouped = grouping.GroupWindowsWithOptions(m.windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
 					m.buildWindowRefs()
+					m.lastOptimisticUpdate = time.Now() // Suppress redundant USR1 refresh
 
-					// Send tmux command - use direct tmux command, much faster than bash
-					// Just select window, tmux will remember the last active pane
-					go func() {
-						_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", clickedIndex)).Run()
-						// Signal other sidebars to refresh
-						signalSidebarsDelayed()
-					}()
+					// Send tmux command async - tmux hooks will signal sidebars
+					go exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", clickedIndex)).Run()
 
-					// Return immediately with updated model
+					// Return immediately with updated model - View() should be called next
 					return m, nil
 				} else if m.config.Sidebar.NewTabButton && msg.Y == newTabLine {
 					// Just create new window - the after-new-window hook adds the sidebar
@@ -679,13 +800,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case refreshMsg:
+		// Always refresh on USR1 - the new sidebar needs current state
+		// (optimistic UI only helps the sidebar that was clicked)
+
 		t := perf.Start("Update.refreshMsg")
 		defer t.Stop()
 		windows, _ := tmux.ListWindowsWithPanes()
-		// Clear bell flag for active windows (user has seen it)
+
+		// Check for shared state from another sidebar's click
+		if sharedIdx, ok := readSharedActive(); ok {
+			for i := range windows {
+				windows[i].Active = (windows[i].Index == sharedIdx)
+			}
+		}
+
+		// Clear bell flag for active windows (user has seen it) - async
 		for _, w := range windows {
 			if w.Active && w.Bell {
-				_ = exec.Command("tmux", "set-option", "-t", fmt.Sprintf(":%d", w.Index), "-wu", "@tabby_bell").Run()
+				go exec.Command("tmux", "set-option", "-t", fmt.Sprintf(":%d", w.Index), "-wu", "@tabby_bell").Run()
 			}
 		}
 		m.windows = windows
@@ -729,10 +861,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case periodicRefreshMsg:
 		// Periodic refresh for pane titles and other dynamic data
 		windows, _ := tmux.ListWindowsWithPanes()
-		// Clear bell flag for active windows (user has seen it)
+
+		// Check for shared state from another sidebar's click
+		// This allows instant cross-sidebar updates without waiting for tmux
+		if sharedIdx, ok := readSharedActive(); ok {
+			// Override Active flags to match shared state
+			for i := range windows {
+				windows[i].Active = (windows[i].Index == sharedIdx)
+			}
+		}
+
+		// Clear bell flag for active windows (user has seen it) - async
 		for _, w := range windows {
 			if w.Active && w.Bell {
-				_ = exec.Command("tmux", "set-option", "-t", fmt.Sprintf(":%d", w.Index), "-wu", "@tabby_bell").Run()
+				go exec.Command("tmux", "set-option", "-t", fmt.Sprintf(":%d", w.Index), "-wu", "@tabby_bell").Run()
 			}
 		}
 		m.windows = windows
@@ -741,6 +883,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.buildWindowRefs()
 		// Schedule next periodic refresh
 		return m, periodicRefresh()
+
+	case sharedStateTickMsg:
+		// Fast tick (30fps) - only check shared state, no tmux queries
+		if sharedIdx, ok := readSharedActive(); ok {
+			// Find current active window
+			currentActive := -1
+			for _, w := range m.windows {
+				if w.Active {
+					currentActive = w.Index
+					break
+				}
+			}
+			// Only update if different
+			if sharedIdx != currentActive {
+				for i := range m.windows {
+					m.windows[i].Active = (m.windows[i].Index == sharedIdx)
+				}
+				m.grouped = grouping.GroupWindowsWithOptions(m.windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
+				m.buildWindowRefs()
+			}
+		}
+		return m, sharedStateTick()
 
 	case tea.WindowSizeMsg:
 		// Update terminal size for dynamic resizing
@@ -754,6 +918,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	t := perf.Start("View")
 	defer t.Stop()
+
+	// Log View() calls when TABBY_CLICK_DEBUG=1
+	if clickDebugEnabled {
+		if f, err := os.OpenFile("/tmp/tabby-click.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			activeIdx := -1
+			for _, w := range m.windows {
+				if w.Active {
+					activeIdx = w.Index
+					break
+				}
+			}
+			fmt.Fprintf(f, "%s [%d] VIEW: active=%d\n", time.Now().Format("15:04:05.000"), os.Getpid(), activeIdx)
+			f.Close()
+		}
+	}
 
 	// Show confirmation dialog if active
 	if m.confirmClose && m.confirmWindow != nil {
@@ -771,8 +950,6 @@ func (m model) View() string {
 			windowStyle.Render(fmt.Sprintf("  %d. %s", m.confirmWindow.Index, m.confirmWindow.Name)) + "\n\n" +
 			promptStyle.Render("  Press y to confirm, n to cancel")
 	}
-
-	debug("--- View() render ---")
 
 	// Show collapsed view if sidebar is collapsed
 	if m.sidebarCollapsed {
@@ -942,15 +1119,12 @@ func (m model) View() string {
 			alertIcon := ""
 			ind := m.config.Indicators
 
-			// Debug: log window state
-			debug("Window %d (%s): Active=%v, Busy=%v (panes: %d), Bell=%v, Activity=%v, Silence=%v",
-				win.Index, win.Name, isActive, win.Busy, len(win.Panes), win.Bell, win.Activity, win.Silence)
-			for _, p := range win.Panes {
-				debug("  Pane %d: cmd=%s, busy=%v, active=%v", p.Index, p.Command, p.Busy, p.Active)
+			// Debug logging - guarded to avoid arg evaluation overhead
+			if debugEnabled {
+				debug("Window %d (%s): Active=%v, Busy=%v, Bell=%v", win.Index, win.Name, isActive, win.Busy, win.Bell)
 			}
 
 			if ind.Busy.Enabled && win.Busy {
-				debug("  -> BUSY indicator (Busy.Enabled=%v, win.Busy=%v)", ind.Busy.Enabled, win.Busy)
 				// Busy indicator shown even for active window
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
 				if ind.Busy.Bg != "" {
@@ -959,7 +1133,6 @@ func (m model) View() string {
 				busyFrames := m.getBusyFrames()
 				alertIcon = alertStyle.Render(busyFrames[m.spinnerFrame%len(busyFrames)])
 			} else if ind.Input.Enabled && win.Input {
-				debug("  -> INPUT indicator (needs user input)")
 				// Input indicator shown even for active window - important to see
 				inputIcon := ind.Input.Icon
 				if inputIcon == "" {
@@ -978,31 +1151,24 @@ func (m model) View() string {
 			} else if !isActive {
 				// Other indicators only for inactive windows
 				if ind.Bell.Enabled && win.Bell {
-					debug("  -> BELL indicator")
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
 					if ind.Bell.Bg != "" {
 						alertStyle = alertStyle.Background(lipgloss.Color(ind.Bell.Bg))
 					}
 					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Bell))
 				} else if ind.Activity.Enabled && win.Activity {
-					debug("  -> ACTIVITY indicator")
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
 					if ind.Activity.Bg != "" {
 						alertStyle = alertStyle.Background(lipgloss.Color(ind.Activity.Bg))
 					}
 					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Activity))
 				} else if ind.Silence.Enabled && win.Silence {
-					debug("  -> SILENCE indicator")
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
 					if ind.Silence.Bg != "" {
 						alertStyle = alertStyle.Background(lipgloss.Color(ind.Silence.Bg))
 					}
 					alertIcon = alertStyle.Render(m.getIndicatorIcon(ind.Silence))
-				} else {
-					debug("  -> no indicator")
 				}
-			} else {
-				debug("  -> no indicator (active window, not busy)")
 			}
 
 			// Build tab content (use visual position, not tmux index)
@@ -1125,11 +1291,8 @@ func (m model) View() string {
 				arrowStyle = arrowStyle.Background(lipgloss.Color(activeIndBgConfig))
 			}
 
-			debug("  Rendering: hasPanes=%v, isActive=%v, windowCollapseIcon='%s'", hasPanes, isActive, windowCollapseIcon)
-
 			if hasPanes {
 				// Windows with panes: ├─⊟ content (collapse icon after tree)
-				debug("    -> hasPanes branch: icon='%s'", windowCollapseIcon)
 				s += indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(contentText) + "\n"
 			} else if isActive {
 				// Active single-pane: ├● content (last char becomes indicator)
@@ -1714,20 +1877,30 @@ func watchConfig(p *tea.Program, configPath string) {
 
 // updatePaneHeaderColors sets pane header colors on each window for pane-border-format
 func updatePaneHeaderColors(grouped []grouping.GroupedWindows) {
-	for _, group := range grouped {
-		baseColor := group.Theme.Bg
-		for _, win := range group.Windows {
-			// Use window custom color if set, otherwise group color
-			color := baseColor
-			if win.CustomColor != "" {
-				color = win.CustomColor
+	// Run async to avoid blocking UI - pane colors can update slightly after
+	go func() {
+		// Build a single batched tmux command for all windows
+		var args []string
+		for _, group := range grouped {
+			baseColor := group.Theme.Bg
+			for _, win := range group.Windows {
+				color := baseColor
+				if win.CustomColor != "" {
+					color = win.CustomColor
+				}
+				inactive := grouping.LightenColor(color, 0.15)
+				// Chain commands with semicolons
+				if len(args) > 0 {
+					args = append(args, ";")
+				}
+				args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", color)
+				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", inactive)
 			}
-			// Set both active and inactive colors
-			_ = exec.Command("tmux", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", color).Run()
-			inactive := grouping.LightenColor(color, 0.15)
-			_ = exec.Command("tmux", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", inactive).Run()
 		}
-	}
+		if len(args) > 0 {
+			exec.Command("tmux", args...).Run()
+		}
+	}()
 }
 
 func main() {
