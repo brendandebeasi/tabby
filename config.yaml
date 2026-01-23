@@ -132,9 +132,12 @@ widgets:
     fg: "#888888"
     # bg: "#1a1a1a"        # Optional background
     position: bottom       # "top" or "bottom"
-    divider: "─"           # Divider line (─, ━, =, -)
+    pin: true              # Pin to bottom (stays visible when scrolling)
+    priority: 100          # Order for multiple pinned widgets (lower = closer to bottom)
+    divider: "─"           # Divider line above widget
+    divider_bottom: ""     # Divider line below widget
     divider_fg: "#444444"
-    margin_top: 1          # Blank lines before divider
-    margin_bottom: 0
-    padding_top: 0         # Blank lines after divider, before content
+    margin_top: 1          # Blank lines before top divider
+    margin_bottom: 0       # Blank lines after bottom divider
+    padding_top: 0         # Blank lines between divider and content
     padding_bottom: 0

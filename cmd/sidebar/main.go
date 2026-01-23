@@ -1577,6 +1577,16 @@ func (m model) renderClockWidget() string {
 		result += "\n"
 	}
 
+	// Bottom divider
+	if clock.DividerBottom != "" {
+		dividerWidth := lipgloss.Width(clock.DividerBottom)
+		if dividerWidth == 0 {
+			dividerWidth = 1
+		}
+		dividerLine := strings.Repeat(clock.DividerBottom, m.width/dividerWidth)
+		result += dividerStyle.Render(dividerLine) + "\n"
+	}
+
 	// Margin bottom
 	for i := 0; i < clock.MarginBot; i++ {
 		result += "\n"

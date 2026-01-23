@@ -18,10 +18,13 @@ widgets:
     fg: "#888888"            # Text color
     bg: ""                   # Background color (optional)
     position: bottom         # "top" or "bottom"
-    divider: "─"             # Divider line character
+    pin: true                # Pin to bottom (stays visible)
+    priority: 100            # Order for multiple widgets (lower = closer to bottom)
+    divider: "─"             # Divider line above widget
+    divider_bottom: ""       # Divider line below widget
     divider_fg: "#444444"    # Divider color
-    margin_top: 1            # Blank lines before widget
-    margin_bottom: 0         # Blank lines after widget
+    margin_top: 1            # Blank lines before top divider
+    margin_bottom: 0         # Blank lines after bottom divider
     padding_top: 0           # Lines between divider and content
     padding_bottom: 0
 ```
@@ -67,8 +70,18 @@ Common divider options:
 [time]
 [date if show_date]
 [padding_bottom lines]
+[divider_bottom line]
 [margin_bottom lines]
 ```
+
+#### Pin and Priority
+
+When `pin: true`, the widget stays at the bottom of the sidebar even if content scrolls.
+
+When multiple widgets are pinned, `priority` determines order:
+- Lower priority = closer to bottom edge
+- Higher priority = further from bottom edge
+- Example: priority 100 appears below priority 50
 
 ## Creating Custom Widgets
 
