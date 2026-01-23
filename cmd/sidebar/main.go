@@ -1107,13 +1107,15 @@ func (m model) View() string {
 				treeBranchRunes := []rune(treeBranch)
 				treeBranchFirst := string(treeBranchRunes[0])
 
-				// Determine indicator background - "auto" uses window/group color
+				// Determine indicator background - "auto" uses group's active_indicator_bg (lighter color)
 				indicatorBgConfig := m.config.Sidebar.Colors.ActiveIndicatorBg
 				var indicatorBg string
 				if indicatorBgConfig == "" || indicatorBgConfig == "auto" {
-					indicatorBg = bgColor
-					if indicatorBg == "" {
-						indicatorBg = theme.Bg // fallback to group theme
+					// Use theme's active_indicator_bg if set, otherwise fall back to theme.Bg
+					if theme.ActiveIndicatorBg != "" {
+						indicatorBg = theme.ActiveIndicatorBg
+					} else {
+						indicatorBg = theme.Bg
 					}
 				} else {
 					indicatorBg = indicatorBgConfig
@@ -1215,11 +1217,31 @@ func (m model) View() string {
 					// Active pane gets indicator, inactive gets extended pipe
 					paneActiveIndicator := m.config.Sidebar.Colors.ActiveIndicator
 					if paneActiveIndicator == "" {
-						paneActiveIndicator = "◀"
+						paneActiveIndicator = "█"
 					}
 					if pane.Active && isActive {
+						// Create pane indicator style using theme's lighter color
+						paneIndicatorBgConfig := m.config.Sidebar.Colors.ActiveIndicatorBg
+						var paneIndicatorBg string
+						if paneIndicatorBgConfig == "" || paneIndicatorBgConfig == "auto" {
+							if theme.ActiveIndicatorBg != "" {
+								paneIndicatorBg = theme.ActiveIndicatorBg
+							} else {
+								paneIndicatorBg = theme.Bg
+							}
+						} else {
+							paneIndicatorBg = paneIndicatorBgConfig
+						}
+						paneIndicatorFgConfig := m.config.Sidebar.Colors.ActiveIndicatorFg
+						var paneIndicatorFg string
+						if paneIndicatorFgConfig == "" || paneIndicatorFgConfig == "auto" {
+							paneIndicatorFg = paneIndicatorBg // Same as bg = solid color
+						} else {
+							paneIndicatorFg = paneIndicatorFgConfig
+						}
+						paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Background(lipgloss.Color(paneIndicatorBg)).Bold(true)
 						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-						s += " " + treeContinue + treeStyle.Render(" "+paneBranch+treeConnectorChar) + arrowStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText) + "\n"
+						s += " " + treeContinue + treeStyle.Render(" "+paneBranch+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText) + "\n"
 					} else {
 						// Extend pipe to connect
 						s += " " + treeContinue + treeStyle.Render(" "+paneBranch+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText) + "\n"

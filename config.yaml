@@ -26,6 +26,7 @@ groups:
       active_bg: "#6b0f0f"
       active_fg: "#ffffff"
       icon: ""
+      active_indicator_bg: "#26c6da"  # Bright teal
 
   - name: "Gunpowder"
     pattern: "^GP\\|"
@@ -36,6 +37,7 @@ groups:
       active_bg: "#34495e"
       active_fg: "#ffffff"
       icon: "🔫"
+      active_indicator_bg: "#26c6da"  # Bright teal
 
   - name: "Default"
     pattern: ".*"
@@ -45,6 +47,7 @@ groups:
       active_bg: "#3498db"
       active_fg: "#ffffff"
       icon: ""
+      active_indicator_bg: "#26c6da"  # Bright teal
 
 bindings:
   toggle_sidebar: "prefix + Tab"
@@ -59,12 +62,12 @@ sidebar:
   sort_by: "group"  # "group" or "index"
   debug: true  # Enable debug logging to /tmp/tabby-debug.log
   colors:
-    disclosure_fg: "#000000"        # Disclosure icon color
+    disclosure_fg: "#e8e8e8"        # Disclosure icon color (off white)
     disclosure_expanded: "⊟"        # Expanded state icon (boxed minus)
     disclosure_collapsed: "⊞"       # Collapsed state icon (boxed plus)
-    active_indicator: "●"           # Active window/pane indicator character
-    active_indicator_fg: "auto"     # Foreground: "auto" = same as bg (solid block), or hex color
-    active_indicator_bg: "auto"     # Background: "auto" = window/group color, or hex color
+    active_indicator: "█"           # Active window/pane indicator character (solid block)
+    active_indicator_fg: "auto"     # Foreground: "auto" = same as bg (solid color)
+    active_indicator_bg: "auto"     # Background: "auto" = group's active_indicator_bg color
     tree_fg: "#888888"              # Tree branch color
     tree_branch: "├─"               # Branch connector
     tree_branch_last: "└─"          # Last branch connector
@@ -116,6 +119,5 @@ indicators:
   input:
     enabled: true
     icon: "?"
-    color: "#ffffff"
-    bg: "#9b59b6"  # Purple background - needs attention
+    color: "#6a1b9a"  # Dark saturated purple - needs attention
     frames: ["?", "?"]  # Can add animation frames like ["?", " "] for blinking

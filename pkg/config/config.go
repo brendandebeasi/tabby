@@ -82,13 +82,14 @@ type Group struct {
 }
 
 type Theme struct {
-	Bg         string `yaml:"bg"`
-	Fg         string `yaml:"fg"`
-	ActiveBg   string `yaml:"active_bg"`
-	ActiveFg   string `yaml:"active_fg"`
-	InactiveBg string `yaml:"inactive_bg"` // Inactive tab background (default: computed from bg)
-	InactiveFg string `yaml:"inactive_fg"` // Inactive tab text
-	Icon       string `yaml:"icon"`
+	Bg                 string `yaml:"bg"`
+	Fg                 string `yaml:"fg"`
+	ActiveBg           string `yaml:"active_bg"`
+	ActiveFg           string `yaml:"active_fg"`
+	InactiveBg         string `yaml:"inactive_bg"`          // Inactive tab background (default: computed from bg)
+	InactiveFg         string `yaml:"inactive_fg"`          // Inactive tab text
+	Icon               string `yaml:"icon"`
+	ActiveIndicatorBg  string `yaml:"active_indicator_bg"`  // Lighter color for active indicator block
 }
 
 type Bindings struct {
