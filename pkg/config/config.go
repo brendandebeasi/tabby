@@ -20,7 +20,112 @@ type Config struct {
 }
 
 type Widgets struct {
-	Clock ClockWidget `yaml:"clock"`
+	Clock   ClockWidget   `yaml:"clock"`
+	Pet     PetWidget     `yaml:"pet"`
+	Git     GitWidget     `yaml:"git"`
+	Session SessionWidget `yaml:"session"`
+	Stats   StatsWidget   `yaml:"stats"`
+}
+
+// StatsWidget shows system stats (CPU, memory, battery)
+type StatsWidget struct {
+	Enabled        bool   `yaml:"enabled"`
+	Style          string `yaml:"style"`           // nerd | emoji | ascii | minimal
+	ShowCPU        bool   `yaml:"show_cpu"`        // Show CPU usage
+	ShowMemory     bool   `yaml:"show_memory"`     // Show memory usage
+	ShowBattery    bool   `yaml:"show_battery"`    // Show battery status
+	BarStyle       string `yaml:"bar_style"`       // block | braille | dots | ascii
+	BarWidth       int    `yaml:"bar_width"`       // Width of progress bars
+	UpdateInterval int    `yaml:"update_interval"` // Seconds between updates (default: 2)
+	Position       string `yaml:"position"`        // top | bottom
+	Pin            bool   `yaml:"pin"`             // Pin to position
+	Priority       int    `yaml:"priority"`        // Order among widgets
+	Fg             string `yaml:"fg"`              // Text color
+	Bg             string `yaml:"bg"`              // Background color
+	CPUFg          string `yaml:"cpu_fg"`          // CPU text color
+	MemoryFg       string `yaml:"memory_fg"`       // Memory text color
+	BatteryFg      string `yaml:"battery_fg"`      // Battery text color
+	Divider        string `yaml:"divider"`         // Divider line above widget
+	DividerFg      string `yaml:"divider_fg"`      // Divider color
+	PaddingTop     int    `yaml:"padding_top"`     // Blank lines above content
+	PaddingBot     int    `yaml:"padding_bottom"`  // Blank lines below content
+	MarginTop      int    `yaml:"margin_top"`      // Lines above top divider
+	MarginBot      int    `yaml:"margin_bottom"`   // Lines below bottom divider
+}
+
+// SessionWidget shows tmux session info
+type SessionWidget struct {
+	Enabled         bool   `yaml:"enabled"`
+	Style           string `yaml:"style"`            // nerd | emoji | ascii | minimal
+	ShowClients     bool   `yaml:"show_clients"`     // Show connected clients count
+	ShowWindowCount bool   `yaml:"show_windows"`     // Show window count
+	Position        string `yaml:"position"`         // top | bottom
+	Pin             bool   `yaml:"pin"`              // Pin to position
+	Priority        int    `yaml:"priority"`         // Order among widgets
+	Fg              string `yaml:"fg"`               // Text color
+	Bg              string `yaml:"bg"`               // Background color
+	SessionFg       string `yaml:"session_fg"`       // Session name color
+	Divider         string `yaml:"divider"`          // Divider line above widget
+	DividerFg       string `yaml:"divider_fg"`       // Divider color
+	PaddingTop      int    `yaml:"padding_top"`      // Blank lines above content
+	PaddingBot      int    `yaml:"padding_bottom"`   // Blank lines below content
+	MarginTop       int    `yaml:"margin_top"`       // Lines above top divider
+	MarginBot       int    `yaml:"margin_bottom"`    // Lines below bottom divider
+}
+
+// GitWidget shows git repository status
+type GitWidget struct {
+	Enabled         bool   `yaml:"enabled"`
+	Style           string `yaml:"style"`            // nerd | emoji | ascii | minimal
+	ShowCounts      bool   `yaml:"show_counts"`      // Show file counts (+3 -2)
+	ShowInsertions  bool   `yaml:"show_insertions"`  // Show line changes
+	ShowStash       bool   `yaml:"show_stash"`       // Show stash count
+	UpdateInterval  int    `yaml:"update_interval"`  // Seconds between updates (default: 5)
+	Position        string `yaml:"position"`         // top | bottom
+	Pin             bool   `yaml:"pin"`              // Pin to position
+	Priority        int    `yaml:"priority"`         // Order among widgets
+	Fg              string `yaml:"fg"`               // Text color
+	Bg              string `yaml:"bg"`               // Background color
+	BranchFg        string `yaml:"branch_fg"`        // Branch name color
+	CleanFg         string `yaml:"clean_fg"`         // Clean status color
+	DirtyFg         string `yaml:"dirty_fg"`         // Dirty status color
+	AheadFg         string `yaml:"ahead_fg"`         // Ahead indicator color
+	BehindFg        string `yaml:"behind_fg"`        // Behind indicator color
+	Divider         string `yaml:"divider"`          // Divider line above widget
+	DividerFg       string `yaml:"divider_fg"`       // Divider color
+	PaddingTop      int    `yaml:"padding_top"`      // Blank lines above content
+	PaddingBot      int    `yaml:"padding_bottom"`   // Blank lines below content
+	MarginTop       int    `yaml:"margin_top"`       // Lines above top divider
+	MarginBot       int    `yaml:"margin_bottom"`    // Lines below bottom divider
+}
+
+// PetWidget configures the virtual pet (cat, dog, etc.)
+type PetWidget struct {
+	Enabled         bool   `yaml:"enabled"`
+	Name            string `yaml:"name"`             // Pet's name (default: "Whiskers")
+	Style           string `yaml:"style"`            // emoji | nerd | ascii
+	Rows            int    `yaml:"rows"`             // 1 or 2 rows for play area
+	Thoughts        bool   `yaml:"thoughts"`         // Enable LLM thoughts
+	ThoughtInterval int    `yaml:"thought_interval"` // Seconds between thoughts
+	Position        string `yaml:"position"`         // top | bottom
+	Pin             bool   `yaml:"pin"`              // Pin to bottom
+	HungerDecay     int    `yaml:"hunger_decay"`     // Seconds between hunger ticks
+	PoopChance      int    `yaml:"poop_chance"`      // % chance to poop after eating
+	// LLM settings for thoughts
+	LLMProvider string `yaml:"llm_provider"` // openai | anthropic | ollama (default: anthropic)
+	LLMModel    string `yaml:"llm_model"`    // Model name (default: claude-3-haiku-20240307)
+	LLMAPIKey   string `yaml:"llm_api_key"`  // API key (or use env: ANTHROPIC_API_KEY, OPENAI_API_KEY)
+	// Styling (same as other widgets)
+	Fg            string `yaml:"fg"`              // Text color
+	Bg            string `yaml:"bg"`              // Background color
+	Priority      int    `yaml:"priority"`        // Order when multiple widgets pinned (lower = closer to bottom)
+	Divider       string `yaml:"divider"`         // Divider line above widget
+	DividerBottom string `yaml:"divider_bottom"`  // Divider line below widget
+	DividerFg     string `yaml:"divider_fg"`      // Divider color
+	PaddingTop    int    `yaml:"padding_top"`     // Blank lines above content
+	PaddingBot    int    `yaml:"padding_bottom"`  // Blank lines below content
+	MarginTop     int    `yaml:"margin_top"`      // Lines above top divider
+	MarginBot     int    `yaml:"margin_bottom"`   // Lines below bottom divider
 }
 
 type ClockWidget struct {

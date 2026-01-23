@@ -53,6 +53,32 @@ var remoteCommands = map[string]bool{
 	"ssh": true, "mosh": true, "mosh-client": true, "telnet": true,
 }
 
+// sidebarCommands are commands that should be filtered from pane lists
+var sidebarCommands = map[string]bool{
+	"sidebar": true, "tabbar": true, "sidebar-master": true, "sidebar-shadow": true,
+	"tabby-daemon": true, "sidebar-renderer": true, "render-status": true,
+}
+
+// isSidebarCommand checks if a command should be filtered from pane lists
+// Handles both exact matches and path-qualified commands (e.g., /path/to/sidebar-renderer)
+func isSidebarCommand(cmd string) bool {
+	// Check exact match first
+	if sidebarCommands[cmd] {
+		return true
+	}
+	// Check if the command ends with any of the sidebar commands (for path-qualified)
+	for sidebarCmd := range sidebarCommands {
+		if strings.HasSuffix(cmd, "/"+sidebarCmd) {
+			return true
+		}
+	}
+	// Also check if command contains "sidebar" or "tabby" anywhere
+	if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "tabby-daemon") {
+		return true
+	}
+	return false
+}
+
 // isPaneBusy returns true if the command is not an idle/shell process
 func isPaneBusy(command string) bool {
 	return !idleCommands[command]
@@ -202,8 +228,10 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		if err != nil {
 			continue
 		}
-		// Skip sidebar/tabbar panes by command name
-		if parts[3] == "sidebar" || parts[3] == "tabbar" {
+		// Skip sidebar/tabbar/daemon panes by command name
+		// Check for exact matches and also suffix matches (for path-qualified commands)
+		cmd := parts[3]
+		if isSidebarCommand(cmd) {
 			continue
 		}
 		// Skip our own pane (in case command name hasn't updated yet)
@@ -281,8 +309,9 @@ func ListAllPanes() (map[int][]Pane, error) {
 			continue
 		}
 
-		// Skip sidebar/tabbar panes by command name
-		if parts[4] == "sidebar" || parts[4] == "tabbar" {
+		// Skip sidebar/tabbar/daemon panes by command name
+		cmd := parts[4]
+		if isSidebarCommand(cmd) {
 			continue
 		}
 		// Skip our own pane

@@ -242,6 +242,9 @@ tmux set-hook -g pane-exited "run-shell '$CLEANUP_SCRIPT'; run-shell '$ENSURE_SI
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'"
 
+# Auto-start sidebar on new session creation
+tmux set-hook -g session-created "run-shell '$CURRENT_DIR/scripts/toggle_sidebar.sh'"
+
 # Maintain sidebar width after terminal resize
 RESIZE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/resize_sidebar.sh"
 chmod +x "$RESIZE_SIDEBAR_SCRIPT"

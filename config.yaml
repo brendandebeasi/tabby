@@ -20,7 +20,7 @@ groups:
   - name: "StudioDome"
     pattern: "^SD\\|"
     working_dir: "~/git/studiodome"
-    theme:
+    theme        :
       bg: "#8b1a1a"
       fg: "#ffffff"
       active_bg: "#6b0f0f"
@@ -51,7 +51,7 @@ groups:
 
 bindings:
   toggle_sidebar: "prefix + Tab"
-  next_tab: "prefix + n"
+  next_           tab: "prefix + n"
   prev_tab: "prefix + p"
 
 sidebar:
@@ -131,7 +131,7 @@ widgets:
     format: "15:04:05"     # Go time format (with seconds)
     show_date: true
     date_format: "Mon Jan 2"
-    fg: "#888888"
+    fg: "#000000"
     # bg: "#1a1a1a"        # Optional background
     position: bottom       # "top" or "bottom"
     pin: true              # Pin to bottom (stays visible when scrolling)
@@ -143,3 +143,21 @@ widgets:
     margin_bottom: 0       # Blank lines after bottom divider
     padding_top: 0         # Blank lines between divider and content
     padding_bottom: 0
+
+  stats:
+    enabled: true
+    show_cpu: true
+    show_memory: true
+    show_battery: true
+    style: "nerd"          # nerd, emoji, ascii, minimal
+    bar_style: "block"     # block, braille, dots, ascii
+    bar_width: 5
+    cpu_fg: "#aaaaaa"
+    memory_fg: "#aaaaaa"
+    battery_fg: "#aaaaaa"
+    divider: "─"
+    divider_fg: "#444444"
+    margin_top: 0
+    margin_bot: 0
+    padding_top: 0
+    padding_bot: 0

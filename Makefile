@@ -9,7 +9,8 @@ GOMOD=$(GOCMD) mod
 # Binary names
 RENDER_STATUS=bin/render-status
 RENDER_TAB=bin/render-tab
-SIDEBAR=bin/sidebar
+TABBY_DAEMON=bin/tabby-daemon
+SIDEBAR_RENDERER=bin/sidebar-renderer
 TABBAR=bin/tabbar
 
 # Directories
@@ -22,7 +23,7 @@ SCREENSHOT_DIR=$(TEST_DIR)/screenshots
 all: build
 
 # Build all binaries
-build: $(RENDER_STATUS) $(RENDER_TAB) $(SIDEBAR) $(TABBAR)
+build: $(RENDER_STATUS) $(RENDER_TAB) $(TABBY_DAEMON) $(SIDEBAR_RENDERER) $(TABBAR)
 
 $(RENDER_STATUS): cmd/render-status/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
@@ -32,9 +33,13 @@ $(RENDER_TAB): cmd/render-tab/main.go
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -o $@ ./cmd/render-tab
 
-$(SIDEBAR): cmd/sidebar/main.go pkg/**/*.go
+$(TABBY_DAEMON): cmd/tabby-daemon/*.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $@ ./cmd/sidebar
+	$(GOBUILD) -o $@ ./cmd/tabby-daemon
+
+$(SIDEBAR_RENDERER): cmd/sidebar-renderer/main.go pkg/**/*.go
+	@mkdir -p $(BIN_DIR)
+	$(GOBUILD) -o $@ ./cmd/sidebar-renderer
 
 $(TABBAR): cmd/tabbar/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
@@ -75,7 +80,8 @@ install: build
 	@mkdir -p ~/.tmux/plugins/tmux-tabs/scripts
 	@cp $(RENDER_STATUS) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp $(RENDER_TAB) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(SIDEBAR) ~/.tmux/plugins/tmux-tabs/bin/
+	@cp $(TABBY_DAEMON) ~/.tmux/plugins/tmux-tabs/bin/
+	@cp $(SIDEBAR_RENDERER) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp $(TABBAR) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp scripts/*.sh ~/.tmux/plugins/tmux-tabs/scripts/
 	@cp tmux-tabs.tmux ~/.tmux/plugins/tmux-tabs/
@@ -89,7 +95,8 @@ install: build
 sync: build
 	@cp $(RENDER_STATUS) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp $(RENDER_TAB) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(SIDEBAR) ~/.tmux/plugins/tmux-tabs/bin/
+	@cp $(TABBY_DAEMON) ~/.tmux/plugins/tmux-tabs/bin/
+	@cp $(SIDEBAR_RENDERER) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp $(TABBAR) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp scripts/*.sh ~/.tmux/plugins/tmux-tabs/scripts/
 	@cp tmux-tabs.tmux ~/.tmux/plugins/tmux-tabs/
