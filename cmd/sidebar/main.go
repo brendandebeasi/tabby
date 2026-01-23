@@ -19,6 +19,7 @@ import (
 
 	"github.com/b/tmux-tabs/pkg/config"
 	"github.com/b/tmux-tabs/pkg/grouping"
+	"github.com/b/tmux-tabs/pkg/perf"
 	"github.com/b/tmux-tabs/pkg/tmux"
 )
 
@@ -590,21 +591,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// Check if clicking on a pane first
 				if paneRef, ok := m.getPaneAtLine(msg.Y); ok {
-					// Click on pane - switch to window and select pane in one command
-					_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", paneRef.windowIdx), ";",
-						"select-pane", "-t", paneRef.pane.ID).Run()
-					// Signal sidebars to refresh in background
-					go signalSidebarsDelayed()
+					// OPTIMISTIC UI: Update local state immediately
+					windowIdx := paneRef.windowIdx
+					paneID := paneRef.pane.ID
+					for i := range m.windows {
+						m.windows[i].Active = (m.windows[i].Index == windowIdx)
+						// Also update active pane within the window
+						for j := range m.windows[i].Panes {
+							m.windows[i].Panes[j].Active = (m.windows[i].Panes[j].ID == paneID)
+						}
+					}
+					m.grouped = grouping.GroupWindowsWithOptions(m.windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
+					m.buildWindowRefs()
+
+					// Send tmux command asynchronously
+					go func() {
+						_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", windowIdx), ";",
+							"select-pane", "-t", paneID).Run()
+						signalSidebarsDelayed()
+					}()
 					return m, nil
 				} else if clicked != nil {
-					// Click on window - select it and focus the main content pane in one command
-					_ = exec.Command("bash", "-c", fmt.Sprintf(`
-						tmux select-window -t :%d
-						main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
-						[ -n "$main_pane" ] && tmux select-pane -t "$main_pane"
-					`, clicked.Index)).Run()
-					// Signal sidebars to refresh in background
-					go signalSidebarsDelayed()
+					// OPTIMISTIC UI: Update local state immediately for instant feedback
+					perf.Start("click.optimisticUpdate")
+					clickedIndex := clicked.Index
+					for i := range m.windows {
+						m.windows[i].Active = (m.windows[i].Index == clickedIndex)
+					}
+					// Recompute grouped state with optimistic update
+					m.grouped = grouping.GroupWindowsWithOptions(m.windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
+					m.buildWindowRefs()
+
+					// Send tmux command asynchronously (don't block UI)
+					go func() {
+						clickT := perf.Start("click.selectWindow.async")
+						_ = exec.Command("bash", "-c", fmt.Sprintf(`
+							tmux select-window -t :%d
+							main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
+							[ -n "$main_pane" ] && tmux select-pane -t "$main_pane"
+						`, clickedIndex)).Run()
+						clickT.Stop()
+						// Signal other sidebars to refresh
+						signalSidebarsDelayed()
+					}()
+
+					// Return immediately with updated model (no refresh needed, we already updated)
 					return m, nil
 				} else if m.config.Sidebar.NewTabButton && msg.Y == newTabLine {
 					// Just create new window - the after-new-window hook adds the sidebar
@@ -654,6 +685,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case refreshMsg:
+		t := perf.Start("Update.refreshMsg")
+		defer t.Stop()
 		windows, _ := tmux.ListWindowsWithPanes()
 		// Clear bell flag for active windows (user has seen it)
 		for _, w := range windows {
@@ -725,6 +758,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	t := perf.Start("View")
+	defer t.Stop()
+
 	// Show confirmation dialog if active
 	if m.confirmClose && m.confirmWindow != nil {
 		confirmStyle := lipgloss.NewStyle().

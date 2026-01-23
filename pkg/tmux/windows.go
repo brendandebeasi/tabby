@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/b/tmux-tabs/pkg/perf"
 )
 
 // ansiEscapeRegex matches ANSI escape sequences including:
@@ -74,6 +76,9 @@ type Window struct {
 }
 
 func ListWindows() ([]Window, error) {
+	t := perf.Start("tmux.ListWindows")
+	defer t.Stop()
+
 	cmd := exec.Command("tmux", "list-windows", "-F",
 		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}")
 	out, err := cmd.Output()
@@ -167,6 +172,9 @@ func ListWindows() ([]Window, error) {
 
 // ListPanesForWindow returns all panes in a specific window
 func ListPanesForWindow(windowIndex int) ([]Pane, error) {
+	t := perf.Start(fmt.Sprintf("tmux.ListPanesForWindow(%d)", windowIndex))
+	defer t.Stop()
+
 	cmd := exec.Command("tmux", "list-panes", "-t", fmt.Sprintf(":%d", windowIndex), "-F",
 		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}")
 	out, err := cmd.Output()
@@ -237,20 +245,115 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 	return panes, nil
 }
 
+// ListAllPanes returns all panes across all windows in a single tmux command
+// This is more efficient than calling ListPanesForWindow for each window (N+1 problem)
+func ListAllPanes() (map[int][]Pane, error) {
+	t := perf.Start("tmux.ListAllPanes")
+	defer t.Stop()
+
+	cmd := exec.Command("tmux", "list-panes", "-a", "-F",
+		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	myPID := fmt.Sprintf("%d", os.Getpid())
+	now := time.Now().Unix()
+	result := make(map[int][]Pane)
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\x1f")
+		if len(parts) < 6 {
+			continue
+		}
+
+		windowIdx, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		paneIdx, err := strconv.Atoi(parts[2])
+		if err != nil {
+			continue
+		}
+
+		// Skip sidebar/tabbar panes by command name
+		if parts[4] == "sidebar" || parts[4] == "tabbar" {
+			continue
+		}
+		// Skip our own pane
+		if len(parts) >= 7 && parts[6] == myPID {
+			continue
+		}
+
+		command := stripANSI(parts[4])
+		isRemote := remoteCommands[command]
+		busy := isPaneBusy(command)
+
+		// For remote connections, check if there's been activity in the last 3 seconds
+		if isRemote && len(parts) >= 8 {
+			lastActivity, err := strconv.ParseInt(parts[7], 10, 64)
+			if err == nil && now-lastActivity <= 3 {
+				busy = true
+			}
+		}
+
+		lockedTitle := ""
+		if len(parts) >= 9 {
+			lockedTitle = strings.TrimSpace(parts[8])
+		}
+
+		pane := Pane{
+			ID:          parts[1],
+			Index:       paneIdx,
+			Active:      parts[3] == "1",
+			Command:     command,
+			Title:       stripANSI(parts[5]),
+			LockedTitle: lockedTitle,
+			Busy:        busy,
+			Remote:      isRemote,
+		}
+
+		result[windowIdx] = append(result[windowIdx], pane)
+	}
+
+	return result, nil
+}
+
 // ListWindowsWithPanes returns all windows with their panes
+// Uses optimized single-query approach to avoid N+1 problem
 func ListWindowsWithPanes() ([]Window, error) {
+	t := perf.Start("tmux.ListWindowsWithPanes")
+	defer t.Stop()
+
 	windows, err := ListWindows()
 	if err != nil {
 		return nil, err
 	}
 
+	// Get all panes in a single command
+	allPanes, err := ListAllPanes()
+	if err != nil {
+		// Fall back to per-window queries if bulk query fails
+		for i := range windows {
+			panes, _ := ListPanesForWindow(windows[i].Index)
+			windows[i].Panes = panes
+		}
+	} else {
+		// Assign panes to their windows
+		for i := range windows {
+			windows[i].Panes = allPanes[windows[i].Index]
+		}
+	}
+
+	// Auto-detect busy from ACTIVE pane state only
 	for i := range windows {
-		panes, _ := ListPanesForWindow(windows[i].Index)
-		windows[i].Panes = panes
-		// Auto-detect busy from ACTIVE pane state only (not background panes like dev servers)
-		// Only check if @tabby_busy not explicitly set
 		if !windows[i].Busy {
-			for _, pane := range panes {
+			for _, pane := range windows[i].Panes {
 				if pane.Active && pane.Busy {
 					windows[i].Busy = true
 					break
