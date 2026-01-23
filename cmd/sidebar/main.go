@@ -376,6 +376,17 @@ func (m model) getBusyFrames() []string {
 	return defaultSpinnerFrames
 }
 
+// lineSpacing returns extra newlines for touch mode / line_height setting
+func (m model) lineSpacing() string {
+	if m.config.Sidebar.TouchMode {
+		return "\n" // Extra line in touch mode
+	}
+	if m.config.Sidebar.LineHeight > 0 {
+		return strings.Repeat("\n", m.config.Sidebar.LineHeight)
+	}
+	return ""
+}
+
 func (m model) Init() tea.Cmd {
 	// Start periodic refresh for pane titles, fast shared state checks, and clock updates
 	cmds := []tea.Cmd{periodicRefresh(), sharedStateTick()}
@@ -1045,7 +1056,7 @@ func (m model) View() string {
 
 		// Width: 2 for collapse icon + space, rest for content
 		headerContentStyle := headerStyle.Width(sidebarWidth - 2)
-		s += collapseStyle.Render(collapseIcon+" ") + headerContentStyle.Render(headerText) + "\n"
+		s += collapseStyle.Render(collapseIcon+" ") + headerContentStyle.Render(headerText) + "\n" + m.lineSpacing()
 
 		// Skip windows if group is collapsed
 		if isCollapsed {
@@ -1317,7 +1328,7 @@ func (m model) View() string {
 
 			if hasPanes {
 				// Windows with panes: ├─⊟ content (collapse icon after tree)
-				s += indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(contentText) + "\n"
+				s += indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(contentText) + "\n" + m.lineSpacing()
 			} else if isActive {
 				// Active single-pane: ├● content (last char becomes indicator)
 				// Get first char of tree branch (├ or └)
@@ -1348,10 +1359,10 @@ func (m model) View() string {
 				}
 
 				activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Background(lipgloss.Color(indicatorBg)).Bold(true)
-				s += indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator) + contentStyle.Render(contentText) + "\n"
+				s += indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator) + contentStyle.Render(contentText) + "\n" + m.lineSpacing()
 			} else {
 				// Inactive single-pane: ├─ content
-				s += indicatorPart + treeStyle.Render(treeBranch) + contentStyle.Render(contentText) + "\n"
+				s += indicatorPart + treeStyle.Render(treeBranch) + contentStyle.Render(contentText) + "\n" + m.lineSpacing()
 			}
 
 			// Show panes if window has multiple panes and is not collapsed
@@ -1475,7 +1486,7 @@ func (m model) View() string {
 	if m.config.Sidebar.NewTabButton {
 		s += "\n"
 		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#27ae60"))
-		s += buttonStyle.Render("[+] New Tab") + "\n"
+		s += buttonStyle.Render("[+] New Tab") + "\n" + m.lineSpacing()
 	}
 
 	if m.config.Sidebar.NewGroupButton {
@@ -1483,12 +1494,12 @@ func (m model) View() string {
 			s += "\n" // Add blank line if New Tab button isn't there
 		}
 		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9b59b6"))
-		s += buttonStyle.Render("[+] New Group") + "\n"
+		s += buttonStyle.Render("[+] New Group") + "\n" + m.lineSpacing()
 	}
 
 	if m.config.Sidebar.CloseButton {
 		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e74c3c"))
-		s += buttonStyle.Render("[x] Close Tab") + "\n"
+		s += buttonStyle.Render("[x] Close Tab") + "\n" + m.lineSpacing()
 	}
 
 	// Clock widget (bottom position)

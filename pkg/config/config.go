@@ -65,7 +65,9 @@ type Sidebar struct {
 	NewGroupButton  bool          `yaml:"new_group_button"`
 	ShowEmptyGroups bool          `yaml:"show_empty_groups"`
 	SortBy          string        `yaml:"sort_by"`
-	Debug           bool          `yaml:"debug"` // Enable debug logging to /tmp/tabby-debug.log
+	Debug           bool          `yaml:"debug"`      // Enable debug logging to /tmp/tabby-debug.log
+	TouchMode       bool          `yaml:"touch_mode"` // Larger tap targets for mobile/touch
+	LineHeight      int           `yaml:"line_height"` // Extra blank lines between items (0=compact, 1+=spaced)
 	Colors          SidebarColors `yaml:"colors"`
 }
 

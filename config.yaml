@@ -61,6 +61,8 @@ sidebar:
   close_button: false
   sort_by: "group"  # "group" or "index"
   debug: true  # Enable debug logging to /tmp/tabby-debug.log
+  touch_mode: false  # Larger tap targets for mobile/touch access
+  line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
   colors:
     disclosure_fg: "#e8e8e8"        # Disclosure icon color (off white)
     disclosure_expanded: "⊟"        # Expanded state icon (boxed minus)
