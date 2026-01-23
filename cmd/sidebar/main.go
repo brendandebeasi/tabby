@@ -377,8 +377,13 @@ func (m model) getBusyFrames() []string {
 }
 
 // lineSpacing returns extra newlines for touch mode / line_height setting
+// Auto-enables touch mode for narrow terminals (< 40 cols) for phone access
 func (m model) lineSpacing() string {
-	if m.config.Sidebar.TouchMode {
+	// Auto-detect phone: narrow terminal or env override
+	autoTouch := m.width > 0 && m.width < 40
+	envTouch := os.Getenv("TABBY_TOUCH") == "1"
+
+	if m.config.Sidebar.TouchMode || autoTouch || envTouch {
 		return "\n" // Extra line in touch mode
 	}
 	if m.config.Sidebar.LineHeight > 0 {
