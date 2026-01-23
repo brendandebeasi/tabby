@@ -206,6 +206,9 @@ type periodicRefreshMsg struct{}
 // sharedStateTickMsg is for fast shared state checks (30fps)
 type sharedStateTickMsg struct{}
 
+// clockTickMsg updates the clock widget every second
+type clockTickMsg struct{}
+
 // triggerRefresh returns a command that triggers a refresh
 func triggerRefresh() tea.Cmd {
 	return func() tea.Msg {
@@ -249,6 +252,13 @@ func periodicRefresh() tea.Cmd {
 func sharedStateTick() tea.Cmd {
 	return tea.Tick(32*time.Millisecond, func(t time.Time) tea.Msg {
 		return sharedStateTickMsg{}
+	})
+}
+
+// clockTick schedules clock updates every second
+func clockTick() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return clockTickMsg{}
 	})
 }
 
@@ -367,8 +377,12 @@ func (m model) getBusyFrames() []string {
 }
 
 func (m model) Init() tea.Cmd {
-	// Start periodic refresh for pane titles, and fast shared state checks for responsive UI
-	return tea.Batch(periodicRefresh(), sharedStateTick())
+	// Start periodic refresh for pane titles, fast shared state checks, and clock updates
+	cmds := []tea.Cmd{periodicRefresh(), sharedStateTick()}
+	if m.config.Widgets.Clock.Enabled {
+		cmds = append(cmds, clockTick())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *model) buildWindowRefs() {
@@ -906,6 +920,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, sharedStateTick()
 
+	case clockTickMsg:
+		// Clock updates every second - just schedule next tick, View() uses time.Now()
+		return m, clockTick()
+
 	case tea.WindowSizeMsg:
 		// Update terminal size for dynamic resizing
 		m.width = msg.Width
@@ -966,6 +984,12 @@ func (m model) View() string {
 	}
 
 	var s string
+
+	// Clock widget (top position)
+	if m.config.Widgets.Clock.Enabled && m.config.Widgets.Clock.Position == "top" {
+		s += m.renderClockWidget()
+	}
+
 	// Use terminal width if available, otherwise default to 25
 	sidebarWidth := m.width
 	if sidebarWidth < 20 {
@@ -1467,7 +1491,61 @@ func (m model) View() string {
 		s += buttonStyle.Render("[x] Close Tab") + "\n"
 	}
 
+	// Clock widget (bottom position)
+	if m.config.Widgets.Clock.Enabled && m.config.Widgets.Clock.Position != "top" {
+		s += m.renderClockWidget()
+	}
+
 	return s
+}
+
+// renderClockWidget renders the clock/date widget
+func (m model) renderClockWidget() string {
+	clock := m.config.Widgets.Clock
+	now := time.Now()
+
+	// Default format
+	timeFormat := clock.Format
+	if timeFormat == "" {
+		timeFormat = "15:04"
+	}
+
+	// Build style
+	fg := clock.Fg
+	if fg == "" {
+		fg = "#888888"
+	}
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(fg))
+	if clock.Bg != "" {
+		style = style.Background(lipgloss.Color(clock.Bg))
+	}
+
+	var result string
+	result += "\n" // Separator line
+
+	// Render time centered
+	timeStr := now.Format(timeFormat)
+	padding := (m.width - len(timeStr)) / 2
+	if padding < 0 {
+		padding = 0
+	}
+	result += style.Render(strings.Repeat(" ", padding) + timeStr) + "\n"
+
+	// Optionally show date
+	if clock.ShowDate {
+		dateFormat := clock.DateFmt
+		if dateFormat == "" {
+			dateFormat = "Mon Jan 2"
+		}
+		dateStr := now.Format(dateFormat)
+		datePadding := (m.width - len(dateStr)) / 2
+		if datePadding < 0 {
+			datePadding = 0
+		}
+		result += style.Render(strings.Repeat(" ", datePadding) + dateStr) + "\n"
+	}
+
+	return result
 }
 
 func (m model) showContextMenu(win *tmux.Window) {

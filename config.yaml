@@ -121,3 +121,14 @@ indicators:
     icon: "?"
     color: "#6a1b9a"  # Dark saturated purple - needs attention
     frames: ["?", "?"]  # Can add animation frames like ["?", " "] for blinking
+
+# Sidebar widgets
+widgets:
+  clock:
+    enabled: true
+    format: "15:04"        # Go time format (24h)
+    show_date: true
+    date_format: "Mon Jan 2"
+    fg: "#888888"
+    # bg: "#1a1a1a"        # Optional background
+    position: bottom       # "top" or "bottom"

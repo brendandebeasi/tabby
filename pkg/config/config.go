@@ -16,6 +16,21 @@ type Config struct {
 	PaneHeader PaneHeader  `yaml:"pane_header"`
 	Indicators Indicators  `yaml:"indicators"`
 	Prompt     PromptStyle `yaml:"prompt"`
+	Widgets    Widgets     `yaml:"widgets"`
+}
+
+type Widgets struct {
+	Clock ClockWidget `yaml:"clock"`
+}
+
+type ClockWidget struct {
+	Enabled  bool   `yaml:"enabled"`
+	Format   string `yaml:"format"`    // Go time format (default: "15:04")
+	ShowDate bool   `yaml:"show_date"` // Show date below time
+	DateFmt  string `yaml:"date_format"` // Date format (default: "Mon Jan 2")
+	Fg       string `yaml:"fg"`        // Text color
+	Bg       string `yaml:"bg"`        // Background color
+	Position string `yaml:"position"`  // "top" or "bottom" (default: bottom)
 }
 
 type PromptStyle struct {
