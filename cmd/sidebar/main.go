@@ -1536,7 +1536,12 @@ func (m model) renderClockWidget() string {
 
 	// Divider (top of widget)
 	if clock.Divider != "" {
-		dividerLine := strings.Repeat(clock.Divider, m.width/len(clock.Divider))
+		// Use lipgloss.Width for proper Unicode width calculation
+		dividerWidth := lipgloss.Width(clock.Divider)
+		if dividerWidth == 0 {
+			dividerWidth = 1
+		}
+		dividerLine := strings.Repeat(clock.Divider, m.width/dividerWidth)
 		result += dividerStyle.Render(dividerLine) + "\n"
 	}
 
