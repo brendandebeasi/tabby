@@ -613,7 +613,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				} else if clicked != nil {
 					// OPTIMISTIC UI: Update local state immediately for instant feedback
-					perf.Start("click.optimisticUpdate")
 					clickedIndex := clicked.Index
 					for i := range m.windows {
 						m.windows[i].Active = (m.windows[i].Index == clickedIndex)
@@ -622,20 +621,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.grouped = grouping.GroupWindowsWithOptions(m.windows, m.config.Groups, m.config.Sidebar.ShowEmptyGroups)
 					m.buildWindowRefs()
 
-					// Send tmux command asynchronously (don't block UI)
+					// Send tmux command - use direct tmux command, much faster than bash
+					// Just select window, tmux will remember the last active pane
 					go func() {
-						clickT := perf.Start("click.selectWindow.async")
-						_ = exec.Command("bash", "-c", fmt.Sprintf(`
-							tmux select-window -t :%d
-							main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
-							[ -n "$main_pane" ] && tmux select-pane -t "$main_pane"
-						`, clickedIndex)).Run()
-						clickT.Stop()
+						_ = exec.Command("tmux", "select-window", "-t", fmt.Sprintf(":%d", clickedIndex)).Run()
 						// Signal other sidebars to refresh
 						signalSidebarsDelayed()
 					}()
 
-					// Return immediately with updated model (no refresh needed, we already updated)
+					// Return immediately with updated model
 					return m, nil
 				} else if m.config.Sidebar.NewTabButton && msg.Y == newTabLine {
 					// Just create new window - the after-new-window hook adds the sidebar
