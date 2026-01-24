@@ -9,16 +9,19 @@ SESSION_ID=$(tmux display-message -p '#{session_id}')
 SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
 DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
-SIDEBAR_WIDTH=25
+
+# Get saved sidebar width or default
+SIDEBAR_WIDTH=$(tmux show-option -gqv @tabby_sidebar_width)
+if [ -z "$SIDEBAR_WIDTH" ]; then SIDEBAR_WIDTH=25; fi
 
 DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
 RENDERER_BIN="$CURRENT_DIR/bin/sidebar-renderer"
-SIDEBAR_BIN="$CURRENT_DIR/bin/sidebar"
 
-# Fall back to old sidebar if daemon binaries don't exist
+# Check if daemon binaries exist
+# Note: Old sidebar code archived in .archive/old-sidebar/ (not loaded by default)
 if [ ! -f "$DAEMON_BIN" ] || [ ! -f "$RENDERER_BIN" ]; then
-    echo "Daemon binaries not found, falling back to legacy sidebar"
-    exec "$CURRENT_DIR/scripts/toggle_sidebar.sh"
+    echo "Error: Daemon binaries not found. Run 'make build' first." >&2
+    exit 1
 fi
 
 # Get current state from tmux option (most reliable) or state file
@@ -74,7 +77,12 @@ else
         rm -f "$DAEMON_PID_FILE"
 
         # Start daemon in background (it manages its own PID file)
-        "$DAEMON_BIN" -session "$SESSION_ID" &
+        # Pass -debug flag if TABBY_DEBUG=1
+        if [ "${TABBY_DEBUG:-}" = "1" ]; then
+            "$DAEMON_BIN" -session "$SESSION_ID" -debug &
+        else
+            "$DAEMON_BIN" -session "$SESSION_ID" &
+        fi
 
         # Wait for socket to be ready
         SOCKET_READY=false
@@ -101,7 +109,7 @@ else
         [ -z "$window_id" ] && continue
 
         # Check if window already has sidebar or renderer
-        if tmux list-panes -t "$window_id" -F "#{pane_current_command}" 2>/dev/null | grep -qE "^(sidebar|sidebar-renderer)"; then
+        if tmux list-panes -t "$window_id" -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -qE "(sidebar|sidebar-renderer)"; then
             continue
         fi
 
@@ -111,15 +119,28 @@ else
         fi
 
         # Split window with renderer, passing the window ID for unique clientID
+        # Add -debug flag if TABBY_DEBUG is set
+        DEBUG_FLAG=""
+        if [ "${TABBY_DEBUG:-}" = "1" ]; then
+            DEBUG_FLAG="-debug"
+        fi
         tmux split-window -t "$FIRST_PANE" -h -b -f -l "$SIDEBAR_WIDTH" \
-            "exec '$RENDERER_BIN' -session '$SESSION_ID' -window '$window_id'" || true
+            "exec '$RENDERER_BIN' -session '$SESSION_ID' -window '$window_id' $DEBUG_FLAG" || true
+
+        # Hide pane border title for sidebar and prevent dimming
+        SIDEBAR_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}:#{pane_current_command}" 2>/dev/null | grep -E "sidebar" | cut -d: -f1 || echo "")
+        if [ -n "$SIDEBAR_PANE" ]; then
+            tmux set-option -p -t "$SIDEBAR_PANE" pane-border-status off 2>/dev/null || true
+            # Prevent sidebar from dimming when inactive
+            tmux select-pane -t "$SIDEBAR_PANE" -P 'bg=default' 2>/dev/null || true
+        fi
     done
 
     # Enforce uniform sidebar width and full window height
     for window_id in $WINDOWS; do
-        SIDEBAR_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}:#{pane_current_command}" 2>/dev/null | grep -E ":(sidebar|sidebar-renderer)$" | cut -d: -f1 || echo "")
+        SIDEBAR_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}:#{pane_current_command}" 2>/dev/null | grep -E "sidebar" | cut -d: -f1 || echo "")
         if [ -n "$SIDEBAR_PANE" ]; then
-            MAIN_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}:#{pane_current_command}" 2>/dev/null | grep -vE ":(sidebar|sidebar-renderer)$" | head -1 | cut -d: -f1 || echo "")
+            MAIN_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}:#{pane_current_command}" 2>/dev/null | grep -vE "sidebar" | head -1 | cut -d: -f1 || echo "")
             if [ -n "$MAIN_PANE" ]; then
                 WINDOW_HEIGHT=$(tmux display-message -t "$MAIN_PANE" -p "#{pane_height}")
                 tmux resize-pane -t "$SIDEBAR_PANE" -x "$SIDEBAR_WIDTH" -y "$WINDOW_HEIGHT" 2>/dev/null || true

@@ -28,10 +28,12 @@ type Message struct {
 
 // ClickableRegion defines a clickable area in the rendered content
 type ClickableRegion struct {
-	StartLine int    `json:"start"`  // First line of the region (0-indexed in content)
-	EndLine   int    `json:"end"`    // Last line of the region (inclusive)
-	Action    string `json:"action"` // "select_window", "select_pane", "toggle_group", "button"
-	Target    string `json:"target"` // window index, pane ID, group name, or button action
+	StartLine int    `json:"start"`     // First line of the region (0-indexed in content)
+	EndLine   int    `json:"end"`       // Last line of the region (inclusive)
+	StartCol  int    `json:"start_col"` // First column of the region (0 for full-width)
+	EndCol    int    `json:"end_col"`   // Last column of the region (0 for full-width, meaning width-1)
+	Action    string `json:"action"`    // "select_window", "select_pane", "toggle_group", "button"
+	Target    string `json:"target"`    // window index, pane ID, group name, or button action
 }
 
 // RenderPayload contains pre-rendered content for a renderer
@@ -45,6 +47,7 @@ type RenderPayload struct {
 	PinnedHeight   int               `json:"pinned_height"`   // Height of pinned section
 	ViewportOffset int               `json:"viewport_offset"` // Suggested scroll position
 	Regions        []ClickableRegion `json:"regions"`         // Clickable regions for hit testing
+	PinnedRegions  []ClickableRegion `json:"pinned_regions"`  // Clickable regions in pinned content (Y relative to pinned start)
 }
 
 // InputPayload contains input events from renderer

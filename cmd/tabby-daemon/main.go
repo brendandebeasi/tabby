@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	zone "github.com/lrstanley/bubblezone"
+
 	"github.com/b/tmux-tabs/pkg/daemon"
 )
 
@@ -95,7 +97,11 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string) {
 		// Spawn renderer in this window
 		debugLog.Printf("Spawning renderer for new window %s (pane %s)", windowID, firstPane)
 		// Use exec to replace shell with renderer (matches toggle_sidebar_daemon.sh behavior)
-		cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s'", rendererBin, sessionID, windowID)
+		debugFlag := ""
+		if *debug {
+			debugFlag = "-debug"
+		}
+		cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
 		cmd := exec.Command("tmux", "split-window", "-t", firstPane, "-h", "-b", "-f", "-l", "25", cmdStr)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			debugLog.Printf("Failed to spawn renderer: %v, output: %s", err, string(out))
@@ -209,8 +215,12 @@ func cleanupOrphanedSidebars() {
 func main() {
 	flag.Parse()
 
+	// Initialize BubbleZone for touch button click detection
+	zone.NewGlobal()
+
 	if *debug {
 		debugLog = log.New(os.Stderr, "[daemon] ", log.LstdFlags|log.Lmicroseconds)
+		SetCoordinatorDebugLog(debugLog)
 	} else {
 		debugLog = log.New(os.Stderr, "", 0)
 	}
@@ -228,6 +238,11 @@ func main() {
 	// Create coordinator for centralized rendering
 	coordinator := NewCoordinator(*sessionID)
 
+	// Enable coordinator debug logging if debug mode is on
+	if *debug {
+		SetCoordinatorDebugLog(debugLog)
+	}
+
 	// Create server
 	server := daemon.NewServer(*sessionID)
 
@@ -238,9 +253,11 @@ func main() {
 
 	// Set up input callback
 	server.OnInput = func(clientID string, input *daemon.InputPayload) {
-		coordinator.HandleInput(clientID, input)
-		// Immediately refresh windows to get updated state from tmux
-		coordinator.RefreshWindows()
+		needsRefresh := coordinator.HandleInput(clientID, input)
+		if needsRefresh {
+			// Only refresh windows for window-related actions (expensive tmux calls)
+			coordinator.RefreshWindows()
+		}
 		// Re-render all clients with fresh state
 		server.BroadcastRender()
 	}
@@ -270,10 +287,9 @@ func main() {
 		for {
 			select {
 			case <-windowCheckTicker.C:
-				// Check for new windows that need renderers (fast check)
-				spawnRenderersForNewWindows(server, *sessionID)
-				// Also cleanup orphaned sidebars
+				// Cleanup orphaned sidebars (but DON'T spawn new ones, let hooks handle that)
 				cleanupOrphanedSidebars()
+				cleanupSidebarsForClosedWindows(server)
 			case <-refreshTicker.C:
 				// Only broadcast if windows changed
 				currentHash := coordinator.GetWindowsHash()

@@ -243,6 +243,7 @@ tmux set-hook -g pane-exited "run-shell '$CLEANUP_SCRIPT'; run-shell '$ENSURE_SI
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'"
 
 # Auto-start sidebar on new session creation
+# Use the daemon toggle script to ensure proper startup logic
 tmux set-hook -g session-created "run-shell '$CURRENT_DIR/scripts/toggle_sidebar.sh'"
 
 # Maintain sidebar width after terminal resize

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -31,6 +32,14 @@ var (
 
 var debugLog *log.Logger
 
+// Long-press detection thresholds
+const (
+	longPressThreshold  = 500 * time.Millisecond
+	doubleTapThreshold  = 300 * time.Millisecond
+	doubleTapDistance   = 3 // max pixels between taps
+	movementThreshold   = 5 // pixels
+)
+
 // rendererModel is a minimal Bubbletea model for the renderer
 type rendererModel struct {
 	conn       net.Conn
@@ -44,12 +53,22 @@ type rendererModel struct {
 	pinnedContent  string
 	pinnedHeight   int
 	regions        []daemon.ClickableRegion
+	pinnedRegions  []daemon.ClickableRegion
 	viewportOffset int
 	totalLines     int
 	sequenceNum    uint64
 
 	// Viewport scroll state
 	scrollY int
+
+	// Long-press detection for iOS/mobile right-click
+	mouseDownTime   time.Time
+	mouseDownPos    struct{ X, Y int }
+	longPressActive bool
+
+	// Double-tap detection (alternative right-click for iOS)
+	lastTapTime time.Time
+	lastTapPos  struct{ X, Y int }
 
 	// Message sending (thread-safe)
 	sendMu sync.Mutex
@@ -68,6 +87,10 @@ type renderMsg struct {
 }
 
 type tickMsg time.Time
+
+type longPressMsg struct {
+	X, Y int
+}
 
 // Init implements tea.Model
 func (m rendererModel) Init() tea.Cmd {
@@ -128,6 +151,18 @@ func tickCmd() tea.Cmd {
 
 // Update implements tea.Model
 func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Debug: log all message types to diagnose mouse event issues
+	if *debug {
+		switch msg.(type) {
+		case tea.MouseMsg:
+			debugLog.Printf(">>> Received tea.MouseMsg")
+		case tea.KeyMsg:
+			debugLog.Printf(">>> Received tea.KeyMsg")
+		case tea.WindowSizeMsg:
+			debugLog.Printf(">>> Received tea.WindowSizeMsg")
+		}
+	}
+
 	switch msg := msg.(type) {
 	case connectedMsg:
 		m.conn = msg.conn
@@ -152,18 +187,34 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case renderMsg:
 		m.content = msg.payload.Content
-		m.pinnedContent = msg.payload.PinnedContent
-		m.pinnedHeight = msg.payload.PinnedHeight
 		m.regions = msg.payload.Regions
 		m.totalLines = msg.payload.TotalLines
 		m.sequenceNum = msg.payload.SequenceNum
-		// Clamp scroll
-		maxScroll := m.totalLines - (m.height - m.pinnedHeight)
+
+		// SIMPLIFIED: Clamp scroll based on simple height calculation
+		maxScroll := m.totalLines - m.height
 		if maxScroll < 0 {
 			maxScroll = 0
 		}
 		if m.scrollY > maxScroll {
 			m.scrollY = maxScroll
+		}
+
+		// Debug logging
+		if *debug {
+			contentLines := strings.Count(m.content, "\n")
+			debugLog.Printf("=== RENDER PAYLOAD ===")
+			debugLog.Printf("  SequenceNum: %d", m.sequenceNum)
+			debugLog.Printf("  Content: %d lines, %d bytes", contentLines, len(m.content))
+			debugLog.Printf("  Regions: %d total", len(m.regions))
+			debugLog.Printf("  TotalLines: %d, maxScroll: %d", m.totalLines, maxScroll)
+			// Log first few regions for debugging
+			for i, r := range m.regions {
+				if i < 10 {
+					debugLog.Printf("  Region[%d]: lines %d-%d, cols %d-%d, action=%s target=%s",
+						i, r.StartLine, r.EndLine, r.StartCol, r.EndCol, r.Action, r.Target)
+				}
+			}
 		}
 		return m, nil
 
@@ -211,6 +262,17 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 
+	case longPressMsg:
+		// Long-press timer fired - check if still valid
+		if m.longPressActive && msg.X == m.mouseDownPos.X && msg.Y == m.mouseDownPos.Y {
+			if *debug {
+				debugLog.Printf("Long-press detected at X=%d Y=%d", msg.X, msg.Y)
+			}
+			// Treat as right-click
+			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight)
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -223,26 +285,30 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse processes mouse events
+// abs returns absolute value of an int
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// handleMouse processes mouse events with long-press detection for iOS/mobile
 func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if !m.connected {
 		return m, nil
 	}
 
-	// Calculate which area was clicked
-	scrollableHeight := m.height - m.pinnedHeight
-	clickedArea := "scrollable"
-	pinnedRelY := 0
-
-	if msg.Y >= scrollableHeight {
-		clickedArea = "pinned"
-		pinnedRelY = msg.Y - scrollableHeight
+	// Debug logging for mouse events
+	if *debug {
+		debugLog.Printf("=== MOUSE EVENT ===")
+		debugLog.Printf("  Position: X=%d Y=%d", msg.X, msg.Y)
+		debugLog.Printf("  Button: %v Action: %v Ctrl: %v Shift: %v Alt: %v", msg.Button, msg.Action, msg.Ctrl, msg.Shift, msg.Alt)
+		debugLog.Printf("  Viewport: height=%d scrollY=%d totalLines=%d", m.height, m.scrollY, m.totalLines)
+		debugLog.Printf("  LongPressActive: %v", m.longPressActive)
 	}
 
-	// Translate Y to content line (accounting for scroll)
-	contentY := msg.Y + m.scrollY
-
-	// Check for scroll
+	// Check for scroll wheel
 	if msg.Button == tea.MouseButtonWheelUp {
 		if m.scrollY > 0 {
 			m.scrollY--
@@ -251,7 +317,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.Button == tea.MouseButtonWheelDown {
-		maxScroll := m.totalLines - scrollableHeight
+		maxScroll := m.totalLines - m.height
 		if maxScroll < 0 {
 			maxScroll = 0
 		}
@@ -262,20 +328,127 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Only handle clicks, not moves
-	if msg.Action != tea.MouseActionPress {
+	// Handle mouse lifecycle for long-press detection
+	switch msg.Action {
+	case tea.MouseActionPress:
+		// Shift+click or Ctrl+click = right-click (alternative for tmux which intercepts right-click)
+		if (msg.Shift || msg.Ctrl) && msg.Button == tea.MouseButtonLeft {
+			if *debug {
+				debugLog.Printf("  Shift/Ctrl+click detected (Shift=%v Ctrl=%v), treating as right-click", msg.Shift, msg.Ctrl)
+			}
+			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight)
+		}
+
+		if msg.Button == tea.MouseButtonLeft {
+			// Start long-press detection
+			m.mouseDownTime = time.Now()
+			m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
+			m.longPressActive = true
+			if *debug {
+				debugLog.Printf("  Starting long-press timer at X=%d Y=%d", msg.X, msg.Y)
+			}
+			// Start a timer for long-press
+			return m, tea.Tick(longPressThreshold, func(t time.Time) tea.Msg {
+				return longPressMsg{X: msg.X, Y: msg.Y}
+			})
+		}
+		// Right or middle click - process immediately
+		return m.processMouseClick(msg.X, msg.Y, msg.Button)
+
+	case tea.MouseActionMotion:
+		// Check if movement exceeds threshold - cancel long-press if so
+		if m.longPressActive {
+			dx := abs(msg.X - m.mouseDownPos.X)
+			dy := abs(msg.Y - m.mouseDownPos.Y)
+			if dx > movementThreshold || dy > movementThreshold {
+				if *debug {
+					debugLog.Printf("  Long-press cancelled due to movement: dx=%d dy=%d", dx, dy)
+				}
+				m.longPressActive = false
+				m.mouseDownTime = time.Time{}
+			}
+		}
+		return m, nil
+
+	case tea.MouseActionRelease:
+		if m.longPressActive {
+			// Release before long-press timer fired - check for double-tap or single click
+			elapsed := time.Since(m.mouseDownTime)
+			m.longPressActive = false
+			m.mouseDownTime = time.Time{}
+
+			if elapsed < longPressThreshold {
+				// Check for double-tap (right-click alternative for iOS)
+				timeSinceLastTap := time.Since(m.lastTapTime)
+				dx := abs(msg.X - m.lastTapPos.X)
+				dy := abs(msg.Y - m.lastTapPos.Y)
+
+				if timeSinceLastTap < doubleTapThreshold && dx <= doubleTapDistance && dy <= doubleTapDistance {
+					// Double-tap detected - treat as right-click
+					if *debug {
+						debugLog.Printf("  Double-tap detected (interval=%v, distance=%d,%d) -> right-click", timeSinceLastTap, dx, dy)
+					}
+					m.lastTapTime = time.Time{} // Reset to prevent triple-tap
+					return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight)
+				}
+
+				// Single tap - record for potential double-tap and process as left-click
+				if *debug {
+					debugLog.Printf("  Quick click (elapsed=%v)", elapsed)
+				}
+				m.lastTapTime = time.Now()
+				m.lastTapPos = struct{ X, Y int }{msg.X, msg.Y}
+				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft)
+			}
+			// Long-press would have already triggered via timer
+		}
 		return m, nil
 	}
 
-	// Find which region was clicked (if any) in the scrollable area
+	return m, nil
+}
+
+// processMouseClick handles the actual click processing after determining button type
+func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.Model, tea.Cmd) {
 	var resolvedAction, resolvedTarget string
-	if clickedArea == "scrollable" {
-		for _, region := range m.regions {
-			if contentY >= region.StartLine && contentY <= region.EndLine {
+
+	// SIMPLIFIED: Single coordinate system - just Y position (no pinned/scrollable split)
+	// Translate Y to content line (accounting for scroll)
+	contentY := y + m.scrollY
+
+	if *debug {
+		debugLog.Printf("  Processing click: button=%v Y=%d ContentY=%d (scroll=%d)", button, y, contentY, m.scrollY)
+	}
+
+	// Check all regions with simple Y-based matching
+	if *debug {
+		debugLog.Printf("  Checking %d regions...", len(m.regions))
+	}
+	for i, region := range m.regions {
+		if contentY >= region.StartLine && contentY <= region.EndLine {
+			// Check column range if specified (EndCol=0 means full width)
+			endCol := region.EndCol
+			if endCol == 0 {
+				endCol = m.width
+			}
+			if x >= region.StartCol && x < endCol {
 				resolvedAction = region.Action
 				resolvedTarget = region.Target
+				if *debug {
+					debugLog.Printf("  -> Matched region[%d]: lines %d-%d, cols %d-%d, action=%s target=%s",
+						i, region.StartLine, region.EndLine, region.StartCol, endCol, region.Action, region.Target)
+				}
 				break
 			}
+		}
+	}
+
+	// Log final resolved action
+	if *debug {
+		if resolvedAction != "" {
+			debugLog.Printf("  RESOLVED: action=%s target=%s", resolvedAction, resolvedTarget)
+		} else {
+			debugLog.Printf("  RESOLVED: (no match)")
 		}
 	}
 
@@ -286,25 +459,23 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		paneID = strings.TrimSpace(string(out))
 	}
 
-	button := ""
-	switch msg.Button {
+	buttonStr := ""
+	switch button {
 	case tea.MouseButtonLeft:
-		button = "left"
+		buttonStr = "left"
 	case tea.MouseButtonRight:
-		button = "right"
+		buttonStr = "right"
 	case tea.MouseButtonMiddle:
-		button = "middle"
+		buttonStr = "middle"
 	}
 
 	input := &daemon.InputPayload{
 		SequenceNum:    m.sequenceNum,
 		Type:           "action",
-		MouseX:         msg.X,
-		MouseY:         msg.Y,
-		Button:         button,
+		MouseX:         x,
+		MouseY:         y,
+		Button:         buttonStr,
 		Action:         "press",
-		ClickedArea:    clickedArea,
-		PinnedRelY:     pinnedRelY,
 		ViewportOffset: m.scrollY,
 		ResolvedAction: resolvedAction,
 		ResolvedTarget: resolvedTarget,
@@ -328,16 +499,10 @@ func (m rendererModel) View() string {
 		return style.Render(fmt.Sprintf(" %s Loading...", frame))
 	}
 
-	// Calculate viewport
-	scrollableHeight := m.height - m.pinnedHeight
-	if scrollableHeight < 1 {
-		scrollableHeight = 1
-	}
-
-	// Split content into lines and extract visible portion
+	// SIMPLIFIED: Just show visible window of content (no pinned section)
 	lines := strings.Split(m.content, "\n")
 	visibleStart := m.scrollY
-	visibleEnd := visibleStart + scrollableHeight
+	visibleEnd := visibleStart + m.height
 
 	if visibleStart >= len(lines) {
 		visibleStart = len(lines) - 1
@@ -356,14 +521,11 @@ func (m rendererModel) View() string {
 	}
 
 	// Pad if needed
-	for len(visible) < scrollableHeight {
+	for len(visible) < m.height {
 		visible = append(visible, "")
 	}
 
-	scrollable := strings.Join(visible, "\n")
-
-	// Combine with pinned content
-	return scrollable + m.pinnedContent
+	return strings.Join(visible, "\n")
 }
 
 // receiveLoop reads messages from the daemon
@@ -488,10 +650,20 @@ var globalProgram *tea.Program
 func main() {
 	flag.Parse()
 
+	// Note: BubbleZone initialization removed - zone detection happens in daemon only.
+	// The daemon extracts zone bounds and sends accurate ClickableRegions.
+
 	if *debug {
-		debugLog = log.New(os.Stderr, "[renderer] ", log.LstdFlags|log.Lmicroseconds)
+		// Write debug log to file instead of stderr to avoid corrupting the display
+		logPath := fmt.Sprintf("/tmp/sidebar-renderer-%s.log", *windowID)
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			debugLog = log.New(os.Stderr, "[renderer] ", log.LstdFlags|log.Lmicroseconds)
+		} else {
+			debugLog = log.New(logFile, "[renderer] ", log.LstdFlags|log.Lmicroseconds)
+		}
 	} else {
-		debugLog = log.New(os.Stderr, "", 0)
+		debugLog = log.New(io.Discard, "", 0)
 	}
 
 	// Get session ID from environment if not provided
@@ -512,7 +684,9 @@ func main() {
 		height: 24,
 	}
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// Use WithMouseAllMotion for better compatibility with tmux
+	// Some terminals/tmux versions don't pass mouse events with WithMouseCellMotion
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	globalProgram = p
 
 	// Handle signals

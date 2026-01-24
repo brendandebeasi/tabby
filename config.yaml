@@ -161,3 +161,42 @@ widgets:
     margin_bot: 0
     padding_top: 0
     padding_bot: 0
+
+  pet:
+    enabled: true
+    name: "Whiskers"
+    style: "emoji"         # emoji, nerd, ascii
+    rows: 2                # 2 rows for play area (Y=0, Y=1, Y=2)
+    thoughts: false        # Disable LLM thoughts for now
+    thought_speed: 3       # Frames per scroll step (1=fast, 5=slow)
+    position: bottom
+    pin: true
+    priority: 50           # Between clock (100) and stats
+    hunger_decay: 30       # Seconds between hunger ticks
+    poop_chance: 50        # 50% chance to poop after eating
+    divider: "─"
+    divider_fg: "#444444"
+    margin_top: 0
+    margin_bottom: 0
+    padding_top: 0
+    padding_bottom: 0
+    # Custom icons (override style preset) - uncomment to customize:
+    # icons:
+    #   idle: "🐱"           # Cat idle state
+    #   walking: "🐱"        # Cat walking
+    #   jumping: "🐱"        # Cat jumping
+    #   playing: "🐱"        # Cat playing with yarn
+    #   eating: "🐱"         # Cat eating
+    #   sleeping: "😺"       # Cat sleeping
+    #   happy: "😻"          # Cat happy
+    #   hungry: "😿"         # Cat hungry
+    #   yarn: "🧶"           # Yarn ball
+    #   food: "🍖"           # Food item
+    #   poop: "💩"           # Poop
+    #   thought: "💭"        # Thought bubble
+    #   heart: "❤"           # Pet/love icon
+    #   life: "💗"           # Life stat icon
+    #   hunger_icon: "🍖"    # Hunger stat icon
+    #   happy_icon: "😸"     # Happy stat icon
+    #   sad_icon: "😿"       # Sad stat icon
+    #   ground: "·"          # Ground character

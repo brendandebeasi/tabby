@@ -106,15 +106,19 @@ type PetWidget struct {
 	Style           string `yaml:"style"`            // emoji | nerd | ascii
 	Rows            int    `yaml:"rows"`             // 1 or 2 rows for play area
 	Thoughts        bool   `yaml:"thoughts"`         // Enable LLM thoughts
-	ThoughtInterval int    `yaml:"thought_interval"` // Seconds between thoughts
+	ThoughtInterval int    `yaml:"thought_interval"` // Seconds between LLM thoughts
+	ThoughtSpeed    int    `yaml:"thought_speed"`    // Frames per scroll step (1=fast, 5=slow)
 	Position        string `yaml:"position"`         // top | bottom
 	Pin             bool   `yaml:"pin"`              // Pin to bottom
 	HungerDecay     int    `yaml:"hunger_decay"`     // Seconds between hunger ticks
 	PoopChance      int    `yaml:"poop_chance"`      // % chance to poop after eating
+	TouchButtons    bool   `yaml:"touch_buttons"`    // Show large touch-friendly action buttons
 	// LLM settings for thoughts
 	LLMProvider string `yaml:"llm_provider"` // openai | anthropic | ollama (default: anthropic)
 	LLMModel    string `yaml:"llm_model"`    // Model name (default: claude-3-haiku-20240307)
 	LLMAPIKey   string `yaml:"llm_api_key"`  // API key (or use env: ANTHROPIC_API_KEY, OPENAI_API_KEY)
+	// Custom icons (override style preset)
+	Icons PetIcons `yaml:"icons"` // Custom icons for each element
 	// Styling (same as other widgets)
 	Fg            string `yaml:"fg"`              // Text color
 	Bg            string `yaml:"bg"`              // Background color
@@ -126,6 +130,31 @@ type PetWidget struct {
 	PaddingBot    int    `yaml:"padding_bottom"`  // Blank lines below content
 	MarginTop     int    `yaml:"margin_top"`      // Lines above top divider
 	MarginBot     int    `yaml:"margin_bottom"`   // Lines below bottom divider
+}
+
+// PetIcons allows customizing individual icons in the pet widget
+type PetIcons struct {
+	// Pet states
+	Idle     string `yaml:"idle"`     // Idle cat (default: style-based)
+	Walking  string `yaml:"walking"`  // Walking cat
+	Jumping  string `yaml:"jumping"`  // Jumping cat
+	Playing  string `yaml:"playing"`  // Playing cat
+	Eating   string `yaml:"eating"`   // Eating cat
+	Sleeping string `yaml:"sleeping"` // Sleeping cat
+	Happy    string `yaml:"happy"`    // Happy cat
+	Hungry   string `yaml:"hungry"`   // Hungry cat
+	// Items
+	Yarn string `yaml:"yarn"` // Yarn ball
+	Food string `yaml:"food"` // Food item
+	Poop string `yaml:"poop"` // Poop
+	// UI elements
+	Thought    string `yaml:"thought"`     // Thought bubble icon
+	Heart      string `yaml:"heart"`       // Pet/love icon
+	Life       string `yaml:"life"`        // Life/health icon
+	HungerIcon string `yaml:"hunger_icon"` // Hunger stat icon
+	HappyIcon  string `yaml:"happy_icon"`  // Happiness stat icon (when happy)
+	SadIcon    string `yaml:"sad_icon"`    // Happiness stat icon (when sad)
+	Ground     string `yaml:"ground"`      // Ground character
 }
 
 type ClockWidget struct {

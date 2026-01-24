@@ -3,16 +3,20 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 
@@ -21,6 +25,19 @@ import (
 	"github.com/b/tmux-tabs/pkg/grouping"
 	"github.com/b/tmux-tabs/pkg/tmux"
 )
+
+// coordinatorDebugLog is the logger for coordinator debug output
+var coordinatorDebugLog *log.Logger
+
+func init() {
+	// Default to discard (no logging)
+	coordinatorDebugLog = log.New(io.Discard, "", 0)
+}
+
+// SetCoordinatorDebugLog sets the debug logger for the coordinator
+func SetCoordinatorDebugLog(logger *log.Logger) {
+	coordinatorDebugLog = logger
+}
 
 // Coordinator manages centralized state and rendering for all renderers
 type Coordinator struct {
@@ -46,6 +63,16 @@ type Coordinator struct {
 	// Pet state
 	pet petState
 
+	// Last known width (for pet physics clamping)
+	lastWidth int
+
+	// Per-client widths for accurate click detection
+	clientWidths   map[string]int
+	clientWidthsMu sync.RWMutex
+
+	// Pet widget layout (for custom click detection)
+	petLayout petWidgetLayout
+
 	// State locks
 	stateMu sync.RWMutex
 
@@ -61,6 +88,7 @@ type petState struct {
 	Hunger        int
 	Happiness     int
 	YarnPos       pos2D
+	YarnExpiresAt time.Time // When yarn disappears
 	FoodItem      pos2D
 	PoopPositions []int
 	NeedsPoopAt   time.Time
@@ -92,28 +120,75 @@ type floatingItem struct {
 	ExpiresAt time.Time
 }
 
+// petWidgetLayout tracks line offsets for custom click detection
+//
+// CLICK DETECTION METHODS:
+//
+// 1. BubbleZone (used for static elements):
+//    - Wrap text with zone.Mark("zone_id", text) during rendering
+//    - Call zone.Scan() on the full output to process markers
+//    - Use zone.Get("zone_id") to retrieve bounds (StartX, EndX, StartY, EndY)
+//    - Good for: buttons, fixed-position elements
+//    - Limitation: Only ONE zone per ID is tracked (multiple zones with same ID overwrite)
+//
+// 2. Custom Layout Tracking (used for pet widget play area):
+//    - Track line numbers during rendering (currentLine counter)
+//    - Store positions in a layout struct (petWidgetLayout)
+//    - In click handler, compare input.PinnedRelY against stored line numbers
+//    - Use input.MouseX for horizontal position within the line
+//    - Good for: complex dynamic content, multi-element interactions, precise hit testing
+//    - Requires: manual tracking during render, custom click handler
+//
+// The pet widget uses BOTH methods:
+// - BubbleZone for the Feed button (zone.Mark("pet:drop_food", ...))
+// - Custom tracking for play area (air lines, ground line)
+//
+// Line numbers are relative to the widget output start (0-indexed), except ContentStartLine
+// which is the absolute content line where the pet widget begins.
+type petWidgetLayout struct {
+	ContentStartLine int // Absolute content line where pet widget starts (set in RenderForClient)
+	FeedLine         int // "Feed" button line (relative to widget start)
+	HighAirLine      int // High air (Y=2) line - click drops yarn
+	LowAirLine       int // Low air (Y=1) line - click drops yarn
+	GroundLine       int // Ground (Y=0) line - click on cat pets, click on poop cleans, else drops yarn
+	PlayWidth        int // Width of play area (safePlayWidth) - clicks beyond this are ignored
+	WidgetHeight     int // Total widget height in lines
+}
+
 // Pet sprites by style
 type petSprites struct {
 	Idle, Walking, Jumping, Playing  string
 	Eating, Sleeping, Happy, Hungry  string
 	Yarn, Food, Poop                 string
+	Thought, Heart, Life             string
+	HungerIcon, HappyIcon, SadIcon   string
+	Ground                           string
 }
 
 var petSpritesByStyle = map[string]petSprites{
 	"emoji": {
-		Idle: "🐱", Walking: "🐱", Jumping: "🐱⬆", Playing: "🐱",
+		Idle: "🐱", Walking: "🐱", Jumping: "🐱", Playing: "🐱",
 		Eating: "🐱", Sleeping: "😺", Happy: "😻", Hungry: "😿",
 		Yarn: "🧶", Food: "🍖", Poop: "💩",
+		Thought: "💭", Heart: "❤", Life: "💗",
+		HungerIcon: "🍖", HappyIcon: "😸", SadIcon: "😿",
+		Ground: "·",
 	},
 	"nerd": {
-		Idle: "󰄛", Walking: "󰄛", Jumping: "󰄛^", Playing: "󰄛",
+		Idle: "󰄛", Walking: "󰄛", Jumping: "󰄛", Playing: "󰄛",
 		Eating: "󰄛", Sleeping: "󰄛", Happy: "󰄛", Hungry: "󰄛",
-		Yarn: "@", Food: "♨", Poop: ".",
+		Yarn: "", Food: "", Poop: "",
+		Thought: "", Heart: "", Life: "",
+		HungerIcon: "", HappyIcon: "", SadIcon: "",
+		Ground: "·",
 	},
 	"ascii": {
 		Idle: "=^.^=", Walking: "=^.^=", Jumping: "=^o^=", Playing: "=^.^=",
 		Eating: "=^.^=", Sleeping: "=-.~=", Happy: "=^.^=", Hungry: "=;.;=",
 		Yarn: "@", Food: "o", Poop: ".",
+		Thought: ">", Heart: "<3", Life: "*",
+		HungerIcon: "o", HappyIcon: ":)", SadIcon: ":(",
+		Ground: ".",
 	},
 }
 
@@ -139,6 +214,8 @@ func NewCoordinator(sessionID string) *Coordinator {
 		sessionID:       sessionID,
 		config:          cfg,
 		collapsedGroups: make(map[string]bool),
+		clientWidths:    make(map[string]int),
+		lastWidth:       25, // Default width for pet physics
 		pet: petState{
 			Pos:       pos2D{X: 10, Y: 0},
 			State:     "idle",
@@ -168,38 +245,75 @@ func NewCoordinator(sessionID string) *Coordinator {
 	return c
 }
 
-// loadCollapsedGroups loads collapsed state from tmux option
+// loadCollapsedGroups loads collapsed state from tmux options
 func (c *Coordinator) loadCollapsedGroups() {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	c.loadCollapsedGroupsLocked()
+}
+
+// loadCollapsedGroupsLocked loads collapsed state (caller must hold stateMu)
+func (c *Coordinator) loadCollapsedGroupsLocked() {
+	// Clear existing state
+	c.collapsedGroups = make(map[string]bool)
+
+	// First try legacy JSON format for backwards compatibility
 	out, err := exec.Command("tmux", "show-options", "-v", "-q", "@tabby_collapsed_groups").Output()
-	if err != nil || len(out) == 0 {
-		return
+	if err == nil && len(out) > 0 {
+		var groups []string
+		if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &groups); err == nil {
+			for _, g := range groups {
+				c.collapsedGroups[g] = true
+			}
+			// Migrate to new per-group format
+			c.saveCollapsedGroupsLocked()
+			exec.Command("tmux", "set-option", "-u", "@tabby_collapsed_groups").Run()
+			return
+		}
 	}
-	var groups []string
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &groups); err != nil {
-		return
+
+	// Load per-group options (new format)
+	// Check all configured groups
+	for _, group := range c.config.Groups {
+		optName := fmt.Sprintf("@tabby_grp_collapsed_%s", strings.ReplaceAll(group.Name, " ", "_"))
+		out, err := exec.Command("tmux", "show-options", "-v", "-q", optName).Output()
+		if err == nil && strings.TrimSpace(string(out)) == "1" {
+			c.collapsedGroups[group.Name] = true
+		}
 	}
-	for _, g := range groups {
-		c.collapsedGroups[g] = true
+	// Also check "Default" group
+	out, err = exec.Command("tmux", "show-options", "-v", "-q", "@tabby_grp_collapsed_Default").Output()
+	if err == nil && strings.TrimSpace(string(out)) == "1" {
+		c.collapsedGroups["Default"] = true
 	}
 }
 
-// saveCollapsedGroups saves collapsed state to tmux option
+// saveCollapsedGroups saves collapsed state to tmux options
 func (c *Coordinator) saveCollapsedGroups() {
-	var groups []string
-	for name, isCollapsed := range c.collapsedGroups {
-		if isCollapsed {
-			groups = append(groups, name)
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	c.saveCollapsedGroupsLocked()
+}
+
+// saveCollapsedGroupsLocked saves collapsed state (caller must hold stateMu)
+func (c *Coordinator) saveCollapsedGroupsLocked() {
+	// Save per-group options for ALL configured groups
+	// This ensures expanded groups get their option unset
+	for _, group := range c.config.Groups {
+		optName := fmt.Sprintf("@tabby_grp_collapsed_%s", strings.ReplaceAll(group.Name, " ", "_"))
+		if c.collapsedGroups[group.Name] {
+			exec.Command("tmux", "set-option", optName, "1").Run()
+		} else {
+			exec.Command("tmux", "set-option", "-u", optName).Run()
 		}
 	}
-	if len(groups) == 0 {
-		exec.Command("tmux", "set-option", "-u", "@tabby_collapsed_groups").Run()
-		return
+	// Also handle Default group
+	optName := "@tabby_grp_collapsed_Default"
+	if c.collapsedGroups["Default"] {
+		exec.Command("tmux", "set-option", optName, "1").Run()
+	} else {
+		exec.Command("tmux", "set-option", "-u", optName).Run()
 	}
-	data, err := json.Marshal(groups)
-	if err != nil {
-		return
-	}
-	exec.Command("tmux", "set-option", "@tabby_collapsed_groups", string(data)).Run()
 }
 
 // petStatePath returns the path to the shared pet state file
@@ -229,6 +343,9 @@ func (c *Coordinator) savePetState() {
 func (c *Coordinator) RefreshWindows() {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
+
+	// Note: collapsed groups state is managed in-memory and synced to tmux options
+	// We don't reload here to avoid race conditions with toggle_group action
 
 	windows, err := tmux.ListWindowsWithPanes()
 	if err != nil {
@@ -340,26 +457,323 @@ func (c *Coordinator) UpdatePetState() {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 
-	// Reload shared state periodically
+	// Reload shared state periodically (for cross-sidebar sync)
 	if c.pet.AnimFrame%5 == 0 {
 		c.loadPetState()
 	}
 
 	c.pet.AnimFrame++
-
-	// Decrease hunger over time
-	if c.pet.Hunger > 0 && c.pet.AnimFrame%30 == 0 {
-		c.pet.Hunger--
+	now := time.Now()
+	width := c.lastWidth
+	if width < 10 {
+		width = 25
+	}
+	// Account for emoji visual width (2 cols) - use safe play width
+	maxX := width - 5 // Reduced from width-2 to match safePlayWidth calculation
+	if maxX < 1 {
+		maxX = 1
 	}
 
-	// Decrease happiness if hungry
-	if c.pet.Hunger < 30 && c.pet.Happiness > 0 && c.pet.AnimFrame%20 == 0 {
+	// === YARN EXPIRATION ===
+
+	// Yarn disappears after expiration time
+	if c.pet.YarnPos.X >= 0 && !c.pet.YarnExpiresAt.IsZero() && now.After(c.pet.YarnExpiresAt) {
+		c.pet.YarnPos = pos2D{X: -1, Y: 0}
+		c.pet.YarnExpiresAt = time.Time{}
+		// If cat was chasing yarn, stop
+		if c.pet.ActionPending == "play" {
+			c.pet.HasTarget = false
+			c.pet.ActionPending = ""
+			c.pet.State = "idle"
+			c.pet.LastThought = "where'd it go?"
+		}
+	}
+
+	// === GRAVITY ===
+
+	// Yarn gravity - falls if in air
+	if c.pet.YarnPos.Y > 0 {
+		c.pet.YarnPos.Y--
+	}
+
+	// Cat gravity - falls back to ground after jumping
+	if c.pet.Pos.Y > 0 {
+		c.pet.Pos.Y--
+		if c.pet.Pos.Y == 0 && c.pet.State == "jumping" {
+			c.pet.State = "idle"
+		}
+	}
+
+	// Food gravity - falls if in air
+	if c.pet.FoodItem.X >= 0 && c.pet.FoodItem.Y > 0 {
+		c.pet.FoodItem.Y--
+		// When food lands, pet should chase it
+		if c.pet.FoodItem.Y == 0 && !c.pet.HasTarget {
+			c.pet.TargetPos = pos2D{X: c.pet.FoodItem.X, Y: 0}
+			c.pet.HasTarget = true
+			c.pet.ActionPending = "eat"
+			c.pet.State = "walking"
+			c.pet.LastThought = "food!"
+		}
+	}
+
+	// === POOP MECHANICS ===
+
+	// Check if pet needs to poop
+	if !c.pet.NeedsPoopAt.IsZero() && now.After(c.pet.NeedsPoopAt) {
+		poopX := c.pet.Pos.X
+		if poopX > 0 {
+			poopX-- // Offset slightly
+		}
+		c.pet.PoopPositions = append(c.pet.PoopPositions, poopX)
+		c.pet.LastPoop = now
+		c.pet.NeedsPoopAt = time.Time{}
+		c.pet.LastThought = randomThought("poop")
+	}
+
+	// === POSITION CLAMPING ===
+
+	if c.pet.Pos.X > maxX {
+		c.pet.Pos.X = maxX
+	}
+	if c.pet.Pos.X < 0 {
+		c.pet.Pos.X = 0
+	}
+	if c.pet.TargetPos.X > maxX {
+		c.pet.TargetPos.X = maxX
+	}
+	if c.pet.TargetPos.X < 0 {
+		c.pet.TargetPos.X = 0
+	}
+
+	// === TARGET MOVEMENT ===
+
+	if c.pet.HasTarget {
+		// Move pet toward target X
+		if c.pet.Pos.X < c.pet.TargetPos.X {
+			c.pet.Pos.X++
+			c.pet.Direction = 1
+		} else if c.pet.Pos.X > c.pet.TargetPos.X {
+			c.pet.Pos.X--
+			c.pet.Direction = -1
+		}
+		// Clamp after move
+		if c.pet.Pos.X > maxX {
+			c.pet.Pos.X = maxX
+		}
+		if c.pet.Pos.X < 0 {
+			c.pet.Pos.X = 0
+		}
+
+		// If chasing yarn, push it when reached
+		if c.pet.ActionPending == "play" {
+			yarnX := c.pet.YarnPos.X
+			if yarnX < 0 {
+				yarnX = width - 4
+			}
+			// Pet pushes yarn when it reaches it
+			if c.pet.Pos.X == yarnX || c.pet.Pos.X == yarnX-1 || c.pet.Pos.X == yarnX+1 {
+				newYarnX := yarnX + c.pet.Direction*2
+				if newYarnX >= 2 && newYarnX < width-2 {
+					c.pet.YarnPos.X = newYarnX
+					c.pet.YarnPos.Y = 1 // Bounce up
+					c.pet.TargetPos.X = newYarnX
+				}
+			}
+		}
+
+		// Check if reached target
+		if c.pet.Pos.X == c.pet.TargetPos.X && c.pet.Pos.Y == c.pet.TargetPos.Y {
+			c.pet.HasTarget = false
+			switch c.pet.ActionPending {
+			case "eat":
+				c.pet.Hunger = 100
+				c.pet.State = "eating"
+				c.pet.LastFed = now
+				c.pet.TotalFeedings++
+				c.pet.LastThought = "nom nom nom"
+				c.pet.FoodItem = pos2D{X: -1, Y: -1}
+				// Schedule potential poop based on config chance (default 50%)
+				poopChance := c.config.Widgets.Pet.PoopChance
+				if poopChance <= 0 {
+					poopChance = 50
+				}
+				if rand.Intn(100) < poopChance {
+					c.pet.NeedsPoopAt = now.Add(time.Duration(3+rand.Intn(5)) * time.Second)
+				}
+			case "play":
+				c.pet.State = "playing"
+				if c.pet.Happiness < 100 {
+					c.pet.Happiness += 5
+					if c.pet.Happiness > 100 {
+						c.pet.Happiness = 100
+					}
+				}
+				c.pet.TotalYarnPlays++
+				c.pet.LastThought = "got it!"
+				// 50% chance yarn disappears after being played with
+				if rand.Intn(100) < 50 {
+					c.pet.YarnPos = pos2D{X: -1, Y: 0}
+					c.pet.YarnExpiresAt = time.Time{}
+				}
+			default:
+				c.pet.State = "idle"
+			}
+			c.pet.ActionPending = ""
+		}
+	} else if c.pet.State == "eating" || c.pet.State == "playing" || c.pet.State == "happy" || c.pet.State == "shooting" {
+		// Return to idle after a few frames
+		if c.pet.AnimFrame%20 == 0 {
+			c.pet.State = "idle"
+			c.pet.LastThought = randomThought("idle")
+		}
+	}
+
+	// === FLOATING ITEMS ===
+
+	var activeItems []floatingItem
+	for _, item := range c.pet.FloatingItems {
+		if now.Before(item.ExpiresAt) {
+			item.Pos.X += item.Velocity.X
+			item.Pos.Y += item.Velocity.Y
+			// Keep in bounds
+			if item.Pos.X >= 0 && item.Pos.X < width && item.Pos.Y >= 0 && item.Pos.Y <= 2 {
+				activeItems = append(activeItems, item)
+			}
+		}
+	}
+	c.pet.FloatingItems = activeItems
+
+	// === RANDOM BEHAVIORS (cat mood) ===
+
+	if c.pet.State == "idle" && !c.pet.HasTarget && c.pet.AnimFrame%10 == 0 {
+		// 30% chance to do something every 10 frames
+		if rand.Intn(100) < 30 {
+			action := rand.Intn(8)
+			switch action {
+			case 0:
+				// Run across the screen
+				c.pet.State = "walking"
+				c.pet.Direction = []int{-1, 1}[rand.Intn(2)]
+				targetX := rand.Intn(maxX)
+				c.pet.TargetPos = pos2D{X: targetX, Y: 0}
+				c.pet.HasTarget = true
+				c.pet.LastThought = randomThought("walking")
+			case 1:
+				// Jump in place
+				c.pet.State = "jumping"
+				c.pet.Pos.Y = 2
+				c.pet.LastThought = randomThought("jumping")
+			case 2:
+				// Chase the yarn
+				if c.pet.YarnPos.X >= 0 {
+					c.pet.TargetPos = pos2D{X: c.pet.YarnPos.X, Y: 0}
+					c.pet.HasTarget = true
+					c.pet.ActionPending = "play"
+					c.pet.State = "walking"
+					c.pet.LastThought = "yarn calls to me."
+				}
+			case 3:
+				// Bat at yarn (toss it)
+				tossX := rand.Intn(maxX-2) + 2
+				c.pet.YarnPos = pos2D{X: tossX, Y: 2}
+				c.pet.YarnExpiresAt = now.Add(15 * time.Second)
+				c.pet.TargetPos = pos2D{X: tossX, Y: 0}
+				c.pet.HasTarget = true
+				c.pet.ActionPending = "play"
+				c.pet.State = "walking"
+				c.pet.LastThought = "chaos time."
+			case 4:
+				// Just be happy
+				c.pet.State = "happy"
+				c.pet.LastThought = randomThought("happy")
+			case 5:
+				// SHOOT A BANANA!
+				c.pet.State = "shooting"
+				dir := c.pet.Direction
+				if dir == 0 {
+					dir = 1
+				}
+				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+					Emoji:     "🔫",
+					Pos:       pos2D{X: c.pet.Pos.X + dir, Y: 0},
+					Velocity:  pos2D{X: 0, Y: 0},
+					ExpiresAt: now.Add(800 * time.Millisecond),
+				})
+				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+					Emoji:     "🍌",
+					Pos:       pos2D{X: c.pet.Pos.X + dir*2, Y: 1},
+					Velocity:  pos2D{X: dir * 2, Y: 0},
+					ExpiresAt: now.Add(2 * time.Second),
+				})
+				thoughts := []string{"pew pew.", "banana had it coming.", "nothing personal.", "the family sends regards."}
+				c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+			case 6:
+				// Toss random emoji
+				emojis := []string{"⭐", "💫", "✨", "🎾", "🏀", "🎈", "🦋", "🐟", "🍎", "🧀"}
+				emoji := emojis[rand.Intn(len(emojis))]
+				startX := rand.Intn(maxX-2) + 2
+				dir := []int{-1, 1}[rand.Intn(2)]
+				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+					Emoji:     emoji,
+					Pos:       pos2D{X: startX, Y: 2},
+					Velocity:  pos2D{X: dir, Y: 0},
+					ExpiresAt: now.Add(3 * time.Second),
+				})
+				c.pet.LastThought = "ooh shiny."
+			case 7:
+				// Menacing stare
+				emojis := []string{"👁️", "🔪", "💀", "🎯"}
+				emoji := emojis[rand.Intn(len(emojis))]
+				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+					Emoji:     emoji,
+					Pos:       pos2D{X: c.pet.Pos.X, Y: 2},
+					Velocity:  pos2D{X: 0, Y: 0},
+					ExpiresAt: now.Add(2 * time.Second),
+				})
+				thoughts := []string{"watching.", "always watching.", "i see you.", "the family knows."}
+				c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+			}
+		}
+	}
+
+	// === HUNGER/HAPPINESS DECAY ===
+
+	// Use config for hunger decay rate (frames = seconds * 10 since ~10fps)
+	hungerDecayFrames := c.config.Widgets.Pet.HungerDecay * 10
+	if hungerDecayFrames <= 0 {
+		hungerDecayFrames = 300 // Default: 30 seconds
+	}
+	if c.pet.Hunger > 0 && c.pet.AnimFrame%hungerDecayFrames == 0 {
+		c.pet.Hunger--
+	}
+	// Happiness decays 1.5x faster when hungry
+	happyDecayFrames := hungerDecayFrames * 2 / 3
+	if happyDecayFrames <= 0 {
+		happyDecayFrames = 200
+	}
+	if c.pet.Hunger < 30 && c.pet.Happiness > 0 && c.pet.AnimFrame%happyDecayFrames == 0 {
 		c.pet.Happiness--
 	}
 
-	// Thought marquee - scroll every 3 frames
-	if c.pet.AnimFrame%3 == 0 {
-		c.pet.ThoughtScroll++
+	// === THOUGHT MARQUEE ===
+
+	// Use config for thought scroll speed (default: 3 frames per scroll step)
+	thoughtSpeed := c.config.Widgets.Pet.ThoughtSpeed
+	if thoughtSpeed <= 0 {
+		thoughtSpeed = 3
+	}
+	if c.pet.AnimFrame%thoughtSpeed == 0 {
+		thoughtWidth := runewidth.StringWidth(c.pet.LastThought)
+		maxThoughtWidth := width - 4
+		if thoughtWidth > maxThoughtWidth {
+			c.pet.ThoughtScroll++
+			if c.pet.ThoughtScroll > thoughtWidth+3 {
+				c.pet.ThoughtScroll = 0
+			}
+		} else {
+			c.pet.ThoughtScroll = 0
+		}
 	}
 
 	c.savePetState()
@@ -367,9 +781,6 @@ func (c *Coordinator) UpdatePetState() {
 
 // RenderForClient generates content for a specific client's dimensions
 func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemon.RenderPayload {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-
 	// Guard dimensions
 	if width < 10 {
 		width = 25
@@ -378,29 +789,73 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		height = 24
 	}
 
+	// Track width for pet physics (safe to update outside lock - advisory)
+	c.lastWidth = width
+
+	// Store per-client width for accurate click detection on resize
+	c.clientWidthsMu.Lock()
+	c.clientWidths[clientID] = width
+	c.clientWidthsMu.Unlock()
+
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+
 	// Generate main content (window/pane list) with clickable regions
 	// Pass clientID so we can show this client's window as active
 	mainContent, regions := c.generateMainContent(clientID, width, height)
 
-	// Generate pinned content (widgets at bottom)
-	pinnedContent := c.generatePinnedContent(width)
-	pinnedHeight := strings.Count(pinnedContent, "\n")
-	if pinnedContent != "" && !strings.HasSuffix(pinnedContent, "\n") {
-		pinnedHeight++
+	// SIMPLIFIED: Stack widgets at the bottom of main content (no more pinned/scrollable split)
+	// Calculate current line offset for widget regions
+	// Count lines in main content (lines = newlines, since each line except last ends with \n)
+	currentLine := strings.Count(mainContent, "\n")
+
+	// Store the content start line for pet widget click detection
+	// This tells us where the pet widget starts in absolute content coordinates
+	c.petLayout.ContentStartLine = currentLine
+
+	// Generate widgets and adjust their regions to account for main content offset
+	widgetContent, widgetRegions := c.generatePinnedContent(width)
+	if len(widgetRegions) > 0 {
+		coordinatorDebugLog.Printf("Widget region offset: mainContent has %d newlines, offsetting widget regions by %d", currentLine, currentLine)
+		coordinatorDebugLog.Printf("  Before offset: first widget region %+v", widgetRegions[0])
+		for i := range widgetRegions {
+			widgetRegions[i].StartLine += currentLine
+			widgetRegions[i].EndLine += currentLine
+		}
+		coordinatorDebugLog.Printf("  After offset: first widget region %+v", widgetRegions[0])
 	}
 
-	// Count total lines for scroll calculation
-	totalLines := strings.Count(mainContent, "\n")
+	// Combine everything into one content string
+	fullContent := mainContent + widgetContent
+	allRegions := append(regions, widgetRegions...)
+
+	// Count total lines
+	totalLines := strings.Count(fullContent, "\n")
+
+	// Debug logging
+	coordinatorDebugLog.Printf("RenderForClient: client=%s width=%d height=%d", clientID, width, height)
+	coordinatorDebugLog.Printf("  Content: %d lines, %d bytes", totalLines, len(fullContent))
+	coordinatorDebugLog.Printf("  Regions: %d total", len(allRegions))
 
 	return &daemon.RenderPayload{
-		Content:       mainContent,
-		PinnedContent: pinnedContent,
+		Content:       fullContent,
+		PinnedContent: "", // No longer using pinned content
 		Width:         width,
 		Height:        height,
 		TotalLines:    totalLines,
-		PinnedHeight:  pinnedHeight,
-		Regions:       regions,
+		PinnedHeight:  0, // No pinned section
+		Regions:       allRegions,
+		PinnedRegions: nil, // All regions are in main Regions array now
 	}
+}
+
+// hashContent returns a simple hash of content for comparison
+func hashContent(s string) uint32 {
+	var h uint32
+	for _, c := range s {
+		h = h*31 + uint32(c)
+	}
+	return h
 }
 
 // isTouchMode checks if touch mode is enabled
@@ -461,6 +916,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	// Clock widget at top if configured
 	if c.config.Widgets.Clock.Enabled && c.config.Widgets.Clock.Position == "top" {
 		clockContent := c.renderClockWidget(width)
+		clockContent = constrainWidgetWidth(clockContent, width)
 		s.WriteString(clockContent)
 		currentLine += strings.Count(clockContent, "\n")
 	}
@@ -555,30 +1011,37 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 		// Only show collapse icon if group has windows
 		if hasWindows {
-			headerContentStyle := headerStyle.Width(width - 2)
+			// Truncate header text to fit width (accounting for collapse icon)
+			headerMaxWidth := width - 2
+			if lipgloss.Width(headerText) > headerMaxWidth {
+				truncated := ""
+				for _, r := range headerText {
+					if lipgloss.Width(truncated+string(r)) > headerMaxWidth-1 {
+						break
+					}
+					truncated += string(r)
+				}
+				headerText = truncated + "~"
+			}
+			headerContentStyle := headerStyle.Width(headerMaxWidth)
 			s.WriteString(collapseStyle.Render(collapseIcon+" ") + headerContentStyle.Render(headerText) + "\n")
 		} else {
 			// No windows - just show header without collapse icon
+			headerMaxWidth := width - 2
+			if lipgloss.Width(headerText) > headerMaxWidth {
+				truncated := ""
+				for _, r := range headerText {
+					if lipgloss.Width(truncated+string(r)) > headerMaxWidth-1 {
+						break
+					}
+					truncated += string(r)
+				}
+				headerText = truncated + "~"
+			}
 			headerContentStyle := headerStyle.Width(width)
 			s.WriteString(headerContentStyle.Render("  "+headerText) + "\n")
 		}
 		currentLine++
-
-		// Touch divider (skip for last group)
-		if !isLastGroup {
-			touchDiv := c.touchDivider(width, theme.Bg)
-			if touchDiv != "" {
-				s.WriteString(touchDiv)
-				currentLine++
-			}
-
-			// Line spacing
-			spacing := c.lineSpacing()
-			if spacing != "" {
-				s.WriteString(spacing)
-				currentLine += strings.Count(spacing, "\n")
-			}
-		}
 
 		// Record group region for click handling
 		regions = append(regions, daemon.ClickableRegion{
@@ -870,8 +1333,16 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					paneIndentWidth := 6
 					paneContentWidth := width - paneIndentWidth
 
-					if len(paneText) > paneContentWidth {
-						paneText = paneText[:paneContentWidth-1] + "~"
+					// Truncate using proper rune width (handles Unicode/emoji)
+					if lipgloss.Width(paneText) > paneContentWidth {
+						truncated := ""
+						for _, r := range paneText {
+							if lipgloss.Width(truncated+string(r)) > paneContentWidth-1 {
+								break
+							}
+							truncated += string(r)
+						}
+						paneText = truncated + "~"
 					}
 
 					paneActiveIndicator := c.config.Sidebar.Colors.ActiveIndicator
@@ -915,38 +1386,30 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			visualPos++
 		}
-	}
 
-	// Buttons
-	if c.config.Sidebar.NewTabButton || c.config.Sidebar.NewGroupButton || c.config.Sidebar.CloseButton {
-		touchDiv := c.touchDivider(width, "#444444")
-		if touchDiv != "" {
-			s.WriteString(touchDiv)
+		// Padding after group (before next group)
+		if !isLastGroup && hasWindows && !isCollapsed {
+			s.WriteString("\n")
 			currentLine++
 		}
+	}
+
+	// Buttons - full width with backgrounds, connected (no spacing)
+	if c.config.Sidebar.NewTabButton || c.config.Sidebar.NewGroupButton || c.config.Sidebar.CloseButton {
 		s.WriteString("\n")
 		currentLine++
 	}
 
 	if c.config.Sidebar.NewTabButton {
 		buttonStartLine := currentLine
-		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#27ae60"))
-		if c.isTouchMode(width) {
-			s.WriteString("\n")
-			currentLine++
-			s.WriteString(buttonStyle.Render("  [+] New Tab") + "\n")
-			currentLine++
-			s.WriteString("\n")
-			currentLine++
-		} else {
-			s.WriteString(buttonStyle.Render("[+] New Tab") + "\n")
-			currentLine++
-			spacing := c.lineSpacing()
-			if spacing != "" {
-				s.WriteString(spacing)
-				currentLine += strings.Count(spacing, "\n")
-			}
-		}
+		buttonStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#ffffff")).
+			Background(lipgloss.Color("#27ae60")).
+			Bold(true).
+			Width(width)
+		label := " + New Tab"
+		s.WriteString(buttonStyle.Render(label) + "\n")
+		currentLine++
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: buttonStartLine,
 			EndLine:   currentLine - 1,
@@ -957,21 +1420,14 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 	if c.config.Sidebar.NewGroupButton {
 		buttonStartLine := currentLine
-		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9b59b6"))
-		if c.isTouchMode(width) {
-			s.WriteString(buttonStyle.Render("  [+] New Group") + "\n")
-			currentLine++
-			s.WriteString("\n")
-			currentLine++
-		} else {
-			s.WriteString(buttonStyle.Render("[+] New Group") + "\n")
-			currentLine++
-			spacing := c.lineSpacing()
-			if spacing != "" {
-				s.WriteString(spacing)
-				currentLine += strings.Count(spacing, "\n")
-			}
-		}
+		buttonStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#ffffff")).
+			Background(lipgloss.Color("#9b59b6")).
+			Bold(true).
+			Width(width)
+		label := " + New Group"
+		s.WriteString(buttonStyle.Render(label) + "\n")
+		currentLine++
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: buttonStartLine,
 			EndLine:   currentLine - 1,
@@ -982,21 +1438,14 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 	if c.config.Sidebar.CloseButton {
 		buttonStartLine := currentLine
-		buttonStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e74c3c"))
-		if c.isTouchMode(width) {
-			s.WriteString(buttonStyle.Render("  [x] Close Tab") + "\n")
-			currentLine++
-			s.WriteString("\n")
-			currentLine++
-		} else {
-			s.WriteString(buttonStyle.Render("[x] Close Tab") + "\n")
-			currentLine++
-			spacing := c.lineSpacing()
-			if spacing != "" {
-				s.WriteString(spacing)
-				currentLine += strings.Count(spacing, "\n")
-			}
-		}
+		buttonStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#ffffff")).
+			Background(lipgloss.Color("#e74c3c")).
+			Bold(true).
+			Width(width)
+		label := " x Close Tab"
+		s.WriteString(buttonStyle.Render(label) + "\n")
+		currentLine++
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: buttonStartLine,
 			EndLine:   currentLine - 1,
@@ -1007,37 +1456,90 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 	// Non-pinned clock widget at bottom position
 	if c.config.Widgets.Clock.Enabled && c.config.Widgets.Clock.Position != "top" && !c.config.Widgets.Clock.Pin {
-		s.WriteString(c.renderClockWidget(width))
+		clockContent := c.renderClockWidget(width)
+		clockContent = constrainWidgetWidth(clockContent, width)
+		s.WriteString(clockContent)
 	}
 
 	return s.String(), regions
 }
 
 // generatePinnedContent creates the pinned widgets at bottom
-func (c *Coordinator) generatePinnedContent(width int) string {
+func (c *Coordinator) generatePinnedContent(width int) (string, []daemon.ClickableRegion) {
 	var s strings.Builder
 
-	// Pinned pet widget at bottom
+	// Pinned pet widget at bottom (with zone.Mark wrappers for clicks)
 	if c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.Pin {
-		s.WriteString(c.renderPetWidget(width))
+		content := c.renderPetWidget(width)
+		// Do not constrain width here, as it messes up ANSI zone markers
+		s.WriteString(content)
+	}
+
+	// Scan content for zone markers and extract click regions automatically
+	if c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.Pin {
+		// Build full content and scan for zones
+		fullContent := s.String()
+		scannedContent := zone.Scan(fullContent)
+
+		// Extract zone bounds for pet touch buttons
+		petZones := []string{"pet:drop_food", "pet:drop_yarn", "pet:clean_poop", "pet:pet_pet", "pet:ground"}
+		var zoneRegions []daemon.ClickableRegion
+
+		for _, zoneID := range petZones {
+			if info := zone.Get(zoneID); info != nil && !info.IsZero() {
+				// Parse action from zone ID (format: "category:action")
+				parts := strings.SplitN(zoneID, ":", 2)
+				if len(parts) == 2 {
+					// Note: BubbleZone EndX is inclusive, but ClickableRegion EndCol is exclusive
+					// So we add 1 to convert from inclusive to exclusive
+					zoneRegions = append(zoneRegions, daemon.ClickableRegion{
+						StartLine: info.StartY,
+						EndLine:   info.EndY,
+						StartCol:  info.StartX,
+						EndCol:    info.EndX + 1, // Convert from inclusive to exclusive
+						Action:    parts[1],      // e.g., "drop_food"
+						Target:    parts[0],      // e.g., "pet"
+					})
+					coordinatorDebugLog.Printf("BubbleZone extracted: %s -> lines %d-%d, cols %d-%d (exclusive)",
+						zoneID, info.StartY, info.EndY, info.StartX, info.EndX+1)
+				}
+			}
+		}
+
+		coordinatorDebugLog.Printf("BubbleZone: extracted %d widget regions automatically", len(zoneRegions))
+
+		// Apply safety constraint to the clean content (after markers are stripped)
+		scannedContent = constrainWidgetWidth(scannedContent, width)
+
+		// Use the scanned content (with zone markers stripped) for display
+		s.Reset()
+		s.WriteString(scannedContent)
+
+		return s.String(), zoneRegions
 	}
 
 	// Pinned clock widget at bottom
 	if c.config.Widgets.Clock.Enabled && c.config.Widgets.Clock.Position != "top" && c.config.Widgets.Clock.Pin {
-		s.WriteString(c.renderClockWidget(width))
+		content := c.renderClockWidget(width)
+		content = constrainWidgetWidth(content, width)
+		s.WriteString(content)
 	}
 
 	// Pinned git widget at bottom
 	if c.config.Widgets.Git.Enabled && c.config.Widgets.Git.Pin {
-		s.WriteString(c.renderGitWidget(width))
+		content := c.renderGitWidget(width)
+		content = constrainWidgetWidth(content, width)
+		s.WriteString(content)
 	}
 
 	// Pinned session widget at bottom
 	if c.config.Widgets.Session.Enabled && c.config.Widgets.Session.Pin {
-		s.WriteString(c.renderSessionWidget(width))
+		content := c.renderSessionWidget(width)
+		content = constrainWidgetWidth(content, width)
+		s.WriteString(content)
 	}
 
-	return s.String()
+	return s.String(), nil
 }
 
 // renderClockWidget renders the clock/date widget
@@ -1165,11 +1667,8 @@ func (c *Coordinator) renderGitWidget(width int) string {
 
 	icon := ""
 	branch := c.gitBranch
-	maxBranch := width - 8
-	if len(branch) > maxBranch {
-		branch = branch[:maxBranch-1] + "~"
-	}
 
+	// Build status first to know its width
 	status := ""
 	if c.gitDirty > 0 {
 		status += fmt.Sprintf(" *%d", c.gitDirty)
@@ -1181,7 +1680,26 @@ func (c *Coordinator) renderGitWidget(width int) string {
 		status += fmt.Sprintf(" ↓%d", c.gitBehind)
 	}
 
-	result.WriteString(style.Render(fmt.Sprintf(" %s %s%s", icon, branch, status)) + "\n")
+	// Calculate max branch width (accounting for icon, spacing, and status)
+	prefix := fmt.Sprintf("  %s ", icon)
+	maxBranch := width - lipgloss.Width(prefix) - lipgloss.Width(status)
+	if maxBranch < 5 {
+		maxBranch = 5
+	}
+
+	// Truncate branch using proper rune width
+	if lipgloss.Width(branch) > maxBranch {
+		truncated := ""
+		for _, r := range branch {
+			if lipgloss.Width(truncated+string(r)) > maxBranch-1 {
+				break
+			}
+			truncated += string(r)
+		}
+		branch = truncated + "~"
+	}
+
+	result.WriteString(style.Render(prefix+branch+status) + "\n")
 
 	for i := 0; i < git.PaddingBot; i++ {
 		result.WriteString("\n")
@@ -1242,10 +1760,27 @@ func (c *Coordinator) renderSessionWidget(width int) string {
 	}
 	sessionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(sessionFg))
 
+	// Truncate session name if needed (reserve space for other stats)
+	sessionName := c.sessionName
+	maxNameWidth := width - 10 // Reserve space for other parts
+	if maxNameWidth < 5 {
+		maxNameWidth = 5
+	}
+	if lipgloss.Width(sessionName) > maxNameWidth {
+		truncated := ""
+		for _, r := range sessionName {
+			if lipgloss.Width(truncated+string(r)) > maxNameWidth-1 {
+				break
+			}
+			truncated += string(r)
+		}
+		sessionName = truncated + "~"
+	}
+
 	if icons.Session != "" {
-		parts = append(parts, sessionStyle.Render(icons.Session+" "+c.sessionName))
+		parts = append(parts, sessionStyle.Render(icons.Session+" "+sessionName))
 	} else {
-		parts = append(parts, sessionStyle.Render(c.sessionName))
+		parts = append(parts, sessionStyle.Render(sessionName))
 	}
 
 	if sessionCfg.ShowClients && c.sessionClients > 0 {
@@ -1279,7 +1814,61 @@ func (c *Coordinator) renderSessionWidget(width int) string {
 	return result.String()
 }
 
+// constrainWidgetWidth ensures all lines in widget content don't exceed maxWidth
+// This prevents widgets from overflowing the sidebar boundary
+func constrainWidgetWidth(content string, maxWidth int) string {
+	if maxWidth < 1 {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	var result strings.Builder
+	hadOverflow := false
+
+	for i, line := range lines {
+		// Strip ANSI codes for width calculation (but keep them in output)
+		stripped := stripAnsi(line)
+		lineWidth := runewidth.StringWidth(stripped)
+
+		if lineWidth > maxWidth {
+			if !hadOverflow {
+				coordinatorDebugLog.Printf("OVERFLOW DETECTED: line width %d > max %d", lineWidth, maxWidth)
+				coordinatorDebugLog.Printf("  Line preview: %s", runewidth.Truncate(stripped, 50, "..."))
+				hadOverflow = true
+			}
+			// Truncate line to maxWidth (accounting for ANSI codes)
+			truncated := runewidth.Truncate(line, maxWidth, "")
+			result.WriteString(truncated)
+		} else {
+			result.WriteString(line)
+		}
+
+		// Add newline except for last line
+		if i < len(lines)-1 {
+			result.WriteString("\n")
+		}
+	}
+
+	return result.String()
+}
+
+// stripAnsi removes ANSI escape codes from a string for accurate width calculation
+func stripAnsi(s string) string {
+	// Simple regex to strip ANSI escape sequences
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
 // renderPetWidget renders the pet tamagotchi widget
+// Layout:
+//   - Divider
+//   - Food icon (clickable)
+//   - Divider
+//   - Thought bubble
+//   - Divider
+//   - Play area (3 lines: high air, low air, ground)
+//   - Divider
+//   - Stats: hunger | happiness | life
 func (c *Coordinator) renderPetWidget(width int) string {
 	petCfg := c.config.Widgets.Pet
 	if !petCfg.Enabled {
@@ -1295,10 +1884,69 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		sprites = petSpritesByStyle["emoji"]
 	}
 
+	// Apply config icon overrides (config takes priority over style preset)
+	icons := petCfg.Icons
+	if icons.Idle != "" {
+		sprites.Idle = icons.Idle
+	}
+	if icons.Walking != "" {
+		sprites.Walking = icons.Walking
+	}
+	if icons.Jumping != "" {
+		sprites.Jumping = icons.Jumping
+	}
+	if icons.Playing != "" {
+		sprites.Playing = icons.Playing
+	}
+	if icons.Eating != "" {
+		sprites.Eating = icons.Eating
+	}
+	if icons.Sleeping != "" {
+		sprites.Sleeping = icons.Sleeping
+	}
+	if icons.Happy != "" {
+		sprites.Happy = icons.Happy
+	}
+	if icons.Hungry != "" {
+		sprites.Hungry = icons.Hungry
+	}
+	if icons.Yarn != "" {
+		sprites.Yarn = icons.Yarn
+	}
+	if icons.Food != "" {
+		sprites.Food = icons.Food
+	}
+	if icons.Poop != "" {
+		sprites.Poop = icons.Poop
+	}
+	if icons.Thought != "" {
+		sprites.Thought = icons.Thought
+	}
+	if icons.Heart != "" {
+		sprites.Heart = icons.Heart
+	}
+	if icons.Life != "" {
+		sprites.Life = icons.Life
+	}
+	if icons.HungerIcon != "" {
+		sprites.HungerIcon = icons.HungerIcon
+	}
+	if icons.HappyIcon != "" {
+		sprites.HappyIcon = icons.HappyIcon
+	}
+	if icons.SadIcon != "" {
+		sprites.SadIcon = icons.SadIcon
+	}
+	if icons.Ground != "" {
+		sprites.Ground = icons.Ground
+	}
+
 	petSprite := sprites.Idle
 	switch c.pet.State {
 	case "walking":
 		petSprite = sprites.Walking
+	case "jumping":
+		petSprite = sprites.Jumping
 	case "playing":
 		petSprite = sprites.Playing
 	case "eating":
@@ -1309,6 +1957,8 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		petSprite = sprites.Happy
 	case "hungry":
 		petSprite = sprites.Hungry
+	case "shooting":
+		petSprite = sprites.Idle
 	}
 	if c.pet.Hunger < 30 {
 		petSprite = sprites.Hungry
@@ -1318,11 +1968,14 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	}
 
 	var result strings.Builder
+	currentLine := 0 // Track line offsets for click detection
 
 	for i := 0; i < petCfg.MarginTop; i++ {
 		result.WriteString("\n")
+		currentLine++
 	}
 
+	// Divider style
 	divider := petCfg.Divider
 	if divider == "" {
 		divider = "─"
@@ -1332,13 +1985,36 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		dividerFg = "#444444"
 	}
 	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(dividerFg))
-	dividerWidth := runewidth.StringWidth(divider)
-	if dividerWidth > 0 {
-		result.WriteString(dividerStyle.Render(strings.Repeat(divider, width/dividerWidth)) + "\n")
+	renderDivider := func() string {
+		dividerWidth := runewidth.StringWidth(divider)
+		if dividerWidth > 0 {
+			repeatCount := (width - 1) / dividerWidth
+			if repeatCount < 1 {
+				repeatCount = 1
+			}
+			return dividerStyle.Render(strings.Repeat(divider, repeatCount)) + "\n"
+		}
+		return ""
 	}
+
+	// Top divider
+	result.WriteString(renderDivider())
+	currentLine++
+
+	// Food icon (clickable to drop food) - track line for click detection
+	c.petLayout.FeedLine = currentLine
+	foodStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f39c12"))
+	foodIcon := zone.Mark("pet:drop_food", foodStyle.Render(sprites.Food+" Feed"))
+	result.WriteString(foodIcon + "\n")
+	currentLine++
+
+	// Divider
+	result.WriteString(renderDivider())
+	currentLine++
 
 	for i := 0; i < petCfg.PaddingTop; i++ {
 		result.WriteString("\n")
+		currentLine++
 	}
 
 	playWidth := width
@@ -1371,84 +2047,315 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		}
 		displayThought = visible
 	}
-	thoughtLine := "💭 " + displayThought
+	thoughtLine := sprites.Thought + " " + displayThought
 	result.WriteString(thoughtStyle.Render(thoughtLine) + "\n")
+	currentLine++
 
-	// Pet position
+	// Divider before play area
+	result.WriteString(renderDivider())
+	currentLine++
+
+	// Get positions, clamped to width
+	safePlayWidth := playWidth - 3
+	c.petLayout.PlayWidth = safePlayWidth
+
 	petX := c.pet.Pos.X
 	if petX < 0 {
-		petX = playWidth / 2
+		petX = safePlayWidth / 2
 	}
-	if petX >= playWidth-2 {
-		petX = playWidth - 3
+	if petX >= safePlayWidth {
+		petX = safePlayWidth - 1
 	}
-
-	// Ground line with pet
-	groundLine := make([]rune, playWidth)
-	for i := range groundLine {
-		groundLine[i] = ' '
-	}
+	petY := c.pet.Pos.Y
 	petRunes := []rune(petSprite)
-	if len(petRunes) > 0 && petX < playWidth {
-		groundLine[petX] = petRunes[0]
-	}
-	result.WriteString(string(groundLine) + "\n")
 
-	// Floor
-	floorChar := "_"
-	if style == "emoji" {
-		floorChar = "▁"
+	yarnX := c.pet.YarnPos.X
+	if yarnX < 0 {
+		yarnX = safePlayWidth - 4
 	}
-	result.WriteString(strings.Repeat(floorChar, playWidth) + "\n")
+	if yarnX >= safePlayWidth {
+		yarnX = safePlayWidth - 1
+	}
+	yarnY := c.pet.YarnPos.Y
+	yarnRunes := []rune(sprites.Yarn)
 
-	// Status line
+	foodX := c.pet.FoodItem.X
+	if foodX >= safePlayWidth {
+		foodX = safePlayWidth - 1
+	}
+	foodY := c.pet.FoodItem.Y
+	foodRunes := []rune(sprites.Food)
+
+	// Line 1: High air (Y=2)
+	highAir := make([]rune, safePlayWidth)
+	for i := range highAir {
+		highAir[i] = ' '
+	}
+	for _, item := range c.pet.FloatingItems {
+		if item.Pos.Y == 2 && item.Pos.X >= 0 && item.Pos.X < safePlayWidth {
+			itemRunes := []rune(item.Emoji)
+			if len(itemRunes) > 0 {
+				highAir[item.Pos.X] = itemRunes[0]
+			}
+		}
+	}
+	if petY >= 2 && petX < safePlayWidth && len(petRunes) > 0 {
+		highAir[petX] = petRunes[0]
+	}
+	if yarnY >= 2 && yarnX >= 0 && yarnX < safePlayWidth && len(yarnRunes) > 0 {
+		highAir[yarnX] = yarnRunes[0]
+	}
+	if foodY >= 2 && foodX >= 0 && foodX < safePlayWidth && len(foodRunes) > 0 {
+		highAir[foodX] = foodRunes[0]
+	}
+	// Mark high air for yarn throwing (click empty space) - track line for click detection
+	c.petLayout.HighAirLine = currentLine
+	highAirLine := zone.Mark("pet:air_high", string(highAir))
+	result.WriteString(highAirLine + "\n")
+	currentLine++
+
+	// Line 2: Low air (Y=1)
+	lowAir := make([]rune, safePlayWidth)
+	for i := range lowAir {
+		lowAir[i] = ' '
+	}
+	for _, item := range c.pet.FloatingItems {
+		if item.Pos.Y == 1 && item.Pos.X >= 0 && item.Pos.X < safePlayWidth {
+			itemRunes := []rune(item.Emoji)
+			if len(itemRunes) > 0 {
+				lowAir[item.Pos.X] = itemRunes[0]
+			}
+		}
+	}
+	if petY == 1 && petX < safePlayWidth && len(petRunes) > 0 {
+		lowAir[petX] = petRunes[0]
+	}
+	if yarnY == 1 && yarnX >= 0 && yarnX < safePlayWidth && len(yarnRunes) > 0 {
+		lowAir[yarnX] = yarnRunes[0]
+	}
+	if foodY == 1 && foodX >= 0 && foodX < safePlayWidth && len(foodRunes) > 0 {
+		lowAir[foodX] = foodRunes[0]
+	}
+	// Mark low air for yarn throwing - track line for click detection
+	c.petLayout.LowAirLine = currentLine
+	lowAirLine := zone.Mark("pet:air_low", string(lowAir))
+	result.WriteString(lowAirLine + "\n")
+	currentLine++
+
+	// Line 3: Ground (Y=0) - single clickable zone, action determined by click position
+	groundChar := '·'
+	if len(sprites.Ground) > 0 {
+		groundChar = []rune(sprites.Ground)[0]
+	}
+	groundRow := make([]rune, safePlayWidth)
+	for i := range groundRow {
+		groundRow[i] = groundChar
+	}
+
+	// Place floating items
+	for _, item := range c.pet.FloatingItems {
+		if item.Pos.Y == 0 && item.Pos.X >= 0 && item.Pos.X < safePlayWidth {
+			itemRunes := []rune(item.Emoji)
+			if len(itemRunes) > 0 {
+				groundRow[item.Pos.X] = itemRunes[0]
+			}
+		}
+	}
+
+	// Place yarn
+	if yarnY == 0 && yarnX >= 0 && yarnX < safePlayWidth && len(yarnRunes) > 0 {
+		groundRow[yarnX] = yarnRunes[0]
+	}
+
+	// Place food
+	if foodY == 0 && foodX >= 0 && foodX < safePlayWidth && len(foodRunes) > 0 {
+		groundRow[foodX] = foodRunes[0]
+	}
+
+	// Place poops
+	poopRunes := []rune(sprites.Poop)
+	for _, poopX := range c.pet.PoopPositions {
+		if poopX >= 0 && poopX < safePlayWidth && len(poopRunes) > 0 {
+			groundRow[poopX] = poopRunes[0]
+		}
+	}
+
+	// Place cat on top
+	if petY == 0 && petX >= 0 && petX < safePlayWidth && len(petRunes) > 0 {
+		groundRow[petX] = petRunes[0]
+	}
+
+	// Single zone for entire ground - action determined by click handler
+	// Track line for click detection
+	c.petLayout.GroundLine = currentLine
+	groundLine := zone.Mark("pet:ground", string(groundRow))
+	result.WriteString(groundLine + "\n")
+	currentLine++
+
+	// Divider before stats
+	result.WriteString(renderDivider())
+	currentLine++
+
+	// Stats line: hunger | happiness | life
 	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
-	hungerBar := "❤"
-	if c.pet.Hunger < 30 {
-		hungerBar = "💔"
-	}
-	happyBar := "😸"
+	hungerIcon := sprites.HungerIcon
+	happyIcon := sprites.HappyIcon
 	if c.pet.Happiness < 30 {
-		happyBar = "😿"
+		happyIcon = sprites.SadIcon
 	}
-	statusLine := fmt.Sprintf("%s%d%% %s%d%%", hungerBar, c.pet.Hunger, happyBar, c.pet.Happiness)
+	lifeIcon := sprites.Life
+	// Calculate life based on hunger + happiness average
+	life := (c.pet.Hunger + c.pet.Happiness) / 2
+	statusLine := fmt.Sprintf("%s%d %s%d %s%d", hungerIcon, c.pet.Hunger, happyIcon, c.pet.Happiness, lifeIcon, life)
 	result.WriteString(statusStyle.Render(statusLine) + "\n")
+	currentLine++
 
 	for i := 0; i < petCfg.PaddingBot; i++ {
 		result.WriteString("\n")
+		currentLine++
 	}
 
 	for i := 0; i < petCfg.MarginBot; i++ {
 		result.WriteString("\n")
+		currentLine++
+	}
+
+	// Store total widget height for click detection
+	c.petLayout.WidgetHeight = currentLine
+
+	coordinatorDebugLog.Printf("Pet layout updated: Feed=%d, HighAir=%d, LowAir=%d, Ground=%d, PlayWidth=%d, Height=%d",
+		c.petLayout.FeedLine, c.petLayout.HighAirLine, c.petLayout.LowAirLine,
+		c.petLayout.GroundLine, c.petLayout.PlayWidth, c.petLayout.WidgetHeight)
+
+	return result.String()
+}
+
+// renderPetTouchButtons renders touch-friendly action buttons for the pet widget
+func (c *Coordinator) renderPetTouchButtons(width int, sprites petSprites) string {
+	var result strings.Builder
+
+	// Simple button style without Width/Padding (we'll handle width manually)
+	buttonBg := lipgloss.Color("#333333")
+	buttonFg := lipgloss.Color("#ffffff")
+	buttonStyle := lipgloss.NewStyle().
+		Foreground(buttonFg).
+		Background(buttonBg)
+
+	// Divider line (constrain to exact width)
+	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#444444"))
+	dividerWidth := width
+	if dividerWidth < 1 {
+		dividerWidth = 1
+	}
+	result.WriteString(dividerStyle.Render(strings.Repeat("─", dividerWidth)) + "\n")
+
+	// Define buttons
+	buttons := []struct {
+		emoji  string
+		label  string
+		action string
+		show   bool
+	}{
+		{sprites.Food, "Feed", "drop_food", true},
+		{sprites.Yarn, "Play", "drop_yarn", true},
+		{sprites.Poop, "Clean", "clean_poop", len(c.pet.PoopPositions) > 0},
+		{sprites.Heart, "Pet", "pet_pet", true},
+	}
+
+	for _, btn := range buttons {
+		if btn.show {
+			// Format: emoji  label, manually padded to fit width
+			content := fmt.Sprintf("%s  %s", btn.emoji, btn.label)
+			// Calculate visual width (emoji is 2 cols, spaces are 1 col each)
+			contentWidth := runewidth.StringWidth(content)
+			// Add padding to reach target width (account for background color padding)
+			targetWidth := width - 2 // Leave 1 char margin on each side
+			if targetWidth < contentWidth {
+				targetWidth = contentWidth
+			}
+			padding := targetWidth - contentWidth
+			if padding > 0 {
+				content = content + strings.Repeat(" ", padding)
+			}
+			// Add single space padding on left and right
+			content = " " + content + " "
+
+			// Apply style and wrap with zone for click detection
+			zoneID := fmt.Sprintf("pet:%s", btn.action)
+			styledContent := buttonStyle.Render(content)
+			markedContent := zone.Mark(zoneID, styledContent)
+			coordinatorDebugLog.Printf("zone.Mark(%q) input len=%d, output len=%d, hasMarker=%v",
+				zoneID, len(styledContent), len(markedContent), len(markedContent) > len(styledContent))
+			result.WriteString(markedContent + "\n")
+		}
 	}
 
 	return result.String()
 }
 
+// getClientWidth returns the width for a specific client, with fallback to lastWidth
+func (c *Coordinator) getClientWidth(clientID string) int {
+	c.clientWidthsMu.RLock()
+	width, ok := c.clientWidths[clientID]
+	c.clientWidthsMu.RUnlock()
+	if !ok || width < 10 {
+		width = c.lastWidth
+		if width < 10 {
+			width = 25
+		}
+	}
+	return width
+}
+
 // HandleInput processes input events from renderers
-func (c *Coordinator) HandleInput(clientID string, input *daemon.InputPayload) {
+// Returns true if window list refresh is needed (expensive tmux calls)
+func (c *Coordinator) HandleInput(clientID string, input *daemon.InputPayload) bool {
 	switch input.Type {
 	case "action":
-		c.handleSemanticAction(clientID, input)
+		return c.handleSemanticAction(clientID, input)
 	case "key":
 		c.handleKeyInput(clientID, input)
+		return true // key inputs might need refresh
 	}
+	return false
 }
 
 // handleSemanticAction processes pre-resolved semantic actions from renderers
-func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputPayload) {
+// Returns true if window list refresh is needed
+func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputPayload) bool {
+	// Debug logging for semantic actions
+	coordinatorDebugLog.Printf("=== SEMANTIC ACTION ===")
+	coordinatorDebugLog.Printf("  Client: %s", clientID)
+	coordinatorDebugLog.Printf("  Action: %s", input.ResolvedAction)
+	coordinatorDebugLog.Printf("  Target: %s", input.ResolvedTarget)
+	coordinatorDebugLog.Printf("  Button: %s", input.Button)
+	coordinatorDebugLog.Printf("  Mouse: X=%d Y=%d ViewportOffset=%d", input.MouseX, input.MouseY, input.ViewportOffset)
+	coordinatorDebugLog.Printf("  SequenceNum: %d", input.SequenceNum)
+
 	// Handle right-click for context menus
 	if input.Button == "right" && input.ResolvedAction != "" {
+		coordinatorDebugLog.Printf("  -> Showing context menu for right-click")
 		c.handleRightClick(clientID, input)
-		return
+		return true
+	}
+
+	// Custom pet widget click detection (bypasses BubbleZone)
+	// Uses tracked line positions from renderPetWidget for precise hit testing
+	// Note: We try this for ALL clicks if pet is enabled - handlePetWidgetClick will
+	// check if the click is actually within the pet widget bounds
+	if c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.Pin {
+		if handled := c.handlePetWidgetClick(clientID, input); handled {
+			return false // Pet actions don't need window refresh
+		}
 	}
 
 	if input.ResolvedAction == "" {
 		// No action resolved - just release focus back to main pane
+		coordinatorDebugLog.Printf("  -> No action resolved, releasing focus")
 		if input.PaneID != "" {
 			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
 		}
-		return
+		return false
 	}
 
 	switch input.ResolvedAction {
@@ -1456,29 +2363,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Run synchronously so RefreshWindows() sees the new state
 		exec.Command("tmux", "select-window", "-t", input.ResolvedTarget).Run()
 		exec.Command("tmux", "select-pane", "-R").Run()
+		return true
 
 	case "toggle_or_select_window":
-		// For windows with panes: clicking left side (X < 6) toggles collapse, right side selects
-		if input.MouseX < 6 {
-			// Toggle window collapse state
-			windowIdx := input.ResolvedTarget
-			// Check current state first
-			out, err := exec.Command("tmux", "show-window-options", "-v", "-t", ":"+windowIdx, "@tabby_collapsed").Output()
-			if err == nil && strings.TrimSpace(string(out)) == "1" {
-				// Currently collapsed, expand it
-				exec.Command("tmux", "set-window-option", "-t", ":"+windowIdx, "-u", "@tabby_collapsed").Run()
-			} else {
-				// Currently expanded, collapse it
-				exec.Command("tmux", "set-window-option", "-t", ":"+windowIdx, "@tabby_collapsed", "1").Run()
-			}
-			if input.PaneID != "" {
-				exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-			}
-		} else {
-			// Click was on the right side - select window normally
-			exec.Command("tmux", "select-window", "-t", input.ResolvedTarget).Run()
-			exec.Command("tmux", "select-pane", "-R").Run()
-		}
+		// Always select window - collapse/expand is available via right-click context menu
+		exec.Command("tmux", "select-window", "-t", input.ResolvedTarget).Run()
+		exec.Command("tmux", "select-pane", "-R").Run()
+		return true
 
 	case "select_pane":
 		// Run synchronously so RefreshWindows() sees the new state
@@ -1494,6 +2385,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			}
 		}
 		exec.Command("tmux", "select-pane", "-t", paneID).Run()
+		return true
 
 	case "toggle_group":
 		c.stateMu.Lock()
@@ -1508,6 +2400,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if input.PaneID != "" {
 			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
 		}
+		return false // No tmux window state change
 
 	case "button":
 		switch input.ResolvedTarget {
@@ -1520,7 +2413,434 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			// Run synchronously so RefreshWindows() sees the removal
 			exec.Command("tmux", "kill-window").Run()
 		}
+		return true
+
+	case "drop_food":
+		// Drop food at a random position for the pet to eat
+		c.stateMu.Lock()
+		width := c.getClientWidth(clientID)
+		dropX := rand.Intn(width - 4) + 2
+		c.pet.FoodItem = pos2D{X: dropX, Y: 2} // Drop from high air
+		c.pet.LastThought = "food!"
+		c.savePetState()
+		c.stateMu.Unlock()
+		if input.PaneID != "" {
+			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+		}
+		return false // Pet action, no window refresh needed
+
+	case "drop_yarn":
+		// Drop or toss the yarn at click position
+		c.stateMu.Lock()
+		width := c.getClientWidth(clientID)
+		// Use click position, clamped to valid range
+		tossX := input.MouseX
+		if tossX < 2 {
+			tossX = 2
+		}
+		if tossX >= width-2 {
+			tossX = width - 3
+		}
+		c.pet.YarnPos = pos2D{X: tossX, Y: 2} // Toss high
+		c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second) // Yarn disappears after 15 seconds
+		c.pet.TargetPos = pos2D{X: tossX, Y: 0}
+		c.pet.HasTarget = true
+		c.pet.ActionPending = "play"
+		c.pet.State = "walking"
+		c.pet.LastThought = "yarn!"
+		c.savePetState()
+		c.stateMu.Unlock()
+		if input.PaneID != "" {
+			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+		}
+		return false // Pet action, no window refresh needed
+
+	case "clean_poop":
+		// Clean up poop at the clicked position
+		c.stateMu.Lock()
+		if len(c.pet.PoopPositions) > 0 {
+			// Remove the first poop (or use input.ResolvedTarget for specific position)
+			c.pet.PoopPositions = c.pet.PoopPositions[1:]
+			c.pet.TotalPoopsCleaned++
+			c.pet.LastThought = "much better."
+			c.savePetState()
+		}
+		c.stateMu.Unlock()
+		if input.PaneID != "" {
+			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+		}
+		return false // Pet action, no window refresh needed
+
+	case "pet_pet":
+		// Pet the pet - increase happiness
+		c.stateMu.Lock()
+		c.pet.Happiness = min(100, c.pet.Happiness+10)
+		c.pet.TotalPets++
+		c.pet.LastPet = time.Now()
+		c.pet.State = "happy"
+		thoughts := []string{"purrrr.", "yes, there.", "acceptable.", "more.", "don't stop."}
+		c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+		c.savePetState()
+		c.stateMu.Unlock()
+		if input.PaneID != "" {
+			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+		}
+		return false // Pet action, no window refresh needed
+
+	case "ground":
+		// Ground click - determine action based on click X position
+		// Click position relative to zone start
+		clickX := input.MouseX
+		c.stateMu.Lock()
+
+		// Check if clicking on cat (only when cat is on ground, Y=0)
+		if c.pet.Pos.Y == 0 && clickX == c.pet.Pos.X {
+			// Pet the cat
+			c.pet.Happiness = min(100, c.pet.Happiness+10)
+			c.pet.TotalPets++
+			c.pet.LastPet = time.Now()
+			c.pet.State = "happy"
+			thoughts := []string{"purrrr.", "yes, there.", "acceptable.", "more.", "don't stop."}
+			c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+			c.savePetState()
+			c.stateMu.Unlock()
+			if input.PaneID != "" {
+				exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+			}
+			return false
+		}
+
+		// Check if clicking on poop
+		for i, poopX := range c.pet.PoopPositions {
+			if clickX == poopX {
+				// Clean this poop
+				c.pet.PoopPositions = append(c.pet.PoopPositions[:i], c.pet.PoopPositions[i+1:]...)
+				c.pet.TotalPoopsCleaned++
+				c.pet.LastThought = "much better."
+				c.savePetState()
+				c.stateMu.Unlock()
+				if input.PaneID != "" {
+					exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+				}
+				return false
+			}
+		}
+
+		// Otherwise, drop yarn at click position using client-specific width
+		width := c.getClientWidth(clientID)
+		tossX := clickX
+		if tossX < 2 {
+			tossX = 2
+		}
+		if tossX >= width-2 {
+			tossX = width - 3
+		}
+		c.pet.YarnPos = pos2D{X: tossX, Y: 2}
+		c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second)
+		c.pet.TargetPos = pos2D{X: tossX, Y: 0}
+		c.pet.HasTarget = true
+		c.pet.ActionPending = "play"
+		c.pet.State = "walking"
+		c.pet.LastThought = "yarn!"
+		c.savePetState()
+		c.stateMu.Unlock()
+		if input.PaneID != "" {
+			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+		}
+		return false
 	}
+	return false
+}
+
+// handlePetWidgetClick uses custom click detection for the pet widget
+// This bypasses BubbleZone and uses tracked line positions for precise hit testing
+// Returns true if the click was handled, false otherwise
+func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputPayload) bool {
+	// Get client-specific width for accurate click detection
+	clientWidth := c.getClientWidth(clientID)
+
+	// Calculate content Y from screen position and viewport offset
+	contentY := input.MouseY + input.ViewportOffset
+	clickX := input.MouseX
+	layout := c.petLayout
+
+	// Calculate Y position relative to pet widget start
+	clickY := contentY - layout.ContentStartLine
+
+	coordinatorDebugLog.Printf("Pet click detection: screenY=%d viewportOffset=%d contentY=%d petRelativeY=%d X=%d clientWidth=%d",
+		input.MouseY, input.ViewportOffset, contentY, clickY, clickX, clientWidth)
+	coordinatorDebugLog.Printf("  Layout: ContentStart=%d Feed=%d HighAir=%d LowAir=%d Ground=%d PlayWidth=%d",
+		layout.ContentStartLine, layout.FeedLine, layout.HighAirLine, layout.LowAirLine, layout.GroundLine, layout.PlayWidth)
+
+	// Check if click is within the pet widget at all
+	if clickY < 0 || clickY >= layout.WidgetHeight {
+		coordinatorDebugLog.Printf("  -> Click outside pet widget bounds (clickY=%d, widgetHeight=%d)", clickY, layout.WidgetHeight)
+		return false
+	}
+
+	// Check if click is on Feed line
+	if clickY == layout.FeedLine {
+		coordinatorDebugLog.Printf("  -> Feed line clicked, dropping food")
+		c.stateMu.Lock()
+		dropX := rand.Intn(clientWidth-4) + 2
+		c.pet.FoodItem = pos2D{X: dropX, Y: 2}
+		c.pet.LastThought = "food!"
+		c.savePetState()
+		c.stateMu.Unlock()
+		if input.PaneID != "" {
+			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+		}
+		return true
+	}
+
+	// Calculate safe play width for this client (must match rendering)
+	safePlayWidth := clientWidth - 3
+	if safePlayWidth < 5 {
+		safePlayWidth = 5
+	}
+
+	// Check if click is on high air line (Y=2 in pet coordinate space)
+	if clickY == layout.HighAirLine && clickX < safePlayWidth {
+		coordinatorDebugLog.Printf("  -> High air line clicked at X=%d, checking for cat/yarn", clickX)
+		return c.handlePetPlayAreaClick(clientID, input, clickX, 2)
+	}
+
+	// Check if click is on low air line (Y=1 in pet coordinate space)
+	if clickY == layout.LowAirLine && clickX < safePlayWidth {
+		coordinatorDebugLog.Printf("  -> Low air line clicked at X=%d, checking for cat/yarn", clickX)
+		return c.handlePetPlayAreaClick(clientID, input, clickX, 1)
+	}
+
+	// Check if click is on ground line (Y=0 in pet coordinate space)
+	if clickY == layout.GroundLine && clickX < safePlayWidth {
+		coordinatorDebugLog.Printf("  -> Ground line clicked at X=%d, checking for cat/poop/yarn", clickX)
+		return c.handlePetPlayAreaClick(clientID, input, clickX, 0)
+	}
+
+	coordinatorDebugLog.Printf("  -> Click not on pet widget interactive lines")
+	return false
+}
+
+// getSprites returns the pet sprites based on current style and config overrides
+func (c *Coordinator) getSprites() petSprites {
+	petCfg := c.config.Widgets.Pet
+	style := petCfg.Style
+	if style == "" {
+		style = "emoji"
+	}
+	sprites, ok := petSpritesByStyle[style]
+	if !ok {
+		sprites = petSpritesByStyle["emoji"]
+	}
+
+	// Apply config icon overrides (config takes priority over style preset)
+	icons := petCfg.Icons
+	if icons.Idle != "" {
+		sprites.Idle = icons.Idle
+	}
+	if icons.Walking != "" {
+		sprites.Walking = icons.Walking
+	}
+	if icons.Jumping != "" {
+		sprites.Jumping = icons.Jumping
+	}
+	if icons.Playing != "" {
+		sprites.Playing = icons.Playing
+	}
+	if icons.Eating != "" {
+		sprites.Eating = icons.Eating
+	}
+	if icons.Sleeping != "" {
+		sprites.Sleeping = icons.Sleeping
+	}
+	if icons.Happy != "" {
+		sprites.Happy = icons.Happy
+	}
+	if icons.Hungry != "" {
+		sprites.Hungry = icons.Hungry
+	}
+	if icons.Yarn != "" {
+		sprites.Yarn = icons.Yarn
+	}
+	if icons.Food != "" {
+		sprites.Food = icons.Food
+	}
+	if icons.Poop != "" {
+		sprites.Poop = icons.Poop
+	}
+	if icons.Thought != "" {
+		sprites.Thought = icons.Thought
+	}
+	if icons.Heart != "" {
+		sprites.Heart = icons.Heart
+	}
+	if icons.Life != "" {
+		sprites.Life = icons.Life
+	}
+	if icons.HungerIcon != "" {
+		sprites.HungerIcon = icons.HungerIcon
+	}
+	if icons.HappyIcon != "" {
+		sprites.HappyIcon = icons.HappyIcon
+	}
+	if icons.SadIcon != "" {
+		sprites.SadIcon = icons.SadIcon
+	}
+	if icons.Ground != "" {
+		sprites.Ground = icons.Ground
+	}
+
+	return sprites
+}
+
+// handlePetPlayAreaClick handles clicks within the pet play area
+// clickX is the X position, petY is the Y in pet coordinate space (0=ground, 1=low air, 2=high air)
+func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.InputPayload, clickX, petY int) bool {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	// Get sprite strings for width calculation
+	sprites := c.getSprites()
+
+	// Calculate safe play width using client-specific width (must match renderPetWidget)
+	playWidth := c.getClientWidth(clientID)
+	safePlayWidth := playWidth - 3
+	if safePlayWidth < 5 {
+		safePlayWidth = 5
+	}
+
+	// Get clamped positions (same as rendering does)
+	// This ensures click detection matches what's displayed
+	catPosX := c.pet.Pos.X
+	if catPosX >= safePlayWidth {
+		catPosX = safePlayWidth - 1
+	}
+	if catPosX < 0 {
+		catPosX = 0
+	}
+
+	yarnPosX := c.pet.YarnPos.X
+	if yarnPosX >= safePlayWidth {
+		yarnPosX = safePlayWidth - 1
+	}
+
+	// Get cat sprite based on current state
+	catSprite := sprites.Idle
+	switch c.pet.State {
+	case "walking":
+		catSprite = sprites.Walking
+	case "jumping":
+		catSprite = sprites.Jumping
+	case "playing":
+		catSprite = sprites.Playing
+	case "eating":
+		catSprite = sprites.Eating
+	case "sleeping":
+		catSprite = sprites.Sleeping
+	case "happy":
+		catSprite = sprites.Happy
+	case "hungry":
+		catSprite = sprites.Hungry
+	}
+	catWidth := runewidth.StringWidth(catSprite)
+	if catWidth < 1 {
+		catWidth = 1
+	}
+
+	// Check if clicking on cat (account for sprite display width)
+	// Sprites like emojis display wider than their rune position
+	// Use clamped position to match what's rendered on screen
+	if c.pet.Pos.Y == petY && clickX >= catPosX && clickX < catPosX+catWidth {
+		coordinatorDebugLog.Printf("    -> Clicked on cat at X=%d (cat rendered at %d, width=%d)! Petting.", clickX, catPosX, catWidth)
+		c.pet.Happiness = min(100, c.pet.Happiness+10)
+		c.pet.TotalPets++
+		c.pet.LastPet = time.Now()
+		c.pet.State = "happy"
+		thoughts := []string{"purrrr.", "yes, there.", "acceptable.", "more.", "don't stop."}
+		c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+		c.savePetState()
+		if input.PaneID != "" {
+			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+		}
+		return true
+	}
+
+	// Check if clicking on poop (only on ground)
+	if petY == 0 {
+		poopWidth := runewidth.StringWidth(sprites.Poop)
+		if poopWidth < 1 {
+			poopWidth = 1
+		}
+		for i, poopX := range c.pet.PoopPositions {
+			// Clamp poop position same as rendering
+			clampedPoopX := poopX
+			if clampedPoopX >= safePlayWidth {
+				clampedPoopX = safePlayWidth - 1
+			}
+			if clampedPoopX < 0 {
+				clampedPoopX = 0
+			}
+			if clickX >= clampedPoopX && clickX < clampedPoopX+poopWidth {
+				coordinatorDebugLog.Printf("    -> Clicked on poop at X=%d (poop rendered at %d, width=%d)! Cleaning.", clickX, clampedPoopX, poopWidth)
+				c.pet.PoopPositions = append(c.pet.PoopPositions[:i], c.pet.PoopPositions[i+1:]...)
+				c.pet.TotalPoopsCleaned++
+				c.pet.LastThought = "much better."
+				c.savePetState()
+				if input.PaneID != "" {
+					exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+				}
+				return true
+			}
+		}
+	}
+
+	// Check if clicking on yarn (account for sprite width)
+	// Use clamped position to match what's rendered on screen
+	yarnWidth := runewidth.StringWidth(sprites.Yarn)
+	if yarnWidth < 1 {
+		yarnWidth = 1
+	}
+	if c.pet.YarnPos.Y == petY && clickX >= yarnPosX && clickX < yarnPosX+yarnWidth {
+		coordinatorDebugLog.Printf("    -> Clicked on yarn at X=%d (yarn rendered at %d)! Moving it.", clickX, yarnPosX)
+		// Toss the yarn to a new position using client-specific width
+		width := playWidth
+		newX := rand.Intn(width-4) + 2
+		c.pet.YarnPos = pos2D{X: newX, Y: 2}
+		c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second)
+		c.pet.TargetPos = pos2D{X: newX, Y: 0}
+		c.pet.HasTarget = true
+		c.pet.ActionPending = "play"
+		c.pet.State = "walking"
+		c.pet.LastThought = "again!"
+		c.savePetState()
+		if input.PaneID != "" {
+			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+		}
+		return true
+	}
+
+	// Otherwise, drop yarn at click position using client-specific width
+	coordinatorDebugLog.Printf("    -> Empty space clicked, dropping yarn at X=%d", clickX)
+	tossX := clickX
+	if tossX < 2 {
+		tossX = 2
+	}
+	if tossX >= playWidth-2 {
+		tossX = playWidth - 3
+	}
+	// Start yarn at high air, let it fall
+	c.pet.YarnPos = pos2D{X: tossX, Y: 2}
+	c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second)
+	c.pet.TargetPos = pos2D{X: tossX, Y: 0}
+	c.pet.HasTarget = true
+	c.pet.ActionPending = "play"
+	c.pet.State = "walking"
+	c.pet.LastThought = "yarn!"
+	c.savePetState()
+	if input.PaneID != "" {
+		exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+	}
+	return true
 }
 
 // handleRightClick shows appropriate context menu based on what was clicked
@@ -1801,15 +3121,8 @@ func (c *Coordinator) showGroupContextMenu(groupName string) {
 		args = append(args, "New Window", "n", newWindowCmd)
 	}
 
-	// Separator
-	args = append(args, "", "", "")
-
-	// Collapse/Expand option
-	if c.collapsedGroups[group.Name] {
-		args = append(args, "Expand Group", "e", "")
-	} else {
-		args = append(args, "Collapse Group", "c", "")
-	}
+	// Note: Collapse/Expand is done by clicking on the group header (left click)
+	// No need for context menu option since it would bypass in-memory state
 
 	exec.Command("tmux", args...).Run()
 }
