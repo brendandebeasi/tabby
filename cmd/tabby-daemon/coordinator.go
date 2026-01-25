@@ -251,6 +251,15 @@ func NewCoordinator(sessionID string) *Coordinator {
 	// Load pet state from shared file
 	c.loadPetState()
 
+	// Initialize LLM if thoughts are enabled
+	if cfg.Widgets.Pet.Thoughts {
+		if err := initLLM(cfg.Widgets.Pet.LLMProvider, cfg.Widgets.Pet.LLMModel, cfg.Widgets.Pet.LLMAPIKey); err != nil {
+			coordinatorDebugLog.Printf("LLM init failed: %v (using default thoughts)", err)
+		} else {
+			coordinatorDebugLog.Printf("LLM initialized with provider=%s model=%s", cfg.Widgets.Pet.LLMProvider, cfg.Widgets.Pet.LLMModel)
+		}
+	}
+
 	// Initial window refresh
 	c.RefreshWindows()
 
@@ -936,6 +945,29 @@ func (c *Coordinator) UpdatePetState() {
 		// Reset starvation tracking when fed
 		if !c.pet.StarvingStart.IsZero() {
 			c.pet.StarvingStart = time.Time{}
+		}
+	}
+
+	// === LLM THOUGHT GENERATION ===
+
+	// If LLM thoughts are enabled and pet is idle, occasionally get new thoughts
+	if c.config.Widgets.Pet.Thoughts && c.pet.State == "idle" && !c.pet.IsDead {
+		// Use configured interval or default to 30 seconds
+		thoughtInterval := c.config.Widgets.Pet.ThoughtInterval
+		if thoughtInterval <= 0 {
+			thoughtInterval = 30
+		}
+		thoughtFrames := thoughtInterval * 10 // Convert seconds to frames (~10fps)
+		if c.pet.AnimFrame%thoughtFrames == 0 {
+			petName := c.config.Widgets.Pet.Name
+			if petName == "" {
+				petName = "Whiskers"
+			}
+			// Try to get an LLM thought (non-blocking, from buffer or triggers generation)
+			if thought := generateLLMThought(&c.pet, petName); thought != "" {
+				c.pet.LastThought = thought
+				c.pet.ThoughtScroll = 0
+			}
 		}
 	}
 
