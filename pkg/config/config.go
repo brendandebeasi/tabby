@@ -112,6 +112,7 @@ type PetWidget struct {
 	Pin             bool   `yaml:"pin"`              // Pin to bottom
 	HungerDecay     int    `yaml:"hunger_decay"`     // Seconds between hunger ticks
 	PoopChance      int    `yaml:"poop_chance"`      // % chance to poop after eating
+	ActionChance    int    `yaml:"action_chance"`    // % chance to do random action when idle (default: 15)
 	TouchButtons    bool   `yaml:"touch_buttons"`    // Show large touch-friendly action buttons
 	// LLM settings for thoughts
 	LLMProvider string `yaml:"llm_provider"` // openai | anthropic | ollama (default: anthropic)

@@ -677,8 +677,12 @@ func (c *Coordinator) UpdatePetState() {
 	// === RANDOM BEHAVIORS (cat mood) ===
 
 	if c.pet.State == "idle" && !c.pet.HasTarget && c.pet.AnimFrame%10 == 0 {
-		// 30% chance to do something every 10 frames
-		if rand.Intn(100) < 30 {
+		// Configurable chance to do something every 10 frames (default: 15%)
+		actionChance := c.config.Widgets.Pet.ActionChance
+		if actionChance <= 0 {
+			actionChance = 15 // Default: less hyper than before
+		}
+		if rand.Intn(100) < actionChance {
 			action := rand.Intn(8)
 			switch action {
 			case 0:
@@ -724,33 +728,60 @@ func (c *Coordinator) UpdatePetState() {
 				if dir == 0 {
 					dir = 1
 				}
+				// Gun to the left of pet (always)
+				gunX := c.pet.Pos.X - 1
+				if gunX < 0 {
+					gunX = 0
+				}
 				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
 					Emoji:     "🔫",
+					Pos:       pos2D{X: gunX, Y: 0},
+					Velocity:  pos2D{X: 0, Y: 0},
+					ExpiresAt: now.Add(1200 * time.Millisecond),
+				})
+				// BANG effect
+				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+					Emoji:     "💥",
 					Pos:       pos2D{X: c.pet.Pos.X + dir, Y: 0},
 					Velocity:  pos2D{X: 0, Y: 0},
-					ExpiresAt: now.Add(800 * time.Millisecond),
+					ExpiresAt: now.Add(400 * time.Millisecond),
 				})
+				// Banana flies slower (velocity 1 instead of 2)
 				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
 					Emoji:     "🍌",
 					Pos:       pos2D{X: c.pet.Pos.X + dir*2, Y: 1},
-					Velocity:  pos2D{X: dir * 2, Y: 0},
-					ExpiresAt: now.Add(2 * time.Second),
+					Velocity:  pos2D{X: dir, Y: 0},
+					ExpiresAt: now.Add(3 * time.Second),
 				})
 				thoughts := []string{"pew pew.", "banana had it coming.", "nothing personal.", "the family sends regards."}
 				c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
 			case 6:
-				// Toss random emoji
-				emojis := []string{"⭐", "💫", "✨", "🎾", "🏀", "🎈", "🦋", "🐟", "🍎", "🧀"}
-				emoji := emojis[rand.Intn(len(emojis))]
+				// Toss random emoji with context-aware thoughts
+				shinyThings := []struct {
+					emoji    string
+					thoughts []string
+				}{
+					{"⭐", []string{"a star!", "make a wish.", "star light, star bright."}},
+					{"💫", []string{"dizzy.", "sparkly.", "ooh cosmic."}},
+					{"✨", []string{"sparkles!", "so shiny.", "glitter everywhere."}},
+					{"🎾", []string{"ball!", "must chase.", "tennis anyone?"}},
+					{"🏀", []string{"bouncy.", "slam dunk.", "ball is life."}},
+					{"🎈", []string{"balloon!", "pop it?", "don't let it fly away."}},
+					{"🦋", []string{"butterfly!", "must catch.", "so graceful."}},
+					{"🐟", []string{"fish!", "dinner?", "swimming in air."}},
+					{"🍎", []string{"apple!", "healthy snack.", "one a day."}},
+					{"🧀", []string{"cheese!", "yes please.", "gouda choice."}},
+				}
+				choice := shinyThings[rand.Intn(len(shinyThings))]
 				startX := rand.Intn(maxX-2) + 2
 				dir := []int{-1, 1}[rand.Intn(2)]
 				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
-					Emoji:     emoji,
+					Emoji:     choice.emoji,
 					Pos:       pos2D{X: startX, Y: 2},
 					Velocity:  pos2D{X: dir, Y: 0},
 					ExpiresAt: now.Add(3 * time.Second),
 				})
-				c.pet.LastThought = "ooh shiny."
+				c.pet.LastThought = choice.thoughts[rand.Intn(len(choice.thoughts))]
 			case 7:
 				// Menacing stare
 				emojis := []string{"👁️", "🔪", "💀", "🎯"}
@@ -772,7 +803,7 @@ func (c *Coordinator) UpdatePetState() {
 	// Use config for hunger decay rate (frames = seconds * 10 since ~10fps)
 	hungerDecayFrames := c.config.Widgets.Pet.HungerDecay * 10
 	if hungerDecayFrames <= 0 {
-		hungerDecayFrames = 300 // Default: 30 seconds
+		hungerDecayFrames = 600 // Default: 60 seconds (less needy)
 	}
 	if c.pet.Hunger > 0 && c.pet.AnimFrame%hungerDecayFrames == 0 {
 		c.pet.Hunger--
@@ -780,7 +811,7 @@ func (c *Coordinator) UpdatePetState() {
 	// Happiness decays 1.5x faster when hungry
 	happyDecayFrames := hungerDecayFrames * 2 / 3
 	if happyDecayFrames <= 0 {
-		happyDecayFrames = 200
+		happyDecayFrames = 400 // Default: 40 seconds when hungry
 	}
 	if c.pet.Hunger < 30 && c.pet.Happiness > 0 && c.pet.AnimFrame%happyDecayFrames == 0 {
 		c.pet.Happiness--
@@ -2507,8 +2538,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.TotalPets++
 		c.pet.LastPet = time.Now()
 		c.pet.State = "happy"
-		thoughts := []string{"purrrr.", "yes, there.", "acceptable.", "more.", "don't stop."}
-		c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+		c.pet.LastThought = randomThought("petting")
 		c.savePetState()
 		c.stateMu.Unlock()
 		if input.PaneID != "" {
@@ -2785,8 +2815,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		c.pet.TotalPets++
 		c.pet.LastPet = time.Now()
 		c.pet.State = "happy"
-		thoughts := []string{"purrrr.", "yes, there.", "acceptable.", "more.", "don't stop."}
-		c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+		c.pet.LastThought = randomThought("petting")
 		c.savePetState()
 		if input.PaneID != "" {
 			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
@@ -3285,12 +3314,15 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 
 // Default pet thoughts by state
 var defaultPetThoughts = map[string][]string{
-	"hungry": {"food. now.", "the bowl. it echoes.", "starving. dramatically.", "hunger level: critical."},
-	"poop":   {"that won't clean itself.", "i made you a gift.", "cleanup crew needed.", "ahem. the floor."},
-	"happy":  {"acceptable.", "fine. you may stay.", "purr engaged.", "not bad."},
-	"yarn":   {"the yarn. it calls.", "must... catch...", "yarn acquired."},
-	"sleepy": {"nap time.", "zzz...", "five more minutes."},
-	"idle":   {"chillin'.", "vibin'.", "just here.", "sup.", "...", "waiting.", "*yawn*", "hmm."},
+	"hungry":  {"food. now.", "the bowl. it echoes.", "starving. dramatically.", "hunger level: critical."},
+	"poop":    {"that won't clean itself.", "i made you a gift.", "cleanup crew needed.", "ahem. the floor."},
+	"happy":   {"acceptable.", "fine. you may stay.", "feeling good.", "not bad.", "this is nice."},
+	"yarn":    {"the yarn. it calls.", "must... catch...", "yarn acquired.", "got it!"},
+	"sleepy":  {"nap time.", "zzz...", "five more minutes.", "so tired."},
+	"idle":    {"chillin'.", "vibin'.", "just here.", "sup.", "...", "waiting.", "*yawn*", "hmm."},
+	"walking": {"exploring.", "on the move.", "wandering.", "going places."},
+	"jumping": {"wheee!", "boing!", "up up up!", "airborne."},
+	"petting": {"mmm...", "yes, there.", "acceptable.", "more.", "don't stop.", "nice."},
 }
 
 // randomThought returns a random thought from the given category
