@@ -110,6 +110,15 @@ type petState struct {
 	TotalFeedings     int
 	TotalPoopsCleaned int
 	TotalYarnPlays    int
+	// Death state
+	IsDead        bool
+	DeathTime     time.Time
+	StarvingStart time.Time // When hunger hit 0 (for death countdown)
+	// Mouse state
+	MousePos       pos2D     // X: -1 means no mouse present
+	MouseDirection int       // Direction mouse is moving
+	MouseAppearsAt time.Time // When a mouse will appear next
+	TotalMouseCatches int
 }
 
 type pos2D struct {
@@ -163,7 +172,8 @@ type petWidgetLayout struct {
 type petSprites struct {
 	Idle, Walking, Jumping, Playing  string
 	Eating, Sleeping, Happy, Hungry  string
-	Yarn, Food, Poop                 string
+	Dead                             string
+	Yarn, Food, Poop, Mouse          string
 	Thought, Heart, Life             string
 	HungerIcon, HappyIcon, SadIcon   string
 	Ground                           string
@@ -173,7 +183,8 @@ var petSpritesByStyle = map[string]petSprites{
 	"emoji": {
 		Idle: "🐱", Walking: "🐱", Jumping: "🐱", Playing: "🐱",
 		Eating: "🐱", Sleeping: "😺", Happy: "😻", Hungry: "😿",
-		Yarn: "🧶", Food: "🍖", Poop: "💩",
+		Dead: "💀",
+		Yarn: "🧶", Food: "🍖", Poop: "💩", Mouse: "🐭",
 		Thought: "💭", Heart: "❤", Life: "💗",
 		HungerIcon: "🍖", HappyIcon: "😸", SadIcon: "😿",
 		Ground: "·",
@@ -181,7 +192,8 @@ var petSpritesByStyle = map[string]petSprites{
 	"nerd": {
 		Idle: "󰄛", Walking: "󰄛", Jumping: "󰄛", Playing: "󰄛",
 		Eating: "󰄛", Sleeping: "󰄛", Happy: "󰄛", Hungry: "󰄛",
-		Yarn: "", Food: "", Poop: "",
+		Dead: "",
+		Yarn: "", Food: "", Poop: "", Mouse: "",
 		Thought: "", Heart: "", Life: "",
 		HungerIcon: "", HappyIcon: "", SadIcon: "",
 		Ground: "·",
@@ -189,7 +201,8 @@ var petSpritesByStyle = map[string]petSprites{
 	"ascii": {
 		Idle: "=^.^=", Walking: "=^.^=", Jumping: "=^o^=", Playing: "=^.^=",
 		Eating: "=^.^=", Sleeping: "=-.~=", Happy: "=^.^=", Hungry: "=;.;=",
-		Yarn: "@", Food: "o", Poop: ".",
+		Dead: "x_x",
+		Yarn: "@", Food: "o", Poop: ".", Mouse: "<:3",
 		Thought: ">", Heart: "<3", Life: "*",
 		HungerIcon: "o", HappyIcon: ":)", SadIcon: ":(",
 		Ground: ".",
@@ -228,6 +241,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 			Happiness: 80,
 			YarnPos:   pos2D{X: -1, Y: 0},
 			FoodItem:  pos2D{X: -1, Y: -1},
+			MousePos:  pos2D{X: -1, Y: 0},
 		},
 	}
 
@@ -683,7 +697,7 @@ func (c *Coordinator) UpdatePetState() {
 			actionChance = 15 // Default: less hyper than before
 		}
 		if rand.Intn(100) < actionChance {
-			action := rand.Intn(8)
+			action := rand.Intn(9)
 			switch action {
 			case 0:
 				// Run across the screen
@@ -794,6 +808,71 @@ func (c *Coordinator) UpdatePetState() {
 				})
 				thoughts := []string{"watching.", "always watching.", "i see you.", "the family knows."}
 				c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+			case 8:
+				// Spawn a mouse! (if not already present)
+				if c.pet.MousePos.X < 0 {
+					// Mouse appears at edge of screen
+					c.pet.MouseDirection = []int{-1, 1}[rand.Intn(2)]
+					if c.pet.MouseDirection == 1 {
+						c.pet.MousePos = pos2D{X: 0, Y: 0}
+					} else {
+						c.pet.MousePos = pos2D{X: maxX, Y: 0}
+					}
+					c.pet.LastThought = randomThought("mouse_spot")
+				}
+			}
+		}
+	}
+
+	// === MOUSE MECHANICS ===
+
+	// If there's a mouse, handle mouse behavior
+	if c.pet.MousePos.X >= 0 {
+		// Mouse runs away from pet
+		dist := c.pet.MousePos.X - c.pet.Pos.X
+		if dist < 0 {
+			dist = -dist
+		}
+
+		// If pet catches mouse (within 2 cells), celebrate and remove mouse
+		if dist <= 2 && c.pet.Pos.Y == 0 {
+			c.pet.MousePos = pos2D{X: -1, Y: 0}
+			c.pet.TotalMouseCatches++
+			c.pet.Happiness = min(100, c.pet.Happiness+20)
+			c.pet.State = "happy"
+			c.pet.HasTarget = false
+			c.pet.ActionPending = ""
+			// Creative kill thought!
+			c.pet.LastThought = randomThought("mouse_kill")
+		} else {
+			// Mouse moves away from pet (every 5 frames)
+			if c.pet.AnimFrame%5 == 0 {
+				// Mouse tries to run away from pet
+				if c.pet.MousePos.X < c.pet.Pos.X {
+					c.pet.MouseDirection = -1 // Run left
+				} else {
+					c.pet.MouseDirection = 1 // Run right
+				}
+				c.pet.MousePos.X += c.pet.MouseDirection
+
+				// If mouse reaches edge, it escapes
+				if c.pet.MousePos.X < 0 || c.pet.MousePos.X > maxX {
+					c.pet.MousePos = pos2D{X: -1, Y: 0}
+					c.pet.LastThought = "it got away..."
+					c.pet.HasTarget = false
+					c.pet.ActionPending = ""
+				}
+			}
+
+			// Pet chases mouse (if not already doing something else important)
+			if !c.pet.HasTarget && c.pet.MousePos.X >= 0 {
+				c.pet.TargetPos = pos2D{X: c.pet.MousePos.X, Y: 0}
+				c.pet.HasTarget = true
+				c.pet.ActionPending = "hunt"
+				c.pet.State = "walking"
+				if c.pet.AnimFrame%20 == 0 {
+					c.pet.LastThought = randomThought("mouse_chase")
+				}
 			}
 		}
 	}
@@ -815,6 +894,49 @@ func (c *Coordinator) UpdatePetState() {
 	}
 	if c.pet.Hunger < 30 && c.pet.Happiness > 0 && c.pet.AnimFrame%happyDecayFrames == 0 {
 		c.pet.Happiness--
+	}
+
+	// === DEATH / STARVATION MECHANICS ===
+
+	// If already dead, just occasionally update thoughts and skip other state changes
+	if c.pet.IsDead {
+		if c.pet.AnimFrame%100 == 0 {
+			c.pet.LastThought = randomThought("dead")
+		}
+		c.savePetState()
+		return
+	}
+
+	// Track starvation time
+	if c.pet.Hunger == 0 {
+		if c.pet.StarvingStart.IsZero() {
+			c.pet.StarvingStart = now
+			c.pet.LastThought = randomThought("starving")
+		}
+
+		// After 60 seconds of starvation
+		starvingDuration := now.Sub(c.pet.StarvingStart)
+		if starvingDuration > 60*time.Second {
+			if c.config.Widgets.Pet.CanDie {
+				// Pet dies
+				c.pet.IsDead = true
+				c.pet.DeathTime = now
+				c.pet.State = "dead"
+				c.pet.LastThought = "goodbye..."
+				c.savePetState()
+				return
+			} else {
+				// Guilt trip mode - passive aggressive thoughts every 10 seconds
+				if c.pet.AnimFrame%100 == 0 {
+					c.pet.LastThought = randomThought("guilt")
+				}
+			}
+		}
+	} else {
+		// Reset starvation tracking when fed
+		if !c.pet.StarvingStart.IsZero() {
+			c.pet.StarvingStart = time.Time{}
+		}
 	}
 
 	// === THOUGHT MARQUEE ===
@@ -2020,8 +2142,13 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		petSprite = sprites.Hungry
 	case "shooting":
 		petSprite = sprites.Idle
+	case "dead":
+		petSprite = sprites.Dead
 	}
-	if c.pet.Hunger < 30 {
+	// Dead overrides everything
+	if c.pet.IsDead {
+		petSprite = sprites.Dead
+	} else if c.pet.Hunger < 30 {
 		petSprite = sprites.Hungry
 	}
 	if petSprite == "" {
@@ -2239,6 +2366,13 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		if poopX >= 0 && poopX < safePlayWidth && len(poopRunes) > 0 {
 			groundRow[poopX] = poopRunes[0]
 		}
+	}
+
+	// Place mouse (if present)
+	mouseRunes := []rune(sprites.Mouse)
+	mouseX := c.pet.MousePos.X
+	if mouseX >= 0 && mouseX < safePlayWidth && len(mouseRunes) > 0 {
+		groundRow[mouseX] = mouseRunes[0]
 	}
 
 	// Place cat on top
@@ -2478,6 +2612,22 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	case "drop_food":
 		// Drop food at a random position for the pet to eat
 		c.stateMu.Lock()
+		// If dead, food revives the pet!
+		if c.pet.IsDead {
+			c.pet.IsDead = false
+			c.pet.DeathTime = time.Time{}
+			c.pet.StarvingStart = time.Time{}
+			c.pet.Hunger = 80
+			c.pet.Happiness = 50
+			c.pet.State = "eating"
+			c.pet.LastThought = "life-giving noms!"
+			c.savePetState()
+			c.stateMu.Unlock()
+			if input.PaneID != "" {
+				exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+			}
+			return false
+		}
 		width := c.getClientWidth(clientID)
 		dropX := rand.Intn(width - 4) + 2
 		c.pet.FoodItem = pos2D{X: dropX, Y: 2} // Drop from high air
@@ -2492,6 +2642,11 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	case "drop_yarn":
 		// Drop or toss the yarn at click position
 		c.stateMu.Lock()
+		// Dead pets don't play
+		if c.pet.IsDead {
+			c.stateMu.Unlock()
+			return false
+		}
 		width := c.getClientWidth(clientID)
 		// Use click position, clamped to valid range
 		tossX := input.MouseX
@@ -2800,6 +2955,12 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		catSprite = sprites.Happy
 	case "hungry":
 		catSprite = sprites.Hungry
+	case "dead":
+		catSprite = sprites.Dead
+	}
+	// Dead overrides everything
+	if c.pet.IsDead {
+		catSprite = sprites.Dead
 	}
 	catWidth := runewidth.StringWidth(catSprite)
 	if catWidth < 1 {
@@ -2810,6 +2971,22 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 	// Sprites like emojis display wider than their rune position
 	// Use clamped position to match what's rendered on screen
 	if c.pet.Pos.Y == petY && clickX >= catPosX && clickX < catPosX+catWidth {
+		// If dead, clicking revives the pet
+		if c.pet.IsDead {
+			coordinatorDebugLog.Printf("    -> Clicked on dead pet! Reviving.")
+			c.pet.IsDead = false
+			c.pet.DeathTime = time.Time{}
+			c.pet.StarvingStart = time.Time{}
+			c.pet.Hunger = 50
+			c.pet.Happiness = 50
+			c.pet.State = "happy"
+			c.pet.LastThought = "back from the void!"
+			c.savePetState()
+			if input.PaneID != "" {
+				exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+			}
+			return true
+		}
 		coordinatorDebugLog.Printf("    -> Clicked on cat at X=%d (cat rendered at %d, width=%d)! Petting.", clickX, catPosX, catWidth)
 		c.pet.Happiness = min(100, c.pet.Happiness+10)
 		c.pet.TotalPets++
@@ -2849,6 +3026,36 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 				}
 				return true
 			}
+		}
+	}
+
+	// Check if clicking on mouse - help the pet catch it!
+	if c.pet.MousePos.X >= 0 && petY == 0 {
+		mouseWidth := runewidth.StringWidth(sprites.Mouse)
+		if mouseWidth < 1 {
+			mouseWidth = 1
+		}
+		clampedMouseX := c.pet.MousePos.X
+		if clampedMouseX >= safePlayWidth {
+			clampedMouseX = safePlayWidth - 1
+		}
+		if clampedMouseX < 0 {
+			clampedMouseX = 0
+		}
+		if clickX >= clampedMouseX && clickX < clampedMouseX+mouseWidth {
+			coordinatorDebugLog.Printf("    -> Clicked on mouse! Pet catches it.")
+			c.pet.MousePos = pos2D{X: -1, Y: 0}
+			c.pet.TotalMouseCatches++
+			c.pet.Happiness = min(100, c.pet.Happiness+20)
+			c.pet.State = "happy"
+			c.pet.HasTarget = false
+			c.pet.ActionPending = ""
+			c.pet.LastThought = randomThought("mouse_kill")
+			c.savePetState()
+			if input.PaneID != "" {
+				exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
+			}
+			return true
 		}
 	}
 
@@ -3314,15 +3521,22 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 
 // Default pet thoughts by state
 var defaultPetThoughts = map[string][]string{
-	"hungry":  {"food. now.", "the bowl. it echoes.", "starving. dramatically.", "hunger level: critical."},
-	"poop":    {"that won't clean itself.", "i made you a gift.", "cleanup crew needed.", "ahem. the floor."},
-	"happy":   {"acceptable.", "fine. you may stay.", "feeling good.", "not bad.", "this is nice."},
-	"yarn":    {"the yarn. it calls.", "must... catch...", "yarn acquired.", "got it!"},
-	"sleepy":  {"nap time.", "zzz...", "five more minutes.", "so tired."},
-	"idle":    {"chillin'.", "vibin'.", "just here.", "sup.", "...", "waiting.", "*yawn*", "hmm."},
-	"walking": {"exploring.", "on the move.", "wandering.", "going places."},
-	"jumping": {"wheee!", "boing!", "up up up!", "airborne."},
-	"petting": {"mmm...", "yes, there.", "acceptable.", "more.", "don't stop.", "nice."},
+	"hungry":   {"food. now.", "the bowl. it echoes.", "starving. dramatically.", "hunger level: critical."},
+	"poop":     {"that won't clean itself.", "i made you a gift.", "cleanup crew needed.", "ahem. the floor."},
+	"happy":    {"acceptable.", "fine. you may stay.", "feeling good.", "not bad.", "this is nice."},
+	"yarn":     {"the yarn. it calls.", "must... catch...", "yarn acquired.", "got it!"},
+	"sleepy":   {"nap time.", "zzz...", "five more minutes.", "so tired."},
+	"idle":     {"chillin'.", "vibin'.", "just here.", "sup.", "...", "waiting.", "*yawn*", "hmm."},
+	"walking":  {"exploring.", "on the move.", "wandering.", "going places."},
+	"jumping":  {"wheee!", "boing!", "up up up!", "airborne."},
+	"petting":  {"mmm...", "yes, there.", "acceptable.", "more.", "don't stop.", "nice."},
+	"starving": {"this is it.", "so hungry...", "fading...", "remember me.", "tell them... i was good."},
+	"guilt":    {"i trusted you.", "is this how it ends?", "the neglect.", "you did this.", "betrayal."},
+	"dead":     {"...", "x_x", "[silence]", "gone.", "rip."},
+	"mouse_spot":  {"intruder.", "prey detected.", "nature calls.", "the hunt begins.", "i see you."},
+	"mouse_chase": {"can't escape.", "almost...", "you're mine.", "gotcha soon.", "so close..."},
+	"mouse_catch": {"victory.", "natural order.", "delicious chaos.", "another conquest.", "the circle of life."},
+	"mouse_kill":  {"blender time.", "yeet into void.", "tiny skateboard accident.", "spontaneous combustion.", "piano from above.", "anvil delivery.", "surprise trapdoor.", "rocket malfunction."},
 }
 
 // randomThought returns a random thought from the given category
