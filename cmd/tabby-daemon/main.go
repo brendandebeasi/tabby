@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -17,9 +18,34 @@ import (
 	"github.com/b/tmux-tabs/pkg/daemon"
 )
 
+var crashLog *log.Logger
+
+func initCrashLog(sessionID string) {
+	crashLogPath := fmt.Sprintf("/tmp/tabby-daemon-%s-crash.log", sessionID)
+	f, err := os.OpenFile(crashLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		crashLog = log.New(os.Stderr, "[CRASH] ", log.LstdFlags)
+		return
+	}
+	crashLog = log.New(f, "", log.LstdFlags|log.Lmicroseconds)
+}
+
+func logCrash(context string, r interface{}) {
+	crashLog.Printf("=== CRASH in %s ===", context)
+	crashLog.Printf("Panic: %v", r)
+	crashLog.Printf("Stack trace:\n%s", debug.Stack())
+	crashLog.Printf("=== END CRASH ===\n")
+}
+
+func recoverAndLog(context string) {
+	if r := recover(); r != nil {
+		logCrash(context, r)
+	}
+}
+
 var (
-	sessionID = flag.String("session", "", "tmux session ID")
-	debug     = flag.Bool("debug", false, "Enable debug logging")
+	sessionID  = flag.String("session", "", "tmux session ID")
+	debugMode  = flag.Bool("debug", false, "Enable debug logging")
 )
 
 var debugLog *log.Logger
@@ -98,7 +124,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string) {
 		debugLog.Printf("Spawning renderer for new window %s (pane %s)", windowID, firstPane)
 		// Use exec to replace shell with renderer (matches toggle_sidebar_daemon.sh behavior)
 		debugFlag := ""
-		if *debug {
+		if *debugMode {
 			debugFlag = "-debug"
 		}
 		cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
@@ -218,13 +244,6 @@ func main() {
 	// Initialize BubbleZone for touch button click detection
 	zone.NewGlobal()
 
-	if *debug {
-		debugLog = log.New(os.Stderr, "[daemon] ", log.LstdFlags|log.Lmicroseconds)
-		SetCoordinatorDebugLog(debugLog)
-	} else {
-		debugLog = log.New(os.Stderr, "", 0)
-	}
-
 	// Get session ID from environment if not provided
 	if *sessionID == "" {
 		out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
@@ -233,13 +252,25 @@ func main() {
 		}
 	}
 
+	// Initialize crash logging early
+	initCrashLog(*sessionID)
+	defer recoverAndLog("main")
+
+	if *debugMode {
+		debugLog = log.New(os.Stderr, "[daemon] ", log.LstdFlags|log.Lmicroseconds)
+		SetCoordinatorDebugLog(debugLog)
+	} else {
+		debugLog = log.New(os.Stderr, "", 0)
+	}
+
 	debugLog.Printf("Starting daemon for session %s", *sessionID)
+	crashLog.Printf("Daemon started for session %s", *sessionID)
 
 	// Create coordinator for centralized rendering
 	coordinator := NewCoordinator(*sessionID)
 
 	// Enable coordinator debug logging if debug mode is on
-	if *debug {
+	if *debugMode {
 		SetCoordinatorDebugLog(debugLog)
 	}
 
@@ -270,6 +301,8 @@ func main() {
 
 	// Start coordinator refresh loops with change detection
 	go func() {
+		defer recoverAndLog("refresh-loop")
+
 		refreshTicker := time.NewTicker(2 * time.Second)        // Window list (less frequent)
 		windowCheckTicker := time.NewTicker(500 * time.Millisecond) // Check for new windows (faster)
 		spinnerTicker := time.NewTicker(100 * time.Millisecond) // Spinner animation
@@ -325,6 +358,7 @@ func main() {
 
 	// Monitor for idle shutdown (no clients for 30s) and session existence
 	go func() {
+		defer recoverAndLog("idle-monitor")
 		idleTicker := time.NewTicker(10 * time.Second)
 		defer idleTicker.Stop()
 		idleStart := time.Time{}

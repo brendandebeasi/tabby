@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,10 +28,35 @@ import (
 var (
 	sessionID = flag.String("session", "", "tmux session ID")
 	windowID  = flag.String("window", "", "tmux window ID this renderer is for")
-	debug     = flag.Bool("debug", false, "Enable debug logging")
+	debugMode = flag.Bool("debug", false, "Enable debug logging")
 )
 
 var debugLog *log.Logger
+var crashLog *log.Logger
+
+func initCrashLog() {
+	crashLogPath := fmt.Sprintf("/tmp/sidebar-renderer-%s-crash.log", *windowID)
+	f, err := os.OpenFile(crashLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		crashLog = log.New(os.Stderr, "[CRASH] ", log.LstdFlags)
+		return
+	}
+	crashLog = log.New(f, "", log.LstdFlags|log.Lmicroseconds)
+}
+
+func logCrash(context string, r interface{}) {
+	crashLog.Printf("=== CRASH in %s ===", context)
+	crashLog.Printf("Window: %s, Session: %s", *windowID, *sessionID)
+	crashLog.Printf("Panic: %v", r)
+	crashLog.Printf("Stack trace:\n%s", debug.Stack())
+	crashLog.Printf("=== END CRASH ===\n")
+}
+
+func recoverAndLog(context string) {
+	if r := recover(); r != nil {
+		logCrash(context, r)
+	}
+}
 
 // Long-press detection thresholds
 const (
@@ -189,7 +215,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Debug logging
-		if *debug {
+		if *debugMode {
 			contentLines := strings.Count(m.content, "\n")
 			debugLog.Printf("=== RENDER PAYLOAD ===")
 			debugLog.Printf("  SequenceNum: %d", m.sequenceNum)
@@ -253,7 +279,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case longPressMsg:
 		// Long-press timer fired - check if still valid
 		if m.longPressActive && msg.X == m.mouseDownPos.X && msg.Y == m.mouseDownPos.Y {
-			if *debug {
+			if *debugMode {
 				debugLog.Printf("Long-press detected at X=%d Y=%d", msg.X, msg.Y)
 			}
 			// Treat as right-click
@@ -288,7 +314,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Debug logging for mouse events
-	if *debug {
+	if *debugMode {
 		debugLog.Printf("=== MOUSE EVENT ===")
 		debugLog.Printf("  Position: X=%d Y=%d", msg.X, msg.Y)
 		debugLog.Printf("  Button: %v Action: %v Ctrl: %v Shift: %v Alt: %v", msg.Button, msg.Action, msg.Ctrl, msg.Shift, msg.Alt)
@@ -321,7 +347,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case tea.MouseActionPress:
 		// Shift+click or Ctrl+click = right-click (alternative for tmux which intercepts right-click)
 		if (msg.Shift || msg.Ctrl) && msg.Button == tea.MouseButtonLeft {
-			if *debug {
+			if *debugMode {
 				debugLog.Printf("  Shift/Ctrl+click detected (Shift=%v Ctrl=%v), treating as right-click", msg.Shift, msg.Ctrl)
 			}
 			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight)
@@ -332,7 +358,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.mouseDownTime = time.Now()
 			m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
 			m.longPressActive = true
-			if *debug {
+			if *debugMode {
 				debugLog.Printf("  Starting long-press timer at X=%d Y=%d", msg.X, msg.Y)
 			}
 			// Start a timer for long-press
@@ -349,7 +375,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			dx := abs(msg.X - m.mouseDownPos.X)
 			dy := abs(msg.Y - m.mouseDownPos.Y)
 			if dx > movementThreshold || dy > movementThreshold {
-				if *debug {
+				if *debugMode {
 					debugLog.Printf("  Long-press cancelled due to movement: dx=%d dy=%d", dx, dy)
 				}
 				m.longPressActive = false
@@ -373,7 +399,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 				if timeSinceLastTap < doubleTapThreshold && dx <= doubleTapDistance && dy <= doubleTapDistance {
 					// Double-tap detected - treat as right-click
-					if *debug {
+					if *debugMode {
 						debugLog.Printf("  Double-tap detected (interval=%v, distance=%d,%d) -> right-click", timeSinceLastTap, dx, dy)
 					}
 					m.lastTapTime = time.Time{} // Reset to prevent triple-tap
@@ -381,7 +407,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 
 				// Single tap - record for potential double-tap and process as left-click
-				if *debug {
+				if *debugMode {
 					debugLog.Printf("  Quick click (elapsed=%v)", elapsed)
 				}
 				m.lastTapTime = time.Now()
@@ -403,12 +429,12 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.
 	// Translate Y to content line (accounting for scroll)
 	contentY := y + m.scrollY
 
-	if *debug {
+	if *debugMode {
 		debugLog.Printf("  Processing click: button=%v Y=%d ContentY=%d (scroll=%d)", button, y, contentY, m.scrollY)
 	}
 
 	// Check all regions with simple Y-based matching
-	if *debug {
+	if *debugMode {
 		debugLog.Printf("  Checking %d regions...", len(m.regions))
 	}
 	for i, region := range m.regions {
@@ -421,7 +447,7 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.
 			if x >= region.StartCol && x < endCol {
 				resolvedAction = region.Action
 				resolvedTarget = region.Target
-				if *debug {
+				if *debugMode {
 					debugLog.Printf("  -> Matched region[%d]: lines %d-%d, cols %d-%d, action=%s target=%s",
 						i, region.StartLine, region.EndLine, region.StartCol, endCol, region.Action, region.Target)
 				}
@@ -430,7 +456,7 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.
 		}
 	}
 
-	if *debug {
+	if *debugMode {
 		if resolvedAction != "" {
 			debugLog.Printf("  RESOLVED: action=%s target=%s", resolvedAction, resolvedTarget)
 		} else {
@@ -516,6 +542,7 @@ func (m rendererModel) View() string {
 
 // receiveLoop reads messages from the daemon
 func (m *rendererModel) receiveLoop() {
+	defer recoverAndLog("receiveLoop")
 	scanner := bufio.NewScanner(m.conn)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
@@ -636,10 +663,14 @@ var globalProgram *tea.Program
 func main() {
 	flag.Parse()
 
+	// Initialize crash logging early
+	initCrashLog()
+	defer recoverAndLog("main")
+
 	// Note: BubbleZone initialization removed - zone detection happens in daemon only.
 	// The daemon extracts zone bounds and sends accurate ClickableRegions.
 
-	if *debug {
+	if *debugMode {
 		// Write debug log to file instead of stderr to avoid corrupting the display
 		logPath := fmt.Sprintf("/tmp/sidebar-renderer-%s.log", *windowID)
 		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -661,6 +692,7 @@ func main() {
 	}
 
 	debugLog.Printf("Starting renderer for session %s", *sessionID)
+	crashLog.Printf("Renderer started for window %s, session %s", *windowID, *sessionID)
 
 	// Force ANSI256 color mode
 	lipgloss.SetColorProfile(termenv.ANSI256)
@@ -677,6 +709,7 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
+		defer recoverAndLog("signal-handler")
 		<-sigCh
 		if p != nil {
 			p.Send(tea.Quit())
