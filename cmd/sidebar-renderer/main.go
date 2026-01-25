@@ -151,18 +151,6 @@ func tickCmd() tea.Cmd {
 
 // Update implements tea.Model
 func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Debug: log all message types to diagnose mouse event issues
-	if *debug {
-		switch msg.(type) {
-		case tea.MouseMsg:
-			debugLog.Printf(">>> Received tea.MouseMsg")
-		case tea.KeyMsg:
-			debugLog.Printf(">>> Received tea.KeyMsg")
-		case tea.WindowSizeMsg:
-			debugLog.Printf(">>> Received tea.WindowSizeMsg")
-		}
-	}
-
 	switch msg := msg.(type) {
 	case connectedMsg:
 		m.conn = msg.conn
@@ -412,7 +400,6 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.Model, tea.Cmd) {
 	var resolvedAction, resolvedTarget string
 
-	// SIMPLIFIED: Single coordinate system - just Y position (no pinned/scrollable split)
 	// Translate Y to content line (accounting for scroll)
 	contentY := y + m.scrollY
 
@@ -443,7 +430,6 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.
 		}
 	}
 
-	// Log final resolved action
 	if *debug {
 		if resolvedAction != "" {
 			debugLog.Printf("  RESOLVED: action=%s target=%s", resolvedAction, resolvedTarget)
@@ -684,9 +670,7 @@ func main() {
 		height: 24,
 	}
 
-	// Use WithMouseAllMotion for better compatibility with tmux
-	// Some terminals/tmux versions don't pass mouse events with WithMouseCellMotion
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	globalProgram = p
 
 	// Handle signals

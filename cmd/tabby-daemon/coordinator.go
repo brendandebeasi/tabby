@@ -78,6 +78,10 @@ type Coordinator struct {
 
 	// Session info
 	sessionID string
+
+	// Pending group for next new window (for optimistic UI)
+	pendingNewWindowGroup string
+	pendingNewWindowTime  time.Time
 }
 
 // petState holds the current state of the pet widget
@@ -347,10 +351,36 @@ func (c *Coordinator) RefreshWindows() {
 	// Note: collapsed groups state is managed in-memory and synced to tmux options
 	// We don't reload here to avoid race conditions with toggle_group action
 
+	// Track old window IDs to detect new windows
+	oldWindowIDs := make(map[string]bool)
+	for _, w := range c.windows {
+		oldWindowIDs[w.ID] = true
+	}
+
 	windows, err := tmux.ListWindowsWithPanes()
 	if err != nil {
 		return
 	}
+
+	// Check for pending group assignment (optimistic UI for new windows in groups)
+	if c.pendingNewWindowGroup != "" && time.Since(c.pendingNewWindowTime) < 5*time.Second {
+		for i := range windows {
+			// Find new window without a group
+			if !oldWindowIDs[windows[i].ID] && windows[i].Group == "" {
+				// Assign the pending group
+				windows[i].Group = c.pendingNewWindowGroup
+				// Also set it in tmux so it persists
+				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_group", c.pendingNewWindowGroup).Run()
+				// Clear pending
+				c.pendingNewWindowGroup = ""
+				break
+			}
+		}
+	} else if c.pendingNewWindowGroup != "" {
+		// Pending group expired, clear it
+		c.pendingNewWindowGroup = ""
+	}
+
 	c.windows = windows
 	c.grouped = grouping.GroupWindowsWithOptions(windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 }
@@ -2323,7 +2353,6 @@ func (c *Coordinator) HandleInput(clientID string, input *daemon.InputPayload) b
 // handleSemanticAction processes pre-resolved semantic actions from renderers
 // Returns true if window list refresh is needed
 func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputPayload) bool {
-	// Debug logging for semantic actions
 	coordinatorDebugLog.Printf("=== SEMANTIC ACTION ===")
 	coordinatorDebugLog.Printf("  Client: %s", clientID)
 	coordinatorDebugLog.Printf("  Action: %s", input.ResolvedAction)
@@ -3114,6 +3143,12 @@ func (c *Coordinator) showGroupContextMenu(groupName string) {
 	}
 
 	if group.Name != "Default" {
+		// Set pending group for optimistic UI - if the new window appears
+		// before tmux sets the option, we'll assign it ourselves
+		c.pendingNewWindowGroup = group.Name
+		c.pendingNewWindowTime = time.Now()
+
+		// Create window and set group option
 		newWindowCmd := fmt.Sprintf("new-window -c %s ; set-window-option @tabby_group '%s'", dirArg, group.Name)
 		args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
 	} else {
@@ -3123,6 +3158,24 @@ func (c *Coordinator) showGroupContextMenu(groupName string) {
 
 	// Note: Collapse/Expand is done by clicking on the group header (left click)
 	// No need for context menu option since it would bypass in-memory state
+
+	// Close all windows in group (only if group has windows)
+	if len(group.Windows) > 0 {
+		// Separator
+		args = append(args, "", "", "")
+
+		// Build command to kill all windows in this group
+		var killCmds []string
+		for _, win := range group.Windows {
+			killCmds = append(killCmds, fmt.Sprintf("kill-window -t %s", win.ID))
+		}
+		killAllCmd := strings.Join(killCmds, " \\; ")
+
+		// Use confirm-before for safety
+		confirmCmd := fmt.Sprintf(`confirm-before -p "Close all %d windows in %s? (y/n)" "%s"`,
+			len(group.Windows), group.Name, killAllCmd)
+		args = append(args, fmt.Sprintf("Close All (%d)", len(group.Windows)), "X", confirmCmd)
+	}
 
 	exec.Command("tmux", args...).Run()
 }
