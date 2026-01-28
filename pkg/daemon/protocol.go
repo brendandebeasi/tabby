@@ -15,6 +15,8 @@ const (
 	MsgInput          MessageType = "input"
 	MsgResize         MessageType = "resize"
 	MsgViewportUpdate MessageType = "viewport_update"
+	MsgMenu           MessageType = "menu"        // Daemon -> Renderer: show context menu
+	MsgMenuSelect     MessageType = "menu_select"  // Renderer -> Daemon: menu item selected
 	MsgPing           MessageType = "ping"
 	MsgPong           MessageType = "pong"
 )
@@ -63,6 +65,7 @@ type InputPayload struct {
 	PinnedRelY     int    `json:"pinned_rel_y,omitempty"`    // Y relative to pinned section start
 	ViewportOffset int    `json:"viewport_offset,omitempty"` // Current viewport offset
 	PaneID         string `json:"pane_id,omitempty"`         // tmux pane ID for context menus
+	SourcePaneID   string `json:"source_pane_id,omitempty"`  // tmux pane ID where the click physically occurred (for positioning)
 	// Semantic action (resolved by renderer from clickable regions)
 	ResolvedAction string `json:"resolved_action,omitempty"` // "select_window", "select_pane", "toggle_group", "button"
 	ResolvedTarget string `json:"resolved_target,omitempty"` // window index, pane ID, group name, or button action
@@ -120,6 +123,27 @@ type PetState struct {
 	PosX              int       `json:"pos_x"`
 	YarnPosX          int       `json:"yarn_pos_x"`
 	PoopPositions     []int     `json:"poop_positions"`
+}
+
+// MenuItemPayload represents a single menu item sent to a renderer
+type MenuItemPayload struct {
+	Label     string `json:"label"`
+	Key       string `json:"key,omitempty"`
+	Separator bool   `json:"separator,omitempty"`
+	Header    bool   `json:"header,omitempty"`
+}
+
+// MenuPayload contains a context menu for the renderer to display
+type MenuPayload struct {
+	Title string            `json:"title"`
+	Items []MenuItemPayload `json:"items"`
+	X     int               `json:"x"` // Menu position X (screen coords)
+	Y     int               `json:"y"` // Menu position Y (screen coords)
+}
+
+// MenuSelectPayload contains the user's menu selection
+type MenuSelectPayload struct {
+	Index int `json:"index"` // Selected item index (-1 for cancel)
 }
 
 // SocketPath returns the daemon socket path for a session

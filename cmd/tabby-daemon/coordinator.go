@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +45,7 @@ type Coordinator struct {
 	// Shared state
 	windows         []tmux.Window
 	grouped         []grouping.GroupedWindows
+	windowVisualPos map[string]int // window ID -> visual position in sidebar
 	config          *config.Config
 	collapsedGroups map[string]bool
 	spinnerFrame    int
@@ -70,6 +72,13 @@ type Coordinator struct {
 	clientWidths   map[string]int
 	clientWidthsMu sync.RWMutex
 
+	// Sidebar collapse state
+	sidebarCollapsed      bool
+	sidebarPreviousWidth  int
+
+	// Touch mode runtime override ("", "1", "0")
+	touchModeOverride string
+
 	// Pet widget layout (for custom click detection)
 	petLayout petWidgetLayout
 
@@ -82,6 +91,18 @@ type Coordinator struct {
 	// Pending group for next new window (for optimistic UI)
 	pendingNewWindowGroup string
 	pendingNewWindowTime  time.Time
+
+	// AI tool state tracking — per-pane (for busy→idle transition detection)
+	prevPaneBusy       map[string]bool   // pane ID → was AI tool busy last cycle
+	prevPaneTitle      map[string]string // pane ID → AI pane title last cycle
+	hookPaneActive     map[string]bool   // pane ID → hooks detected (seen @tabby_busy=1)
+	hookPaneBusyIdleAt map[string]int64  // pane ID → unix timestamp when hook-busy but process looks idle
+	aiBellUntil        map[int]int64     // window index → unix timestamp when bell expires (window-level)
+
+	// Context menu state (for in-renderer menus)
+	OnSendMenu     func(clientID string, menu *daemon.MenuPayload)
+	pendingMenus   map[string][]menuItemDef
+	pendingMenusMu sync.Mutex
 }
 
 // petState holds the current state of the pet widget
@@ -232,6 +253,12 @@ func NewCoordinator(sessionID string) *Coordinator {
 		config:          cfg,
 		collapsedGroups: make(map[string]bool),
 		clientWidths:    make(map[string]int),
+		pendingMenus:    make(map[string][]menuItemDef),
+		prevPaneBusy:       make(map[string]bool),
+		prevPaneTitle:      make(map[string]string),
+		aiBellUntil:        make(map[int]int64),
+		hookPaneActive:     make(map[string]bool),
+		hookPaneBusyIdleAt: make(map[string]int64),
 		lastWidth:       25, // Default width for pet physics
 		pet: petState{
 			Pos:       pos2D{X: 10, Y: 0},
@@ -244,6 +271,9 @@ func NewCoordinator(sessionID string) *Coordinator {
 			MousePos:  pos2D{X: -1, Y: 0},
 		},
 	}
+
+	// Configure busy detection from config
+	tmux.ConfigureBusyDetection(cfg.BusyDetection.ExtraIdle, cfg.BusyDetection.AITools, cfg.BusyDetection.IdleTimeout)
 
 	// Load collapsed groups from tmux option
 	c.loadCollapsedGroups()
@@ -270,6 +300,17 @@ func NewCoordinator(sessionID string) *Coordinator {
 	c.RefreshSession()
 
 	return c
+}
+
+// getMainPaneDirection returns the tmux select-pane flag to navigate
+// from the sidebar pane to the main content pane.
+// If sidebar is on the left, main pane is to the right (-R).
+// If sidebar is on the right, main pane is to the left (-L).
+func (c *Coordinator) getMainPaneDirection() string {
+	if c.config.Sidebar.Position == "right" {
+		return "-L"
+	}
+	return "-R"
 }
 
 // loadCollapsedGroups loads collapsed state from tmux options
@@ -405,7 +446,554 @@ func (c *Coordinator) RefreshWindows() {
 	}
 
 	c.windows = windows
+
+	// Auto-sync window names from active pane title, unless name is locked.
+	c.syncWindowNames()
+
+	// Detect AI tool busy/done/idle states using state transitions.
+	c.processAIToolStates()
+
 	c.grouped = grouping.GroupWindowsWithOptions(windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
+	c.computeVisualPositions()
+	c.syncWindowIndices()
+
+	// Read runtime touch mode override
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_touch_mode").Output(); err == nil {
+		c.touchModeOverride = strings.TrimSpace(string(out))
+	}
+
+	// Update pane header colors to match group themes
+	c.updatePaneHeaderColors()
+}
+
+// processAIToolStates detects AI tool busy/done/idle states using stateful
+// transition tracking. Detection is per-pane: each AI pane gets its own
+// busy/input state stored in pane.AIBusy and pane.AIInput.
+//
+// For multi-pane windows, indicators appear on individual pane lines in the
+// sidebar. For single-pane windows, indicators stay at the window tab level.
+//
+// Detection signals (universal, works for any AI tool):
+//   - Braille spinner in pane title (U+2801-U+28FF): tool is working (Claude Code)
+//   - Pane title changed since last cycle: tool is active (OpenCode, Gemini, etc.)
+//   - Process tree CPU usage > 5%: tool is working (universal)
+//
+// State machine per pane:
+//   - Currently busy -> Busy indicator (animated spinner)
+//   - Was busy, now idle (tool still running) -> Input indicator (needs user input)
+//   - AI tool exited (was present, now gone) -> Bell indicator at window level
+//   - Was idle, still idle -> no indicator
+func (c *Coordinator) processAIToolStates() {
+	now := time.Now().Unix()
+
+	// Load process table once per cycle for CPU-based busy detection
+	pt := loadProcessTree()
+
+	// Track which pane IDs we see this cycle for stale cleanup
+	seenPanes := make(map[string]bool)
+
+	for i := range c.windows {
+		win := &c.windows[i]
+		idx := win.Index
+		multiPane := len(win.Panes) > 1
+
+		// Find all AI tool panes in this window
+		var aiPanes []*tmux.Pane
+		for j := range win.Panes {
+			if tmux.IsAITool(win.Panes[j].Command) {
+				aiPanes = append(aiPanes, &win.Panes[j])
+			}
+		}
+
+		// Check for expiring bell indicators (window-level, from AI tool exit)
+		if expiry, ok := c.aiBellUntil[idx]; ok {
+			if now < expiry {
+				win.Bell = true
+			} else {
+				delete(c.aiBellUntil, idx)
+			}
+		}
+
+		if len(aiPanes) == 0 {
+			// No AI tool in this window.
+			// Check if any pane in this window WAS an AI tool last cycle (tool exited).
+			anyPrevAI := false
+			for j := range win.Panes {
+				pid := win.Panes[j].ID
+				if c.prevPaneBusy[pid] || c.prevPaneTitle[pid] != "" {
+					anyPrevAI = true
+					delete(c.prevPaneBusy, pid)
+					delete(c.prevPaneTitle, pid)
+					delete(c.hookPaneActive, pid)
+					delete(c.hookPaneBusyIdleAt, pid)
+				}
+			}
+			if anyPrevAI {
+				win.Bell = true
+				win.Input = false
+				c.aiBellUntil[idx] = now + 30
+				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "@tabby_bell", "1").Run()
+				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "@tabby_input", "").Run()
+			}
+			continue
+		}
+
+		// If this is the active window, clear window-level input indicator
+		if win.Active && win.Input {
+			win.Input = false
+			exec.Command("tmux", "set-option", "-w", "-t", win.ID, "-u", "@tabby_input").Run()
+		}
+
+		// === Per-pane AI detection ===
+		// Hook-based: @tabby_busy is set at window level. When hooks are active,
+		// attribute busy to the pane with a spinner, or first AI pane as fallback.
+		hookBusyPaneID := ""
+		if win.Busy {
+			// Find which pane the hook likely refers to
+			for _, p := range aiPanes {
+				if tmux.HasSpinner(p.Title) {
+					hookBusyPaneID = p.ID
+					break
+				}
+			}
+			if hookBusyPaneID == "" {
+				hookBusyPaneID = aiPanes[0].ID
+			}
+		}
+
+		// Hook-based input: @tabby_input at window level -> attribute to active AI pane or first
+		hookInputPaneID := ""
+		if win.Input && !win.Active {
+			for _, p := range aiPanes {
+				if tmux.HasIdleIcon(p.Title) {
+					hookInputPaneID = p.ID
+					break
+				}
+			}
+			if hookInputPaneID == "" {
+				hookInputPaneID = aiPanes[0].ID
+			}
+		}
+
+		// Staleness check for hook-based busy (window-level @tabby_busy)
+		if win.Busy {
+			anySpinner := false
+			for _, p := range aiPanes {
+				if tmux.HasSpinner(p.Title) {
+					anySpinner = true
+					break
+				}
+			}
+			if !anySpinner {
+				stalePID := hookBusyPaneID
+				if _, ok := c.hookPaneBusyIdleAt[stalePID]; !ok {
+					c.hookPaneBusyIdleAt[stalePID] = now
+					coordinatorDebugLog.Printf("[AI] Pane %s (win %d): hook says busy but no spinner, starting staleness timer", stalePID, idx)
+				} else if now-c.hookPaneBusyIdleAt[stalePID] > 10 {
+					idleSecs := now - c.hookPaneBusyIdleAt[stalePID]
+					coordinatorDebugLog.Printf("[AI] Pane %s (win %d): auto-clearing stale @tabby_busy (idle for %ds)", stalePID, idx, idleSecs)
+					logEvent("STALE_BUSY_CLEAR pane=%s window=%d idle_secs=%d", stalePID, idx, idleSecs)
+					exec.Command("tmux", "set-option", "-w", "-t", win.ID, "-u", "@tabby_busy").Run()
+					win.Busy = false
+					hookBusyPaneID = ""
+					delete(c.hookPaneBusyIdleAt, stalePID)
+				}
+			} else {
+				// Spinner found — reset staleness for the busy pane
+				delete(c.hookPaneBusyIdleAt, hookBusyPaneID)
+			}
+		}
+
+		// Process each AI pane individually
+		for _, pane := range aiPanes {
+			pid := pane.ID
+			seenPanes[pid] = true
+
+			hasSpinner := tmux.HasSpinner(pane.Title)
+			hasIdle := tmux.HasIdleIcon(pane.Title)
+
+			// === Hook-based detection for this pane ===
+			if win.Busy && pid == hookBusyPaneID {
+				// Hook says this pane is busy
+				c.hookPaneActive[pid] = true
+				pane.AIBusy = true
+				pane.AIInput = false
+				if !c.prevPaneBusy[pid] {
+					coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): -> BUSY (hook)",
+						pid, idx, pane.Command)
+				}
+				c.prevPaneBusy[pid] = true
+				delete(c.aiBellUntil, idx)
+				c.prevPaneTitle[pid] = pane.Title
+				continue
+			}
+
+			if pid == hookInputPaneID {
+				// Hook says this pane needs input
+				pane.AIInput = true
+				pane.AIBusy = false
+				c.prevPaneBusy[pid] = false
+				c.prevPaneTitle[pid] = pane.Title
+				continue
+			}
+
+			// Hook-active bypass: when hooks previously controlled this pane
+			// and now say idle, trust that unless spinner overrides.
+			if c.hookPaneActive[pid] && !win.Busy && !hasSpinner {
+				if c.prevPaneBusy[pid] {
+					coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): BUSY -> IDLE (hook)",
+						pid, idx, pane.Command)
+				}
+				pane.AIBusy = false
+				c.prevPaneBusy[pid] = false
+				c.prevPaneTitle[pid] = pane.Title
+				continue
+			}
+
+			// === Passive detection ===
+			busy := false
+
+			// Signal 1: Braille spinner in this pane's title
+			if hasSpinner {
+				busy = true
+			}
+
+			// Signal 2: Title changed since last cycle
+			prevTitle, hasPrev := c.prevPaneTitle[pid]
+			hadSpinner := hasPrev && tmux.HasSpinner(prevTitle)
+			spinnerCleared := hadSpinner && !hasSpinner
+			if hasPrev && pane.Title != prevTitle && !spinnerCleared && !hasIdle {
+				busy = true
+			}
+
+			// Signal 3: CPU usage (skip when idle icon present)
+			if !busy && pane.PID > 0 && !hasIdle {
+				cpuPct := pt.treeCPU(pane.PID)
+				if cpuPct > 5.0 {
+					busy = true
+				}
+			}
+
+			// State machine
+			wasBusy := c.prevPaneBusy[pid]
+
+			if busy {
+				pane.AIBusy = true
+				pane.AIInput = false
+				c.prevPaneBusy[pid] = true
+				delete(c.aiBellUntil, idx)
+				if !wasBusy {
+					coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): -> BUSY (spinner=%v titleChanged=%v)",
+						pid, idx, pane.Command, hasSpinner, hasPrev && pane.Title != prevTitle)
+				}
+			} else if wasBusy {
+				// busy -> idle: tool waiting for user input
+				pane.AIInput = true
+				pane.AIBusy = false
+				c.prevPaneBusy[pid] = false
+				coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): BUSY -> INPUT (title=%q)",
+					pid, idx, pane.Command, pane.Title)
+			} else if !hasPrev {
+				coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): FIRST SEEN (title=%q)",
+					pid, idx, pane.Command, pane.Title)
+			}
+
+			c.prevPaneTitle[pid] = pane.Title
+		}
+
+		// === Derive window-level state ===
+		// Single-pane: promote pane state to window (current behavior)
+		// Multi-pane: indicators stay on pane lines; window shows nothing for busy/input
+		if !multiPane && len(aiPanes) == 1 {
+			pane := aiPanes[0]
+			if pane.AIBusy {
+				win.Busy = true
+				win.Input = false
+			} else if pane.AIInput && !win.Active {
+				win.Input = true
+				win.Busy = false
+			}
+		} else if multiPane {
+			// Multi-pane: clear window-level busy/input (indicators are on pane lines)
+			// But if the window had @tabby_busy from hooks, we already handled it above.
+			// Only clear the window-level flags that were set by passive detection.
+			anyPaneBusy := false
+			anyPaneInput := false
+			for _, p := range aiPanes {
+				if p.AIBusy {
+					anyPaneBusy = true
+				}
+				if p.AIInput {
+					anyPaneInput = true
+				}
+			}
+			// For collapsed multi-pane: aggregate to window level
+			if win.Collapsed {
+				win.Busy = anyPaneBusy
+				if !anyPaneBusy && anyPaneInput && !win.Active {
+					win.Input = true
+				}
+			} else {
+				// Expanded multi-pane: no window-level busy/input (pane lines show it)
+				win.Busy = false
+				win.Input = false
+			}
+		}
+
+		// Clear window-level input for active panes in active window
+		if win.Active && multiPane {
+			for _, pane := range aiPanes {
+				if pane.Active {
+					pane.AIInput = false
+				}
+			}
+		}
+	}
+
+	// Cleanup stale pane state for panes that no longer exist
+	for pid := range c.prevPaneBusy {
+		if !seenPanes[pid] {
+			delete(c.prevPaneBusy, pid)
+			delete(c.prevPaneTitle, pid)
+			delete(c.hookPaneActive, pid)
+			delete(c.hookPaneBusyIdleAt, pid)
+		}
+	}
+	for pid := range c.prevPaneTitle {
+		if !seenPanes[pid] {
+			delete(c.prevPaneTitle, pid)
+		}
+	}
+}
+
+// processTree holds pre-parsed process table data for CPU-based busy detection.
+// Call loadProcessTree() once per cycle and reuse for all windows.
+type processTree struct {
+	children map[int][]int    // ppid -> child pids
+	cpuByPID map[int]float64  // pid -> cpu%
+}
+
+// loadProcessTree reads the system process table once. Returns nil on error.
+func loadProcessTree() *processTree {
+	out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,%cpu=").Output()
+	if err != nil {
+		return nil
+	}
+	pt := &processTree{
+		children: make(map[int][]int),
+		cpuByPID: make(map[int]float64),
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		ppid, err2 := strconv.Atoi(fields[1])
+		cpu, err3 := strconv.ParseFloat(fields[2], 64)
+		if err1 != nil || err2 != nil || err3 != nil {
+			continue
+		}
+		pt.children[ppid] = append(pt.children[ppid], pid)
+		pt.cpuByPID[pid] = cpu
+	}
+	return pt
+}
+
+// treeCPU returns the total CPU% for a process and all its descendants.
+func (pt *processTree) treeCPU(pid int) float64 {
+	if pt == nil || pid <= 0 {
+		return 0
+	}
+	visited := make(map[int]bool)
+	queue := []int{pid}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		queue = append(queue, pt.children[cur]...)
+	}
+	var total float64
+	for p := range visited {
+		total += pt.cpuByPID[p]
+	}
+	return total
+}
+
+// computeVisualPositions builds a map of window ID -> visual position in the
+// sidebar. Visual position is a sequential counter (0, 1, 2...) based on the
+// order windows appear in the grouped display, which may differ from tmux's
+// window index when groups reorder windows.
+func (c *Coordinator) computeVisualPositions() {
+	pos := make(map[string]int)
+	n := 0
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			pos[win.ID] = n
+			n++
+		}
+	}
+	c.windowVisualPos = pos
+}
+
+// syncWindowIndices renumbers tmux windows so their indices match the visual
+// syncWindowNames updates window names from pane directories for
+// windows that haven't been explicitly renamed (NameLocked=false).
+// Uses the directory basename; combines with " | " when panes are in different dirs.
+func (c *Coordinator) syncWindowNames() {
+	home := os.Getenv("HOME")
+
+	for i := range c.windows {
+		if c.windows[i].NameLocked {
+			continue
+		}
+		if len(c.windows[i].Panes) == 0 {
+			continue
+		}
+
+		// Collect unique directory basenames from all panes, preserving order.
+		seen := make(map[string]bool)
+		var dirs []string
+		for _, pane := range c.windows[i].Panes {
+			p := pane.CurrentPath
+			if p == "" {
+				continue
+			}
+			name := shortenPath(p, home)
+			if !seen[name] {
+				seen[name] = true
+				dirs = append(dirs, name)
+			}
+		}
+
+		if len(dirs) == 0 {
+			continue
+		}
+
+		desiredName := strings.Join(dirs, " | ")
+
+		if desiredName == c.windows[i].Name {
+			continue
+		}
+
+		exec.Command("tmux", "rename-window", "-t", c.windows[i].ID, desiredName).Run()
+		// Ensure daemon-initiated renames don't leave the lock flag set
+		exec.Command("tmux", "set-window-option", "-t", c.windows[i].ID, "@tabby_name_locked", "0").Run()
+		c.windows[i].Name = desiredName
+	}
+}
+
+// shortenPath converts a full path to a short display name.
+// /Users/b -> ~, /Users/b/git/tabby -> tabby, / -> /
+func shortenPath(p, home string) string {
+	if p == "/" {
+		return "/"
+	}
+	// Use basename for most paths
+	base := filepath.Base(p)
+	// If the path IS the home directory, show ~
+	if p == home {
+		return "~"
+	}
+	return base
+}
+
+// positions shown in the sidebar. This ensures prefix+N selects the window
+// the user sees as "N" in the sidebar.
+func (c *Coordinator) syncWindowIndices() {
+	// Build desired mapping: visual position -> window ID
+	type winMapping struct {
+		id           string
+		currentIndex int
+		desiredIndex int
+	}
+
+	var mappings []winMapping
+	allMatch := true
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			desired := c.windowVisualPos[win.ID]
+			mappings = append(mappings, winMapping{
+				id:           win.ID,
+				currentIndex: win.Index,
+				desiredIndex: desired,
+			})
+			if win.Index != desired {
+				allMatch = false
+			}
+		}
+	}
+
+	if allMatch {
+		return // Already in order
+	}
+
+	coordinatorDebugLog.Printf("syncWindowIndices: reordering %d windows", len(mappings))
+
+	// Phase 1: Move all windows to high temporary indices to avoid conflicts.
+	// Use index 1000+ as temp space.
+	for i, m := range mappings {
+		tmpIdx := 1000 + i
+		if m.currentIndex != tmpIdx {
+			exec.Command("tmux", "move-window", "-s", m.id, "-t", fmt.Sprintf(":%d", tmpIdx)).Run()
+		}
+	}
+
+	// Phase 2: Move windows from temp indices to their desired positions.
+	for i, m := range mappings {
+		tmpIdx := 1000 + i
+		exec.Command("tmux", "move-window", "-s", fmt.Sprintf(":%d", tmpIdx), "-t", fmt.Sprintf(":%d", m.desiredIndex)).Run()
+	}
+
+	// Update local state to reflect new indices
+	for i := range c.windows {
+		if desired, ok := c.windowVisualPos[c.windows[i].ID]; ok {
+			c.windows[i].Index = desired
+		}
+	}
+
+	coordinatorDebugLog.Printf("syncWindowIndices: done")
+}
+
+// updatePaneHeaderColors sets per-window tmux options for pane header colors
+// based on the group theme. Uses @tabby_pane_active and @tabby_pane_inactive.
+// When auto_border is enabled, also sets pane-border-style and pane-active-border-style.
+func (c *Coordinator) updatePaneHeaderColors() {
+	// Run async to avoid blocking the coordinator
+	grouped := c.grouped // capture under existing lock
+	autoBorder := c.config.PaneHeader.AutoBorder
+	go func() {
+		var args []string
+		for _, group := range grouped {
+			baseColor := group.Theme.Bg
+			for _, win := range group.Windows {
+				color := baseColor
+				if win.CustomColor != "" {
+					color = win.CustomColor
+				}
+				inactive := grouping.LightenColor(color, 0.15)
+				if len(args) > 0 {
+					args = append(args, ";")
+				}
+				args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", color)
+				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", inactive)
+
+				// Auto-set tmux pane border colors from the window's resolved color
+				if autoBorder {
+					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
+						"pane-active-border-style", fmt.Sprintf("fg=%s", color))
+					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
+						"pane-border-style", fmt.Sprintf("fg=%s", inactive))
+				}
+			}
+		}
+		if len(args) > 0 {
+			exec.Command("tmux", args...).Run()
+		}
+	}()
 }
 
 // GetWindowsHash returns a hash of current window state for change detection
@@ -887,22 +1475,28 @@ func (c *Coordinator) UpdatePetState() {
 	}
 
 	// === HUNGER/HAPPINESS DECAY ===
+	// Only decay when at least one renderer is connected
+	c.clientWidthsMu.RLock()
+	hasConnectedClients := len(c.clientWidths) > 0
+	c.clientWidthsMu.RUnlock()
 
-	// Use config for hunger decay rate (frames = seconds * 10 since ~10fps)
-	hungerDecayFrames := c.config.Widgets.Pet.HungerDecay * 10
-	if hungerDecayFrames <= 0 {
-		hungerDecayFrames = 600 // Default: 60 seconds (less needy)
-	}
-	if c.pet.Hunger > 0 && c.pet.AnimFrame%hungerDecayFrames == 0 {
-		c.pet.Hunger--
-	}
-	// Happiness decays 1.5x faster when hungry
-	happyDecayFrames := hungerDecayFrames * 2 / 3
-	if happyDecayFrames <= 0 {
-		happyDecayFrames = 400 // Default: 40 seconds when hungry
-	}
-	if c.pet.Hunger < 30 && c.pet.Happiness > 0 && c.pet.AnimFrame%happyDecayFrames == 0 {
-		c.pet.Happiness--
+	if hasConnectedClients {
+		// Use config for hunger decay rate (frames = seconds * 10 since ~10fps)
+		hungerDecayFrames := c.config.Widgets.Pet.HungerDecay * 10
+		if hungerDecayFrames <= 0 {
+			hungerDecayFrames = 600 // Default: 60 seconds (less needy)
+		}
+		if c.pet.Hunger > 0 && c.pet.AnimFrame%hungerDecayFrames == 0 {
+			c.pet.Hunger--
+		}
+		// Happiness decays 1.5x faster when hungry
+		happyDecayFrames := hungerDecayFrames * 2 / 3
+		if happyDecayFrames <= 0 {
+			happyDecayFrames = 400 // Default: 40 seconds when hungry
+		}
+		if c.pet.Hunger < 30 && c.pet.Happiness > 0 && c.pet.AnimFrame%happyDecayFrames == 0 {
+			c.pet.Happiness--
+		}
 	}
 
 	// === DEATH / STARVATION MECHANICS ===
@@ -967,6 +1561,8 @@ func (c *Coordinator) UpdatePetState() {
 			if thought := generateLLMThought(&c.pet, petName); thought != "" {
 				c.pet.LastThought = thought
 				c.pet.ThoughtScroll = 0
+				// Parse thought for action keywords and trigger matching behavior
+				c.triggerActionFromThought(thought, maxX)
 			}
 		}
 	}
@@ -997,11 +1593,45 @@ func (c *Coordinator) UpdatePetState() {
 // RenderForClient generates content for a specific client's dimensions
 func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemon.RenderPayload {
 	// Guard dimensions
-	if width < 10 {
-		width = 25
+	if width < 3 {
+		width = 3
 	}
 	if height < 5 {
 		height = 24
+	}
+
+	// If sidebar is collapsed, render minimal expand button only
+	if c.sidebarCollapsed {
+		var s strings.Builder
+		expandStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#ffffff")).
+			Background(lipgloss.Color("#3498db")).
+			Bold(true)
+
+		// Vertical expand button - just "[>]" repeated to fill height
+		for i := 0; i < height; i++ {
+			if i == height/2 {
+				s.WriteString(zone.Mark("pet:expand_sidebar", expandStyle.Render("[>]")) + "\n")
+			} else {
+				s.WriteString(expandStyle.Render("   ") + "\n")
+			}
+		}
+
+		content := s.String()
+		return &daemon.RenderPayload{
+			Content:    content,
+			Width:      width,
+			Height:     height,
+			TotalLines: height,
+			Regions: []daemon.ClickableRegion{
+				{StartLine: 0, EndLine: height - 1, Action: "expand_sidebar", Target: "pet"},
+			},
+		}
+	}
+
+	// Normal render - guard minimum width
+	if width < 10 {
+		width = 25
 	}
 
 	// Track width for pet physics (safe to update outside lock - advisory)
@@ -1015,41 +1645,56 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 
+	// Generate sidebar header (session name, gear, position toggle, collapse)
+	headerContent, headerRegions := c.generateSidebarHeader(width)
+	headerLines := strings.Count(headerContent, "\n")
+
+	// Generate widget zones (top and bottom) using priority-based layout
+	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(width)
+	topWidgetLines := strings.Count(topWidgets, "\n")
+
 	// Generate main content (window/pane list) with clickable regions
 	// Pass clientID so we can show this client's window as active
-	mainContent, regions := c.generateMainContent(clientID, width, height)
+	mainContent, mainRegions := c.generateMainContent(clientID, width, height)
+	mainLines := strings.Count(mainContent, "\n")
 
-	// SIMPLIFIED: Stack widgets at the bottom of main content (no more pinned/scrollable split)
-	// Calculate current line offset for widget regions
-	// Count lines in main content (lines = newlines, since each line except last ends with \n)
-	currentLine := strings.Count(mainContent, "\n")
-
-	// Store the content start line for pet widget click detection
-	// This tells us where the pet widget starts in absolute content coordinates
-	c.petLayout.ContentStartLine = currentLine
-
-	// Generate widgets and adjust their regions to account for main content offset
-	widgetContent, widgetRegions := c.generatePinnedContent(width)
-	if len(widgetRegions) > 0 {
-		coordinatorDebugLog.Printf("Widget region offset: mainContent has %d newlines, offsetting widget regions by %d", currentLine, currentLine)
-		coordinatorDebugLog.Printf("  Before offset: first widget region %+v", widgetRegions[0])
-		for i := range widgetRegions {
-			widgetRegions[i].StartLine += currentLine
-			widgetRegions[i].EndLine += currentLine
-		}
-		coordinatorDebugLog.Printf("  After offset: first widget region %+v", widgetRegions[0])
+	// Offset top widget regions by header height
+	for i := range topWRegions {
+		topWRegions[i].StartLine += headerLines
+		topWRegions[i].EndLine += headerLines
 	}
 
-	// Combine everything into one content string
-	fullContent := mainContent + widgetContent
-	allRegions := append(regions, widgetRegions...)
+	// Offset main content regions by header + top widgets
+	mainOffset := headerLines + topWidgetLines
+	for i := range mainRegions {
+		mainRegions[i].StartLine += mainOffset
+		mainRegions[i].EndLine += mainOffset
+	}
+
+	// Store the content start line for pet widget click detection
+	// This tells us where the bottom zone starts in absolute content coordinates
+	bottomOffset := headerLines + topWidgetLines + mainLines
+	c.petLayout.ContentStartLine = bottomOffset
+
+	// Offset bottom widget regions by header + top widgets + main content
+	for i := range bottomWRegions {
+		bottomWRegions[i].StartLine += bottomOffset
+		bottomWRegions[i].EndLine += bottomOffset
+	}
+
+	// Combine everything: header + top_widgets + main + bottom_widgets
+	fullContent := headerContent + topWidgets + mainContent + bottomWidgets
+	allRegions := append(headerRegions, topWRegions...)
+	allRegions = append(allRegions, mainRegions...)
+	allRegions = append(allRegions, bottomWRegions...)
 
 	// Count total lines
 	totalLines := strings.Count(fullContent, "\n")
 
 	// Debug logging
 	coordinatorDebugLog.Printf("RenderForClient: client=%s width=%d height=%d", clientID, width, height)
-	coordinatorDebugLog.Printf("  Content: %d lines, %d bytes", totalLines, len(fullContent))
+	coordinatorDebugLog.Printf("  Content: %d lines (%d header + %d topW + %d main + %d bottomW)",
+		totalLines, headerLines, topWidgetLines, mainLines, strings.Count(bottomWidgets, "\n"))
 	coordinatorDebugLog.Printf("  Regions: %d total", len(allRegions))
 
 	return &daemon.RenderPayload{
@@ -1064,6 +1709,221 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	}
 }
 
+// RenderHeaderForClient renders a 1-line pane header for a specific content pane.
+// Each content pane has its own header showing that pane's label and action buttons.
+// clientID format: "header:%123" where %123 is the pane ID the header sits above.
+func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) *daemon.RenderPayload {
+	if width < 5 {
+		width = 5
+	}
+
+	// Parse pane ID from clientID
+	paneID := strings.TrimPrefix(clientID, "header:")
+	if paneID == "" {
+		return nil
+	}
+
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+
+	// Find the window this header belongs to
+	var foundWindow *tmux.Window
+	for i := range c.windows {
+		for j := range c.windows[i].Panes {
+			if c.windows[i].Panes[j].ID == paneID {
+				foundWindow = &c.windows[i]
+				break
+			}
+		}
+		if foundWindow != nil {
+			break
+		}
+	}
+
+	if foundWindow == nil {
+		blankLine := strings.Repeat(" ", width)
+		return &daemon.RenderPayload{
+			Content:    blankLine,
+			Width:      width,
+			Height:     1,
+			TotalLines: 1,
+		}
+	}
+
+	// Find the group for this window's theme color
+	var bgColor string
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.ID == foundWindow.ID {
+				bgColor = group.Theme.Bg
+				if win.CustomColor != "" {
+					bgColor = win.CustomColor
+				}
+				break
+			}
+		}
+		if bgColor != "" {
+			break
+		}
+	}
+	if bgColor == "" {
+		bgColor = c.config.PaneHeader.ActiveBg
+		if bgColor == "" {
+			bgColor = "#3498db"
+		}
+	}
+
+	// Window-level active state determines header bg
+	isWindowActive := foundWindow.Active
+	var headerBg, headerFg string
+	if isWindowActive {
+		headerBg = bgColor
+		headerFg = c.config.PaneHeader.ActiveFg
+		if headerFg == "" {
+			headerFg = "#ffffff"
+		}
+	} else {
+		headerBg = grouping.LightenColor(bgColor, 0.15)
+		headerFg = c.config.PaneHeader.InactiveFg
+		if headerFg == "" {
+			headerFg = "#cccccc"
+		}
+	}
+
+	dimFg := c.config.PaneHeader.CommandFg
+	buttonFg := c.config.PaneHeader.ButtonFg
+	baseStyle := lipgloss.NewStyle().Background(lipgloss.Color(headerBg))
+	btnStyle := baseStyle.Copy()
+	if buttonFg != "" {
+		btnStyle = btnStyle.Foreground(lipgloss.Color(buttonFg))
+	}
+
+	// Right side buttons - use distinctive Unicode chars for visibility
+	splitVBtn := "│"  // BOX DRAWINGS LIGHT VERTICAL - split vertical
+	splitHBtn := "─"  // BOX DRAWINGS LIGHT HORIZONTAL - split horizontal
+	closeBtn := "×"   // MULTIPLICATION SIGN - close
+	buttonsStr := " " + splitVBtn + " " + splitHBtn + " " + closeBtn + " "
+	buttonsWidth := runewidth.StringWidth(buttonsStr)
+
+	// Find the specific pane this header belongs to
+	var foundPane *tmux.Pane
+	for i := range foundWindow.Panes {
+		if foundWindow.Panes[i].ID == paneID {
+			foundPane = &foundWindow.Panes[i]
+			break
+		}
+	}
+	if foundPane == nil {
+		blankLine := strings.Repeat(" ", width)
+		return &daemon.RenderPayload{
+			Content:    blankLine,
+			Width:      width,
+			Height:     1,
+			TotalLines: 1,
+		}
+	}
+
+	// Build label for this pane: "win.pane command"
+	// Use visual position (matching sidebar order) instead of tmux index
+	label := foundPane.Command
+	if foundPane.LockedTitle != "" {
+		label = foundPane.LockedTitle
+	} else if foundPane.Title != "" && foundPane.Title != foundPane.Command && foundPane.Title != foundWindow.Name {
+		label = foundPane.Title
+	}
+	winVisualNum := c.windowVisualPos[foundWindow.ID]
+	labelText := fmt.Sprintf("%d.%d %s", winVisualNum, foundPane.Index, label)
+
+	// Available width for the label
+	availWidth := width - 1 - buttonsWidth // 1 for leading space
+	if availWidth < 4 {
+		availWidth = 4
+	}
+
+	// Truncate label if needed
+	if runewidth.StringWidth(labelText) > availWidth {
+		labelText = runewidth.Truncate(labelText, availWidth, "~")
+	}
+	textWidth := runewidth.StringWidth(labelText)
+
+	// Style: active pane bold+bright, others dimmed
+	isActive := foundPane.Active && isWindowActive
+	segStyle := baseStyle.Copy()
+	if isActive {
+		if headerFg != "" {
+			segStyle = segStyle.Foreground(lipgloss.Color(headerFg))
+		}
+		segStyle = segStyle.Bold(true)
+	} else if dimFg != "" {
+		segStyle = segStyle.Foreground(lipgloss.Color(dimFg))
+	}
+
+	// Build rendered line and click regions
+	var regions []daemon.ClickableRegion
+	currentCol := 1 // after leading space
+
+	renderedLabel := segStyle.Render(labelText)
+
+	// Button area starts here
+	btnAreaStart := width - buttonsWidth
+
+	// Click region to select this pane (covers label + spacer, up to buttons)
+	regions = append(regions, daemon.ClickableRegion{
+		StartLine: 0, EndLine: 0,
+		StartCol: 0, EndCol: btnAreaStart,
+		Action: "header_select_pane", Target: paneID,
+	})
+	currentCol += textWidth
+
+	// Spacer to push buttons to the right
+	spacerWidth := width - currentCol - buttonsWidth
+	if spacerWidth < 0 {
+		spacerWidth = 0
+	}
+
+	leadStyle := baseStyle.Copy().Foreground(lipgloss.Color(headerFg))
+	line := leadStyle.Render(" ") +
+		renderedLabel +
+		baseStyle.Render(strings.Repeat(" ", spacerWidth)) +
+		btnStyle.Render(buttonsStr)
+
+	// Button click regions (target = this specific pane)
+	// Each region includes surrounding spaces for easier click targets.
+	// Layout: " │ ─ × " -> positions: [sp][│][sp][─][sp][×][sp]
+	splitVCol := btnAreaStart + 1 // after leading space
+	splitHCol := splitVCol + 2    // after "│ "
+	closeCol := splitHCol + 2     // after "─ "
+	regions = append(regions, daemon.ClickableRegion{
+		StartLine: 0, EndLine: 0,
+		StartCol: btnAreaStart, EndCol: splitHCol,
+		Action: "header_split_v", Target: paneID,
+	})
+	regions = append(regions, daemon.ClickableRegion{
+		StartLine: 0, EndLine: 0,
+		StartCol: splitHCol, EndCol: closeCol,
+		Action: "header_split_h", Target: paneID,
+	})
+	regions = append(regions, daemon.ClickableRegion{
+		StartLine: 0, EndLine: 0,
+		StartCol: closeCol, EndCol: width,
+		Action: "header_close", Target: paneID,
+	})
+
+	// Full header area for right-click context menu (targets this pane)
+	regions = append(regions, daemon.ClickableRegion{
+		StartLine: 0, EndLine: 0,
+		Action: "header_context", Target: paneID,
+	})
+
+	return &daemon.RenderPayload{
+		Content:    line,
+		Width:      width,
+		Height:     1,
+		TotalLines: 1,
+		Regions:    regions,
+	}
+}
+
 // hashContent returns a simple hash of content for comparison
 func hashContent(s string) uint32 {
 	var h uint32
@@ -1075,6 +1935,13 @@ func hashContent(s string) uint32 {
 
 // isTouchMode checks if touch mode is enabled
 func (c *Coordinator) isTouchMode(width int) bool {
+	// Runtime override via @tabby_touch_mode tmux option
+	if c.touchModeOverride == "1" {
+		return true
+	}
+	if c.touchModeOverride == "0" {
+		return false
+	}
 	if c.config.Sidebar.TouchMode {
 		return true
 	}
@@ -1084,16 +1951,10 @@ func (c *Coordinator) isTouchMode(width int) bool {
 	return false
 }
 
-// touchDivider returns a divider for touch mode
+// touchDivider returns a divider for touch mode.
+// Disabled: headers are minimal 1-char height with no top/bottom borders.
 func (c *Coordinator) touchDivider(width int, bgColor string) string {
-	if !c.isTouchMode(width) {
-		return ""
-	}
-	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#333333"))
-	if bgColor != "" {
-		dividerStyle = dividerStyle.Background(lipgloss.Color(bgColor))
-	}
-	return dividerStyle.Render(strings.Repeat("─", width)) + "\n"
+	return ""
 }
 
 // lineSpacing returns extra line spacing for touch mode
@@ -1102,6 +1963,78 @@ func (c *Coordinator) lineSpacing() string {
 		return strings.Repeat("\n", c.config.Sidebar.LineHeight)
 	}
 	return ""
+}
+
+// touchPadLine renders a blank padding line with background color for touch mode.
+// Returns empty string when touch mode is off.
+func (c *Coordinator) touchPadLine(width int, bgColor string) string {
+	if !c.isTouchMode(width) {
+		return ""
+	}
+	if bgColor == "" {
+		return "\n"
+	}
+	padStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color(bgColor)).
+		Width(width)
+	return padStyle.Render("") + "\n"
+}
+
+// touchButtonOpts configures renderTouchButton appearance.
+type touchButtonOpts struct {
+	FgColor   string // text color (default: #ffffff)
+	BoldText  bool   // bold content text
+	BorderFg  string // border color override (default: same as FgColor)
+}
+
+// renderTouchButton renders a 3-line bordered button for touch mode.
+// Returns a multi-line string (3 lines, no trailing newline):
+//
+//	╭──────────────────╮
+//	│ + New Tab        │
+//	╰──────────────────╯
+func (c *Coordinator) renderTouchButton(width int, label string, bgColor string, opts ...touchButtonOpts) string {
+	fgColor := "#ffffff"
+	bold := false
+	borderFg := ""
+	if len(opts) > 0 {
+		if opts[0].FgColor != "" {
+			fgColor = opts[0].FgColor
+		}
+		bold = opts[0].BoldText
+		borderFg = opts[0].BorderFg
+	}
+	if borderFg == "" {
+		borderFg = fgColor
+	}
+	borderType := lipgloss.RoundedBorder()
+	if !c.config.Style.Rounded {
+		borderType = lipgloss.NormalBorder()
+	}
+	boxStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(fgColor)).
+		Background(lipgloss.Color(bgColor)).
+		Bold(bold).
+		Width(width - 2).
+		Border(borderType).
+		BorderForeground(lipgloss.Color(borderFg)).
+		BorderBackground(lipgloss.Color(bgColor))
+	return boxStyle.Render(label)
+}
+
+// syncAllSidebarWidths resizes all sidebar panes to match the given width.
+// This keeps sidebars synced across windows when one is resized.
+func syncAllSidebarWidths(newWidth int) {
+	out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id} #{pane_current_command}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) >= 2 && strings.Contains(parts[1], "sidebar-renderer") {
+			exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", newWidth)).Run()
+		}
+	}
 }
 
 // getBusyFrames returns the busy indicator animation frames
@@ -1120,6 +2053,70 @@ func (c *Coordinator) getIndicatorIcon(ind config.Indicator) string {
 	return "●"
 }
 
+// generateSidebarHeader renders the pinned header bar at the top of the sidebar.
+// Returns the header content string (with trailing newline) and click regions.
+// Layout:  SessionName
+//          ─────────────────────────────
+// Left-click collapses sidebar. Right-click opens settings context menu.
+func (c *Coordinator) generateSidebarHeader(width int) (string, []daemon.ClickableRegion) {
+	var s strings.Builder
+	var regions []daemon.ClickableRegion
+
+	// --- Header line ---
+	// Simple: session name (left-click collapse, right-click settings menu)
+	sessionName := "TABBY!!"
+	maxNameWidth := width - 2 // 1 char padding each side
+	if maxNameWidth < 3 {
+		maxNameWidth = 3
+	}
+	nameWidth := runewidth.StringWidth(sessionName)
+	if nameWidth > maxNameWidth {
+		truncated := ""
+		w := 0
+		for _, r := range sessionName {
+			rw := runewidth.RuneWidth(r)
+			if w+rw > maxNameWidth-1 {
+				break
+			}
+			truncated += string(r)
+			w += rw
+		}
+		sessionName = truncated + "~"
+		nameWidth = runewidth.StringWidth(sessionName)
+	}
+
+	// Build the header line: centered session name
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ffffff")).
+		Bold(true)
+
+	spacerWidth := width - 1 - nameWidth
+	if spacerWidth < 0 {
+		spacerWidth = 0
+	}
+
+	headerLine := " " + headerStyle.Render(sessionName) + strings.Repeat(" ", spacerWidth)
+	s.WriteString(headerLine + "\n")
+
+	// --- Divider line ---
+	dividerStyle := lipgloss.NewStyle() // Use terminal default
+	s.WriteString(dividerStyle.Render(strings.Repeat("─", width)) + "\n")
+
+	// Header is 2 lines (line 0 = header, line 1 = divider)
+	// Left-click: collapse sidebar
+	regions = append(regions, daemon.ClickableRegion{
+		StartLine: 0, EndLine: 0,
+		Action: "collapse_sidebar", Target: "",
+	})
+	// Right-click: settings context menu
+	regions = append(regions, daemon.ClickableRegion{
+		StartLine: 0, EndLine: 1,
+		Action: "sidebar_header_area", Target: "",
+	})
+
+	return s.String(), regions
+}
+
 // generateMainContent creates the main scrollable area with window list
 // clientID is the window ID that this content is being rendered for
 func (c *Coordinator) generateMainContent(clientID string, width, height int) (string, []daemon.ClickableRegion) {
@@ -1127,14 +2124,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	var regions []daemon.ClickableRegion
 
 	currentLine := 0
-
-	// Clock widget at top if configured
-	if c.config.Widgets.Clock.Enabled && c.config.Widgets.Clock.Position == "top" {
-		clockContent := c.renderClockWidget(width)
-		clockContent = constrainWidgetWidth(clockContent, width)
-		s.WriteString(clockContent)
-		currentLine += strings.Count(clockContent, "\n")
-	}
 
 	// Configurable tree characters
 	treeBranchChar := c.config.Sidebar.Colors.TreeBranch
@@ -1165,17 +2154,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	}
 
 	// Tree color
-	treeFg := c.config.Sidebar.Colors.TreeFg
-	if treeFg == "" {
-		treeFg = "#888888"
+	treeStyle := lipgloss.NewStyle()
+	if c.config.Sidebar.Colors.TreeFg != "" {
+		treeStyle = treeStyle.Foreground(lipgloss.Color(c.config.Sidebar.Colors.TreeFg))
 	}
-	treeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(treeFg))
 
-	// Disclosure color
+	// Disclosure color (use config or terminal default)
 	disclosureColor := c.config.Sidebar.Colors.DisclosureFg
-	if disclosureColor == "" {
-		disclosureColor = "#000000"
-	}
 
 	// Active indicator config
 	activeIndicator := c.config.Sidebar.Colors.ActiveIndicator
@@ -1184,9 +2169,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	}
 	activeIndFgConfig := c.config.Sidebar.Colors.ActiveIndicatorFg
 	activeIndBgConfig := c.config.Sidebar.Colors.ActiveIndicatorBg
-
-	// Visual position counter (for display numbering)
-	visualPos := 0
 
 	// Iterate over grouped windows
 	numGroups := len(c.grouped)
@@ -1206,9 +2188,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		if isCollapsed {
 			collapseIcon = collapsedIcon
 		}
-		collapseStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(disclosureColor)).
-			Background(lipgloss.Color(theme.Bg))
+		collapseStyle := lipgloss.NewStyle()
+		if disclosureColor != "" {
+			collapseStyle = collapseStyle.Foreground(lipgloss.Color(disclosureColor))
+		}
+		if theme.Bg != "" {
+			collapseStyle = collapseStyle.Background(lipgloss.Color(theme.Bg))
+		}
 
 		// Build header
 		icon := theme.Icon
@@ -1223,6 +2209,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		// Track group header line
 		groupStartLine := currentLine
 		hasWindows := len(group.Windows) > 0
+
+		// Touch mode: top padding for group header (3 lines: pad + content + pad)
+		if c.isTouchMode(width) {
+			s.WriteString(c.touchPadLine(width, theme.Bg))
+			currentLine++
+		}
 
 		// Only show collapse icon if group has windows
 		if hasWindows {
@@ -1286,9 +2278,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			if isTransparent {
 				bgColor = ""
 				if isActive {
-					fgColor = "#ffffff"
+					fgColor = theme.ActiveFg
+					if fgColor == "" {
+						fgColor = theme.Fg
+					}
 				} else {
-					fgColor = "#888888"
+					fgColor = theme.Fg
 				}
 			} else if win.CustomColor != "" {
 				if isActive {
@@ -1310,12 +2305,11 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				bgColor = theme.Bg
 				fgColor = theme.Fg
 			}
-			if fgColor == "" {
-				fgColor = "#ffffff"
-			}
-
 			// Build style
-			style := lipgloss.NewStyle().Foreground(lipgloss.Color(fgColor))
+			style := lipgloss.NewStyle()
+			if fgColor != "" {
+				style = style.Foreground(lipgloss.Color(fgColor))
+			}
 			if bgColor != "" {
 				style = style.Background(lipgloss.Color(bgColor))
 			}
@@ -1399,9 +2393,11 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 			}
 
-			// Build tab content
+			// Build tab content - use visual position for display (stable sequential
+			// numbering that matches sidebar order regardless of tmux renumbering)
 			displayName := win.Name
-			baseContent := fmt.Sprintf("%d. %s", visualPos, displayName)
+			visualNum := c.windowVisualPos[win.ID]
+			baseContent := fmt.Sprintf("%d. %s", visualNum, displayName)
 
 			// Add pane count if collapsed
 			if hasPanes && isWindowCollapsed {
@@ -1429,15 +2425,54 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			}
 
 			// Styles for window collapse icon
-			windowCollapseStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(disclosureColor))
+			windowCollapseStyle := lipgloss.NewStyle()
+			if disclosureColor != "" {
+				windowCollapseStyle = windowCollapseStyle.Foreground(lipgloss.Color(disclosureColor))
+			}
 			if bgColor != "" {
 				windowCollapseStyle = windowCollapseStyle.Background(lipgloss.Color(bgColor))
 			}
 			contentStyle := style.Width(windowContentWidth)
 
-			// Render tab line
-			if hasPanes {
+			// Render tab line - touch mode uses bordered box, normal mode uses inline
+			if c.isTouchMode(width) {
+				// Build the tab label with indicators
+				tabLabel := " " + contentText
+				if hasPanes {
+					tabLabel = " " + windowCollapseIcon + " " + contentText
+				}
+				// Prepend status icon (busy/bell/activity) if present
+				if alertIcon != "" {
+					tabLabel = alertIcon + tabLabel
+				}
+				tabBg := bgColor
+				if tabBg == "" {
+					tabBg = theme.Bg
+				}
+				// Active tab: bold, text-colored border (clean)
+				// Inactive tab: accent-colored border (visual pop)
+				tb := c.config.Sidebar.TouchButtons
+				tabOpts := touchButtonOpts{FgColor: fgColor}
+				if isActive {
+					tabOpts.BoldText = true
+					// Active border: use config override or text color (clean look)
+					if tb.ActiveBorder != "" {
+						tabOpts.BorderFg = tb.ActiveBorder
+					}
+					// BorderFg defaults to FgColor in renderTouchButton when empty
+				} else {
+					// Inactive border: use config override or theme accent color
+					if tb.InactiveBorder != "" {
+						tabOpts.BorderFg = tb.InactiveBorder
+					} else if theme.ActiveIndicatorBg != "" {
+						tabOpts.BorderFg = theme.ActiveIndicatorBg
+					}
+				}
+				s.WriteString(c.renderTouchButton(width, tabLabel, tabBg, tabOpts) + "\n")
+				currentLine += 3
+			} else if hasPanes {
 				s.WriteString(indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(contentText) + "\n")
+				currentLine++
 			} else if isActive {
 				// Active indicator replaces part of tree branch
 				treeBranchRunes := []rune(treeBranch)
@@ -1461,23 +2496,42 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 				activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Background(lipgloss.Color(indicatorBg)).Bold(true)
 				s.WriteString(indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator) + contentStyle.Render(contentText) + "\n")
+				currentLine++
 			} else {
 				s.WriteString(indicatorPart + treeStyle.Render(treeBranch) + contentStyle.Render(contentText) + "\n")
+				currentLine++
 			}
-			currentLine++
 
-			// Record window region for click handling
-			// For windows with panes, use special action that can toggle collapse
-			windowAction := "select_window"
+			// Record window region(s) for click handling
+			// For windows with panes, split into two click regions:
+			// 1. Left area (indicator + tree branch + collapse icon) -> toggle_panes
+			// 2. Right area (window name) -> select_window
 			if hasPanes {
-				windowAction = "toggle_or_select_window"
+				collapseColEnd := 5 // covers indicator(1) + tree(2) + icon(1) + space(1)
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: windowStartLine,
+					EndLine:   currentLine - 1,
+					StartCol:  0,
+					EndCol:    collapseColEnd,
+					Action:    "toggle_panes",
+					Target:    strconv.Itoa(win.Index),
+				})
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: windowStartLine,
+					EndLine:   currentLine - 1,
+					StartCol:  collapseColEnd,
+					EndCol:    0, // full width from here
+					Action:    "select_window",
+					Target:    strconv.Itoa(win.Index),
+				})
+			} else {
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: windowStartLine,
+					EndLine:   currentLine - 1,
+					Action:    "select_window",
+					Target:    strconv.Itoa(win.Index),
+				})
 			}
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: windowStartLine,
-				EndLine:   currentLine - 1,
-				Action:    windowAction,
-				Target:    strconv.Itoa(win.Index),
-			})
 
 			// Show panes if window has multiple panes and is not collapsed
 			if len(win.Panes) > 1 && !isWindowCollapsed {
@@ -1536,7 +2590,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						}
 					}
 
-					paneNum := fmt.Sprintf("%d.%d", visualPos, pane.Index)
+					paneNum := fmt.Sprintf("%d.%d", visualNum, pane.Index)
 					paneLabel := pane.Command
 					if pane.LockedTitle != "" {
 						paneLabel = pane.LockedTitle
@@ -1565,6 +2619,46 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						paneActiveIndicator = "█"
 					}
 
+					// Per-pane alert indicator (busy/input for multi-pane windows)
+					paneAlertIcon := ""
+					pInd := c.config.Indicators
+					if pane.AIBusy && pInd.Busy.Enabled {
+						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
+						if pInd.Busy.Bg != "" {
+							alertStyle = alertStyle.Background(lipgloss.Color(pInd.Busy.Bg))
+						}
+						busyFrames := c.getBusyFrames()
+						paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
+					} else if pane.AIInput && pInd.Input.Enabled {
+						inputIcon := pInd.Input.Icon
+						if inputIcon == "" {
+							inputIcon = "?"
+						}
+						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Input.Color))
+						if pInd.Input.Bg != "" {
+							alertStyle = alertStyle.Background(lipgloss.Color(pInd.Input.Bg))
+						}
+						if len(pInd.Input.Frames) > 0 {
+							paneAlertIcon = alertStyle.Render(pInd.Input.Frames[c.spinnerFrame%len(pInd.Input.Frames)])
+						} else {
+							paneAlertIcon = alertStyle.Render(inputIcon)
+						}
+					} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) {
+						// Non-AI pane with foreground process
+						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
+						if pInd.Busy.Bg != "" {
+							alertStyle = alertStyle.Background(lipgloss.Color(pInd.Busy.Bg))
+						}
+						busyFrames := c.getBusyFrames()
+						paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
+					}
+
+					// Leading character: alert icon or space
+					paneLeadChar := " "
+					if paneAlertIcon != "" {
+						paneLeadChar = paneAlertIcon
+					}
+
 					if pane.Active && isActive {
 						var paneIndicatorBg, paneIndicatorFg string
 						if activeIndBgConfig == "" || activeIndBgConfig == "auto" {
@@ -1583,11 +2677,33 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						}
 						paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Background(lipgloss.Color(paneIndicatorBg)).Bold(true)
 						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-						s.WriteString(" " + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText) + "\n")
+						s.WriteString(paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText) + "\n")
 					} else {
-						s.WriteString(" " + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText) + "\n")
+						s.WriteString(paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText) + "\n")
 					}
 					currentLine++
+
+					// Touch mode: bottom padding for pane (2 lines total: content + pad)
+					if c.isTouchMode(width) {
+						currentPaneBg := paneBg
+						if pane.Active && isActive {
+							currentPaneBg = activePaneBg
+						}
+						// Pane tree continuation: │ if not last pane, space if last
+						var panePadBranch string
+						if isLastPane {
+							panePadBranch = " "
+						} else {
+							panePadBranch = treeStyle.Render(treeContinueChar)
+						}
+						// paneIndentWidth = 6: " " + treeContinue + " " + branch + connector + connector
+						panePadFillWidth := width - 6
+						panePadFillStyle := lipgloss.NewStyle().
+							Background(lipgloss.Color(currentPaneBg)).
+							Width(panePadFillWidth)
+						s.WriteString(" " + treeContinue + " " + panePadBranch + "  " + panePadFillStyle.Render("") + "\n")
+						currentLine++
+					}
 
 					// Record pane region for click handling
 					regions = append(regions, daemon.ClickableRegion{
@@ -1599,162 +2715,202 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 			}
 
-			visualPos++
 		}
 
-		// Padding after group (before next group)
-		if !isLastGroup && hasWindows && !isCollapsed {
+		// Padding after group (before next group) - always add blank line
+		if !isLastGroup {
 			s.WriteString("\n")
 			currentLine++
 		}
 	}
 
-	// Buttons - full width with backgrounds, connected (no spacing)
-	if c.config.Sidebar.NewTabButton || c.config.Sidebar.NewGroupButton || c.config.Sidebar.CloseButton {
-		s.WriteString("\n")
-		currentLine++
-	}
-
-	if c.config.Sidebar.NewTabButton {
-		buttonStartLine := currentLine
-		buttonStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#ffffff")).
-			Background(lipgloss.Color("#27ae60")).
-			Bold(true).
-			Width(width)
-		label := " + New Tab"
-		s.WriteString(buttonStyle.Render(label) + "\n")
-		currentLine++
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: buttonStartLine,
-			EndLine:   currentLine - 1,
-			Action:    "button",
-			Target:    "new_tab",
-		})
-	}
-
-	if c.config.Sidebar.NewGroupButton {
-		buttonStartLine := currentLine
-		buttonStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#ffffff")).
-			Background(lipgloss.Color("#9b59b6")).
-			Bold(true).
-			Width(width)
-		label := " + New Group"
-		s.WriteString(buttonStyle.Render(label) + "\n")
-		currentLine++
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: buttonStartLine,
-			EndLine:   currentLine - 1,
-			Action:    "button",
-			Target:    "new_group",
-		})
-	}
-
-	if c.config.Sidebar.CloseButton {
-		buttonStartLine := currentLine
-		buttonStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#ffffff")).
-			Background(lipgloss.Color("#e74c3c")).
-			Bold(true).
-			Width(width)
-		label := " x Close Tab"
-		s.WriteString(buttonStyle.Render(label) + "\n")
-		currentLine++
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: buttonStartLine,
-			EndLine:   currentLine - 1,
-			Action:    "button",
-			Target:    "close_tab",
-		})
-	}
-
-	// Non-pinned clock widget at bottom position
-	if c.config.Widgets.Clock.Enabled && c.config.Widgets.Clock.Position != "top" && !c.config.Widgets.Clock.Pin {
-		clockContent := c.renderClockWidget(width)
-		clockContent = constrainWidgetWidth(clockContent, width)
-		s.WriteString(clockContent)
-	}
-
 	return s.String(), regions
 }
 
-// generatePinnedContent creates the pinned widgets at bottom
-func (c *Coordinator) generatePinnedContent(width int) (string, []daemon.ClickableRegion) {
-	var s strings.Builder
+// widgetEntry represents a single widget for the zone layout system.
+// Widgets are sorted by zone (top/bottom) then priority within each zone.
+type widgetEntry struct {
+	name     string
+	zone     string // "top" or "bottom"
+	priority int
+	content  string // pre-rendered content (may contain zone.Mark markers)
+}
 
-	// Pinned pet widget at bottom (with zone.Mark wrappers for clicks)
-	if c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.Pin {
-		content := c.renderPetWidget(width)
-		// Do not constrain width here, as it messes up ANSI zone markers
-		s.WriteString(content)
+// collectWidgetEntries gathers all enabled widgets and action buttons into
+// a sorted slice of widgetEntry, ready for zone-based rendering.
+func (c *Coordinator) collectWidgetEntries(width int) []widgetEntry {
+	var entries []widgetEntry
+
+	// Clock widget
+	if c.config.Widgets.Clock.Enabled {
+		pos := c.config.Widgets.Clock.Position
+		if pos == "" {
+			pos = "top"
+		}
+		entries = append(entries, widgetEntry{
+			name:     "clock",
+			zone:     pos,
+			priority: c.config.Widgets.Clock.Priority,
+			content:  constrainWidgetWidth(c.renderClockWidget(width), width),
+		})
 	}
 
-	// Scan content for zone markers and extract click regions automatically
-	if c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.Pin {
-		// Build full content and scan for zones
-		fullContent := s.String()
-		scannedContent := zone.Scan(fullContent)
+	// Pet widget
+	if c.config.Widgets.Pet.Enabled {
+		pos := c.config.Widgets.Pet.Position
+		if pos == "" {
+			pos = "bottom"
+		}
+		entries = append(entries, widgetEntry{
+			name:     "pet",
+			zone:     pos,
+			priority: c.config.Widgets.Pet.Priority,
+			// Do not constrain pet content here - it has zone markers that would be corrupted
+			content: c.renderPetWidget(width),
+		})
+	}
 
-		// Extract zone bounds for pet touch buttons
-		petZones := []string{"pet:drop_food", "pet:drop_yarn", "pet:clean_poop", "pet:pet_pet", "pet:ground"}
-		var zoneRegions []daemon.ClickableRegion
+	// Git widget
+	if c.config.Widgets.Git.Enabled {
+		pos := c.config.Widgets.Git.Position
+		if pos == "" {
+			pos = "bottom"
+		}
+		entries = append(entries, widgetEntry{
+			name:     "git",
+			zone:     pos,
+			priority: c.config.Widgets.Git.Priority,
+			content:  constrainWidgetWidth(c.renderGitWidget(width), width),
+		})
+	}
 
-		for _, zoneID := range petZones {
-			if info := zone.Get(zoneID); info != nil && !info.IsZero() {
-				// Parse action from zone ID (format: "category:action")
-				parts := strings.SplitN(zoneID, ":", 2)
-				if len(parts) == 2 {
-					// Note: BubbleZone EndX is inclusive, but ClickableRegion EndCol is exclusive
-					// So we add 1 to convert from inclusive to exclusive
-					zoneRegions = append(zoneRegions, daemon.ClickableRegion{
-						StartLine: info.StartY,
-						EndLine:   info.EndY,
-						StartCol:  info.StartX,
-						EndCol:    info.EndX + 1, // Convert from inclusive to exclusive
-						Action:    parts[1],      // e.g., "drop_food"
-						Target:    parts[0],      // e.g., "pet"
-					})
-					coordinatorDebugLog.Printf("BubbleZone extracted: %s -> lines %d-%d, cols %d-%d (exclusive)",
-						zoneID, info.StartY, info.EndY, info.StartX, info.EndX+1)
-				}
+	// Session widget
+	if c.config.Widgets.Session.Enabled {
+		pos := c.config.Widgets.Session.Position
+		if pos == "" {
+			pos = "bottom"
+		}
+		entries = append(entries, widgetEntry{
+			name:     "session",
+			zone:     pos,
+			priority: c.config.Widgets.Session.Priority,
+			content:  constrainWidgetWidth(c.renderSessionWidget(width), width),
+		})
+	}
+
+	// Action buttons (new tab, new group, close, touch mode toggle)
+	actionZone := c.config.Sidebar.ActionZone
+	if actionZone == "" {
+		actionZone = "bottom"
+	}
+	actionPriority := c.config.Sidebar.ActionPriority
+	if actionPriority == 0 {
+		actionPriority = 90
+	}
+	entries = append(entries, widgetEntry{
+		name:     "action_buttons",
+		zone:     actionZone,
+		priority: actionPriority,
+		content:  c.renderPinnedActionButtons(width),
+	})
+
+	// Sort by priority within each zone (stable sort preserves insertion order for equal priority)
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].priority < entries[j].priority
+	})
+
+	return entries
+}
+
+// renderWidgetZone renders a list of widget entries into a single content string
+// and extracts BubbleZone-based click regions. Positions are relative to the
+// returned content (caller must offset them).
+func (c *Coordinator) renderWidgetZone(entries []widgetEntry, width int) (string, []daemon.ClickableRegion) {
+	if len(entries) == 0 {
+		return "", nil
+	}
+
+	var s strings.Builder
+	for _, entry := range entries {
+		s.WriteString(entry.content)
+	}
+
+	rawContent := s.String()
+	if rawContent == "" {
+		return "", nil
+	}
+
+	// Scan for zone markers (BubbleZone)
+	scannedContent := zone.Scan(rawContent)
+
+	// Extract zone bounds for all known clickable areas
+	knownZones := []string{
+		// Pet zones
+		"pet:drop_food", "pet:drop_yarn", "pet:clean_poop", "pet:pet_pet", "pet:ground",
+		// Button zones
+		"sidebar:new_tab", "sidebar:new_group", "sidebar:close_tab",
+		"sidebar:toggle_touch_mode",
+		// Sidebar zones
+		"sidebar:shrink", "sidebar:grow",
+	}
+	var regions []daemon.ClickableRegion
+	for _, zoneID := range knownZones {
+		if info := zone.Get(zoneID); info != nil && !info.IsZero() {
+			parts := strings.SplitN(zoneID, ":", 2)
+			if len(parts) == 2 {
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: info.StartY,
+					EndLine:   info.EndY,
+					StartCol:  info.StartX,
+					EndCol:    info.EndX + 1, // Convert from inclusive to exclusive
+					Action:    parts[1],
+					Target:    parts[0],
+				})
+				coordinatorDebugLog.Printf("BubbleZone extracted: %s -> lines %d-%d, cols %d-%d (exclusive)",
+					zoneID, info.StartY, info.EndY, info.StartX, info.EndX+1)
 			}
 		}
-
-		coordinatorDebugLog.Printf("BubbleZone: extracted %d widget regions automatically", len(zoneRegions))
-
-		// Apply safety constraint to the clean content (after markers are stripped)
-		scannedContent = constrainWidgetWidth(scannedContent, width)
-
-		// Use the scanned content (with zone markers stripped) for display
-		s.Reset()
-		s.WriteString(scannedContent)
-
-		return s.String(), zoneRegions
 	}
 
-	// Pinned clock widget at bottom
-	if c.config.Widgets.Clock.Enabled && c.config.Widgets.Clock.Position != "top" && c.config.Widgets.Clock.Pin {
-		content := c.renderClockWidget(width)
-		content = constrainWidgetWidth(content, width)
-		s.WriteString(content)
+	coordinatorDebugLog.Printf("BubbleZone: extracted %d widget regions from zone", len(regions))
+
+	// Apply safety constraint to the clean content (after markers are stripped)
+	scannedContent = constrainWidgetWidth(scannedContent, width)
+
+	return scannedContent, regions
+}
+
+// generateWidgetZones renders all widgets into top and bottom zones,
+// plus resize buttons that always appear at the very bottom.
+// Returns: topContent, topRegions, bottomContent, bottomRegions
+func (c *Coordinator) generateWidgetZones(width int) (string, []daemon.ClickableRegion, string, []daemon.ClickableRegion) {
+	entries := c.collectWidgetEntries(width)
+
+	// Split into top and bottom zones
+	var topEntries, bottomEntries []widgetEntry
+	for _, e := range entries {
+		if e.zone == "top" {
+			topEntries = append(topEntries, e)
+		} else {
+			bottomEntries = append(bottomEntries, e)
+		}
 	}
 
-	// Pinned git widget at bottom
-	if c.config.Widgets.Git.Enabled && c.config.Widgets.Git.Pin {
-		content := c.renderGitWidget(width)
-		content = constrainWidgetWidth(content, width)
-		s.WriteString(content)
-	}
+	// Render top zone
+	topContent, topRegions := c.renderWidgetZone(topEntries, width)
 
-	// Pinned session widget at bottom
-	if c.config.Widgets.Session.Enabled && c.config.Widgets.Session.Pin {
-		content := c.renderSessionWidget(width)
-		content = constrainWidgetWidth(content, width)
-		s.WriteString(content)
-	}
+	// Add resize buttons to bottom (always last)
+	bottomEntries = append(bottomEntries, widgetEntry{
+		name:     "resize_buttons",
+		zone:     "bottom",
+		priority: 9999,
+		content:  c.renderSidebarResizeButtons(width),
+	})
 
-	return s.String(), nil
+	// Render bottom zone
+	bottomContent, bottomRegions := c.renderWidgetZone(bottomEntries, width)
+
+	return topContent, topRegions, bottomContent, bottomRegions
 }
 
 // renderClockWidget renders the clock/date widget
@@ -1767,20 +2923,27 @@ func (c *Coordinator) renderClockWidget(width int) string {
 		timeFormat = "15:04:05"
 	}
 
-	fg := clock.Fg
-	if fg == "" {
-		fg = "#888888"
+	// Use clock's Fg, fall back to sidebar's InactiveFg for visibility
+	fgColor := clock.Fg
+	if fgColor == "" {
+		fgColor = c.config.Sidebar.Colors.InactiveFg
 	}
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color(fg))
+	style := lipgloss.NewStyle()
+	if fgColor != "" {
+		style = style.Foreground(lipgloss.Color(fgColor))
+	}
 	if clock.Bg != "" {
 		style = style.Background(lipgloss.Color(clock.Bg))
 	}
 
+	dividerStyle := lipgloss.NewStyle()
 	dividerFg := clock.DividerFg
 	if dividerFg == "" {
-		dividerFg = "#444444"
+		dividerFg = c.config.Sidebar.Colors.InactiveFg
 	}
-	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(dividerFg))
+	if dividerFg != "" {
+		dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
+	}
 
 	var result strings.Builder
 
@@ -1849,17 +3012,24 @@ func (c *Coordinator) renderGitWidget(width int) string {
 		return ""
 	}
 
-	dividerFg := git.DividerFg
-	if dividerFg == "" {
-		dividerFg = "#444444"
+	// Fall back to sidebar's InactiveFg for visibility
+	gitDividerFg := git.DividerFg
+	if gitDividerFg == "" {
+		gitDividerFg = c.config.Sidebar.Colors.InactiveFg
 	}
-	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(dividerFg))
+	dividerStyle := lipgloss.NewStyle()
+	if gitDividerFg != "" {
+		dividerStyle = dividerStyle.Foreground(lipgloss.Color(gitDividerFg))
+	}
 
-	fg := git.Fg
-	if fg == "" {
-		fg = "#888888"
+	gitFg := git.Fg
+	if gitFg == "" {
+		gitFg = c.config.Sidebar.Colors.InactiveFg
 	}
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color(fg))
+	style := lipgloss.NewStyle()
+	if gitFg != "" {
+		style = style.Foreground(lipgloss.Color(gitFg))
+	}
 
 	var result strings.Builder
 
@@ -1953,11 +3123,15 @@ func (c *Coordinator) renderSessionWidget(width int) string {
 	if divider == "" {
 		divider = "─"
 	}
-	dividerFg := sessionCfg.DividerFg
-	if dividerFg == "" {
-		dividerFg = "#444444"
+	// Fall back to sidebar's InactiveFg for visibility
+	sessDividerFg := sessionCfg.DividerFg
+	if sessDividerFg == "" {
+		sessDividerFg = c.config.Sidebar.Colors.InactiveFg
 	}
-	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(dividerFg))
+	dividerStyle := lipgloss.NewStyle()
+	if sessDividerFg != "" {
+		dividerStyle = dividerStyle.Foreground(lipgloss.Color(sessDividerFg))
+	}
 	dividerWidth := lipgloss.Width(divider)
 	if dividerWidth > 0 {
 		result.WriteString(dividerStyle.Render(strings.Repeat(divider, width/dividerWidth)) + "\n")
@@ -1969,11 +3143,18 @@ func (c *Coordinator) renderSessionWidget(width int) string {
 
 	var parts []string
 
-	sessionFg := sessionCfg.SessionFg
-	if sessionFg == "" {
-		sessionFg = "#aaaaaa"
+	// Determine foreground color with fallback chain
+	sessFg := sessionCfg.SessionFg
+	if sessFg == "" {
+		sessFg = sessionCfg.Fg
 	}
-	sessionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(sessionFg))
+	if sessFg == "" {
+		sessFg = c.config.Sidebar.Colors.InactiveFg
+	}
+	sessionStyle := lipgloss.NewStyle()
+	if sessFg != "" {
+		sessionStyle = sessionStyle.Foreground(lipgloss.Color(sessFg))
+	}
 
 	// Truncate session name if needed (reserve space for other stats)
 	sessionName := c.sessionName
@@ -1999,7 +3180,10 @@ func (c *Coordinator) renderSessionWidget(width int) string {
 	}
 
 	if sessionCfg.ShowClients && c.sessionClients > 0 {
-		clientStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+		clientStyle := lipgloss.NewStyle()
+		if sessFg != "" {
+			clientStyle = clientStyle.Foreground(lipgloss.Color(sessFg))
+		}
 		if icons.Clients != "" {
 			parts = append(parts, clientStyle.Render(fmt.Sprintf("%s%d", icons.Clients, c.sessionClients)))
 		} else {
@@ -2008,7 +3192,10 @@ func (c *Coordinator) renderSessionWidget(width int) string {
 	}
 
 	if sessionCfg.ShowWindowCount {
-		windowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+		windowStyle := lipgloss.NewStyle()
+		if sessFg != "" {
+			windowStyle = windowStyle.Foreground(lipgloss.Color(sessFg))
+		}
 		if icons.Windows != "" {
 			parts = append(parts, windowStyle.Render(fmt.Sprintf("%s%d", icons.Windows, c.windowCount)))
 		} else {
@@ -2072,6 +3259,75 @@ func stripAnsi(s string) string {
 	// Simple regex to strip ANSI escape sequences
 	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// clampSpriteX clamps a position so the sprite fits within the given width
+func clampSpriteX(x int, sprite string, maxWidth int) int {
+	spriteWidth := runewidth.StringWidth(sprite)
+	if spriteWidth < 1 {
+		spriteWidth = 1
+	}
+	maxX := maxWidth - spriteWidth
+	if maxX < 0 {
+		maxX = 0
+	}
+	if x < 0 {
+		return x // preserve negative (hidden) positions
+	}
+	if x > maxX {
+		return maxX
+	}
+	return x
+}
+
+// placeSprite adds a sprite to the map with proper position clamping
+// Returns the clamped X position
+func placeSprite(sprites map[int]string, x int, sprite string, maxWidth int) int {
+	clampedX := clampSpriteX(x, sprite, maxWidth)
+	if clampedX >= 0 && clampedX < maxWidth {
+		sprites[clampedX] = sprite
+	}
+	return clampedX
+}
+
+// buildSpriteRow builds a row with sprites placed at their positions
+// Fills remaining space with the filler character
+func buildSpriteRow(sprites map[int]string, filler string, totalWidth int) string {
+	var builder strings.Builder
+	fillerWidth := runewidth.StringWidth(filler)
+	if fillerWidth < 1 {
+		fillerWidth = 1
+	}
+
+	col := 0
+	for col < totalWidth {
+		if sprite, hasSprite := sprites[col]; hasSprite {
+			spriteWidth := runewidth.StringWidth(sprite)
+			if spriteWidth < 1 {
+				spriteWidth = 1
+			}
+			// Only place sprite if it fits within bounds
+			if col+spriteWidth <= totalWidth {
+				builder.WriteString(sprite)
+				col += spriteWidth
+			} else {
+				// Doesn't fit, use filler
+				builder.WriteString(filler)
+				col += fillerWidth
+			}
+		} else {
+			builder.WriteString(filler)
+			col += fillerWidth
+		}
+	}
+	return builder.String()
+}
+
+// buildAirRow builds an air row (for Y=1 or Y=2) with proper width accounting for wide emojis
+// sprites is a map of column position -> sprite string
+// safePlayWidth is the total width available for the row
+func buildAirRow(sprites map[int]string, safePlayWidth int) string {
+	return buildSpriteRow(sprites, " ", safePlayWidth)
 }
 
 // renderPetWidget renders the pet tamagotchi widget
@@ -2195,16 +3451,19 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		currentLine++
 	}
 
-	// Divider style
+	// Divider style - fall back to sidebar's InactiveFg for visibility
 	divider := petCfg.Divider
 	if divider == "" {
 		divider = "─"
 	}
 	dividerFg := petCfg.DividerFg
 	if dividerFg == "" {
-		dividerFg = "#444444"
+		dividerFg = c.config.Sidebar.Colors.InactiveFg
 	}
-	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(dividerFg))
+	dividerStyle := lipgloss.NewStyle()
+	if dividerFg != "" {
+		dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
+	}
 	renderDivider := func() string {
 		dividerWidth := runewidth.StringWidth(divider)
 		if dividerWidth > 0 {
@@ -2223,7 +3482,14 @@ func (c *Coordinator) renderPetWidget(width int) string {
 
 	// Food icon (clickable to drop food) - track line for click detection
 	c.petLayout.FeedLine = currentLine
-	foodStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f39c12"))
+	petFg := petCfg.Fg
+	if petFg == "" {
+		petFg = c.config.Sidebar.Colors.InactiveFg
+	}
+	foodStyle := lipgloss.NewStyle()
+	if petFg != "" {
+		foodStyle = foodStyle.Foreground(lipgloss.Color(petFg))
+	}
 	foodIcon := zone.Mark("pet:drop_food", foodStyle.Render(sprites.Food+" Feed"))
 	result.WriteString(foodIcon + "\n")
 	currentLine++
@@ -2247,7 +3513,10 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	if thought == "" {
 		thought = "chillin'."
 	}
-	thoughtStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+	thoughtStyle := lipgloss.NewStyle()
+	if petFg != "" {
+		thoughtStyle = thoughtStyle.Foreground(lipgloss.Color(petFg))
+	}
 	maxThoughtWidth := playWidth - 4
 	if maxThoughtWidth < 5 {
 		maxThoughtWidth = 5
@@ -2262,8 +3531,12 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		visWidth := 0
 		for i := startIdx; i < len(scrollRunes) && visWidth < maxThoughtWidth; i++ {
 			r := scrollRunes[i]
+			rw := runewidth.RuneWidth(r)
+			if visWidth+rw > maxThoughtWidth {
+				break // Don't add partial wide char
+			}
 			visible += string(r)
-			visWidth++
+			visWidth += rw
 		}
 		displayThought = visible
 	}
@@ -2275,147 +3548,138 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	result.WriteString(renderDivider())
 	currentLine++
 
-	// Get positions, clamped to width
-	safePlayWidth := playWidth - 3
+	// Get positions, clamped to width accounting for sprite widths
+	// Use width - 1 to match divider width for visual consistency
+	safePlayWidth := playWidth - 1
 	c.petLayout.PlayWidth = safePlayWidth
 
+	// Get raw positions
 	petX := c.pet.Pos.X
 	if petX < 0 {
 		petX = safePlayWidth / 2
 	}
-	if petX >= safePlayWidth {
-		petX = safePlayWidth - 1
-	}
 	petY := c.pet.Pos.Y
-	petRunes := []rune(petSprite)
 
 	yarnX := c.pet.YarnPos.X
-	if yarnX < 0 {
-		yarnX = safePlayWidth - 4
-	}
-	if yarnX >= safePlayWidth {
-		yarnX = safePlayWidth - 1
-	}
 	yarnY := c.pet.YarnPos.Y
-	yarnRunes := []rune(sprites.Yarn)
 
 	foodX := c.pet.FoodItem.X
-	if foodX >= safePlayWidth {
-		foodX = safePlayWidth - 1
-	}
 	foodY := c.pet.FoodItem.Y
-	foodRunes := []rune(sprites.Food)
 
-	// Line 1: High air (Y=2)
-	highAir := make([]rune, safePlayWidth)
-	for i := range highAir {
-		highAir[i] = ' '
-	}
+	// Clamp all positions to fit their sprites within bounds
+	petX = clampSpriteX(petX, petSprite, safePlayWidth)
+	yarnX = clampSpriteX(yarnX, sprites.Yarn, safePlayWidth)
+	foodX = clampSpriteX(foodX, sprites.Food, safePlayWidth)
+
+	// Line 1: High air (Y=2) - build with proper width accounting
+	coordinatorDebugLog.Printf("Pet render: petX=%d, petY=%d, yarnX=%d, yarnY=%d, foodX=%d, foodY=%d, safePlayWidth=%d, petSprite=%q",
+		petX, petY, yarnX, yarnY, foodX, foodY, safePlayWidth, petSprite)
+	highAirSprites := make(map[int]string)
 	for _, item := range c.pet.FloatingItems {
 		if item.Pos.Y == 2 && item.Pos.X >= 0 && item.Pos.X < safePlayWidth {
-			itemRunes := []rune(item.Emoji)
-			if len(itemRunes) > 0 {
-				highAir[item.Pos.X] = itemRunes[0]
-			}
+			highAirSprites[item.Pos.X] = item.Emoji
 		}
 	}
-	if petY >= 2 && petX < safePlayWidth && len(petRunes) > 0 {
-		highAir[petX] = petRunes[0]
+	if petY >= 2 && petX >= 0 && petX < safePlayWidth {
+		highAirSprites[petX] = petSprite
 	}
-	if yarnY >= 2 && yarnX >= 0 && yarnX < safePlayWidth && len(yarnRunes) > 0 {
-		highAir[yarnX] = yarnRunes[0]
+	if yarnY >= 2 && yarnX >= 0 && yarnX < safePlayWidth {
+		highAirSprites[yarnX] = sprites.Yarn
 	}
-	if foodY >= 2 && foodX >= 0 && foodX < safePlayWidth && len(foodRunes) > 0 {
-		highAir[foodX] = foodRunes[0]
+	if foodY >= 2 && foodX >= 0 && foodX < safePlayWidth {
+		highAirSprites[foodX] = sprites.Food
 	}
-	// Mark high air for yarn throwing (click empty space) - track line for click detection
+	highAirLine := buildAirRow(highAirSprites, safePlayWidth)
+	highAirWidth := runewidth.StringWidth(highAirLine)
+	coordinatorDebugLog.Printf("High air: sprites=%v, line=%q (len=%d, runewidth=%d)", highAirSprites, highAirLine, len(highAirLine), highAirWidth)
+	if highAirWidth != safePlayWidth {
+		coordinatorDebugLog.Printf("WARNING: High air row width mismatch! expected=%d, actual=%d", safePlayWidth, highAirWidth)
+	}
 	c.petLayout.HighAirLine = currentLine
-	highAirLine := zone.Mark("pet:air_high", string(highAir))
-	result.WriteString(highAirLine + "\n")
+	result.WriteString(zone.Mark("pet:air_high", highAirLine) + "\n")
 	currentLine++
 
-	// Line 2: Low air (Y=1)
-	lowAir := make([]rune, safePlayWidth)
-	for i := range lowAir {
-		lowAir[i] = ' '
-	}
+	// Line 2: Low air (Y=1) - build with proper width accounting
+	lowAirSprites := make(map[int]string)
 	for _, item := range c.pet.FloatingItems {
 		if item.Pos.Y == 1 && item.Pos.X >= 0 && item.Pos.X < safePlayWidth {
-			itemRunes := []rune(item.Emoji)
-			if len(itemRunes) > 0 {
-				lowAir[item.Pos.X] = itemRunes[0]
-			}
+			lowAirSprites[item.Pos.X] = item.Emoji
 		}
 	}
-	if petY == 1 && petX < safePlayWidth && len(petRunes) > 0 {
-		lowAir[petX] = petRunes[0]
+	if petY == 1 && petX >= 0 && petX < safePlayWidth {
+		lowAirSprites[petX] = petSprite
 	}
-	if yarnY == 1 && yarnX >= 0 && yarnX < safePlayWidth && len(yarnRunes) > 0 {
-		lowAir[yarnX] = yarnRunes[0]
+	if yarnY == 1 && yarnX >= 0 && yarnX < safePlayWidth {
+		lowAirSprites[yarnX] = sprites.Yarn
 	}
-	if foodY == 1 && foodX >= 0 && foodX < safePlayWidth && len(foodRunes) > 0 {
-		lowAir[foodX] = foodRunes[0]
+	if foodY == 1 && foodX >= 0 && foodX < safePlayWidth {
+		lowAirSprites[foodX] = sprites.Food
 	}
-	// Mark low air for yarn throwing - track line for click detection
+	lowAirLine := buildAirRow(lowAirSprites, safePlayWidth)
+	lowAirWidth := runewidth.StringWidth(lowAirLine)
+	coordinatorDebugLog.Printf("Low air: sprites=%v, line=%q (len=%d, runewidth=%d)", lowAirSprites, lowAirLine, len(lowAirLine), lowAirWidth)
+	if lowAirWidth != safePlayWidth {
+		coordinatorDebugLog.Printf("WARNING: Low air row width mismatch! expected=%d, actual=%d", safePlayWidth, lowAirWidth)
+	}
 	c.petLayout.LowAirLine = currentLine
-	lowAirLine := zone.Mark("pet:air_low", string(lowAir))
-	result.WriteString(lowAirLine + "\n")
+	result.WriteString(zone.Mark("pet:air_low", lowAirLine) + "\n")
 	currentLine++
 
 	// Line 3: Ground (Y=0) - single clickable zone, action determined by click position
-	groundChar := '·'
+	// Build ground row with proper width accounting for wide emojis
+	groundChar := "·"
 	if len(sprites.Ground) > 0 {
-		groundChar = []rune(sprites.Ground)[0]
+		groundChar = sprites.Ground
 	}
-	groundRow := make([]rune, safePlayWidth)
-	for i := range groundRow {
-		groundRow[i] = groundChar
+	groundCharWidth := runewidth.StringWidth(groundChar)
+	if groundCharWidth < 1 {
+		groundCharWidth = 1
 	}
+
+	// Map of positions to sprites (position -> sprite string)
+	// Each position represents a display column, not a rune slot
+	groundSprites := make(map[int]string)
 
 	// Place floating items
 	for _, item := range c.pet.FloatingItems {
 		if item.Pos.Y == 0 && item.Pos.X >= 0 && item.Pos.X < safePlayWidth {
-			itemRunes := []rune(item.Emoji)
-			if len(itemRunes) > 0 {
-				groundRow[item.Pos.X] = itemRunes[0]
-			}
+			groundSprites[item.Pos.X] = item.Emoji
 		}
 	}
 
 	// Place yarn
-	if yarnY == 0 && yarnX >= 0 && yarnX < safePlayWidth && len(yarnRunes) > 0 {
-		groundRow[yarnX] = yarnRunes[0]
+	if yarnY == 0 && yarnX >= 0 && yarnX < safePlayWidth {
+		groundSprites[yarnX] = sprites.Yarn
 	}
 
 	// Place food
-	if foodY == 0 && foodX >= 0 && foodX < safePlayWidth && len(foodRunes) > 0 {
-		groundRow[foodX] = foodRunes[0]
+	if foodY == 0 && foodX >= 0 && foodX < safePlayWidth {
+		groundSprites[foodX] = sprites.Food
 	}
 
-	// Place poops
-	poopRunes := []rune(sprites.Poop)
+	// Place poops (clamped to fit within width)
 	for _, poopX := range c.pet.PoopPositions {
-		if poopX >= 0 && poopX < safePlayWidth && len(poopRunes) > 0 {
-			groundRow[poopX] = poopRunes[0]
-		}
+		placeSprite(groundSprites, poopX, sprites.Poop, safePlayWidth)
 	}
 
-	// Place mouse (if present)
-	mouseRunes := []rune(sprites.Mouse)
-	mouseX := c.pet.MousePos.X
-	if mouseX >= 0 && mouseX < safePlayWidth && len(mouseRunes) > 0 {
-		groundRow[mouseX] = mouseRunes[0]
+	// Place mouse (if present, clamped to fit within width)
+	placeSprite(groundSprites, c.pet.MousePos.X, sprites.Mouse, safePlayWidth)
+
+	// Place cat on top (overwrites anything at that position)
+	if petY == 0 {
+		placeSprite(groundSprites, petX, petSprite, safePlayWidth)
 	}
 
-	// Place cat on top
-	if petY == 0 && petX >= 0 && petX < safePlayWidth && len(petRunes) > 0 {
-		groundRow[petX] = petRunes[0]
-	}
-
-	// Single zone for entire ground - action determined by click handler
-	// Track line for click detection
+	// Build the ground row using helper
 	c.petLayout.GroundLine = currentLine
-	groundLine := zone.Mark("pet:ground", string(groundRow))
+	groundContent := buildSpriteRow(groundSprites, groundChar, safePlayWidth)
+	actualWidth := runewidth.StringWidth(groundContent)
+	coordinatorDebugLog.Printf("Ground: width=%d, content=%q (len=%d bytes, runewidth=%d)",
+		safePlayWidth, groundContent, len(groundContent), actualWidth)
+	if actualWidth != safePlayWidth {
+		coordinatorDebugLog.Printf("WARNING: Ground row width mismatch! expected=%d, actual=%d", safePlayWidth, actualWidth)
+	}
+	groundLine := zone.Mark("pet:ground", groundContent)
 	result.WriteString(groundLine + "\n")
 	currentLine++
 
@@ -2424,7 +3688,10 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	currentLine++
 
 	// Stats line: hunger | happiness | life
-	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
+	statusStyle := lipgloss.NewStyle()
+	if petFg != "" {
+		statusStyle = statusStyle.Foreground(lipgloss.Color(petFg))
+	}
 	hungerIcon := sprites.HungerIcon
 	happyIcon := sprites.HappyIcon
 	if c.pet.Happiness < 30 {
@@ -2437,22 +3704,15 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	result.WriteString(statusStyle.Render(statusLine) + "\n")
 	currentLine++
 
-	for i := 0; i < petCfg.PaddingBot; i++ {
-		result.WriteString("\n")
-		currentLine++
-	}
-
-	for i := 0; i < petCfg.MarginBot; i++ {
-		result.WriteString("\n")
-		currentLine++
-	}
-
 	// Store total widget height for click detection
 	c.petLayout.WidgetHeight = currentLine
 
 	coordinatorDebugLog.Printf("Pet layout updated: Feed=%d, HighAir=%d, LowAir=%d, Ground=%d, PlayWidth=%d, Height=%d",
 		c.petLayout.FeedLine, c.petLayout.HighAirLine, c.petLayout.LowAirLine,
 		c.petLayout.GroundLine, c.petLayout.PlayWidth, c.petLayout.WidgetHeight)
+
+	// Pet touch buttons removed - using touch input on pet area instead
+	// Feed button at top of widget remains for touch access
 
 	return result.String()
 }
@@ -2468,15 +3728,22 @@ func (c *Coordinator) renderPetTouchButtons(width int, sprites petSprites) strin
 		Foreground(buttonFg).
 		Background(buttonBg)
 
-	// Divider line (constrain to exact width)
-	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#444444"))
+	// Divider line (constrain to exact width) - fall back to sidebar's InactiveFg
+	touchDividerFg := c.config.Widgets.Pet.DividerFg
+	if touchDividerFg == "" {
+		touchDividerFg = c.config.Sidebar.Colors.InactiveFg
+	}
+	dividerStyle := lipgloss.NewStyle()
+	if touchDividerFg != "" {
+		dividerStyle = dividerStyle.Foreground(lipgloss.Color(touchDividerFg))
+	}
 	dividerWidth := width
 	if dividerWidth < 1 {
 		dividerWidth = 1
 	}
 	result.WriteString(dividerStyle.Render(strings.Repeat("─", dividerWidth)) + "\n")
 
-	// Define buttons
+	// Define pet action buttons (regular full-width)
 	buttons := []struct {
 		emoji  string
 		label  string
@@ -2520,6 +3787,149 @@ func (c *Coordinator) renderPetTouchButtons(width int, sprites petSprites) strin
 	return result.String()
 }
 
+// renderSmallButton renders a single-line flat button with background color.
+func renderSmallButton(width int, label string, bgColor, fgColor string) string {
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color(fgColor)).
+		Background(lipgloss.Color(bgColor)).
+		Bold(true).
+		Width(width).
+		Align(lipgloss.Center).
+		Render(label)
+}
+
+// renderPinnedActionButtons renders New Tab, New Group, Close, and Touch Mode toggle
+// buttons in the pinned area, above the resize buttons.
+// In large/touch mode: 3-line bordered buttons. In small mode: single-line flat buttons.
+func (c *Coordinator) renderPinnedActionButtons(width int) string {
+	if width < 1 {
+		width = 1
+	}
+	var s strings.Builder
+	tb := c.config.Sidebar.TouchButtons
+	large := c.isTouchMode(width)
+
+	// New Tab + New Group side by side
+	if c.config.Sidebar.NewTabButton && c.config.Sidebar.NewGroupButton {
+		tabColor := "#27ae60"
+		tabFg := "#ffffff"
+		tabBorder := ""
+		if tb.NewTabBg != "" { tabColor = tb.NewTabBg }
+		if tb.NewTabFg != "" { tabFg = tb.NewTabFg }
+		if tb.NewTabBorder != "" { tabBorder = tb.NewTabBorder }
+		leftWidth := width / 2
+
+		grpColor := "#9b59b6"
+		grpFg := "#ffffff"
+		grpBorder := ""
+		if tb.NewGroupBg != "" { grpColor = tb.NewGroupBg }
+		if tb.NewGroupFg != "" { grpFg = tb.NewGroupFg }
+		if tb.NewGroupBorder != "" { grpBorder = tb.NewGroupBorder }
+		rightWidth := width - leftWidth
+
+		var leftBtn, rightBtn string
+		if large {
+			leftBtn = c.renderTouchButton(leftWidth, "+ Tab", tabColor, touchButtonOpts{FgColor: tabFg, BorderFg: tabBorder})
+			rightBtn = c.renderTouchButton(rightWidth, "+ Group", grpColor, touchButtonOpts{FgColor: grpFg, BorderFg: grpBorder})
+		} else {
+			leftBtn = renderSmallButton(leftWidth, "+ Tab", tabColor, tabFg)
+			rightBtn = renderSmallButton(rightWidth, "+ Group", grpColor, grpFg)
+		}
+
+		left := zone.Mark("sidebar:new_tab", leftBtn)
+		right := zone.Mark("sidebar:new_group", rightBtn)
+		s.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, right) + "\n")
+	} else if c.config.Sidebar.NewTabButton {
+		tabColor := "#27ae60"
+		tabFg := "#ffffff"
+		tabBorder := ""
+		if tb.NewTabBg != "" { tabColor = tb.NewTabBg }
+		if tb.NewTabFg != "" { tabFg = tb.NewTabFg }
+		if tb.NewTabBorder != "" { tabBorder = tb.NewTabBorder }
+		var btn string
+		if large {
+			btn = c.renderTouchButton(width, "+ New Tab", tabColor, touchButtonOpts{FgColor: tabFg, BorderFg: tabBorder})
+		} else {
+			btn = renderSmallButton(width, "+ New Tab", tabColor, tabFg)
+		}
+		s.WriteString(zone.Mark("sidebar:new_tab", btn) + "\n")
+	} else if c.config.Sidebar.NewGroupButton {
+		grpColor := "#9b59b6"
+		grpFg := "#ffffff"
+		grpBorder := ""
+		if tb.NewGroupBg != "" { grpColor = tb.NewGroupBg }
+		if tb.NewGroupFg != "" { grpFg = tb.NewGroupFg }
+		if tb.NewGroupBorder != "" { grpBorder = tb.NewGroupBorder }
+		var btn string
+		if large {
+			btn = c.renderTouchButton(width, "+ New Group", grpColor, touchButtonOpts{FgColor: grpFg, BorderFg: grpBorder})
+		} else {
+			btn = renderSmallButton(width, "+ New Group", grpColor, grpFg)
+		}
+		s.WriteString(zone.Mark("sidebar:new_group", btn) + "\n")
+	}
+
+	// Close Tab button
+	if c.config.Sidebar.CloseButton {
+		closeColor := "#e74c3c"
+		closeFg := "#ffffff"
+		closeBorder := ""
+		if tb.CloseBg != "" { closeColor = tb.CloseBg }
+		if tb.CloseFg != "" { closeFg = tb.CloseFg }
+		if tb.CloseBorder != "" { closeBorder = tb.CloseBorder }
+		var btn string
+		if large {
+			btn = c.renderTouchButton(width, "x Close Tab", closeColor, touchButtonOpts{FgColor: closeFg, BorderFg: closeBorder})
+		} else {
+			btn = renderSmallButton(width, "x Close Tab", closeColor, closeFg)
+		}
+		s.WriteString(zone.Mark("sidebar:close_tab", btn) + "\n")
+	}
+
+	// Touch mode toggle button - label describes what clicking will do
+	touchLabel := "Large Mode"
+	touchColor := "#555555"
+	if large {
+		touchLabel = "Small Mode"
+		touchColor = "#2980b9"
+	}
+	var btn string
+	if large {
+		btn = c.renderTouchButton(width, touchLabel, touchColor, touchButtonOpts{FgColor: "#ffffff"})
+	} else {
+		btn = renderSmallButton(width, touchLabel, touchColor, "#ffffff")
+	}
+	s.WriteString(zone.Mark("sidebar:toggle_touch_mode", btn) + "\n")
+
+	return s.String()
+}
+
+// renderSidebarResizeButtons renders resize buttons at bottom of sidebar.
+// Large mode: 3-line bordered buttons. Small mode: single-line flat buttons.
+func (c *Coordinator) renderSidebarResizeButtons(width int) string {
+	if width < 1 {
+		width = 1
+	}
+
+	leftWidth := width / 2
+	rightWidth := width - leftWidth
+
+	var shrinkBtn, growBtn string
+	if c.isTouchMode(width) {
+		shrinkBtn = c.renderTouchButton(leftWidth, "<", "#e74c3c", touchButtonOpts{FgColor: "#ffffff"})
+		growBtn = c.renderTouchButton(rightWidth, ">", "#27ae60", touchButtonOpts{FgColor: "#ffffff"})
+	} else {
+		shrinkBtn = renderSmallButton(leftWidth, "<", "#e74c3c", "#ffffff")
+		growBtn = renderSmallButton(rightWidth, ">", "#27ae60", "#ffffff")
+	}
+
+	left := zone.Mark("sidebar:shrink", shrinkBtn)
+	right := zone.Mark("sidebar:grow", growBtn)
+	combined := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+
+	return combined + "\n"
+}
+
 // getClientWidth returns the width for a specific client, with fallback to lastWidth
 func (c *Coordinator) getClientWidth(clientID string) int {
 	c.clientWidthsMu.RLock()
@@ -2534,6 +3944,14 @@ func (c *Coordinator) getClientWidth(clientID string) int {
 	return width
 }
 
+// RemoveClient cleans up state for a disconnected client
+func (c *Coordinator) RemoveClient(clientID string) {
+	c.clientWidthsMu.Lock()
+	delete(c.clientWidths, clientID)
+	c.clientWidthsMu.Unlock()
+	coordinatorDebugLog.Printf("Removed client: %s (remaining: %d)", clientID, len(c.clientWidths))
+}
+
 // HandleInput processes input events from renderers
 // Returns true if window list refresh is needed (expensive tmux calls)
 func (c *Coordinator) HandleInput(clientID string, input *daemon.InputPayload) bool {
@@ -2543,6 +3961,9 @@ func (c *Coordinator) HandleInput(clientID string, input *daemon.InputPayload) b
 	case "key":
 		c.handleKeyInput(clientID, input)
 		return true // key inputs might need refresh
+	case "menu_select":
+		c.HandleMenuSelect(clientID, input.MouseX) // MouseX repurposed as menu item index
+		return true
 	}
 	return false
 }
@@ -2576,11 +3997,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	}
 
 	if input.ResolvedAction == "" {
-		// No action resolved - just release focus back to main pane
-		coordinatorDebugLog.Printf("  -> No action resolved, releasing focus")
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
+		// No action resolved - stay in sidebar (don't steal focus)
+		coordinatorDebugLog.Printf("  -> No action resolved, staying in sidebar")
 		return false
 	}
 
@@ -2588,14 +4006,22 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	case "select_window":
 		// Run synchronously so RefreshWindows() sees the new state
 		exec.Command("tmux", "select-window", "-t", input.ResolvedTarget).Run()
-		exec.Command("tmux", "select-pane", "-R").Run()
+		exec.Command("tmux", "select-pane", c.getMainPaneDirection()).Run()
 		return true
 
-	case "toggle_or_select_window":
-		// Always select window - collapse/expand is available via right-click context menu
-		exec.Command("tmux", "select-window", "-t", input.ResolvedTarget).Run()
-		exec.Command("tmux", "select-pane", "-R").Run()
-		return true
+	case "toggle_panes":
+		// Toggle collapse/expand for panes within this window
+		winIdx := input.ResolvedTarget
+		// Check current collapsed state via tmux option
+		out, err := exec.Command("tmux", "show-window-option", "-v", "-t", ":"+winIdx, "@tabby_collapsed").Output()
+		if err == nil && strings.TrimSpace(string(out)) == "1" {
+			// Currently collapsed -> expand (unset option)
+			exec.Command("tmux", "set-window-option", "-t", ":"+winIdx, "-u", "@tabby_collapsed").Run()
+		} else {
+			// Currently expanded -> collapse
+			exec.Command("tmux", "set-window-option", "-t", ":"+winIdx, "@tabby_collapsed", "1").Run()
+		}
+		return true // Trigger immediate refresh to show collapse/expand change
 
 	case "select_pane":
 		// Run synchronously so RefreshWindows() sees the new state
@@ -2623,22 +4049,34 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		c.stateMu.Unlock()
 		c.saveCollapsedGroups()
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
 		return false // No tmux window state change
 
 	case "button":
 		switch input.ResolvedTarget {
 		case "new_tab":
-			// Run synchronously so RefreshWindows() sees the new window
-			exec.Command("tmux", "new-window").Run()
+			// Create new window - the daemon's spawnRenderersForNewWindows will spawn
+			// the sidebar and handle focus. We don't call select-pane here since
+			// the sidebar doesn't exist yet.
+			exec.Command("tmux", "new-window", "-t", c.sessionID+":").Run()
 		case "new_group":
 			// Could implement group creation dialog
 		case "close_tab":
-			// Run synchronously so RefreshWindows() sees the removal
 			exec.Command("tmux", "kill-window").Run()
 		}
+		return true
+
+	case "new_tab":
+		// Create new window - the daemon's spawnRenderersForNewWindows will spawn
+		// the sidebar and handle focus.
+		exec.Command("tmux", "new-window", "-t", c.sessionID+":").Run()
+		return true
+
+	case "new_group":
+		// Could implement group creation dialog
+		return true
+
+	case "close_tab":
+		exec.Command("tmux", "kill-window").Run()
 		return true
 
 	case "drop_food":
@@ -2655,9 +4093,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.pet.LastThought = "life-giving noms!"
 			c.savePetState()
 			c.stateMu.Unlock()
-			if input.PaneID != "" {
-				exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-			}
 			return false
 		}
 		width := c.getClientWidth(clientID)
@@ -2666,9 +4101,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.LastThought = "food!"
 		c.savePetState()
 		c.stateMu.Unlock()
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
 		return false // Pet action, no window refresh needed
 
 	case "drop_yarn":
@@ -2686,7 +4118,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			tossX = 2
 		}
 		if tossX >= width-2 {
-			tossX = width - 3
+			tossX = width - 1
 		}
 		c.pet.YarnPos = pos2D{X: tossX, Y: 2} // Toss high
 		c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second) // Yarn disappears after 15 seconds
@@ -2697,9 +4129,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.LastThought = "yarn!"
 		c.savePetState()
 		c.stateMu.Unlock()
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
 		return false // Pet action, no window refresh needed
 
 	case "clean_poop":
@@ -2713,9 +4142,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.savePetState()
 		}
 		c.stateMu.Unlock()
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
 		return false // Pet action, no window refresh needed
 
 	case "pet_pet":
@@ -2728,10 +4154,129 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.LastThought = randomThought("petting")
 		c.savePetState()
 		c.stateMu.Unlock()
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
 		return false // Pet action, no window refresh needed
+
+	case "shrink_sidebar", "shrink":
+		// Shrink sidebar width by 5 columns (min 15)
+		currentWidth := c.getClientWidth(clientID)
+		newWidth := currentWidth - 5
+		if newWidth < 15 {
+			newWidth = 15
+		}
+		// Save to tmux option and sync all sidebar panes
+		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
+		go syncAllSidebarWidths(newWidth)
+		// Update client width tracking
+		c.clientWidthsMu.Lock()
+		c.clientWidths[clientID] = newWidth
+		c.clientWidthsMu.Unlock()
+		coordinatorDebugLog.Printf("Sidebar shrink: %d -> %d (syncing all)", currentWidth, newWidth)
+		return false
+
+	case "grow_sidebar", "grow":
+		// Grow sidebar width by 5 columns (max 50)
+		currentWidth := c.getClientWidth(clientID)
+		newWidth := currentWidth + 5
+		if newWidth > 50 {
+			newWidth = 50
+		}
+		// Save to tmux option and sync all sidebar panes
+		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
+		go syncAllSidebarWidths(newWidth)
+		// Update client width tracking
+		c.clientWidthsMu.Lock()
+		c.clientWidths[clientID] = newWidth
+		c.clientWidthsMu.Unlock()
+		coordinatorDebugLog.Printf("Sidebar grow: %d -> %d (syncing all)", currentWidth, newWidth)
+		return false
+
+	case "collapse_sidebar":
+		// Collapse sidebar to minimal width (3 cols)
+		currentWidth := c.getClientWidth(clientID)
+		c.sidebarPreviousWidth = currentWidth
+		c.sidebarCollapsed = true
+		// Resize pane to minimal width
+		if input.PaneID != "" {
+			exec.Command("tmux", "resize-pane", "-t", input.PaneID, "-x", "3").Run()
+		}
+		return false
+
+	case "expand_sidebar":
+		// Expand sidebar back to previous width
+		c.sidebarCollapsed = false
+		newWidth := c.sidebarPreviousWidth
+		if newWidth < 15 {
+			newWidth = 25 // Default if no previous width
+		}
+		// Sync all sidebar panes back to normal width
+		go syncAllSidebarWidths(newWidth)
+		// Update client width tracking
+		c.clientWidthsMu.Lock()
+		c.clientWidths[clientID] = newWidth
+		c.clientWidthsMu.Unlock()
+		return false
+
+	case "sidebar_settings":
+		// Show sidebar settings context menu
+		c.showSidebarSettingsMenu(clientID, menuPosition{PaneID: input.PaneID, X: input.MouseX, Y: input.MouseY})
+		return false
+
+	case "header_split_v":
+		// [|] button: split horizontally (side-by-side panes, vertical divider)
+		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget).Run()
+		return true
+
+	case "header_split_h":
+		// [-] button: split vertically (stacked panes, horizontal divider)
+		exec.Command("tmux", "split-window", "-v", "-t", input.ResolvedTarget).Run()
+		return true
+
+	case "header_close":
+		// Close the pane
+		exec.Command("tmux", "kill-pane", "-t", input.ResolvedTarget).Run()
+		return true
+
+	case "header_select_pane":
+		// Click on a pane label in the header -> focus that pane
+		exec.Command("tmux", "select-pane", "-t", input.ResolvedTarget).Run()
+		return true
+
+	case "header_context":
+		// This is the full-width fallback region on pane headers.
+		// Right-clicks are already handled by handleRightClick() above.
+		// Left-clicks on the spacer area should be a no-op.
+		return false
+
+	case "sidebar_toggle_position":
+		// Toggle sidebar position between left and right
+		currentPos := c.config.Sidebar.Position
+		newPos := "right"
+		if currentPos == "right" {
+			newPos = "left"
+		}
+		// Use tmux run-shell to restart asynchronously (the daemon dies on toggle-off)
+		toggleScript := c.getToggleScript()
+		if toggleScript != "" {
+			restartCmd := fmt.Sprintf("tmux set-option -g @tabby_sidebar_position %s; '%s'; sleep 0.3; '%s'", newPos, toggleScript, toggleScript)
+			exec.Command("tmux", "run-shell", "-b", restartCmd).Run()
+		}
+		return false
+
+	case "toggle_touch_mode":
+		// Toggle touch mode via tmux option
+		newVal := "1"
+		if c.touchModeOverride == "1" {
+			newVal = "0"
+		} else if c.touchModeOverride == "0" {
+			newVal = "" // cycle back to "auto" (use config/env)
+		}
+		if newVal == "" {
+			exec.Command("tmux", "set-option", "-gqu", "@tabby_touch_mode").Run()
+		} else {
+			exec.Command("tmux", "set-option", "-gq", "@tabby_touch_mode", newVal).Run()
+		}
+		c.touchModeOverride = newVal
+		return false
 
 	case "ground":
 		// Ground click - determine action based on click X position
@@ -2750,9 +4295,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
 			c.savePetState()
 			c.stateMu.Unlock()
-			if input.PaneID != "" {
-				exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-			}
 			return false
 		}
 
@@ -2765,9 +4307,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				c.pet.LastThought = "much better."
 				c.savePetState()
 				c.stateMu.Unlock()
-				if input.PaneID != "" {
-					exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-				}
 				return false
 			}
 		}
@@ -2779,7 +4318,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			tossX = 2
 		}
 		if tossX >= width-2 {
-			tossX = width - 3
+			tossX = width - 1
 		}
 		c.pet.YarnPos = pos2D{X: tossX, Y: 2}
 		c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second)
@@ -2790,9 +4329,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.LastThought = "yarn!"
 		c.savePetState()
 		c.stateMu.Unlock()
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
 		return false
 	}
 	return false
@@ -2833,14 +4369,11 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 		c.pet.LastThought = "food!"
 		c.savePetState()
 		c.stateMu.Unlock()
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
 		return true
 	}
 
 	// Calculate safe play width for this client (must match rendering)
-	safePlayWidth := clientWidth - 3
+	safePlayWidth := clientWidth - 1
 	if safePlayWidth < 5 {
 		safePlayWidth = 5
 	}
@@ -2950,7 +4483,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 
 	// Calculate safe play width using client-specific width (must match renderPetWidget)
 	playWidth := c.getClientWidth(clientID)
-	safePlayWidth := playWidth - 3
+	safePlayWidth := playWidth - 1
 	if safePlayWidth < 5 {
 		safePlayWidth = 5
 	}
@@ -3014,9 +4547,6 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 			c.pet.State = "happy"
 			c.pet.LastThought = "back from the void!"
 			c.savePetState()
-			if input.PaneID != "" {
-				exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-			}
 			return true
 		}
 		coordinatorDebugLog.Printf("    -> Clicked on cat at X=%d (cat rendered at %d, width=%d)! Petting.", clickX, catPosX, catWidth)
@@ -3026,9 +4556,6 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		c.pet.State = "happy"
 		c.pet.LastThought = randomThought("petting")
 		c.savePetState()
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
 		return true
 	}
 
@@ -3053,9 +4580,6 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 				c.pet.TotalPoopsCleaned++
 				c.pet.LastThought = "much better."
 				c.savePetState()
-				if input.PaneID != "" {
-					exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-				}
 				return true
 			}
 		}
@@ -3084,11 +4608,18 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 			c.pet.ActionPending = ""
 			c.pet.LastThought = randomThought("mouse_kill")
 			c.savePetState()
-			if input.PaneID != "" {
-				exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-			}
 			return true
 		}
+	}
+
+	// DEBUG: Click far left on ground (X=0) to spawn a mouse
+	if petY == 0 && clickX == 0 && c.pet.MousePos.X < 0 {
+		coordinatorDebugLog.Printf("    -> DEBUG: Spawning mouse!")
+		c.pet.MouseDirection = 1
+		c.pet.MousePos = pos2D{X: 0, Y: 0}
+		c.pet.LastThought = randomThought("mouse_spot")
+		c.savePetState()
+		return true
 	}
 
 	// Check if clicking on yarn (account for sprite width)
@@ -3110,9 +4641,6 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		c.pet.State = "walking"
 		c.pet.LastThought = "again!"
 		c.savePetState()
-		if input.PaneID != "" {
-			exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-		}
 		return true
 	}
 
@@ -3123,7 +4651,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		tossX = 2
 	}
 	if tossX >= playWidth-2 {
-		tossX = playWidth - 3
+		tossX = playWidth - 1
 	}
 	// Start yarn at high air, let it fall
 	c.pet.YarnPos = pos2D{X: tossX, Y: 2}
@@ -3134,31 +4662,198 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 	c.pet.State = "walking"
 	c.pet.LastThought = "yarn!"
 	c.savePetState()
-	if input.PaneID != "" {
-		exec.Command("tmux", "select-pane", "-t", input.PaneID, "-R").Run()
-	}
 	return true
+}
+
+// menuPosition carries mouse coordinates for positioning tmux display-menu
+// at the exact click location (since renderers capture mouse events before tmux sees them)
+type menuPosition struct {
+	PaneID string // tmux pane ID where the click occurred
+	X      int    // mouse X within the pane
+	Y      int    // mouse Y within the pane
+}
+
+// menuPosArgs returns the tmux display-menu positioning flags
+func (p menuPosition) args() []string {
+	if p.PaneID != "" {
+		return []string{
+			"-t", p.PaneID,
+			"-x", fmt.Sprintf("%d", p.X),
+			"-y", fmt.Sprintf("%d", p.Y),
+		}
+	}
+	// Fallback if no pane ID (shouldn't happen)
+	return []string{"-x", "M", "-y", "M"}
+}
+
+// menuItemDef holds a menu item definition with its tmux command
+type menuItemDef struct {
+	Label     string
+	Key       string
+	Command   string // tmux command string to execute
+	Separator bool
+	Header    bool
+}
+
+// parseTmuxMenuArgs extracts menu title and items from tmux display-menu arguments
+func parseTmuxMenuArgs(args []string) (string, []menuItemDef) {
+	var title string
+	var items []menuItemDef
+
+	// Find the title and the start of item triples
+	itemStart := -1
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "display-menu", "-O":
+			continue
+		case "-T":
+			if i+1 < len(args) {
+				title = args[i+1]
+				i++
+			}
+		case "-t", "-x", "-y":
+			i++ // skip value
+		default:
+			itemStart = i
+			goto parseItems
+		}
+	}
+parseItems:
+	if itemStart < 0 {
+		return title, items
+	}
+	// Parse triples: label, key, command
+	for i := itemStart; i+2 < len(args); i += 3 {
+		label := args[i]
+		key := args[i+1]
+		cmd := args[i+2]
+
+		if label == "" && key == "" && cmd == "" {
+			items = append(items, menuItemDef{Separator: true})
+		} else if strings.HasPrefix(label, "-") {
+			items = append(items, menuItemDef{
+				Label:  strings.TrimPrefix(label, "-"),
+				Header: true,
+			})
+		} else {
+			items = append(items, menuItemDef{
+				Label:   label,
+				Key:     key,
+				Command: cmd,
+			})
+		}
+	}
+
+	return title, items
+}
+
+// executeOrSendMenu sends the menu to the renderer or falls back to tmux display-menu.
+// Pane-header clients (clientID starts with "header:") always use tmux display-menu
+// since the 1-line pane is too small for overlay menus.
+func (c *Coordinator) executeOrSendMenu(clientID string, args []string, pos menuPosition) {
+	// Pane-header clients can't show overlay menus - use tmux display-menu
+	isHeaderClient := strings.HasPrefix(clientID, "header:")
+
+	if c.OnSendMenu != nil && !isHeaderClient {
+		title, items := parseTmuxMenuArgs(args)
+
+		// Store items for later execution
+		c.pendingMenusMu.Lock()
+		c.pendingMenus[clientID] = items
+		c.pendingMenusMu.Unlock()
+
+		// Convert to protocol items
+		protoItems := make([]daemon.MenuItemPayload, len(items))
+		for i, item := range items {
+			protoItems[i] = daemon.MenuItemPayload{
+				Label:     item.Label,
+				Key:       item.Key,
+				Separator: item.Separator,
+				Header:    item.Header,
+			}
+		}
+
+		c.OnSendMenu(clientID, &daemon.MenuPayload{
+			Title: title,
+			Items: protoItems,
+			X:     pos.X,
+			Y:     pos.Y,
+		})
+	} else {
+		exec.Command("tmux", args...).Run()
+	}
+}
+
+// HandleMenuSelect executes the tmux command for the selected menu item
+func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
+	c.pendingMenusMu.Lock()
+	items, ok := c.pendingMenus[clientID]
+	delete(c.pendingMenus, clientID)
+	c.pendingMenusMu.Unlock()
+
+	if !ok || index < 0 || index >= len(items) {
+		return
+	}
+
+	item := items[index]
+	if item.Command == "" || item.Separator || item.Header {
+		return
+	}
+
+	// Execute the tmux command via temp file (handles complex quoting correctly)
+	executeTmuxCommand(item.Command)
+}
+
+// executeTmuxCommand executes a tmux command string by writing to a temp file
+// and sourcing it, which correctly handles all quoting and escaping
+func executeTmuxCommand(cmd string) {
+	f, err := os.CreateTemp("", "tabby-cmd-*.conf")
+	if err != nil {
+		coordinatorDebugLog.Printf("Failed to create temp file for menu command: %v", err)
+		return
+	}
+	defer os.Remove(f.Name())
+	f.WriteString(cmd + "\n")
+	f.Close()
+	exec.Command("tmux", "source-file", f.Name()).Run()
 }
 
 // handleRightClick shows appropriate context menu based on what was clicked
 func (c *Coordinator) handleRightClick(clientID string, input *daemon.InputPayload) {
+	pos := menuPosition{
+		PaneID: input.PaneID,
+		X:      input.MouseX,
+		Y:      input.MouseY,
+	}
+	// For header clients, use SourcePaneID (the header pane itself) for positioning
+	// so the menu appears at the click location. The content pane comes from ResolvedTarget.
+	if strings.HasPrefix(clientID, "header:") {
+		if input.SourcePaneID != "" {
+			pos.PaneID = input.SourcePaneID
+		}
+	}
 	switch input.ResolvedAction {
-	case "select_window", "toggle_or_select_window":
+	case "select_window", "toggle_panes":
 		// If clicking on far left (X < 2), show indicator menu; otherwise show window menu
 		if input.MouseX < 2 {
-			c.showIndicatorContextMenu(input.ResolvedTarget)
+			c.showIndicatorContextMenu(clientID, input.ResolvedTarget, pos)
 		} else {
-			c.showWindowContextMenu(input.ResolvedTarget)
+			c.showWindowContextMenu(clientID, input.ResolvedTarget, pos)
 		}
 	case "select_pane":
-		c.showPaneContextMenu(input.ResolvedTarget)
+		c.showPaneContextMenu(clientID, input.ResolvedTarget, pos)
 	case "toggle_group":
-		c.showGroupContextMenu(input.ResolvedTarget)
+		c.showGroupContextMenu(clientID, input.ResolvedTarget, pos)
+	case "sidebar_header_area", "sidebar_settings":
+		c.showSidebarSettingsMenu(clientID, pos)
+	case "header_context", "header_split_v", "header_split_h", "header_close", "header_select_pane":
+		// Right-click on pane header -> show pane context menu
+		c.showPaneContextMenu(clientID, input.ResolvedTarget, pos)
 	}
 }
 
 // showWindowContextMenu displays the context menu for a window
-func (c *Coordinator) showWindowContextMenu(windowIdx string) {
+func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, pos menuPosition) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 
@@ -3178,20 +4873,18 @@ func (c *Coordinator) showWindowContextMenu(windowIdx string) {
 		return
 	}
 
-	args := []string{
+	args := append([]string{
 		"display-menu",
 		"-O",
 		"-T", fmt.Sprintf("Window %d: %s", win.Index, win.Name),
-		"-x", "M",
-		"-y", "M",
-	}
+	}, pos.args()...)
 
-	// Rename option
-	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d automatic-rename off\"", win.Name, win.Index, win.Index)
+	// Rename option - locks the name so syncWindowNames won't overwrite it
+	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d @tabby_name_locked 1\"", win.Name, win.Index, win.Index)
 	args = append(args, "Rename", "r", renameCmd)
 
-	// Unlock name option
-	unlockCmd := fmt.Sprintf("set-window-option -t :%d automatic-rename on", win.Index)
+	// Unlock name option - allows syncWindowNames to auto-update from pane title
+	unlockCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_name_locked", win.Index)
 	args = append(args, "Unlock Name", "u", unlockCmd)
 
 	// Collapse/Expand panes option (only for windows with multiple panes)
@@ -3261,9 +4954,23 @@ func (c *Coordinator) showWindowContextMenu(windowIdx string) {
 	// Separator
 	args = append(args, "", "", "")
 
-	// Split options
-	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t :%d.1 ; split-window -h -c '#{pane_current_path}'", win.Index, win.Index)
-	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t :%d.1 ; split-window -v -c '#{pane_current_path}'", win.Index, win.Index)
+	// Split options - use active pane ID to avoid index issues with header panes
+	activePaneID := ""
+	for _, p := range win.Panes {
+		if p.Active {
+			activePaneID = p.ID
+			break
+		}
+	}
+	if activePaneID == "" && len(win.Panes) > 0 {
+		activePaneID = win.Panes[0].ID
+	}
+	splitTarget := fmt.Sprintf(":%d", win.Index)
+	if activePaneID != "" {
+		splitTarget = activePaneID
+	}
+	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", win.Index, splitTarget)
+	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", win.Index, splitTarget)
 	args = append(args, "Split Horizontal |", "|", splitHCmd)
 	args = append(args, "Split Vertical -", "-", splitVCmd)
 
@@ -3281,11 +4988,11 @@ func (c *Coordinator) showWindowContextMenu(windowIdx string) {
 	killCmd := fmt.Sprintf("kill-window -t :%d", win.Index)
 	args = append(args, "Kill", "k", killCmd)
 
-	exec.Command("tmux", args...).Run()
+	c.executeOrSendMenu(clientID, args, pos)
 }
 
 // showPaneContextMenu displays the context menu for a pane
-func (c *Coordinator) showPaneContextMenu(paneID string) {
+func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos menuPosition) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 
@@ -3316,13 +5023,11 @@ func (c *Coordinator) showPaneContextMenu(paneID string) {
 		paneLabel = pane.Title
 	}
 
-	args := []string{
+	args := append([]string{
 		"display-menu",
 		"-O",
 		"-T", fmt.Sprintf("Pane %d.%d: %s", windowIdx, pane.Index, paneLabel),
-		"-x", "M",
-		"-y", "M",
-	}
+	}, pos.args()...)
 
 	// Rename option
 	currentTitle := pane.LockedTitle
@@ -3339,12 +5044,24 @@ func (c *Coordinator) showPaneContextMenu(paneID string) {
 	unlockCmd := fmt.Sprintf("set-option -p -t %s -u @tabby_pane_title ; select-pane -t %s -T ''", pane.ID, pane.ID)
 	args = append(args, "Unlock Name", "u", unlockCmd)
 
+	// For header clients, -t targets the header pane (for positioning), so #{pane_current_path}
+	// would resolve to the header pane's path. Pre-resolve from the content pane instead.
+	panePath := "#{pane_current_path}"
+	if strings.HasPrefix(clientID, "header:") {
+		if out, err := exec.Command("tmux", "display-message", "-t", pane.ID, "-p", "#{pane_current_path}").Output(); err == nil {
+			resolved := strings.TrimSpace(string(out))
+			if resolved != "" {
+				panePath = resolved
+			}
+		}
+	}
+
 	// Separator
 	args = append(args, "", "", "")
 
 	// Split options
-	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", windowIdx, pane.ID)
-	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", windowIdx, pane.ID)
+	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
+	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
 	args = append(args, "Split Horizontal |", "|", splitHCmd)
 	args = append(args, "Split Vertical -", "-", splitVCmd)
 
@@ -3355,12 +5072,53 @@ func (c *Coordinator) showPaneContextMenu(paneID string) {
 	focusCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s", windowIdx, pane.ID)
 	args = append(args, "Focus", "f", focusCmd)
 
-	// Break pane to new window
+	// Break pane to new window (preserving group assignment)
 	breakCmd := fmt.Sprintf("break-pane -s %s", pane.ID)
+	// Find the group this window belongs to and assign it to the new window
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.Index == windowIdx && group.Name != "" {
+				breakCmd += fmt.Sprintf(" ; set-window-option @tabby_group '%s'", group.Name)
+				break
+			}
+		}
+	}
 	args = append(args, "Break to New Window", "b", breakCmd)
 
+	// Move to Group submenu
+	args = append(args, "", "", "") // Separator
+	args = append(args, "-Move to Group", "", "")
+	keyNum := 1
+	for _, group := range c.config.Groups {
+		if group.Name == "Default" {
+			continue
+		}
+		key := fmt.Sprintf("%d", keyNum)
+		keyNum++
+		if keyNum <= 10 {
+			moveCmd := fmt.Sprintf("break-pane -s %s ; set-window-option @tabby_group '%s'", pane.ID, group.Name)
+			args = append(args, fmt.Sprintf("  %s %s", group.Theme.Icon, group.Name), key, moveCmd)
+		}
+	}
+
+	// Remove from group option (if pane's window has a group)
+	windowGroup := ""
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.Index == windowIdx && group.Name != "" {
+				windowGroup = group.Name
+				break
+			}
+		}
+	}
+	if windowGroup != "" {
+		removeCmd := fmt.Sprintf("break-pane -s %s ; set-window-option -u @tabby_group", pane.ID)
+		args = append(args, "  Remove from Group", "0", removeCmd)
+	}
+
 	// Open in Finder
-	args = append(args, "Open in Finder", "o", "run-shell 'open \"#{pane_current_path}\"'")
+	openFinderCmd := fmt.Sprintf("run-shell 'open \"%s\"'", panePath)
+	args = append(args, "Open in Finder", "o", openFinderCmd)
 
 	// Separator
 	args = append(args, "", "", "")
@@ -3368,11 +5126,11 @@ func (c *Coordinator) showPaneContextMenu(paneID string) {
 	// Close pane
 	args = append(args, "Close Pane", "x", fmt.Sprintf("kill-pane -t %s", pane.ID))
 
-	exec.Command("tmux", args...).Run()
+	c.executeOrSendMenu(clientID, args, pos)
 }
 
 // showGroupContextMenu displays the context menu for a group header
-func (c *Coordinator) showGroupContextMenu(groupName string) {
+func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, pos menuPosition) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 
@@ -3388,13 +5146,11 @@ func (c *Coordinator) showGroupContextMenu(groupName string) {
 		return
 	}
 
-	args := []string{
+	args := append([]string{
 		"display-menu",
 		"-O",
 		"-T", fmt.Sprintf("Group: %s (%d windows)", group.Name, len(group.Windows)),
-		"-x", "M",
-		"-y", "M",
-	}
+	}, pos.args()...)
 
 	// Get working directory for new windows in this group
 	var workingDir string
@@ -3445,11 +5201,11 @@ func (c *Coordinator) showGroupContextMenu(groupName string) {
 		args = append(args, fmt.Sprintf("Close All (%d)", len(group.Windows)), "X", confirmCmd)
 	}
 
-	exec.Command("tmux", args...).Run()
+	c.executeOrSendMenu(clientID, args, pos)
 }
 
 // showIndicatorContextMenu displays the context menu for window indicators (busy, bell, etc.)
-func (c *Coordinator) showIndicatorContextMenu(windowIdx string) {
+func (c *Coordinator) showIndicatorContextMenu(clientID string, windowIdx string, pos menuPosition) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 
@@ -3469,13 +5225,11 @@ func (c *Coordinator) showIndicatorContextMenu(windowIdx string) {
 		return
 	}
 
-	args := []string{
+	args := append([]string{
 		"display-menu",
 		"-O",
 		"-T", fmt.Sprintf("Alerts: Window %d", win.Index),
-		"-x", "M",
-		"-y", "M",
-	}
+	}, pos.args()...)
 
 	// Busy indicator toggle
 	if win.Busy {
@@ -3532,7 +5286,62 @@ func (c *Coordinator) showIndicatorContextMenu(windowIdx string) {
 	clearAllCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_busy ; set-window-option -t :%d -u @tabby_input ; set-window-option -t :%d -u @tabby_bell ; set-window-option -t :%d -u @tabby_activity ; set-window-option -t :%d -u @tabby_silence", win.Index, win.Index, win.Index, win.Index, win.Index)
 	args = append(args, "Clear All Alerts", "c", clearAllCmd)
 
-	exec.Command("tmux", args...).Run()
+	c.executeOrSendMenu(clientID, args, pos)
+}
+
+// getToggleScript returns the path to the toggle_sidebar_daemon.sh script
+func (c *Coordinator) getToggleScript() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(exe), "..", "scripts", "toggle_sidebar_daemon.sh")
+}
+
+// showSidebarSettingsMenu displays a context menu for sidebar settings
+func (c *Coordinator) showSidebarSettingsMenu(clientID string, pos menuPosition) {
+	toggleScript := c.getToggleScript()
+
+	// Build restart command: toggle off, wait, toggle on (runs in background via tmux)
+	restartCmd := func(setCmd string) string {
+		if toggleScript == "" {
+			return setCmd
+		}
+		return fmt.Sprintf("%s; run-shell -b \"'%s'; sleep 0.3; '%s'\"", setCmd, toggleScript, toggleScript)
+	}
+
+	args := append([]string{
+		"display-menu",
+		"-O",
+		"-T", "Sidebar Settings",
+	}, pos.args()...)
+
+	// Position options (restart sidebar to move it)
+	args = append(args, "Position: Left", "l", restartCmd("set-option -g @tabby_sidebar_position left"))
+	args = append(args, "Position: Right", "r", restartCmd("set-option -g @tabby_sidebar_position right"))
+
+	// Separator
+	args = append(args, "", "", "")
+
+	// Mode options (restart to apply)
+	args = append(args, "Mode: Full Height", "f", restartCmd("set-option -g @tabby_sidebar_mode full"))
+	args = append(args, "Mode: Partial", "p", restartCmd("set-option -g @tabby_sidebar_mode partial"))
+
+	// Separator
+	args = append(args, "", "", "")
+
+	// Pane headers toggle (no restart needed, daemon handles it)
+	args = append(args, "Pane Headers: On", "h", "set-option -g @tabby_pane_headers on")
+	args = append(args, "Pane Headers: Off", "o", "set-option -g @tabby_pane_headers off")
+
+	// Separator
+	args = append(args, "", "", "")
+
+	// Reset width (set to 25 and sync all sidebars)
+	resetCmd := `set-option -gq @tabby_sidebar_width 25; run-shell -b 'for p in $(tmux list-panes -a -F "#{pane_id} #{pane_current_command}" | grep sidebar-renderer | cut -d" " -f1); do tmux resize-pane -t $p -x 25; done'`
+	args = append(args, "Reset Width (25)", "w", resetCmd)
+
+	c.executeOrSendMenu(clientID, args, pos)
 }
 
 // handleKeyInput processes keyboard events
@@ -3546,8 +5355,82 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			c.stateMu.Lock()
 			c.config = cfg
 			c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
+			c.computeVisualPositions()
+			c.syncWindowIndices()
 			c.stateMu.Unlock()
 		}
+	}
+}
+
+// triggerActionFromThought parses an LLM thought and triggers matching pet behavior
+func (c *Coordinator) triggerActionFromThought(thought string, maxX int) {
+	lowerThought := strings.ToLower(thought)
+
+	// Skip if already doing something
+	if c.pet.State != "idle" || c.pet.HasTarget {
+		return
+	}
+
+	// Map keywords to actions
+	// Walking/exploring
+	if strings.Contains(lowerThought, "wander") ||
+		strings.Contains(lowerThought, "explor") ||
+		strings.Contains(lowerThought, "roam") ||
+		strings.Contains(lowerThought, "patrol") ||
+		strings.Contains(lowerThought, "walk") ||
+		strings.Contains(lowerThought, "going") ||
+		strings.Contains(lowerThought, "move") {
+		c.pet.State = "walking"
+		c.pet.Direction = []int{-1, 1}[rand.Intn(2)]
+		targetX := rand.Intn(maxX)
+		c.pet.TargetPos = pos2D{X: targetX, Y: 0}
+		c.pet.HasTarget = true
+		return
+	}
+
+	// Jumping
+	if strings.Contains(lowerThought, "jump") ||
+		strings.Contains(lowerThought, "leap") ||
+		strings.Contains(lowerThought, "bounce") ||
+		strings.Contains(lowerThought, "air") ||
+		strings.Contains(lowerThought, "zoom") {
+		c.pet.State = "jumping"
+		c.pet.Pos.Y = 2
+		return
+	}
+
+	// Playing with yarn
+	if strings.Contains(lowerThought, "yarn") ||
+		strings.Contains(lowerThought, "play") ||
+		strings.Contains(lowerThought, "chase") ||
+		strings.Contains(lowerThought, "catch") {
+		if c.pet.YarnPos.X >= 0 {
+			c.pet.TargetPos = pos2D{X: c.pet.YarnPos.X, Y: 0}
+			c.pet.HasTarget = true
+			c.pet.ActionPending = "play"
+			c.pet.State = "walking"
+		}
+		return
+	}
+
+	// Happy/content
+	if strings.Contains(lowerThought, "happy") ||
+		strings.Contains(lowerThought, "content") ||
+		strings.Contains(lowerThought, "purr") ||
+		strings.Contains(lowerThought, "nice") ||
+		strings.Contains(lowerThought, "good") {
+		c.pet.State = "happy"
+		return
+	}
+
+	// Sleepy/nap
+	if strings.Contains(lowerThought, "nap") ||
+		strings.Contains(lowerThought, "sleep") ||
+		strings.Contains(lowerThought, "tired") ||
+		strings.Contains(lowerThought, "zzz") ||
+		strings.Contains(lowerThought, "rest") {
+		c.pet.State = "sleeping"
+		return
 	}
 }
 
@@ -3578,6 +5461,104 @@ func randomThought(category string) string {
 		thoughts = defaultPetThoughts["idle"]
 	}
 	return thoughts[rand.Intn(len(thoughts))]
+}
+
+// GetSidebarBg returns the configured sidebar background color.
+func (c *Coordinator) GetSidebarBg() string {
+	bg := c.config.Sidebar.Colors.Bg
+	if bg == "" {
+		bg = "#1a1a2e"
+	}
+	return bg
+}
+
+// HeaderColors holds the fg/bg colors for a pane header border.
+type HeaderColors struct {
+	Fg string
+	Bg string
+}
+
+// GetHeaderColorsForPane returns the fg and bg colors for a pane header border.
+// Fg is the text color (for border line characters), Bg is the header background.
+func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+
+	// Find the window containing this pane
+	var foundWindow *tmux.Window
+	var foundPaneActive bool
+	for i := range c.windows {
+		for j := range c.windows[i].Panes {
+			if c.windows[i].Panes[j].ID == paneID {
+				foundWindow = &c.windows[i]
+				foundPaneActive = c.windows[i].Panes[j].Active && c.windows[i].Active
+				// If window is active but no content pane is marked active
+				// (sidebar has focus), treat as active for styling
+				if !foundPaneActive && c.windows[i].Active {
+					anyContentActive := false
+					for _, p := range c.windows[i].Panes {
+						if p.Active {
+							anyContentActive = true
+							break
+						}
+					}
+					if !anyContentActive {
+						// Sidebar has focus - treat single pane as active,
+						// or first pane in multi-pane layout
+						if len(c.windows[i].Panes) == 1 || j == 0 {
+							foundPaneActive = true
+						}
+					}
+				}
+				break
+			}
+		}
+		if foundWindow != nil {
+			break
+		}
+	}
+	if foundWindow == nil {
+		return HeaderColors{}
+	}
+
+	// Get the group theme color
+	var bgColor string
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.ID == foundWindow.ID {
+				bgColor = group.Theme.Bg
+				if win.CustomColor != "" {
+					bgColor = win.CustomColor
+				}
+				break
+			}
+		}
+		if bgColor != "" {
+			break
+		}
+	}
+	if bgColor == "" {
+		bgColor = c.config.PaneHeader.ActiveBg
+		if bgColor == "" {
+			bgColor = "#3498db"
+		}
+	}
+
+	// Fg/Bg based on active/inactive state
+	var headerFg string
+	if foundPaneActive {
+		headerFg = c.config.PaneHeader.ActiveFg
+		if headerFg == "" {
+			headerFg = "#ffffff"
+		}
+	} else {
+		bgColor = grouping.LightenColor(bgColor, 0.15)
+		headerFg = c.config.PaneHeader.InactiveFg
+		if headerFg == "" {
+			headerFg = "#cccccc"
+		}
+	}
+	return HeaderColors{Fg: headerFg, Bg: bgColor}
 }
 
 // GetGitStateHash returns a hash of current git state for change detection

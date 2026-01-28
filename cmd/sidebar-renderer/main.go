@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -20,6 +22,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 
 	"github.com/b/tmux-tabs/pkg/daemon"
@@ -98,6 +101,17 @@ type rendererModel struct {
 
 	// Message sending (thread-safe)
 	sendMu sync.Mutex
+
+	// Context menu overlay state
+	menuShowing    bool
+	menuTitle      string
+	menuItems      []daemon.MenuItemPayload
+	menuY          int  // Screen Y where menu was requested
+	menuHighlight  int  // Currently highlighted item index (-1 = none)
+	menuDragActive bool // First interaction after menu appears uses release-to-select
+
+	// Sidebar pane ID for focus management (context menu keyboard input)
+	sidebarPaneID string
 }
 
 // Message types
@@ -110,6 +124,10 @@ type disconnectedMsg struct{}
 
 type renderMsg struct {
 	payload *daemon.RenderPayload
+}
+
+type menuMsg struct {
+	payload *daemon.MenuPayload
 }
 
 type tickMsg time.Time
@@ -199,6 +217,17 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return connectCmd()()
 		})
 
+	case menuMsg:
+		m.menuShowing = true
+		m.menuTitle = msg.payload.Title
+		m.menuItems = msg.payload.Items
+		m.menuY = msg.payload.Y
+		m.menuHighlight = -1
+		m.menuDragActive = true // Assume right button still held for drag-to-select
+		// Focus the sidebar pane so keyboard shortcuts reach the renderer
+		m.menuFocusSidebar()
+		return m, nil
+
 	case renderMsg:
 		m.content = msg.payload.Content
 		m.regions = msg.payload.Regions
@@ -240,6 +269,10 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case tea.KeyMsg:
+		// Menu mode: intercept all keys
+		if m.menuShowing {
+			return m.handleMenuKey(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.sendUnsubscribe()
@@ -311,6 +344,11 @@ func abs(x int) int {
 func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if !m.connected {
 		return m, nil
+	}
+
+	// Menu mode: intercept all mouse events
+	if m.menuShowing {
+		return m.handleMenuMouse(msg)
 	}
 
 	// Debug logging for mouse events
@@ -385,37 +423,57 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseActionRelease:
-		if m.longPressActive {
-			// Release before long-press timer fired - check for double-tap or single click
-			elapsed := time.Since(m.mouseDownTime)
-			m.longPressActive = false
-			m.mouseDownTime = time.Time{}
+		wasLongPressActive := m.longPressActive
+		m.longPressActive = false
+		elapsed := time.Since(m.mouseDownTime)
+		m.mouseDownTime = time.Time{}
 
-			if elapsed < longPressThreshold {
-				// Check for double-tap (right-click alternative for iOS)
-				timeSinceLastTap := time.Since(m.lastTapTime)
-				dx := abs(msg.X - m.lastTapPos.X)
-				dy := abs(msg.Y - m.lastTapPos.Y)
-
-				if timeSinceLastTap < doubleTapThreshold && dx <= doubleTapDistance && dy <= doubleTapDistance {
-					// Double-tap detected - treat as right-click
-					if *debugMode {
-						debugLog.Printf("  Double-tap detected (interval=%v, distance=%d,%d) -> right-click", timeSinceLastTap, dx, dy)
-					}
-					m.lastTapTime = time.Time{} // Reset to prevent triple-tap
-					return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight)
-				}
-
-				// Single tap - record for potential double-tap and process as left-click
-				if *debugMode {
-					debugLog.Printf("  Quick click (elapsed=%v)", elapsed)
-				}
-				m.lastTapTime = time.Now()
-				m.lastTapPos = struct{ X, Y int }{msg.X, msg.Y}
-				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft)
-			}
-			// Long-press would have already triggered via timer
+		if *debugMode {
+			debugLog.Printf("  RELEASE at (%d,%d), press was (%d,%d), longPress=%v elapsed=%v",
+				msg.X, msg.Y, m.mouseDownPos.X, m.mouseDownPos.Y, wasLongPressActive, elapsed)
 		}
+
+		// Detect drag by comparing press vs release position directly.
+		// This works even if motion events aren't received (e.g. mosh).
+		// Use larger threshold (5 chars horizontal, 2 lines vertical) to avoid
+		// false drag detection from slight mouse movement during clicks
+		dx := abs(msg.X - m.mouseDownPos.X)
+		dy := abs(msg.Y - m.mouseDownPos.Y)
+		isDrag := dx > 5 || dy > 2
+
+		if isDrag {
+			if *debugMode {
+				debugLog.Printf("  Drag detected: from (%d,%d) to (%d,%d), dx=%d dy=%d",
+					m.mouseDownPos.X, m.mouseDownPos.Y, msg.X, msg.Y, dx, dy)
+			}
+			m.dragCopyToClipboard(msg.X, msg.Y)
+			return m, nil
+		}
+
+		if wasLongPressActive && elapsed < longPressThreshold {
+			// Quick click - check for double-tap (right-click alternative for iOS)
+			timeSinceLastTap := time.Since(m.lastTapTime)
+			tapDx := abs(msg.X - m.lastTapPos.X)
+			tapDy := abs(msg.Y - m.lastTapPos.Y)
+
+			if timeSinceLastTap < doubleTapThreshold && tapDx <= doubleTapDistance && tapDy <= doubleTapDistance {
+				// Double-tap detected - treat as right-click
+				if *debugMode {
+					debugLog.Printf("  Double-tap detected (interval=%v, distance=%d,%d) -> right-click", timeSinceLastTap, tapDx, tapDy)
+				}
+				m.lastTapTime = time.Time{} // Reset to prevent triple-tap
+				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight)
+			}
+
+			// Single tap - record for potential double-tap and process as left-click
+			if *debugMode {
+				debugLog.Printf("  Quick click (elapsed=%v)", elapsed)
+			}
+			m.lastTapTime = time.Now()
+			m.lastTapPos = struct{ X, Y int }{msg.X, msg.Y}
+			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft)
+		}
+		// Long-press would have already triggered via timer
 		return m, nil
 	}
 
@@ -464,8 +522,8 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.
 		}
 	}
 
-	// Get our pane ID for context menus
-	paneID := m.clientID
+	// Get our actual pane ID (not client/window ID) for resize and context menus
+	paneID := os.Getenv("TMUX_PANE")
 	if paneID == "" {
 		out, _ := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output()
 		paneID = strings.TrimSpace(string(out))
@@ -498,6 +556,429 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.
 	return m, nil
 }
 
+// --- Drag-to-Copy ---
+
+// dragCopyToClipboard extracts text from a drag selection and copies to clipboard
+func (m *rendererModel) dragCopyToClipboard(releaseX, releaseY int) {
+	if m.content == "" {
+		return
+	}
+
+	lines := strings.Split(m.content, "\n")
+
+	// Convert screen Y to content line index
+	startY := m.mouseDownPos.Y + m.scrollY
+	endY := releaseY + m.scrollY
+	startX := m.mouseDownPos.X
+	endX := releaseX
+
+	// Normalize direction (allow upward drags)
+	if startY > endY || (startY == endY && startX > endX) {
+		startY, endY = endY, startY
+		startX, endX = endX, startX
+	}
+
+	// Clamp to content bounds
+	if startY < 0 {
+		startY = 0
+	}
+	if endY >= len(lines) {
+		endY = len(lines) - 1
+	}
+	if startY > endY {
+		return
+	}
+
+	var selected []string
+	for i := startY; i <= endY; i++ {
+		plain := stripAnsi(lines[i])
+		plain = strings.TrimRight(plain, " ") // remove padding whitespace
+
+		if startY == endY {
+			// Single line: extract column range
+			selected = append(selected, sliceByColumns(plain, startX, endX+1))
+		} else if i == startY {
+			// First line: from startX to end
+			selected = append(selected, sliceByColumns(plain, startX, runewidth.StringWidth(plain)))
+		} else if i == endY {
+			// Last line: from beginning to endX
+			selected = append(selected, sliceByColumns(plain, 0, endX+1))
+		} else {
+			// Middle lines: full line
+			selected = append(selected, plain)
+		}
+	}
+
+	text := strings.Join(selected, "\n")
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+
+	// Copy to tmux paste buffer (prefix+] to paste)
+	exec.Command("tmux", "set-buffer", "--", text).Run()
+
+	// Copy to system clipboard via OSC 52 written directly to the
+	// tmux client TTY. tmux set-buffer -w doesn't reliably send OSC 52
+	// through mosh, but writing directly to the client TTY works.
+	encoded := base64.StdEncoding.EncodeToString([]byte(text))
+	osc52 := fmt.Sprintf("\x1b]52;c;%s\x07", encoded)
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output()
+	if err == nil {
+		for _, ttyPath := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			ttyPath = strings.TrimSpace(ttyPath)
+			if ttyPath == "" {
+				continue
+			}
+			if f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0); err == nil {
+				f.WriteString(osc52)
+				f.Close()
+			}
+		}
+	}
+
+	lineCount := strings.Count(text, "\n") + 1
+	exec.Command("tmux", "display-message", "-d", "1500",
+		fmt.Sprintf("Copied %d lines", lineCount)).Run()
+
+	if *debugMode {
+		debugLog.Printf("Drag copy: %d chars from lines %d-%d", len(text), startY, endY)
+	}
+}
+
+// sliceByColumns extracts text from column startCol to endCol (exclusive)
+func sliceByColumns(s string, startCol, endCol int) string {
+	var result strings.Builder
+	col := 0
+	for _, r := range s {
+		w := runewidth.RuneWidth(r)
+		if col+w > startCol && col < endCol {
+			result.WriteRune(r)
+		}
+		col += w
+		if col >= endCol {
+			break
+		}
+	}
+	return result.String()
+}
+
+// --- Context Menu Handling ---
+
+// handleMenuKey processes keyboard events while menu is showing
+func (m rendererModel) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	// Check menu item shortcut keys FIRST (before navigation)
+	// This ensures shortcuts like "e", "c", "r" always trigger their item
+	// even if they overlap with navigation keys
+	for i, item := range m.menuItems {
+		if !item.Separator && !item.Header && item.Key == key {
+			m.menuSelect(i)
+			m.menuShowing = false
+			m.menuDragActive = false
+			m.menuRestoreFocus()
+			return m, nil
+		}
+	}
+
+	// Then handle navigation and control keys
+	switch key {
+	case "escape", "q":
+		m.menuDismiss()
+		m.menuShowing = false
+		m.menuDragActive = false
+		m.menuRestoreFocus()
+		return m, nil
+	case "up", "k":
+		m.menuMoveHighlight(-1)
+		return m, nil
+	case "down", "j":
+		m.menuMoveHighlight(1)
+		return m, nil
+	case "enter":
+		if m.menuHighlight >= 0 && m.menuHighlight < len(m.menuItems) {
+			item := m.menuItems[m.menuHighlight]
+			if !item.Separator && !item.Header {
+				m.menuSelect(m.menuHighlight)
+			} else {
+				m.menuDismiss()
+			}
+		} else {
+			m.menuDismiss()
+		}
+		m.menuShowing = false
+		m.menuDragActive = false
+		m.menuRestoreFocus()
+		return m, nil
+	}
+	return m, nil
+}
+
+// handleMenuMouse processes mouse events while menu is showing
+func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Scroll wheel should close menu
+	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+		m.menuDismiss()
+		m.menuShowing = false
+		m.menuDragActive = false
+		m.menuRestoreFocus()
+		return m, nil
+	}
+
+	inMenu := m.isInMenuBounds(msg.X, msg.Y)
+	itemIdx := m.menuItemAtScreenY(msg.Y)
+
+	switch msg.Action {
+	case tea.MouseActionMotion:
+		// Highlight item under cursor
+		if inMenu && itemIdx >= 0 {
+			m.menuHighlight = itemIdx
+		} else {
+			m.menuHighlight = -1
+		}
+		return m, nil
+
+	case tea.MouseActionRelease:
+		if m.menuDragActive {
+			m.menuDragActive = false
+			if inMenu && itemIdx >= 0 {
+				item := m.menuItems[itemIdx]
+				if !item.Separator && !item.Header {
+					m.menuSelect(itemIdx)
+					m.menuShowing = false
+					m.menuRestoreFocus()
+					return m, nil
+				}
+			}
+			// Released outside or on non-selectable item - keep menu open
+			// so user can use keyboard shortcuts after releasing the mouse
+			return m, nil
+		}
+		return m, nil
+
+	case tea.MouseActionPress:
+		if !inMenu {
+			// Click outside menu - close
+			m.menuDismiss()
+			m.menuShowing = false
+			m.menuDragActive = false
+			m.menuRestoreFocus()
+			return m, nil
+		}
+		if msg.Button == tea.MouseButtonLeft && !m.menuDragActive {
+			// Direct left-click on menu item (not drag mode)
+			if itemIdx >= 0 {
+				item := m.menuItems[itemIdx]
+				if !item.Separator && !item.Header {
+					m.menuSelect(itemIdx)
+					m.menuShowing = false
+					m.menuRestoreFocus()
+					return m, nil
+				}
+			}
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// menuMoveHighlight moves the highlight to the next/previous selectable item
+func (m *rendererModel) menuMoveHighlight(direction int) {
+	if len(m.menuItems) == 0 {
+		return
+	}
+	start := m.menuHighlight
+	if start < 0 {
+		if direction > 0 {
+			start = -1
+		} else {
+			start = len(m.menuItems)
+		}
+	}
+	for i := start + direction; i >= 0 && i < len(m.menuItems); i += direction {
+		item := m.menuItems[i]
+		if !item.Separator && !item.Header {
+			m.menuHighlight = i
+			return
+		}
+	}
+}
+
+// menuSelect sends the selected menu item index to the daemon
+func (m *rendererModel) menuSelect(index int) {
+	m.sendInput(&daemon.InputPayload{
+		Type:   "menu_select",
+		MouseX: index,
+	})
+}
+
+// menuDismiss sends a cancel signal to clean up pending menu state in the daemon
+func (m *rendererModel) menuDismiss() {
+	m.sendInput(&daemon.InputPayload{
+		Type:   "menu_select",
+		MouseX: -1,
+	})
+}
+
+// menuFocusSidebar focuses the sidebar pane so keyboard events reach the renderer
+func (m *rendererModel) menuFocusSidebar() {
+	if m.sidebarPaneID != "" {
+		exec.Command("tmux", "select-pane", "-t", m.sidebarPaneID).Run()
+	}
+}
+
+// menuRestoreFocus returns focus to the previously active pane
+func (m *rendererModel) menuRestoreFocus() {
+	// select-pane -l switches back to the last active pane
+	exec.Command("tmux", "select-pane", "-l").Run()
+}
+
+// menuStartY returns the computed screen Y where the menu starts rendering
+func (m rendererModel) menuStartY() int {
+	menuH := len(m.menuItems) + 2 // top border + items + bottom border
+	startY := m.menuY
+	// Clamp to fit within screen
+	if startY+menuH > m.height {
+		startY = m.height - menuH
+	}
+	if startY < 0 {
+		startY = 0
+	}
+	return startY
+}
+
+// isInMenuBounds checks if screen coordinates are within the menu box
+func (m rendererModel) isInMenuBounds(x, y int) bool {
+	menuH := len(m.menuItems) + 2
+	startY := m.menuStartY()
+	return y >= startY && y < startY+menuH && x >= 0 && x < m.width
+}
+
+// menuItemAtScreenY returns the menu item index at a screen Y coordinate
+// Returns -1 if not on an item row or if the item is a separator/header
+func (m rendererModel) menuItemAtScreenY(screenY int) int {
+	startY := m.menuStartY()
+	relY := screenY - startY
+	// Row 0 = top border, rows 1..N = items, row N+1 = bottom border
+	itemIdx := relY - 1
+	if itemIdx < 0 || itemIdx >= len(m.menuItems) {
+		return -1
+	}
+	if m.menuItems[itemIdx].Separator || m.menuItems[itemIdx].Header {
+		return -1
+	}
+	return itemIdx
+}
+
+// renderMenuLines generates styled lines for the menu overlay
+func (m rendererModel) renderMenuLines() []string {
+	w := m.width
+	if w < 6 || len(m.menuItems) == 0 {
+		return nil
+	}
+
+	borderColor := lipgloss.Color("#666")
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ddd"))
+	highlightStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#2563eb")).
+		Foreground(lipgloss.Color("#fff"))
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#999")).
+		Bold(true)
+
+	var lines []string
+
+	// Top border with title: ┌─ Title ───┐
+	title := m.menuTitle
+	maxTitleW := w - 5 // "┌─ " + " ┐" overhead
+	if maxTitleW < 0 {
+		maxTitleW = 0
+	}
+	title = truncateToWidth(title, maxTitleW)
+	titleW := runewidth.StringWidth(title)
+	padCount := w - 3 - titleW // "┌─" + title + pad*"─" + "┐" = w
+	if padCount < 0 {
+		padCount = 0
+	}
+	topBorder := borderStyle.Render("┌─" + title + strings.Repeat("─", padCount) + "┐")
+	lines = append(lines, topBorder)
+
+	// Inner content width: "│ " + content + " │" = w  =>  content = w - 4
+	innerW := w - 4
+	if innerW < 1 {
+		innerW = 1
+	}
+
+	for i, item := range m.menuItems {
+		if item.Separator {
+			sep := borderStyle.Render("├" + strings.Repeat("─", w-2) + "┤")
+			lines = append(lines, sep)
+			continue
+		}
+
+		label := item.Label
+		key := item.Key
+
+		// Build inner text content (plain, no ANSI)
+		var inner string
+		if key != "" {
+			keyW := runewidth.StringWidth(key)
+			labelMax := innerW - keyW - 1
+			if labelMax < 0 {
+				labelMax = 0
+			}
+			label = truncateToWidth(label, labelMax)
+			labelW := runewidth.StringWidth(label)
+			gap := labelMax - labelW
+			if gap < 0 {
+				gap = 0
+			}
+			inner = label + strings.Repeat(" ", gap) + " " + key
+		} else {
+			label = truncateToWidth(label, innerW)
+			labelW := runewidth.StringWidth(label)
+			inner = label + strings.Repeat(" ", innerW-labelW)
+		}
+
+		// Apply style
+		border := borderStyle.Render("│")
+		var styledInner string
+		if item.Header {
+			styledInner = headerStyle.Render(" " + inner + " ")
+		} else if i == m.menuHighlight {
+			styledInner = highlightStyle.Render(" " + inner + " ")
+		} else {
+			styledInner = normalStyle.Render(" " + inner + " ")
+		}
+		lines = append(lines, border+styledInner+border)
+	}
+
+	// Bottom border
+	bottomBorder := borderStyle.Render("└" + strings.Repeat("─", w-2) + "┘")
+	lines = append(lines, bottomBorder)
+
+	return lines
+}
+
+// truncateToWidth truncates a string to fit within maxW display columns
+func truncateToWidth(s string, maxW int) string {
+	if runewidth.StringWidth(s) <= maxW {
+		return s
+	}
+	w := 0
+	for i, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if w+rw > maxW {
+			return s[:i]
+		}
+		w += rw
+	}
+	return s
+}
+
 // spinnerFrames for loading animation
 var spinnerFrames = []string{"◐", "◓", "◑", "◒"}
 
@@ -526,15 +1007,35 @@ func (m rendererModel) View() string {
 		visibleEnd = len(lines)
 	}
 
-	// Build visible content
+	// Build visible content, padding each line to full width
+	// This ensures old content is always overwritten
 	var visible []string
 	for i := visibleStart; i < visibleEnd && i < len(lines); i++ {
-		visible = append(visible, lines[i])
+		line := lines[i]
+		// Pad line to full width if shorter
+		lineWidth := runewidth.StringWidth(stripAnsi(line))
+		if lineWidth < m.width {
+			line += strings.Repeat(" ", m.width-lineWidth)
+		}
+		visible = append(visible, line)
 	}
 
-	// Pad if needed
+	// Pad remaining lines with full-width blank lines
+	blankLine := strings.Repeat(" ", m.width)
 	for len(visible) < m.height {
-		visible = append(visible, "")
+		visible = append(visible, blankLine)
+	}
+
+	// Overlay context menu if showing
+	if m.menuShowing {
+		menuLines := m.renderMenuLines()
+		startY := m.menuStartY()
+		for i, ml := range menuLines {
+			row := startY + i
+			if row >= 0 && row < len(visible) {
+				visible[row] = ml
+			}
+		}
 	}
 
 	return strings.Join(visible, "\n")
@@ -562,6 +1063,16 @@ func (m *rendererModel) receiveLoop() {
 					// For simplicity, we'll use the global program reference
 					if globalProgram != nil {
 						globalProgram.Send(renderMsg{payload: &payload})
+					}
+				}
+			}
+		case daemon.MsgMenu:
+			if msg.Payload != nil {
+				payloadBytes, _ := json.Marshal(msg.Payload)
+				var payload daemon.MenuPayload
+				if json.Unmarshal(payloadBytes, &payload) == nil {
+					if globalProgram != nil {
+						globalProgram.Send(menuMsg{payload: &payload})
 					}
 				}
 			}
@@ -697,33 +1208,80 @@ func main() {
 	// Force ANSI256 color mode
 	lipgloss.SetColorProfile(termenv.ANSI256)
 
+	// Reset terminal state before starting to clean up any stale modes from previous renderers
+	// This prevents mouse/keyboard issues when sidebar is restarted
+	resetTerminal := func() {
+		// Disable ALL mouse tracking modes comprehensively
+		// 1000=basic mouse tracking, 1002=button motion, 1003=any motion (cell motion)
+		// 1004=focus events, 1005=UTF-8 encoding, 1006=SGR encoding, 1015=URXVT encoding
+		fmt.Print("\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?1015l")
+		// Exit alternate screen buffer if active
+		fmt.Print("\033[?1049l")
+		// Disable bracketed paste mode
+		fmt.Print("\033[?2004l")
+		// Reset to normal mode and show cursor
+		fmt.Print("\033[0m\033[?25h")
+		// Flush output
+		os.Stdout.Sync()
+	}
+
+	// Clean start
+	resetTerminal()
+
+	// Ensure cleanup on exit
+	defer resetTerminal()
+
+	// Get our own pane ID for focus management (context menu keyboard input)
+	sidebarPane := os.Getenv("TMUX_PANE")
+	if sidebarPane == "" {
+		if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
+			sidebarPane = strings.TrimSpace(string(out))
+		}
+	}
+
 	model := rendererModel{
-		width:  80,
-		height: 24,
+		width:         80,
+		height:        24,
+		sidebarPaneID: sidebarPane,
 	}
 
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	globalProgram = p
 
-	// Handle signals
+	// Handle signals - reset terminal immediately on signal to prevent stuck mouse modes
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		defer recoverAndLog("signal-handler")
 		<-sigCh
+		// Reset terminal FIRST before trying to quit tea program
+		// This ensures mouse mode is disabled even if we're killed quickly
+		resetTerminal()
 		if p != nil {
 			p.Send(tea.Quit())
 		}
+		// Give tea a moment to quit gracefully, then force reset again
+		time.Sleep(100 * time.Millisecond)
+		resetTerminal()
 	}()
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		resetTerminal() // Ensure cleanup even on error
 		os.Exit(1)
 	}
+	// Final cleanup after normal exit
+	resetTerminal()
 }
 
 // Helper to convert string to int
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// stripAnsi removes ANSI escape codes from a string for accurate width calculation
+func stripAnsi(s string) string {
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	return ansiRegex.ReplaceAllString(s, "")
 }

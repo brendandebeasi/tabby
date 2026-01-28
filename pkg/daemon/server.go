@@ -20,6 +20,7 @@ type ClientInfo struct {
 	Height         int
 	ViewportOffset int
 	ColorProfile   string // "Ascii", "ANSI", "ANSI256", "TrueColor"
+	lastContentHash uint32 // hash of last sent content to deduplicate renders
 }
 
 // Server is the daemon server that manages connected renderers
@@ -39,11 +40,17 @@ type Server struct {
 	// The callback receives clientID, width, height and returns RenderPayload
 	OnRenderNeeded func(clientID string, width, height int) *RenderPayload
 
+	// Callback for new client connections
+	OnConnect func(clientID string)
+
 	// Callback for handling input events
 	OnInput func(clientID string, input *InputPayload)
 
 	// Callback for resize events
 	OnResize func(clientID string, width, height int)
+
+	// Callback for client disconnect
+	OnDisconnect func(clientID string)
 }
 
 // NewServer creates a new daemon server
@@ -120,8 +127,21 @@ func (s *Server) Stop() {
 		delete(s.clients, id)
 	}
 	s.clientsMu.Unlock()
-	os.Remove(s.socketPath)
-	os.Remove(s.pidPath)
+
+	// Only remove socket and PID file if we still own them
+	// (prevents a departing daemon from deleting a new daemon's socket)
+	myPid := os.Getpid()
+	if data, err := os.ReadFile(s.pidPath); err == nil {
+		pidStr := strings.TrimSpace(string(data))
+		if pid, err := strconv.Atoi(pidStr); err == nil && pid == myPid {
+			os.Remove(s.socketPath)
+			os.Remove(s.pidPath)
+		}
+		// else: another daemon owns these files, don't touch them
+	} else {
+		// PID file missing/unreadable - clean up socket as a fallback
+		os.Remove(s.socketPath)
+	}
 }
 
 // ClientCount returns the number of connected clients
@@ -203,6 +223,9 @@ func (s *Server) handleClient(conn net.Conn) {
 				ColorProfile: colorProfile,
 			}
 			s.clientsMu.Unlock()
+			if s.OnConnect != nil {
+				s.OnConnect(clientID)
+			}
 			// Send initial render
 			s.sendRenderToClient(clientID)
 
@@ -250,7 +273,15 @@ func (s *Server) handleClient(conn net.Conn) {
 				var input InputPayload
 				if json.Unmarshal(payloadBytes, &input) == nil {
 					if s.OnInput != nil {
-						s.OnInput(clientID, &input)
+						// Recover from panics in input handler to avoid killing client goroutine
+						func() {
+							defer func() {
+								if r := recover(); r != nil {
+									fmt.Fprintf(os.Stderr, "PANIC in OnInput (client=%s): %v\n", clientID, r)
+								}
+							}()
+							s.OnInput(clientID, &input)
+						}()
 					}
 				}
 			}
@@ -265,6 +296,10 @@ func (s *Server) handleClient(conn net.Conn) {
 		s.clientsMu.Lock()
 		delete(s.clients, clientID)
 		s.clientsMu.Unlock()
+		// Notify callback
+		if s.OnDisconnect != nil {
+			s.OnDisconnect(clientID)
+		}
 	}
 }
 
@@ -290,7 +325,6 @@ func (s *Server) sendRenderToClient(clientID string) {
 		s.clientsMu.RUnlock()
 		return
 	}
-	conn := client.Conn
 	width := client.Width
 	height := client.Height
 	s.clientsMu.RUnlock()
@@ -299,11 +333,37 @@ func (s *Server) sendRenderToClient(clientID string) {
 		return
 	}
 
-	// Get render payload from callback
+	// Get render payload from callback (may take time)
 	render := s.OnRenderNeeded(clientID, width, height)
 	if render == nil {
 		return
 	}
+
+	// Deduplicate: skip sending if content hasn't changed
+	contentHash := hashContent(render.Content)
+	s.clientsMu.RLock()
+	client, ok = s.clients[clientID]
+	if !ok {
+		// Client disconnected during render
+		s.clientsMu.RUnlock()
+		return
+	}
+	if client.lastContentHash == contentHash {
+		s.clientsMu.RUnlock()
+		return
+	}
+	s.clientsMu.RUnlock()
+
+	// Update hash and get fresh conn reference under lock
+	s.clientsMu.Lock()
+	client, ok = s.clients[clientID]
+	if !ok {
+		s.clientsMu.Unlock()
+		return
+	}
+	client.lastContentHash = contentHash
+	conn := client.Conn
+	s.clientsMu.Unlock()
 
 	// Set sequence number
 	s.seqMu.Lock()
@@ -317,6 +377,15 @@ func (s *Server) sendRenderToClient(clientID string) {
 		Payload:  render,
 	}
 	s.sendMessage(conn, msg)
+}
+
+// hashContent returns a simple FNV-like hash of content for deduplication
+func hashContent(s string) uint32 {
+	var h uint32
+	for _, c := range s {
+		h = h*31 + uint32(c)
+	}
+	return h
 }
 
 // GetClientInfo returns info about a specific client
@@ -344,6 +413,25 @@ func (s *Server) GetAllClientIDs() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// SendMenuToClient sends a context menu to a specific renderer client
+func (s *Server) SendMenuToClient(clientID string, menu *MenuPayload) {
+	s.clientsMu.RLock()
+	client, ok := s.clients[clientID]
+	if !ok {
+		s.clientsMu.RUnlock()
+		return
+	}
+	conn := client.Conn
+	s.clientsMu.RUnlock()
+
+	msg := Message{
+		Type:     MsgMenu,
+		ClientID: clientID,
+		Payload:  menu,
+	}
+	s.sendMessage(conn, msg)
 }
 
 // colorProfileOrder defines the capability order (lowest to highest)
@@ -385,7 +473,15 @@ func (s *Server) GetMinColorProfile() string {
 }
 
 // sendMessage sends a message to a client
-func (s *Server) sendMessage(conn net.Conn, msg Message) error {
+func (s *Server) sendMessage(conn net.Conn, msg Message) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in sendMessage: %v", r)
+		}
+	}()
+	if conn == nil {
+		return fmt.Errorf("nil connection")
+	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err

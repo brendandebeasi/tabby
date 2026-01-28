@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,14 +25,20 @@ func stripANSI(s string) string {
 }
 
 type Pane struct {
-	ID          string
-	Index       int
-	Active      bool
-	Command     string // Current command running in pane
-	Title       string // Pane title if set
-	LockedTitle string // Locked title that won't be overwritten (from @tabby_pane_title)
-	Busy        bool   // Pane has a foreground process (not shell)
-	Remote      bool   // Pane is running a remote connection (ssh, mosh, etc.)
+	ID           string
+	Index        int
+	Active       bool
+	Command      string // Current command running in pane
+	Title        string // Pane title if set
+	LockedTitle  string // Locked title that won't be overwritten (from @tabby_pane_title)
+	Busy         bool   // Pane has a foreground process (not shell)
+	AIBusy       bool   // AI tool in this pane is actively working
+	AIInput      bool   // AI tool in this pane is waiting for user input
+	Remote       bool   // Pane is running a remote connection (ssh, mosh, etc.)
+	Top          int    // Y position of pane in window layout (for visual ordering)
+	CurrentPath  string // Current working directory of pane
+	LastActivity int64  // Unix timestamp of last pane output (for idle detection)
+	PID          int    // Process ID of the shell in this pane
 }
 
 // idleCommands are processes that indicate "idle" state (not busy)
@@ -47,6 +54,70 @@ var idleCommands = map[string]bool{
 	"ssh": true, "mosh": true, "mosh-client": true, "telnet": true,
 }
 
+// aiToolCommands are interactive AI/coding tools that have distinct
+// "working" (busy) and "waiting for input" states. Configured from config.yaml.
+var aiToolCommands = map[string]bool{}
+
+// aiIdleTimeout is how many seconds of no pane output before an AI tool
+// is considered "waiting for input" rather than "busy working".
+var aiIdleTimeout int64 = 10
+
+// ConfigureBusyDetection applies user config to idle/busy detection.
+// extraIdle adds commands to the idle list.
+// aiTools lists interactive AI tools that distinguish busy vs waiting-for-input.
+// idleTimeout is seconds of no output before an AI tool is considered idle.
+func ConfigureBusyDetection(extraIdle, aiTools []string, idleTimeout int) {
+	for _, cmd := range extraIdle {
+		idleCommands[cmd] = true
+	}
+	aiToolCommands = make(map[string]bool, len(aiTools))
+	for _, cmd := range aiTools {
+		aiToolCommands[cmd] = true
+	}
+	if idleTimeout > 0 {
+		aiIdleTimeout = int64(idleTimeout)
+	}
+}
+
+// semverRegex matches version-number process names like "2.1.17" (Claude Code).
+// Claude Code sets its process title to its semver version.
+var semverRegex = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
+// IsAITool returns true if the command is a configured AI tool.
+// Also detects Claude Code which sets its process name to a semver version.
+func IsAITool(command string) bool {
+	if aiToolCommands[command] {
+		return true
+	}
+	// Claude Code uses its version number as the process title (e.g., "2.1.17")
+	return semverRegex.MatchString(command)
+}
+
+// HasSpinner returns true if the title starts with a braille pattern dot (U+2800-U+28FF),
+// which AI tools like Claude Code use as a working/thinking spinner.
+// Note: ✳ (U+2733) is Claude Code's idle icon, NOT a spinner.
+func HasSpinner(title string) bool {
+	for _, r := range title {
+		// Braille patterns U+2800-U+28FF (excluding U+2800 which is blank)
+		return r >= 0x2801 && r <= 0x28FF
+	}
+	return false
+}
+
+// HasIdleIcon returns true if the title starts with ✳ (U+2733),
+// which Claude Code uses as its explicit idle/waiting-for-input icon.
+func HasIdleIcon(title string) bool {
+	for _, r := range title {
+		return r == 0x2733
+	}
+	return false
+}
+
+// AIIdleTimeout returns the configured idle timeout in seconds.
+func AIIdleTimeout() int64 {
+	return aiIdleTimeout
+}
+
 // remoteCommands are processes that connect to remote systems
 // For these, we detect "busy" based on recent activity rather than just running
 var remoteCommands = map[string]bool{
@@ -57,6 +128,7 @@ var remoteCommands = map[string]bool{
 var sidebarCommands = map[string]bool{
 	"sidebar": true, "tabbar": true, "sidebar-master": true, "sidebar-shadow": true,
 	"tabby-daemon": true, "sidebar-renderer": true, "render-status": true,
+	"pane-header": true,
 }
 
 // isSidebarCommand checks if a command should be filtered from pane lists
@@ -72,15 +144,21 @@ func isSidebarCommand(cmd string) bool {
 			return true
 		}
 	}
-	// Also check if command contains "sidebar" or "tabby" anywhere
-	if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "tabby-daemon") {
+	// Also check if command contains known utility substrings anywhere
+	if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "tabby-daemon") || strings.Contains(cmd, "pane-header") {
 		return true
 	}
 	return false
 }
 
-// isPaneBusy returns true if the command is not an idle/shell process
+// isPaneBusy returns true if the command is not an idle/shell process.
+// AI tool commands are handled separately (busy depends on activity, not just running).
 func isPaneBusy(command string) bool {
+	// AI tools have activity-based busy detection (handled at coordinator level).
+	// Use IsAITool() which also catches semver process names like "2.1.17" (Claude Code).
+	if IsAITool(command) {
+		return false
+	}
 	return !idleCommands[command]
 }
 
@@ -98,6 +176,7 @@ type Window struct {
 	CustomColor string // User-defined tab color (set via @tabby_color option)
 	Group       string // User-assigned group name (set via @tabby_group option)
 	Collapsed   bool   // Panes are hidden in sidebar (set via @tabby_collapsed option)
+	NameLocked  bool   // Window name was explicitly set by user (set via @tabby_name_locked)
 	Panes       []Pane
 }
 
@@ -106,7 +185,7 @@ func ListWindows() ([]Window, error) {
 	defer t.Stop()
 
 	cmd := exec.Command("tmux", "list-windows", "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -176,6 +255,12 @@ func ListWindows() ([]Window, error) {
 			tabbyInput := strings.TrimSpace(parts[15])
 			input = tabbyInput == "1" || tabbyInput == "true"
 		}
+		// Name locked state from @tabby_name_locked option
+		nameLocked := false
+		if len(parts) >= 17 {
+			tabbyNameLocked := strings.TrimSpace(parts[16])
+			nameLocked = tabbyNameLocked == "1" || tabbyNameLocked == "true"
+		}
 		windows = append(windows, Window{
 			ID:          parts[0],
 			Index:       index,
@@ -190,6 +275,7 @@ func ListWindows() ([]Window, error) {
 			CustomColor: customColor,
 			Group:       group,
 			Collapsed:   collapsed,
+			NameLocked:  nameLocked,
 		})
 	}
 
@@ -202,7 +288,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 	defer t.Stop()
 
 	cmd := exec.Command("tmux", "list-panes", "-t", fmt.Sprintf(":%d", windowIndex), "-F",
-		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}")
+		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -242,14 +328,16 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		isRemote := remoteCommands[command]
 		busy := isPaneBusy(command)
 
+		// Parse last activity timestamp
+		var lastActivityTS int64
+		if len(parts) >= 7 {
+			lastActivityTS, _ = strconv.ParseInt(parts[6], 10, 64)
+		}
+
 		// For remote connections, check if there's been activity in the last 3 seconds
-		if isRemote && len(parts) >= 7 {
-			lastActivity, err := strconv.ParseInt(parts[6], 10, 64)
-			if err == nil {
-				// If activity within last 3 seconds, consider it busy
-				if now-lastActivity <= 3 {
-					busy = true
-				}
+		if isRemote && lastActivityTS > 0 {
+			if now-lastActivityTS <= 3 {
+				busy = true
 			}
 		}
 
@@ -259,15 +347,34 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 			lockedTitle = strings.TrimSpace(parts[7])
 		}
 
+		top := 0
+		if len(parts) >= 9 {
+			top, _ = strconv.Atoi(parts[8])
+		}
+
+		currentPath := ""
+		if len(parts) >= 10 {
+			currentPath = parts[9]
+		}
+
+		panePID := 0
+		if len(parts) >= 6 {
+			panePID, _ = strconv.Atoi(parts[5])
+		}
+
 		panes = append(panes, Pane{
-			ID:          parts[0],
-			Index:       index,
-			Active:      parts[2] == "1",
-			Command:     command,
-			Title:       stripANSI(parts[4]),
-			LockedTitle: lockedTitle,
-			Busy:        busy,
-			Remote:      isRemote,
+			ID:           parts[0],
+			Index:        index,
+			Active:       parts[2] == "1",
+			Command:      command,
+			Title:        stripANSI(parts[4]),
+			LockedTitle:  lockedTitle,
+			Busy:         busy,
+			Remote:       isRemote,
+			Top:          top,
+			CurrentPath:  currentPath,
+			LastActivity: lastActivityTS,
+			PID:          panePID,
 		})
 	}
 	return panes, nil
@@ -280,7 +387,7 @@ func ListAllPanes() (map[int][]Pane, error) {
 	defer t.Stop()
 
 	cmd := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}")
+		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -323,12 +430,15 @@ func ListAllPanes() (map[int][]Pane, error) {
 		isRemote := remoteCommands[command]
 		busy := isPaneBusy(command)
 
+		// Parse last activity timestamp
+		var lastActivityTS int64
+		if len(parts) >= 8 {
+			lastActivityTS, _ = strconv.ParseInt(parts[7], 10, 64)
+		}
+
 		// For remote connections, check if there's been activity in the last 3 seconds
-		if isRemote && len(parts) >= 8 {
-			lastActivity, err := strconv.ParseInt(parts[7], 10, 64)
-			if err == nil && now-lastActivity <= 3 {
-				busy = true
-			}
+		if isRemote && lastActivityTS > 0 && now-lastActivityTS <= 3 {
+			busy = true
 		}
 
 		lockedTitle := ""
@@ -336,15 +446,34 @@ func ListAllPanes() (map[int][]Pane, error) {
 			lockedTitle = strings.TrimSpace(parts[8])
 		}
 
+		top := 0
+		if len(parts) >= 10 {
+			top, _ = strconv.Atoi(parts[9])
+		}
+
+		currentPath := ""
+		if len(parts) >= 11 {
+			currentPath = parts[10]
+		}
+
+		panePID := 0
+		if len(parts) >= 7 {
+			panePID, _ = strconv.Atoi(parts[6])
+		}
+
 		pane := Pane{
-			ID:          parts[1],
-			Index:       paneIdx,
-			Active:      parts[3] == "1",
-			Command:     command,
-			Title:       stripANSI(parts[5]),
-			LockedTitle: lockedTitle,
-			Busy:        busy,
-			Remote:      isRemote,
+			ID:           parts[1],
+			Index:        paneIdx,
+			Active:       parts[3] == "1",
+			Command:      command,
+			Title:        stripANSI(parts[5]),
+			LockedTitle:  lockedTitle,
+			Busy:         busy,
+			Remote:       isRemote,
+			Top:          top,
+			CurrentPath:  currentPath,
+			LastActivity: lastActivityTS,
+			PID:          panePID,
 		}
 
 		result[windowIdx] = append(result[windowIdx], pane)
@@ -379,11 +508,25 @@ func ListWindowsWithPanes() ([]Window, error) {
 		}
 	}
 
-	// Auto-detect busy from ACTIVE pane state only
+	// Sort panes by visual position (top to bottom) and re-index sequentially.
+	// tmux list-panes returns panes in creation order, not visual order.
+	// Using pane_top ensures numbering matches the top-to-bottom layout.
+	for i := range windows {
+		sort.Slice(windows[i].Panes, func(a, b int) bool {
+			return windows[i].Panes[a].Top < windows[i].Panes[b].Top
+		})
+		for j := range windows[i].Panes {
+			windows[i].Panes[j].Index = j
+		}
+	}
+
+	// Auto-detect busy state from panes (non-AI tools only).
+	// AI tool busy/bell/input states are handled by the coordinator's
+	// stateful processAIToolStates() which tracks transitions.
 	for i := range windows {
 		if !windows[i].Busy {
 			for _, pane := range windows[i].Panes {
-				if pane.Active && pane.Busy {
+				if pane.Busy {
 					windows[i].Busy = true
 					break
 				}

@@ -6,17 +6,33 @@ import (
 )
 
 type Config struct {
-	Position   string      `yaml:"position"`
-	Height     int         `yaml:"height"`
-	Style      Style       `yaml:"style"`
-	Overflow   Overflow    `yaml:"overflow"`
-	Groups     []Group     `yaml:"groups"`
-	Bindings   Bindings    `yaml:"bindings"`
-	Sidebar    Sidebar     `yaml:"sidebar"`
-	PaneHeader PaneHeader  `yaml:"pane_header"`
-	Indicators Indicators  `yaml:"indicators"`
-	Prompt     PromptStyle `yaml:"prompt"`
-	Widgets    Widgets     `yaml:"widgets"`
+	Position       string         `yaml:"position"`
+	Height         int            `yaml:"height"`
+	Style          Style          `yaml:"style"`
+	Overflow       Overflow       `yaml:"overflow"`
+	Groups         []Group        `yaml:"groups"`
+	Bindings       Bindings       `yaml:"bindings"`
+	Sidebar        Sidebar        `yaml:"sidebar"`
+	PaneHeader     PaneHeader     `yaml:"pane_header"`
+	Indicators     Indicators     `yaml:"indicators"`
+	Prompt         PromptStyle    `yaml:"prompt"`
+	Widgets        Widgets        `yaml:"widgets"`
+	BusyDetection  BusyDetection  `yaml:"busy_detection"`
+	TerminalTitle  TerminalTitle  `yaml:"terminal_title"`
+}
+
+// BusyDetection configures which pane commands trigger the busy indicator.
+// By default, any foreground process that isn't a shell or editor is "busy".
+// AI tools have activity-based detection: busy when outputting, input when idle.
+type BusyDetection struct {
+	ExtraIdle   []string `yaml:"extra_idle"`    // Additional commands to treat as idle (not busy)
+	AITools     []string `yaml:"ai_tools"`      // Interactive AI tools (busy when active, input when idle)
+	IdleTimeout int      `yaml:"idle_timeout"`  // Seconds of no output before AI tool shows as "input needed" (default: 10)
+}
+
+type TerminalTitle struct {
+	Enabled bool   `yaml:"enabled"`
+	Format  string `yaml:"format"`
 }
 
 type Widgets struct {
@@ -189,25 +205,50 @@ type PaneHeader struct {
 	ActiveBg      string `yaml:"active_bg"`       // Active pane header bg fallback (default: #3498db)
 	InactiveFg    string `yaml:"inactive_fg"`     // Inactive pane header text (default: #cccccc)
 	InactiveBg    string `yaml:"inactive_bg"`     // Inactive pane header bg fallback (default: #333333)
-	CommandFg     string `yaml:"command_fg"`      // Command text color (default: #aaaaaa)
+	CommandFg     string `yaml:"command_fg"`      // Dimmed pane text color (default: #aaaaaa)
+	ButtonFg      string `yaml:"button_fg"`       // Button text color for [|] [-] [x] (default: #888888)
+	DividerFg     string `yaml:"divider_fg"`      // Divider "|" between panes (default: same as button_fg)
 	BorderFromTab bool   `yaml:"border_from_tab"` // Use tab's color for active pane border (default: false)
+	AutoBorder    bool   `yaml:"auto_border"`     // Auto-set pane border color from window's resolved color (default: false)
 	BorderLines   string `yaml:"border_lines"`    // Border style: single, double, heavy, simple, number (default: single)
 	BorderFg      string `yaml:"border_fg"`       // Border foreground color (default: #444444)
 }
 
 type Sidebar struct {
+	Position        string        `yaml:"position"`      // "left" (default) or "right"
+	Mode            string        `yaml:"mode"`          // "full" (default) or "partial"
+	PaneHeaders     bool          `yaml:"pane_headers"`  // Enable clickable overlay pane headers
 	NewTabButton    bool          `yaml:"new_tab_button"`
 	CloseButton     bool          `yaml:"close_button"`
 	NewGroupButton  bool          `yaml:"new_group_button"`
 	ShowEmptyGroups bool          `yaml:"show_empty_groups"`
 	SortBy          string        `yaml:"sort_by"`
-	Debug           bool          `yaml:"debug"`      // Enable debug logging to /tmp/tabby-debug.log
-	TouchMode       bool          `yaml:"touch_mode"` // Larger tap targets for mobile/touch
-	LineHeight      int           `yaml:"line_height"` // Extra blank lines between items (0=compact, 1+=spaced)
+	Debug           bool          `yaml:"debug"`         // Enable debug logging to /tmp/tabby-debug.log
+	TouchMode       bool          `yaml:"touch_mode"`    // Larger tap targets for mobile/touch
+	LineHeight      int           `yaml:"line_height"`   // Extra blank lines between items (0=compact, 1+=spaced)
+	ActionZone      string        `yaml:"action_zone"`     // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
+	ActionPriority  int           `yaml:"action_priority"` // Priority within zone (default: 90)
 	Colors          SidebarColors `yaml:"colors"`
+	TouchButtons    TouchButtons  `yaml:"touch_buttons"` // Touch mode button styling
+}
+
+// TouchButtons configures colors for touch mode buttons
+type TouchButtons struct {
+	NewTabBg       string `yaml:"new_tab_bg"`       // New Tab button background (default: #27ae60)
+	NewTabFg       string `yaml:"new_tab_fg"`       // New Tab button text (default: #ffffff)
+	NewTabBorder   string `yaml:"new_tab_border"`   // New Tab button border (default: same as fg)
+	NewGroupBg     string `yaml:"new_group_bg"`     // New Group button background (default: #9b59b6)
+	NewGroupFg     string `yaml:"new_group_fg"`     // New Group button text (default: #ffffff)
+	NewGroupBorder string `yaml:"new_group_border"` // New Group button border (default: same as fg)
+	CloseBg        string `yaml:"close_bg"`         // Close button background (default: #e74c3c)
+	CloseFg        string `yaml:"close_fg"`         // Close button text (default: #ffffff)
+	CloseBorder    string `yaml:"close_border"`     // Close button border (default: same as fg)
+	ActiveBorder   string `yaml:"active_border"`    // Active tab border color (default: from theme.active_indicator_bg)
+	InactiveBorder string `yaml:"inactive_border"`  // Inactive tab border color (default: same as text)
 }
 
 type SidebarColors struct {
+	Bg                  string `yaml:"bg"`                   // Sidebar background color (default: #1a1a2e)
 	HeaderFg            string `yaml:"header_fg"`            // Group header text (default: #000000)
 	ActiveFg            string `yaml:"active_fg"`            // Active tab text (default: #ffffff)
 	InactiveFg          string `yaml:"inactive_fg"`          // Inactive tab text (default: #cccccc)

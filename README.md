@@ -126,6 +126,21 @@ set -g @tmux_tabs_test 1  # Currently gated - required for activation
 
 Note: Horizontal tabs have limited mouse support due to tmux status bar limitations.
 
+### Sidebar Position and Mode
+
+The sidebar can be placed on either side of the window and can span the full height or attach to a single pane.
+
+**Set via tmux options:**
+```bash
+# Position: left (default) or right
+tmux set-option -g @tabby_sidebar_position right
+
+# Mode: full (default, spans full window) or partial (attaches to one pane)
+tmux set-option -g @tabby_sidebar_mode partial
+```
+
+Toggle the sidebar off and on (`prefix + Tab` twice) after changing these options.
+
 ### Sidebar Collapse
 
 The sidebar can be collapsed to maximize screen space:
@@ -243,6 +258,8 @@ overflow:
 
 # Vertical sidebar settings
 sidebar:
+  position: left      # "left" or "right"
+  mode: full          # "full" (full window height) or "partial" (attach to pane)
   new_tab_button: true
   new_group_button: true
   show_empty_groups: true

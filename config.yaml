@@ -55,13 +55,14 @@ bindings:
   prev_tab: "prefix + p"
 
 sidebar:
+  pane_headers: true    # Enable clickable overlay pane headers (replaces native border headers)
   new_tab_button: true
   new_group_button: true
   show_empty_groups: true
   close_button: false
   sort_by: "group"  # "group" or "index"
   debug: true  # Enable debug logging to /tmp/tabby-debug.log
-  touch_mode: false  # Larger tap targets for mobile/touch access
+  touch_mode: false  # Auto-detects small screens (width < 40) or set TABBY_TOUCH=1
   line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
   colors:
     disclosure_fg: "#e8e8e8"        # Disclosure icon color (off white)
@@ -76,6 +77,18 @@ sidebar:
     tree_connector: "─"             # Horizontal connector
     tree_connector_panes: "┬"       # Connector when has panes
     tree_continue: "│"              # Vertical continuation
+  touch_buttons:
+    # new_tab_bg: "#27ae60"         # New Tab button background (green)
+    # new_tab_fg: "#ffffff"         # New Tab button text
+    # new_tab_border: ""            # New Tab button border (default: same as fg)
+    # new_group_bg: "#9b59b6"       # New Group button background (purple)
+    # new_group_fg: "#ffffff"       # New Group button text
+    # new_group_border: ""          # New Group button border
+    # close_bg: "#e74c3c"           # Close button background (red)
+    # close_fg: "#ffffff"           # Close button text
+    # close_border: ""              # Close button border
+    # active_border: ""             # Active tab border (default: text color)
+    # inactive_border: ""           # Inactive tab border (default: theme accent)
 
 pane_header:
   active_fg: "#ffffff"
@@ -84,6 +97,7 @@ pane_header:
   inactive_bg: "#333333"
   command_fg: "#aaaaaa"
   border_from_tab: true  # Use the tab's color for active pane border
+  auto_border: false     # Auto-set tmux pane-border colors from window's group/custom color
   # Border line style: single, double, heavy, simple, number
   border_lines: heavy
   # Border style for inactive panes (fg color)
@@ -98,6 +112,20 @@ prompt:
 # Terminal app for notifications deep-linking (used by focus_pane.sh)
 # Options: Ghostty, iTerm, Terminal, Alacritty, kitty, WezTerm
 terminal_app: Ghostty
+
+# Busy detection - controls which pane commands trigger the busy indicator.
+# By default, any foreground process that isn't a shell/editor is "busy".
+# AI tools get special treatment: busy when actively outputting, input (?) when idle.
+busy_detection:
+  ai_tools:
+    - opencode
+    - gemini
+    - codex
+    - aider
+    - cursor
+    - copilot
+  idle_timeout: 10   # Seconds of no output before AI tool shows "?" (input needed)
+  # extra_idle: []   # Additional commands to suppress busy (e.g., "make")
 
 indicators:
   activity:
@@ -131,7 +159,7 @@ widgets:
     format: "15:04:05"     # Go time format (with seconds)
     show_date: true
     date_format: "Mon Jan 2"
-    fg: "#000000"
+    #fg: "#ffffff"
     # bg: "#1a1a1a"        # Optional background
     position: bottom       # "top" or "bottom"
     pin: true              # Pin to bottom (stays visible when scrolling)
@@ -167,7 +195,8 @@ widgets:
     name: "Whiskers"
     style: "emoji"         # emoji, nerd, ascii
     rows: 2                # 2 rows for play area (Y=0, Y=1, Y=2)
-    thoughts: false        # Disable LLM thoughts for now
+    thoughts: true         # Enable LLM thoughts
+    thought_interval: 60   # Seconds between thoughts (60s = ~1 API call per 10 min)
     thought_speed: 3       # Frames per scroll step (1=fast, 5=slow)
     position: bottom
     pin: true
