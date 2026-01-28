@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Handler for window selection - signal sidebar and update border color
+# Handler for window selection - signal daemon and update border color
 
-# Signal sidebar to refresh
-PID_FILE="/tmp/tmux-tabs-sidebar-$(tmux display-message -p '#{session_id}').pid"
-[ -f "$PID_FILE" ] && kill -USR1 "$(cat "$PID_FILE")" 2>/dev/null || true
+# Clear AI tool input/bell indicators when user switches to a window
+# (user is now looking at it, so the notification is acknowledged)
+tmux set-option -w @tabby_input "" 2>/dev/null || true
+tmux set-option -w @tabby_bell "" 2>/dev/null || true
+
+# Signal daemon to refresh immediately
+DAEMON_PID_FILE="/tmp/tabby-daemon-$(tmux display-message -p '#{session_id}').pid"
+[ -f "$DAEMON_PID_FILE" ] && kill -USR1 "$(cat "$DAEMON_PID_FILE")" 2>/dev/null || true
 
 # Update pane border color if border_from_tab is enabled
 BORDER_FROM_TAB=$(tmux show-option -gqv @tabby_border_from_tab)

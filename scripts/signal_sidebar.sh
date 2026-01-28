@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# Signal sidebar to refresh window list
+# Signal daemon to refresh window list (instant re-render + spawn new renderers)
 SESSION_ID=$(tmux display-message -p '#{session_id}')
-PID_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.pid"
+PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
 
 if [ -f "$PID_FILE" ]; then
-    SIDEBAR_PID=$(cat "$PID_FILE")
-    if [ -n "$SIDEBAR_PID" ] && kill -0 "$SIDEBAR_PID" 2>/dev/null; then
-        # Send SIGUSR1 to trigger refresh
-        kill -USR1 "$SIDEBAR_PID" 2>/dev/null || true
-    fi
+    kill -USR1 "$(cat "$PID_FILE")" 2>/dev/null || true
 fi

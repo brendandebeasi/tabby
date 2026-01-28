@@ -13,6 +13,13 @@ DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
 # Get saved sidebar width or default
 SIDEBAR_WIDTH=$(tmux show-option -gqv @tabby_sidebar_width)
 if [ -z "$SIDEBAR_WIDTH" ]; then SIDEBAR_WIDTH=25; fi
+
+# Get sidebar position and mode
+SIDEBAR_POSITION=$(tmux show-option -gqv @tabby_sidebar_position)
+if [ -z "$SIDEBAR_POSITION" ]; then SIDEBAR_POSITION="left"; fi
+
+SIDEBAR_MODE=$(tmux show-option -gqv @tabby_sidebar_mode)
+if [ -z "$SIDEBAR_MODE" ]; then SIDEBAR_MODE="full"; fi
 TABBAR_HEIGHT=2
 
 DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
@@ -30,7 +37,7 @@ if [ "$MODE" = "enabled" ]; then
     HAS_SIDEBAR=$(tmux list-panes -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -qE "(sidebar-renderer|sidebar)" && echo "yes" || echo "no")
 
     if [ "$HAS_SIDEBAR" = "no" ]; then
-        # Verify daemon is running before spawning renderer
+        # Verify daemon is running - it handles spawning renderers
         DAEMON_RUNNING=false
         if [ -S "$DAEMON_SOCK" ]; then
             if [ -f "$DAEMON_PID_FILE" ]; then
@@ -41,7 +48,7 @@ if [ "$MODE" = "enabled" ]; then
             fi
         fi
 
-        # Start daemon if needed
+        # Start daemon if needed - it will spawn renderers via its ticker loop
         if [ "$DAEMON_RUNNING" = "false" ]; then
             rm -f "$DAEMON_SOCK" "$DAEMON_PID_FILE"
             if [ "${TABBY_DEBUG:-}" = "1" ]; then
@@ -56,26 +63,9 @@ if [ "$MODE" = "enabled" ]; then
             done
         fi
 
-        # No sidebar in current window - add renderer pane
-        WINDOW_ID=$(tmux display-message -p '#{window_id}')
-        MAIN_PANE=$(tmux list-panes -F "#{pane_id}" 2>/dev/null | tail -1)
-        if [ -n "$MAIN_PANE" ]; then
-            DEBUG_FLAG=""
-            if [ "${TABBY_DEBUG:-}" = "1" ]; then
-                DEBUG_FLAG="-debug"
-            fi
-            tmux split-window -t "$MAIN_PANE" -h -b -l "$SIDEBAR_WIDTH" \
-                "exec '$RENDERER_BIN' -session '$SESSION_ID' -window '$WINDOW_ID' $DEBUG_FLAG" || true
-
-            # Hide pane border title for sidebar and prevent dimming
-            SIDEBAR_PANE=$(tmux list-panes -F "#{pane_id}:#{pane_current_command}" 2>/dev/null | grep -E "sidebar" | cut -d: -f1 || echo "")
-            if [ -n "$SIDEBAR_PANE" ]; then
-                tmux set-option -p -t "$SIDEBAR_PANE" pane-border-status off 2>/dev/null || true
-                tmux select-pane -t "$SIDEBAR_PANE" -P 'bg=default' 2>/dev/null || true
-            fi
-
-            # Focus the main content pane (right side)
-            tmux select-pane -t "{right}" 2>/dev/null || true
+        # Signal daemon for immediate renderer spawning (don't wait for 2s ticker)
+        if [ -f "$DAEMON_PID_FILE" ]; then
+            kill -USR1 "$(cat "$DAEMON_PID_FILE")" 2>/dev/null || true
         fi
     fi
 elif [ "$MODE" = "horizontal" ]; then

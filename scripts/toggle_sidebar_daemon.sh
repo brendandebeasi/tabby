@@ -4,7 +4,7 @@
 
 set -eu
 
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
+CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && cd .. >/dev/null 2>&1 && pwd)"
 SESSION_ID=$(tmux display-message -p '#{session_id}')
 SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
 DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
@@ -13,6 +13,13 @@ DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
 # Get saved sidebar width or default
 SIDEBAR_WIDTH=$(tmux show-option -gqv @tabby_sidebar_width)
 if [ -z "$SIDEBAR_WIDTH" ]; then SIDEBAR_WIDTH=25; fi
+
+# Get sidebar position and mode
+SIDEBAR_POSITION=$(tmux show-option -gqv @tabby_sidebar_position)
+if [ -z "$SIDEBAR_POSITION" ]; then SIDEBAR_POSITION="left"; fi
+
+SIDEBAR_MODE=$(tmux show-option -gqv @tabby_sidebar_mode)
+if [ -z "$SIDEBAR_MODE" ]; then SIDEBAR_MODE="full"; fi
 
 DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
 RENDERER_BIN="$CURRENT_DIR/bin/sidebar-renderer"
@@ -33,6 +40,10 @@ fi
 if [ "$CURRENT_STATE" = "enabled" ]; then
     # === DISABLE SIDEBARS ===
 
+    # CRITICAL: Reset terminal mouse modes BEFORE killing anything
+    # This must happen while we still have terminal access
+    printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l' 2>/dev/null || true
+
     # Kill daemon if running
     if [ -f "$DAEMON_PID_FILE" ]; then
         DAEMON_PID=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
@@ -43,12 +54,35 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
     fi
     rm -f "$DAEMON_SOCK"
 
-    # Close all sidebar and renderer panes in session
+    # Close all sidebar and renderer panes in session (gracefully)
+    RENDERER_PIDS=""
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        pane_id=$(echo "$line" | cut -d'|' -f2)
+        pane_pid=$(echo "$line" | cut -d'|' -f3)
+        # Send SIGTERM to renderer process first (allows graceful cleanup)
+        if [ -n "$pane_pid" ]; then
+            kill -TERM "$pane_pid" 2>/dev/null || true
+            RENDERER_PIDS="$RENDERER_PIDS $pane_pid"
+        fi
+    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}|#{pane_pid}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|pane-header)" || true)
+
+    # Wait briefly for renderers to restore terminal modes
+    sleep 0.2
+
+    # Now kill the panes
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         pane_id=$(echo "$line" | cut -d'|' -f2)
         tmux kill-pane -t "$pane_id" 2>/dev/null || true
-    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabby-daemon)" || true)
+    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabby-daemon|pane-header)" || true)
+
+    # Force reset tmux's mouse state by toggling it off/on
+    # This clears any corrupted internal mouse tracking state
+    tmux set -g mouse off 2>/dev/null || true
+    sleep 0.1
+    tmux set -g mouse on 2>/dev/null || true
+    tmux refresh-client -S 2>/dev/null || true
 
     echo "disabled" > "$SIDEBAR_STATE_FILE"
     tmux set-option @tmux-tabs-sidebar "disabled"
@@ -58,107 +92,83 @@ else
     echo "enabled" > "$SIDEBAR_STATE_FILE"
     tmux set-option @tmux-tabs-sidebar "enabled"
 
-    # Close any existing sidebar/renderer panes first
+    # CRITICAL: Reset terminal mouse modes BEFORE killing old renderers
+    printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l' 2>/dev/null || true
+
+    # Close any existing sidebar/renderer panes first (gracefully with SIGTERM)
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        pane_id=$(echo "$line" | cut -d'|' -f2)
+        pane_pid=$(echo "$line" | cut -d'|' -f3)
+        # Send SIGTERM first to allow cleanup
+        if [ -n "$pane_pid" ]; then
+            kill -TERM "$pane_pid" 2>/dev/null || true
+        fi
+    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}|#{pane_pid}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabbar|pane-header)" || true)
+
+    # Wait for cleanup
+    sleep 0.2
+
+    # Now kill the panes
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         pane_id=$(echo "$line" | cut -d'|' -f2)
         tmux kill-pane -t "$pane_id" 2>/dev/null || true
-    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabbar)" || true)
+    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabbar|pane-header)" || true)
 
     tmux set-option -g status off
 
     # Get current window before making changes
     CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
 
-    # Start daemon if not already running
-    if [ ! -S "$DAEMON_SOCK" ]; then
-        # Clean up any stale files
-        rm -f "$DAEMON_SOCK"
-        rm -f "$DAEMON_PID_FILE"
-
-        # Start daemon in background (it manages its own PID file)
-        # Pass -debug flag if TABBY_DEBUG=1
-        if [ "${TABBY_DEBUG:-}" = "1" ]; then
-            "$DAEMON_BIN" -session "$SESSION_ID" -debug &
-        else
-            "$DAEMON_BIN" -session "$SESSION_ID" &
-        fi
-
-        # Wait for socket to be ready
-        SOCKET_READY=false
-        for i in $(seq 1 20); do
-            if [ -S "$DAEMON_SOCK" ]; then
-                SOCKET_READY=true
-                break
-            fi
-            sleep 0.1
-        done
-
-        # If socket didn't appear, daemon failed to start
-        if [ "$SOCKET_READY" = "false" ]; then
-            echo "Error: Failed to start daemon (socket not created)" >&2
-            exit 1
-        fi
+    if [ "${TABBY_DEBUG:-}" = "1" ]; then
+        "$DAEMON_BIN" -session "$SESSION_ID" -debug &
+    else
+        "$DAEMON_BIN" -session "$SESSION_ID" &
     fi
+
+    SOCKET_READY=false
+    for i in $(seq 1 20); do
+        if [ -S "$DAEMON_SOCK" ]; then
+            SOCKET_READY=true
+            break
+        fi
+        sleep 0.1
+    done
+
+    if [ "$SOCKET_READY" = "false" ]; then
+        echo "Error: Failed to start daemon (socket not created)" >&2
+        exit 1
+    fi
+
+    # The daemon handles spawning sidebar renderers and pane headers
+    # via its windowCheckTicker loop. Just wait briefly for it to spawn them.
+    sleep 1
 
     # Get all windows
     WINDOWS=$(tmux list-windows -F "#{window_id}")
 
-    # Open renderer in all windows that don't have one
-    for window_id in $WINDOWS; do
-        [ -z "$window_id" ] && continue
-
-        # Check if window already has sidebar or renderer
-        if tmux list-panes -t "$window_id" -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -qE "(sidebar|sidebar-renderer)"; then
-            continue
-        fi
-
-        FIRST_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}" 2>/dev/null | head -1)
-        if [ -z "$FIRST_PANE" ]; then
-            continue
-        fi
-
-        # Split window with renderer, passing the window ID for unique clientID
-        # Add -debug flag if TABBY_DEBUG is set
-        DEBUG_FLAG=""
-        if [ "${TABBY_DEBUG:-}" = "1" ]; then
-            DEBUG_FLAG="-debug"
-        fi
-        tmux split-window -t "$FIRST_PANE" -h -b -f -l "$SIDEBAR_WIDTH" \
-            "exec '$RENDERER_BIN' -session '$SESSION_ID' -window '$window_id' $DEBUG_FLAG" || true
-
-        # Hide pane border title for sidebar and prevent dimming
-        SIDEBAR_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}:#{pane_current_command}" 2>/dev/null | grep -E "sidebar" | cut -d: -f1 || echo "")
-        if [ -n "$SIDEBAR_PANE" ]; then
-            tmux set-option -p -t "$SIDEBAR_PANE" pane-border-status off 2>/dev/null || true
-            # Prevent sidebar from dimming when inactive
-            tmux select-pane -t "$SIDEBAR_PANE" -P 'bg=default' 2>/dev/null || true
-        fi
-    done
-
-    # Enforce uniform sidebar width and full window height
-    for window_id in $WINDOWS; do
-        SIDEBAR_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}:#{pane_current_command}" 2>/dev/null | grep -E "sidebar" | cut -d: -f1 || echo "")
-        if [ -n "$SIDEBAR_PANE" ]; then
-            MAIN_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}:#{pane_current_command}" 2>/dev/null | grep -vE "sidebar" | head -1 | cut -d: -f1 || echo "")
-            if [ -n "$MAIN_PANE" ]; then
-                WINDOW_HEIGHT=$(tmux display-message -t "$MAIN_PANE" -p "#{pane_height}")
-                tmux resize-pane -t "$SIDEBAR_PANE" -x "$SIDEBAR_WIDTH" -y "$WINDOW_HEIGHT" 2>/dev/null || true
-            fi
-        fi
-    done
-
     # Return to original window and focus main pane
     tmux select-window -t "$CURRENT_WINDOW" 2>/dev/null || true
-    tmux select-pane -t "{right}" 2>/dev/null || true
+    if [ "$SIDEBAR_POSITION" = "left" ]; then
+        tmux select-pane -t "{right}" 2>/dev/null || true
+    else
+        tmux select-pane -t "{left}" 2>/dev/null || true
+    fi
 
     # Clear activity flags that may have been set during sidebar setup
-    sleep 0.2
+    sleep 0.1
     for window_id in $WINDOWS; do
         tmux set-window-option -t "$window_id" -q monitor-activity off 2>/dev/null || true
         tmux set-window-option -t "$window_id" -q monitor-activity on 2>/dev/null || true
     done
 fi
 
-# Force refresh
+# Force reset tmux's mouse state by toggling it off/on
+# This clears any corrupted internal mouse tracking state from killed renderers
+tmux set -g mouse off 2>/dev/null || true
+sleep 0.1
+tmux set -g mouse on 2>/dev/null || true
+
+# Force refresh all clients
 tmux refresh-client -S 2>/dev/null || true

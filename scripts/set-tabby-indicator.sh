@@ -52,16 +52,28 @@ if [ -z "$CLAUDE_WIN" ]; then
     done
 fi
 
-# Final fallback: use active window
+# Final fallback: use active window ONLY for busy=1 (UserPromptSubmit).
+# For all other operations (busy=0, bell, input), the user may have switched
+# windows since the hook was registered, so targeting the active window would
+# set indicators on the WRONG window.
+USED_FALLBACK=""
 if [ -z "$CLAUDE_WIN" ]; then
-    CLAUDE_WIN=$(tmux display-message -p '#{window_index}' 2>/dev/null)
+    if [ "$INDICATOR" = "busy" ] && [ "$VALUE" = "1" ]; then
+        CLAUDE_WIN=$(tmux display-message -p '#{window_index}' 2>/dev/null)
+        USED_FALLBACK="active-window"
+    else
+        # Cannot determine correct window — skip rather than target wrong one
+        echo "=== $(date) ===" >> /tmp/tabby-indicator-debug.log
+        echo "INDICATOR=$INDICATOR VALUE=$VALUE" >> /tmp/tabby-indicator-debug.log
+        echo "TMUX_PANE=$TMUX_PANE -> CLAUDE_WIN=(none, skipping)" >> /tmp/tabby-indicator-debug.log
+        exit 0
+    fi
 fi
 
 # Debug logging
 echo "=== $(date) ===" >> /tmp/tabby-indicator-debug.log
 echo "INDICATOR=$INDICATOR VALUE=$VALUE" >> /tmp/tabby-indicator-debug.log
-echo "TMUX_PANE=$TMUX_PANE -> CLAUDE_WIN=$CLAUDE_WIN" >> /tmp/tabby-indicator-debug.log
-echo "Active window: $(tmux display-message -p '#{window_index}' 2>/dev/null)" >> /tmp/tabby-indicator-debug.log
+echo "TMUX_PANE=$TMUX_PANE -> CLAUDE_WIN=$CLAUDE_WIN${USED_FALLBACK:+ (fallback: $USED_FALLBACK)}" >> /tmp/tabby-indicator-debug.log
 
 case "$INDICATOR" in
     busy)
@@ -130,7 +142,9 @@ case "$INDICATOR" in
         ;;
 esac
 
-# Signal all sidebars to refresh
-for pid in $(tmux list-panes -a -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
-    kill -USR1 "$pid" 2>/dev/null
-done
+# Signal the daemon to refresh immediately (USR1 triggers instant re-render)
+SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null)
+DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
+if [ -f "$DAEMON_PID_FILE" ]; then
+    kill -USR1 "$(cat "$DAEMON_PID_FILE")" 2>/dev/null
+fi

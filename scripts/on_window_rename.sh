@@ -4,8 +4,8 @@
 # Get the window that was just renamed
 WINDOW_ID=$(tmux display-message -p '#{window_id}')
 
-# Lock the window name (disable automatic-rename for this window)
-tmux set-window-option -t "$WINDOW_ID" automatic-rename off 2>/dev/null || true
+# Lock the window name so tabby's syncWindowNames won't overwrite it
+tmux set-window-option -t "$WINDOW_ID" @tabby_name_locked 1 2>/dev/null || true
 
 # Signal sidebar to refresh
 SESSION_ID=$(tmux display-message -p '#{session_id}')

@@ -7,6 +7,13 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 SESSION_ID=$(tmux display-message -p '#{session_id}')
 SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
 
+# Get sidebar position and mode
+SIDEBAR_POSITION=$(tmux show-option -gqv @tabby_sidebar_position)
+if [ -z "$SIDEBAR_POSITION" ]; then SIDEBAR_POSITION="left"; fi
+
+SIDEBAR_MODE=$(tmux show-option -gqv @tabby_sidebar_mode)
+if [ -z "$SIDEBAR_MODE" ]; then SIDEBAR_MODE="full"; fi
+
 # Get current window to return to (before any pane changes)
 CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
 
@@ -34,12 +41,24 @@ while IFS= read -r window_id; do
         # Get the first pane in the window to split from
         FIRST_PANE=$(tmux list-panes -t "$window_id" -F "#{pane_id}" 2>/dev/null | head -1)
         if [ -n "$FIRST_PANE" ]; then
-            tmux split-window -t "$FIRST_PANE" -h -b -l 25 "exec \"$CURRENT_DIR/bin/sidebar\"" || true
+            # Build split flags based on position and mode
+            SPLIT_FLAGS="-h"
+            if [ "$SIDEBAR_POSITION" = "left" ]; then
+                SPLIT_FLAGS="$SPLIT_FLAGS -b"
+            fi
+            if [ "$SIDEBAR_MODE" = "full" ]; then
+                SPLIT_FLAGS="$SPLIT_FLAGS -f"
+            fi
+            tmux split-window -t "$FIRST_PANE" $SPLIT_FLAGS -l 25 "exec \"$CURRENT_DIR/bin/sidebar\"" || true
         fi
     fi
 done < <(tmux list-windows -F "#{window_id}")
 
 # Return to original window and focus main pane
 tmux select-window -t "$CURRENT_WINDOW" 2>/dev/null || true
-tmux select-pane -t "{right}" 2>/dev/null || true
+if [ "$SIDEBAR_POSITION" = "left" ]; then
+    tmux select-pane -t "{right}" 2>/dev/null || true
+else
+    tmux select-pane -t "{left}" 2>/dev/null || true
+fi
 
