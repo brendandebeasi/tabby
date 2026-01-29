@@ -773,10 +773,6 @@ func main() {
 	debugLog.Printf("Starting daemon for session %s", *sessionID)
 	crashLog.Printf("Daemon started for session %s", *sessionID)
 
-	// Reset terminal mouse modes on startup to clean up any stale state from crashed renderers
-	// This sends disable sequences to all content panes (non-sidebar/header panes)
-	resetTerminalModes(*sessionID)
-
 	// Create coordinator for centralized rendering
 	coordinator := NewCoordinator(*sessionID)
 

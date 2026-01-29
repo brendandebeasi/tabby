@@ -63,19 +63,19 @@ func recoverAndLog(context string) {
 
 // Long-press detection thresholds
 const (
-	longPressThreshold  = 500 * time.Millisecond
-	doubleTapThreshold  = 300 * time.Millisecond
-	doubleTapDistance   = 3 // max pixels between taps
-	movementThreshold   = 5 // pixels
+	longPressThreshold = 500 * time.Millisecond
+	doubleTapThreshold = 300 * time.Millisecond
+	doubleTapDistance  = 3 // max pixels between taps
+	movementThreshold  = 5 // pixels
 )
 
 // rendererModel is a minimal Bubbletea model for the renderer
 type rendererModel struct {
-	conn       net.Conn
-	clientID   string
-	width      int
-	height     int
-	connected  bool
+	conn      net.Conn
+	clientID  string
+	width     int
+	height    int
+	connected bool
 
 	// Render state from daemon
 	content        string
@@ -1208,29 +1208,6 @@ func main() {
 	// Force ANSI256 color mode
 	lipgloss.SetColorProfile(termenv.ANSI256)
 
-	// Reset terminal state before starting to clean up any stale modes from previous renderers
-	// This prevents mouse/keyboard issues when sidebar is restarted
-	resetTerminal := func() {
-		// Disable ALL mouse tracking modes comprehensively
-		// 1000=basic mouse tracking, 1002=button motion, 1003=any motion (cell motion)
-		// 1004=focus events, 1005=UTF-8 encoding, 1006=SGR encoding, 1015=URXVT encoding
-		fmt.Print("\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?1015l")
-		// Exit alternate screen buffer if active
-		fmt.Print("\033[?1049l")
-		// Disable bracketed paste mode
-		fmt.Print("\033[?2004l")
-		// Reset to normal mode and show cursor
-		fmt.Print("\033[0m\033[?25h")
-		// Flush output
-		os.Stdout.Sync()
-	}
-
-	// Clean start
-	resetTerminal()
-
-	// Ensure cleanup on exit
-	defer resetTerminal()
-
 	// Get our own pane ID for focus management (context menu keyboard input)
 	sidebarPane := os.Getenv("TMUX_PANE")
 	if sidebarPane == "" {
@@ -1248,30 +1225,21 @@ func main() {
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	globalProgram = p
 
-	// Handle signals - reset terminal immediately on signal to prevent stuck mouse modes
+	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		defer recoverAndLog("signal-handler")
 		<-sigCh
-		// Reset terminal FIRST before trying to quit tea program
-		// This ensures mouse mode is disabled even if we're killed quickly
-		resetTerminal()
 		if p != nil {
 			p.Send(tea.Quit())
 		}
-		// Give tea a moment to quit gracefully, then force reset again
-		time.Sleep(100 * time.Millisecond)
-		resetTerminal()
 	}()
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		resetTerminal() // Ensure cleanup even on error
 		os.Exit(1)
 	}
-	// Final cleanup after normal exit
-	resetTerminal()
 }
 
 // Helper to convert string to int

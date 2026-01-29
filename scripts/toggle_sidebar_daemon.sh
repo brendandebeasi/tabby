@@ -40,10 +40,6 @@ fi
 if [ "$CURRENT_STATE" = "enabled" ]; then
     # === DISABLE SIDEBARS ===
 
-    # CRITICAL: Reset terminal mouse modes BEFORE killing anything
-    # This must happen while we still have terminal access
-    printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l' 2>/dev/null || true
-
     # Kill daemon if running
     if [ -f "$DAEMON_PID_FILE" ]; then
         DAEMON_PID=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
@@ -67,8 +63,8 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
         fi
     done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}|#{pane_pid}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|pane-header)" || true)
 
-    # Wait briefly for renderers to restore terminal modes
-    sleep 0.2
+    # Wait for renderers to cleanup gracefully
+    sleep 0.5
 
     # Now kill the panes
     while IFS= read -r line; do
@@ -92,9 +88,6 @@ else
     echo "enabled" > "$SIDEBAR_STATE_FILE"
     tmux set-option @tmux-tabs-sidebar "enabled"
 
-    # CRITICAL: Reset terminal mouse modes BEFORE killing old renderers
-    printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l' 2>/dev/null || true
-
     # Close any existing sidebar/renderer panes first (gracefully with SIGTERM)
     while IFS= read -r line; do
         [ -z "$line" ] && continue
@@ -107,7 +100,7 @@ else
     done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}|#{pane_pid}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabbar|pane-header)" || true)
 
     # Wait for cleanup
-    sleep 0.2
+    sleep 0.5
 
     # Now kill the panes
     while IFS= read -r line; do
