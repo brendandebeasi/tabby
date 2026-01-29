@@ -73,3 +73,6 @@ ctrl+b Tab  # ON
 ```
 
 **Next Action**: User performs manual QA and marks remaining checkboxes.
+
+### Final Code Improvement
+Updated `cmd/tabby-daemon/main.go` to also refresh all clients in its recovery function. This ensures that if you use the manual recovery (via daemon), it fixes the focus issue just like the toggle script does.

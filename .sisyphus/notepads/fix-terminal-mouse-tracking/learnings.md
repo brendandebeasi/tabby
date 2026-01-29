@@ -108,3 +108,32 @@ The toggle process may need to:
 - Focus changes from pane 0.0 to 0.1 after toggle
 - Crash recovery (kill -9) works fine, suggesting issue is in toggle script
 - Both Ghostty and kitty affected equally (not terminal-specific)
+
+## [2026-01-29] Focus Fix Implemented
+
+### Solution Applied
+Replaced single `tmux refresh-client -S` with a loop that refreshes all attached clients:
+```bash
+for client_tty in $(tmux list-clients -F "#{client_tty}" 2>/dev/null); do
+    tmux refresh-client -t "$client_tty" -S 2>/dev/null || true
+done
+```
+
+### Why This Works
+- The default `refresh-client` only refreshes the current client
+- The terminal with focus during toggle was left in a bad state
+- Refreshing each client individually ensures all terminals get reset
+- The `-S` flag forces a full refresh which resets terminal state
+
+### Complete Fix Summary
+1. **Garbled text**: Fixed by removing manual escape sequence writes
+2. **Focus input issue**: Fixed by refreshing all clients individually
+
+### Lessons Learned
+- Terminal state issues can be client-specific in tmux
+- Always consider multi-client scenarios when dealing with terminal state
+- Individual client refresh is more thorough than global refresh
+- Testing with multiple clients is essential for tmux plugins
+
+### [2026-01-29] Daemon Consistency Fix
+Applied the same "refresh all clients" logic to the `resetTerminalModes` function in `cmd/tabby-daemon/main.go`. This ensures that the fallback recovery mechanism works correctly for multi-client setups, mirroring the fix in the toggle script.
