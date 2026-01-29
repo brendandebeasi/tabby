@@ -163,5 +163,7 @@ tmux set -g mouse off 2>/dev/null || true
 sleep 0.1
 tmux set -g mouse on 2>/dev/null || true
 
-# Force refresh all clients
-tmux refresh-client -S 2>/dev/null || true
+# Force refresh all clients individually to fix focus issues
+for client_tty in $(tmux list-clients -F "#{client_tty}" 2>/dev/null); do
+    tmux refresh-client -t "$client_tty" -S 2>/dev/null || true
+done

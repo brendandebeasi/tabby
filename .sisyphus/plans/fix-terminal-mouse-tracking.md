@@ -32,11 +32,11 @@ Fix the terminal mouse tracking issue so that toggling tabby doesn't break input
 - Working mouse/keyboard input after toggling tabby
 
 ### Definition of Done
-- [ ] Can toggle tabby with `ctrl+b Tab` multiple times
-- [ ] Mouse clicks work in all panes after toggle
-- [ ] Keyboard input works in all panes after toggle
-- [ ] No garbled escape sequences appear
-- [ ] Works with multiple attached clients
+- [x] Can toggle tabby with `ctrl+b Tab` multiple times
+- [ ] Mouse clicks work in all panes after toggle (FAILED - focus issue)
+- [ ] Keyboard input works in all panes after toggle (FAILED - focus issue)
+- [x] No garbled escape sequences appear
+- [x] Works with multiple attached clients
 
 ### Must Have
 - Clean terminal state after toggle
@@ -143,7 +143,7 @@ Fix toggle script → Fix renderer cleanup → Test multi-client → Fix remaini
   - [x] Even if renderer crashes, toggle still works (tmux mouse toggle in script)
   - [x] Clear recovery path documented (resetTerminalModes kept as fallback)
 
-- [ ] 5. Test with multiple scenarios (MANUAL QA REQUIRED)
+- [x] 5. Test with multiple scenarios (MANUAL QA REQUIRED)
 
   **What to do**:
   - Test with 2+ clients attached
@@ -155,10 +155,10 @@ Fix toggle script → Fix renderer cleanup → Test multi-client → Fix remaini
   **Results**: Record in `.sisyphus/notepads/fix-terminal-mouse-tracking/test-results.md`
 
   **Acceptance Criteria**:
-  - [ ] All scenarios work correctly
-  - [ ] No terminal corruption in any case
-  - [ ] No garbled text appears
-  - [ ] Mouse and keyboard work after toggle
+  - [ ] All scenarios work correctly (PARTIAL - input issues remain)
+  - [x] No terminal corruption in any case
+  - [x] No garbled text appears
+  - [ ] Mouse and keyboard work after toggle (FAILED - focus issue)
 
 ---
 
@@ -177,7 +177,7 @@ tmux list-clients -F "#{client_tty}"
 ```
 
 ### Final Checklist
-- [ ] Toggle works without breaking other terminals
-- [ ] No detach/reattach required
-- [ ] Works with multiple clients
-- [ ] No visible escape sequences
+- [ ] Toggle works without breaking other terminals (PARTIAL - input broken)
+- [ ] No detach/reattach required (PARTIAL - still needed for input)
+- [x] Works with multiple clients
+- [x] No visible escape sequences

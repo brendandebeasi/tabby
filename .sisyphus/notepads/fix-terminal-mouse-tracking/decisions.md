@@ -33,3 +33,28 @@
 2. If stuck: Toggle tabby off/on (script toggles tmux mouse)
 3. If still stuck: Restart daemon (can call resetTerminalModes if needed)
 4. Last resort: Detach/reattach tmux session
+
+## [2026-01-29] Focus Issue Analysis
+
+### Discovery: Incomplete Client Refresh
+The toggle script only calls `tmux refresh-client -S` once at the end, which only refreshes the current client. This doesn't help other attached clients, especially the one that had focus during toggle.
+
+### Solution: Refresh ALL Clients Individually
+We need to iterate through all attached clients and refresh each one explicitly:
+
+```bash
+for client_tty in $(tmux list-clients -F "#{client_tty}"); do
+    tmux refresh-client -t "$client_tty" -S
+done
+```
+
+### Why This Should Work
+- The focused client during toggle gets stuck in a bad state
+- BubbleTea properly cleaned up, but the terminal emulator needs a refresh
+- Individual client refresh should reset the terminal state properly
+- This is less invasive than detach/reattach
+
+### Implementation Plan
+1. Replace single `refresh-client` with loop to refresh all clients
+2. Consider adding a small delay between refreshes
+3. Test with multiple clients to verify fix

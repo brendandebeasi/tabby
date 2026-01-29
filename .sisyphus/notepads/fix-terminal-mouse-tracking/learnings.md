@@ -78,3 +78,33 @@ Manual QA testing required. See test-plan.md for detailed scenarios.
 
 **Test Plan Location**: `.sisyphus/notepads/fix-terminal-mouse-tracking/test-plan.md`
 **Results Location**: `.sisyphus/notepads/fix-terminal-mouse-tracking/test-results.md`
+
+## [2026-01-29] Manual QA Results
+
+### Partial Success
+The fix successfully eliminated garbled text, but revealed a secondary issue with input handling.
+
+### What Worked
+- ✅ No more `[?2004l` garbled text (primary issue fixed)
+- ✅ BubbleTea cleanup is working correctly
+- ✅ Multi-client state synchronization works
+- ✅ Crash recovery works properly
+
+### What Didn't Work
+- ❌ Mouse clicks don't work in sidebar after toggle
+- ❌ Keyboard input doesn't work in content panes after toggle
+- ❌ Only works in terminal that wasn't focused during toggle
+
+### Key Discovery
+**Focus state matters**: The input issue only affects the terminal that had focus during toggle. Other attached clients work fine. This suggests the problem is with how we handle the actively focused client during toggle.
+
+### New Hypothesis
+The toggle process may need to:
+1. Save focus state before killing renderers
+2. Properly refresh the focused client after toggle
+3. Explicitly restore input modes for the active terminal
+
+### Interesting Observations
+- Focus changes from pane 0.0 to 0.1 after toggle
+- Crash recovery (kill -9) works fine, suggesting issue is in toggle script
+- Both Ghostty and kitty affected equally (not terminal-specific)
