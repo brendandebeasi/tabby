@@ -68,13 +68,18 @@ type Coordinator struct {
 	// Last known width (for pet physics clamping)
 	lastWidth int
 
+	// Global width for synchronization
+	globalWidth     int
+	lastWidthSync   time.Time // Last time we synced widths (for debouncing)
+	widthSyncMu     sync.Mutex
+
 	// Per-client widths for accurate click detection
 	clientWidths   map[string]int
 	clientWidthsMu sync.RWMutex
 
 	// Sidebar collapse state
-	sidebarCollapsed      bool
-	sidebarPreviousWidth  int
+	sidebarCollapsed     bool
+	sidebarPreviousWidth int
 
 	// Touch mode runtime override ("", "1", "0")
 	touchModeOverride string
@@ -107,26 +112,26 @@ type Coordinator struct {
 
 // petState holds the current state of the pet widget
 type petState struct {
-	Pos           pos2D
-	State         string
-	Direction     int
-	Hunger        int
-	Happiness     int
-	YarnPos       pos2D
-	YarnExpiresAt time.Time // When yarn disappears
-	FoodItem      pos2D
-	PoopPositions []int
-	NeedsPoopAt   time.Time
-	LastFed       time.Time
-	LastPet       time.Time
-	LastPoop      time.Time
-	LastThought   string
-	ThoughtScroll int
-	FloatingItems []floatingItem
-	TargetPos     pos2D
-	HasTarget     bool
-	ActionPending string
-	AnimFrame     int
+	Pos               pos2D
+	State             string
+	Direction         int
+	Hunger            int
+	Happiness         int
+	YarnPos           pos2D
+	YarnExpiresAt     time.Time // When yarn disappears
+	FoodItem          pos2D
+	PoopPositions     []int
+	NeedsPoopAt       time.Time
+	LastFed           time.Time
+	LastPet           time.Time
+	LastPoop          time.Time
+	LastThought       string
+	ThoughtScroll     int
+	FloatingItems     []floatingItem
+	TargetPos         pos2D
+	HasTarget         bool
+	ActionPending     string
+	AnimFrame         int
 	TotalPets         int
 	TotalFeedings     int
 	TotalPoopsCleaned int
@@ -136,9 +141,9 @@ type petState struct {
 	DeathTime     time.Time
 	StarvingStart time.Time // When hunger hit 0 (for death countdown)
 	// Mouse state
-	MousePos       pos2D     // X: -1 means no mouse present
-	MouseDirection int       // Direction mouse is moving
-	MouseAppearsAt time.Time // When a mouse will appear next
+	MousePos          pos2D     // X: -1 means no mouse present
+	MouseDirection    int       // Direction mouse is moving
+	MouseAppearsAt    time.Time // When a mouse will appear next
 	TotalMouseCatches int
 }
 
@@ -159,19 +164,19 @@ type floatingItem struct {
 // CLICK DETECTION METHODS:
 //
 // 1. BubbleZone (used for static elements):
-//    - Wrap text with zone.Mark("zone_id", text) during rendering
-//    - Call zone.Scan() on the full output to process markers
-//    - Use zone.Get("zone_id") to retrieve bounds (StartX, EndX, StartY, EndY)
-//    - Good for: buttons, fixed-position elements
-//    - Limitation: Only ONE zone per ID is tracked (multiple zones with same ID overwrite)
+//   - Wrap text with zone.Mark("zone_id", text) during rendering
+//   - Call zone.Scan() on the full output to process markers
+//   - Use zone.Get("zone_id") to retrieve bounds (StartX, EndX, StartY, EndY)
+//   - Good for: buttons, fixed-position elements
+//   - Limitation: Only ONE zone per ID is tracked (multiple zones with same ID overwrite)
 //
 // 2. Custom Layout Tracking (used for pet widget play area):
-//    - Track line numbers during rendering (currentLine counter)
-//    - Store positions in a layout struct (petWidgetLayout)
-//    - In click handler, compare input.PinnedRelY against stored line numbers
-//    - Use input.MouseX for horizontal position within the line
-//    - Good for: complex dynamic content, multi-element interactions, precise hit testing
-//    - Requires: manual tracking during render, custom click handler
+//   - Track line numbers during rendering (currentLine counter)
+//   - Store positions in a layout struct (petWidgetLayout)
+//   - In click handler, compare input.PinnedRelY against stored line numbers
+//   - Use input.MouseX for horizontal position within the line
+//   - Good for: complex dynamic content, multi-element interactions, precise hit testing
+//   - Requires: manual tracking during render, custom click handler
 //
 // The pet widget uses BOTH methods:
 // - BubbleZone for the Feed button (zone.Mark("pet:drop_food", ...))
@@ -191,13 +196,13 @@ type petWidgetLayout struct {
 
 // Pet sprites by style
 type petSprites struct {
-	Idle, Walking, Jumping, Playing  string
-	Eating, Sleeping, Happy, Hungry  string
-	Dead                             string
-	Yarn, Food, Poop, Mouse          string
-	Thought, Heart, Life             string
-	HungerIcon, HappyIcon, SadIcon   string
-	Ground                           string
+	Idle, Walking, Jumping, Playing string
+	Eating, Sleeping, Happy, Hungry string
+	Dead                            string
+	Yarn, Food, Poop, Mouse         string
+	Thought, Heart, Life            string
+	HungerIcon, HappyIcon, SadIcon  string
+	Ground                          string
 }
 
 var petSpritesByStyle = map[string]petSprites{
@@ -249,17 +254,17 @@ func NewCoordinator(sessionID string) *Coordinator {
 	}
 
 	c := &Coordinator{
-		sessionID:       sessionID,
-		config:          cfg,
-		collapsedGroups: make(map[string]bool),
-		clientWidths:    make(map[string]int),
-		pendingMenus:    make(map[string][]menuItemDef),
+		sessionID:          sessionID,
+		config:             cfg,
+		collapsedGroups:    make(map[string]bool),
+		clientWidths:       make(map[string]int),
+		pendingMenus:       make(map[string][]menuItemDef),
 		prevPaneBusy:       make(map[string]bool),
 		prevPaneTitle:      make(map[string]string),
 		aiBellUntil:        make(map[int]int64),
 		hookPaneActive:     make(map[string]bool),
 		hookPaneBusyIdleAt: make(map[string]int64),
-		lastWidth:       25, // Default width for pet physics
+		lastWidth:          25, // Default width for pet physics
 		pet: petState{
 			Pos:       pos2D{X: 10, Y: 0},
 			State:     "idle",
@@ -298,6 +303,15 @@ func NewCoordinator(sessionID string) *Coordinator {
 
 	// Initial session refresh
 	c.RefreshSession()
+
+	// Initialize global width from tmux option
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width").Output(); err == nil {
+		if w, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && w > 0 {
+			c.globalWidth = w
+		} else {
+			c.globalWidth = 25 // Default
+		}
+	}
 
 	return c
 }
@@ -769,8 +783,8 @@ func (c *Coordinator) processAIToolStates() {
 // processTree holds pre-parsed process table data for CPU-based busy detection.
 // Call loadProcessTree() once per cycle and reuse for all windows.
 type processTree struct {
-	children map[int][]int    // ppid -> child pids
-	cpuByPID map[int]float64  // pid -> cpu%
+	children map[int][]int   // ppid -> child pids
+	cpuByPID map[int]float64 // pid -> cpu%
 }
 
 // loadProcessTree reads the system process table once. Returns nil on error.
@@ -1590,6 +1604,55 @@ func (c *Coordinator) UpdatePetState() {
 	c.savePetState()
 }
 
+// handleWidthSync checks if the current width matches global state and syncs if needed
+func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
+	if strings.HasPrefix(clientID, "header:") {
+		return
+	}
+
+	// Debounce: ignore resize events within 500ms of our last sync
+	// to avoid cascading syncs when we resize multiple panes
+	c.widthSyncMu.Lock()
+	sinceLast := time.Since(c.lastWidthSync)
+	if sinceLast < 500*time.Millisecond {
+		c.widthSyncMu.Unlock()
+		return
+	}
+
+	var win *tmux.Window
+	c.stateMu.RLock()
+	for i := range c.windows {
+		if c.windows[i].ID == clientID {
+			win = &c.windows[i]
+			break
+		}
+	}
+	c.stateMu.RUnlock()
+
+	if win == nil || !win.SyncWidth {
+		c.widthSyncMu.Unlock()
+		return
+	}
+
+	if c.globalWidth == 0 {
+		c.globalWidth = currentWidth
+	}
+
+	if currentWidth != c.globalWidth {
+		coordinatorDebugLog.Printf("Width sync: %s resized %d -> %d, syncing other sidebars", clientID, c.globalWidth, currentWidth)
+		c.globalWidth = currentWidth
+		c.lastWidthSync = time.Now()
+		c.widthSyncMu.Unlock()
+
+		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", currentWidth)).Run()
+
+		// Sync OTHER sidebars to match, but skip the one being dragged
+		syncOtherSidebarWidths(currentWidth, clientID)
+	} else {
+		c.widthSyncMu.Unlock()
+	}
+}
+
 // RenderForClient generates content for a specific client's dimensions
 func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemon.RenderPayload {
 	// Guard dimensions
@@ -1599,6 +1662,8 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	if height < 5 {
 		height = 24
 	}
+
+	c.handleWidthSync(clientID, width)
 
 	// If sidebar is collapsed, render minimal expand button only
 	if c.sidebarCollapsed {
@@ -1791,17 +1856,16 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 
 	dimFg := c.config.PaneHeader.CommandFg
-	buttonFg := c.config.PaneHeader.ButtonFg
 	baseStyle := lipgloss.NewStyle().Background(lipgloss.Color(headerBg))
 	btnStyle := baseStyle.Copy()
-	if buttonFg != "" {
-		btnStyle = btnStyle.Foreground(lipgloss.Color(buttonFg))
+	if headerFg != "" {
+		btnStyle = btnStyle.Foreground(lipgloss.Color(headerFg))
 	}
 
 	// Right side buttons - use distinctive Unicode chars for visibility
-	splitVBtn := "│"  // BOX DRAWINGS LIGHT VERTICAL - split vertical
-	splitHBtn := "─"  // BOX DRAWINGS LIGHT HORIZONTAL - split horizontal
-	closeBtn := "×"   // MULTIPLICATION SIGN - close
+	splitVBtn := "│" // BOX DRAWINGS LIGHT VERTICAL - split vertical
+	splitHBtn := "─" // BOX DRAWINGS LIGHT HORIZONTAL - split horizontal
+	closeBtn := "×"  // MULTIPLICATION SIGN - close
 	buttonsStr := " " + splitVBtn + " " + splitHBtn + " " + closeBtn + " "
 	buttonsWidth := runewidth.StringWidth(buttonsStr)
 
@@ -1982,9 +2046,9 @@ func (c *Coordinator) touchPadLine(width int, bgColor string) string {
 
 // touchButtonOpts configures renderTouchButton appearance.
 type touchButtonOpts struct {
-	FgColor   string // text color (default: #ffffff)
-	BoldText  bool   // bold content text
-	BorderFg  string // border color override (default: same as FgColor)
+	FgColor  string // text color (default: #ffffff)
+	BoldText bool   // bold content text
+	BorderFg string // border color override (default: same as FgColor)
 }
 
 // renderTouchButton renders a 3-line bordered button for touch mode.
@@ -2023,16 +2087,44 @@ func (c *Coordinator) renderTouchButton(width int, label string, bgColor string,
 }
 
 // syncAllSidebarWidths resizes all sidebar panes to match the given width.
-// This keeps sidebars synced across windows when one is resized.
+// Used for button clicks (grow/shrink) where we want to resize ALL sidebars.
 func syncAllSidebarWidths(newWidth int) {
-	out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id} #{pane_current_command}").Output()
+	syncSidebarWidthsExcept(newWidth, "")
+}
+
+// syncOtherSidebarWidths resizes all sidebar panes EXCEPT the one in skipWindowID.
+// Used when user drags a sidebar border - we sync others but don't interrupt the drag.
+func syncOtherSidebarWidths(newWidth int, skipWindowID string) {
+	syncSidebarWidthsExcept(newWidth, skipWindowID)
+}
+
+// syncSidebarWidthsExcept resizes sidebar panes to match the given width.
+// If skipWindowID is non-empty, skips the sidebar in that window.
+// Respects @tabby_sync_width window option (default true).
+func syncSidebarWidthsExcept(newWidth int, skipWindowID string) {
+	// Query panes with their window ID and sync setting
+	out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}|#{window_id}|#{?@tabby_sync_width,#{@tabby_sync_width},1}|#{pane_current_command}").Output()
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.Fields(line)
-		if len(parts) >= 2 && strings.Contains(parts[1], "sidebar-renderer") {
-			exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", newWidth)).Run()
+		parts := strings.Split(line, "|")
+		// Check for "sidebar" prefix - tmux truncates pane_current_command to ~15 chars
+		// so "sidebar-renderer" may appear as "sidebar-rendere"
+		if len(parts) >= 4 && strings.HasPrefix(parts[3], "sidebar") {
+			paneID := parts[0]
+			windowID := parts[1]
+			syncSetting := parts[2]
+
+			// Skip the specified window (if any)
+			if skipWindowID != "" && windowID == skipWindowID {
+				continue
+			}
+
+			// Only resize if sync is enabled (1/true) or default (1)
+			if syncSetting == "1" || syncSetting == "true" {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-x", fmt.Sprintf("%d", newWidth)).Run()
+			}
 		}
 	}
 }
@@ -2056,7 +2148,9 @@ func (c *Coordinator) getIndicatorIcon(ind config.Indicator) string {
 // generateSidebarHeader renders the pinned header bar at the top of the sidebar.
 // Returns the header content string (with trailing newline) and click regions.
 // Layout:  SessionName
-//          ─────────────────────────────
+//
+//	─────────────────────────────
+//
 // Left-click collapses sidebar. Right-click opens settings context menu.
 func (c *Coordinator) generateSidebarHeader(width int) (string, []daemon.ClickableRegion) {
 	var s strings.Builder
@@ -3814,17 +3908,29 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 		tabColor := "#27ae60"
 		tabFg := "#ffffff"
 		tabBorder := ""
-		if tb.NewTabBg != "" { tabColor = tb.NewTabBg }
-		if tb.NewTabFg != "" { tabFg = tb.NewTabFg }
-		if tb.NewTabBorder != "" { tabBorder = tb.NewTabBorder }
+		if tb.NewTabBg != "" {
+			tabColor = tb.NewTabBg
+		}
+		if tb.NewTabFg != "" {
+			tabFg = tb.NewTabFg
+		}
+		if tb.NewTabBorder != "" {
+			tabBorder = tb.NewTabBorder
+		}
 		leftWidth := width / 2
 
 		grpColor := "#9b59b6"
 		grpFg := "#ffffff"
 		grpBorder := ""
-		if tb.NewGroupBg != "" { grpColor = tb.NewGroupBg }
-		if tb.NewGroupFg != "" { grpFg = tb.NewGroupFg }
-		if tb.NewGroupBorder != "" { grpBorder = tb.NewGroupBorder }
+		if tb.NewGroupBg != "" {
+			grpColor = tb.NewGroupBg
+		}
+		if tb.NewGroupFg != "" {
+			grpFg = tb.NewGroupFg
+		}
+		if tb.NewGroupBorder != "" {
+			grpBorder = tb.NewGroupBorder
+		}
 		rightWidth := width - leftWidth
 
 		var leftBtn, rightBtn string
@@ -3843,9 +3949,15 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 		tabColor := "#27ae60"
 		tabFg := "#ffffff"
 		tabBorder := ""
-		if tb.NewTabBg != "" { tabColor = tb.NewTabBg }
-		if tb.NewTabFg != "" { tabFg = tb.NewTabFg }
-		if tb.NewTabBorder != "" { tabBorder = tb.NewTabBorder }
+		if tb.NewTabBg != "" {
+			tabColor = tb.NewTabBg
+		}
+		if tb.NewTabFg != "" {
+			tabFg = tb.NewTabFg
+		}
+		if tb.NewTabBorder != "" {
+			tabBorder = tb.NewTabBorder
+		}
 		var btn string
 		if large {
 			btn = c.renderTouchButton(width, "+ New Tab", tabColor, touchButtonOpts{FgColor: tabFg, BorderFg: tabBorder})
@@ -3857,9 +3969,15 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 		grpColor := "#9b59b6"
 		grpFg := "#ffffff"
 		grpBorder := ""
-		if tb.NewGroupBg != "" { grpColor = tb.NewGroupBg }
-		if tb.NewGroupFg != "" { grpFg = tb.NewGroupFg }
-		if tb.NewGroupBorder != "" { grpBorder = tb.NewGroupBorder }
+		if tb.NewGroupBg != "" {
+			grpColor = tb.NewGroupBg
+		}
+		if tb.NewGroupFg != "" {
+			grpFg = tb.NewGroupFg
+		}
+		if tb.NewGroupBorder != "" {
+			grpBorder = tb.NewGroupBorder
+		}
 		var btn string
 		if large {
 			btn = c.renderTouchButton(width, "+ New Group", grpColor, touchButtonOpts{FgColor: grpFg, BorderFg: grpBorder})
@@ -3874,9 +3992,15 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 		closeColor := "#e74c3c"
 		closeFg := "#ffffff"
 		closeBorder := ""
-		if tb.CloseBg != "" { closeColor = tb.CloseBg }
-		if tb.CloseFg != "" { closeFg = tb.CloseFg }
-		if tb.CloseBorder != "" { closeBorder = tb.CloseBorder }
+		if tb.CloseBg != "" {
+			closeColor = tb.CloseBg
+		}
+		if tb.CloseFg != "" {
+			closeFg = tb.CloseFg
+		}
+		if tb.CloseBorder != "" {
+			closeBorder = tb.CloseBorder
+		}
 		var btn string
 		if large {
 			btn = c.renderTouchButton(width, "x Close Tab", closeColor, touchButtonOpts{FgColor: closeFg, BorderFg: closeBorder})
@@ -4096,7 +4220,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			return false
 		}
 		width := c.getClientWidth(clientID)
-		dropX := rand.Intn(width - 4) + 2
+		dropX := rand.Intn(width-4) + 2
 		c.pet.FoodItem = pos2D{X: dropX, Y: 2} // Drop from high air
 		c.pet.LastThought = "food!"
 		c.savePetState()
@@ -4120,7 +4244,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if tossX >= width-2 {
 			tossX = width - 1
 		}
-		c.pet.YarnPos = pos2D{X: tossX, Y: 2} // Toss high
+		c.pet.YarnPos = pos2D{X: tossX, Y: 2}                  // Toss high
 		c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second) // Yarn disappears after 15 seconds
 		c.pet.TargetPos = pos2D{X: tossX, Y: 0}
 		c.pet.HasTarget = true
@@ -5341,6 +5465,33 @@ func (c *Coordinator) showSidebarSettingsMenu(clientID string, pos menuPosition)
 	resetCmd := `set-option -gq @tabby_sidebar_width 25; run-shell -b 'for p in $(tmux list-panes -a -F "#{pane_id} #{pane_current_command}" | grep sidebar-renderer | cut -d" " -f1); do tmux resize-pane -t $p -x 25; done'`
 	args = append(args, "Reset Width (25)", "w", resetCmd)
 
+	// Sync Width toggle
+	var win *tmux.Window
+	c.stateMu.RLock()
+	for i := range c.windows {
+		for _, p := range c.windows[i].Panes {
+			if p.ID == pos.PaneID {
+				win = &c.windows[i]
+				break
+			}
+		}
+		if win != nil {
+			break
+		}
+	}
+	c.stateMu.RUnlock()
+
+	if win != nil {
+		args = append(args, "", "", "")
+		if win.SyncWidth {
+			args = append(args, "Sync Width: On", "s", fmt.Sprintf("set-window-option -t :%d @tabby_sync_width 0", win.Index))
+		} else {
+			snapCmd := fmt.Sprintf("set-window-option -t :%d @tabby_sync_width 1 ; run-shell -b 'tmux resize-pane -t %s -x %d'",
+				win.Index, pos.PaneID, c.globalWidth)
+			args = append(args, "Sync Width: Off", "s", snapCmd)
+		}
+	}
+
 	c.executeOrSendMenu(clientID, args, pos)
 }
 
@@ -5436,18 +5587,18 @@ func (c *Coordinator) triggerActionFromThought(thought string, maxX int) {
 
 // Default pet thoughts by state
 var defaultPetThoughts = map[string][]string{
-	"hungry":   {"food. now.", "the bowl. it echoes.", "starving. dramatically.", "hunger level: critical."},
-	"poop":     {"that won't clean itself.", "i made you a gift.", "cleanup crew needed.", "ahem. the floor."},
-	"happy":    {"acceptable.", "fine. you may stay.", "feeling good.", "not bad.", "this is nice."},
-	"yarn":     {"the yarn. it calls.", "must... catch...", "yarn acquired.", "got it!"},
-	"sleepy":   {"nap time.", "zzz...", "five more minutes.", "so tired."},
-	"idle":     {"chillin'.", "vibin'.", "just here.", "sup.", "...", "waiting.", "*yawn*", "hmm."},
-	"walking":  {"exploring.", "on the move.", "wandering.", "going places."},
-	"jumping":  {"wheee!", "boing!", "up up up!", "airborne."},
-	"petting":  {"mmm...", "yes, there.", "acceptable.", "more.", "don't stop.", "nice."},
-	"starving": {"this is it.", "so hungry...", "fading...", "remember me.", "tell them... i was good."},
-	"guilt":    {"i trusted you.", "is this how it ends?", "the neglect.", "you did this.", "betrayal."},
-	"dead":     {"...", "x_x", "[silence]", "gone.", "rip."},
+	"hungry":      {"food. now.", "the bowl. it echoes.", "starving. dramatically.", "hunger level: critical."},
+	"poop":        {"that won't clean itself.", "i made you a gift.", "cleanup crew needed.", "ahem. the floor."},
+	"happy":       {"acceptable.", "fine. you may stay.", "feeling good.", "not bad.", "this is nice."},
+	"yarn":        {"the yarn. it calls.", "must... catch...", "yarn acquired.", "got it!"},
+	"sleepy":      {"nap time.", "zzz...", "five more minutes.", "so tired."},
+	"idle":        {"chillin'.", "vibin'.", "just here.", "sup.", "...", "waiting.", "*yawn*", "hmm."},
+	"walking":     {"exploring.", "on the move.", "wandering.", "going places."},
+	"jumping":     {"wheee!", "boing!", "up up up!", "airborne."},
+	"petting":     {"mmm...", "yes, there.", "acceptable.", "more.", "don't stop.", "nice."},
+	"starving":    {"this is it.", "so hungry...", "fading...", "remember me.", "tell them... i was good."},
+	"guilt":       {"i trusted you.", "is this how it ends?", "the neglect.", "you did this.", "betrayal."},
+	"dead":        {"...", "x_x", "[silence]", "gone.", "rip."},
 	"mouse_spot":  {"intruder.", "prey detected.", "nature calls.", "the hunt begins.", "i see you."},
 	"mouse_chase": {"can't escape.", "almost...", "you're mine.", "gotcha soon.", "so close..."},
 	"mouse_catch": {"victory.", "natural order.", "delicious chaos.", "another conquest.", "the circle of life."},
@@ -5545,20 +5696,22 @@ func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
 	}
 
 	// Fg/Bg based on active/inactive state
-	var headerFg string
+	var headerBg, headerFg string
 	if foundPaneActive {
+		headerBg = bgColor
 		headerFg = c.config.PaneHeader.ActiveFg
 		if headerFg == "" {
 			headerFg = "#ffffff"
 		}
 	} else {
-		bgColor = grouping.LightenColor(bgColor, 0.15)
+		headerBg = grouping.LightenColor(bgColor, 0.15)
 		headerFg = c.config.PaneHeader.InactiveFg
 		if headerFg == "" {
 			headerFg = "#cccccc"
 		}
 	}
-	return HeaderColors{Fg: headerFg, Bg: bgColor}
+
+	return HeaderColors{Fg: headerFg, Bg: headerBg}
 }
 
 // GetGitStateHash returns a hash of current git state for change detection
