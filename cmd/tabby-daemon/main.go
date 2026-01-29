@@ -736,7 +736,15 @@ func updateHeaderBorderStyles(coordinator *Coordinator) {
 func resetTerminalModes(sessionID string) {
 	// Use tmux's refresh-client to reset terminal state
 	// The -S flag forces a full refresh which can help reset stuck modes
-	exec.Command("tmux", "refresh-client", "-S").Run()
+	// We must refresh ALL clients to handle multi-client scenarios correctly
+	if out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output(); err == nil {
+		for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if tty == "" {
+				continue
+			}
+			exec.Command("tmux", "refresh-client", "-t", tty, "-S").Run()
+		}
+	}
 
 	// Also try to reset mouse mode by toggling tmux's mouse option
 	// This forces tmux to re-sync mouse state with the terminal
