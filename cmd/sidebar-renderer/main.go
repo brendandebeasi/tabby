@@ -29,9 +29,10 @@ import (
 )
 
 var (
-	sessionID = flag.String("session", "", "tmux session ID")
-	windowID  = flag.String("window", "", "tmux window ID this renderer is for")
-	debugMode = flag.Bool("debug", false, "Enable debug logging")
+	sessionID    = flag.String("session", "", "tmux session ID")
+	windowID     = flag.String("window", "", "tmux window ID this renderer is for")
+	debugMode    = flag.Bool("debug", false, "Enable debug logging")
+	terminalBg   = flag.String("terminal-bg", "", "Terminal background color for loading state")
 )
 
 var debugLog *log.Logger
@@ -989,12 +990,26 @@ var spinnerFrames = []string{"◐", "◓", "◑", "◒"}
 // View implements tea.Model
 func (m rendererModel) View() string {
 	if !m.connected || m.content == "" {
-		// Show minimal loading indicator - no background color set
-		// so terminal's native background shows through (works for light & dark themes)
+		// Show loading indicator with terminal background color
 		frame := spinnerFrames[int(time.Now().UnixMilli()/100)%len(spinnerFrames)]
+		loadingText := fmt.Sprintf(" %s Loading...", frame)
 		style := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#888888"))
-		return style.Render(fmt.Sprintf(" %s Loading...", frame))
+			Foreground(lipgloss.Color("#888888")).
+			Width(m.width)
+
+		// Use terminal background if provided, otherwise no background
+		if *terminalBg != "" {
+			style = style.Background(lipgloss.Color(*terminalBg))
+		}
+
+		// Fill entire pane with background color
+		var lines []string
+		lines = append(lines, style.Render(loadingText))
+		blankLine := style.Render("")
+		for i := 1; i < m.height; i++ {
+			lines = append(lines, blankLine)
+		}
+		return strings.Join(lines, "\n")
 	}
 
 	// SIMPLIFIED: Just show visible window of content (no pinned section)

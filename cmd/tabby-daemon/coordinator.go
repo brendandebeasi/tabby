@@ -70,9 +70,11 @@ type Coordinator struct {
 	lastWidth int
 
 	// Global width for synchronization
-	globalWidth   int
-	lastWidthSync time.Time // Last time we synced widths (for debouncing)
-	widthSyncMu   sync.Mutex
+	globalWidth            int
+	lastWidthSync          time.Time // Last time we synced widths (for debouncing)
+	lastActiveWindowID     string    // Track which window was last active (for detecting window switch)
+	activeWindowChangeTime time.Time // When the active window changed (for grace period)
+	widthSyncMu            sync.Mutex
 
 	// Per-client widths for accurate click detection
 	clientWidths   map[string]int
@@ -98,6 +100,10 @@ type Coordinator struct {
 	pendingNewWindowGroup string
 	pendingNewWindowTime  time.Time
 
+	// Process tree caching
+	lastProcessCheck time.Time
+	cachedProcessTree *processTree
+
 	// AI tool state tracking — per-pane (for busy→idle transition detection)
 	prevPaneBusy       map[string]bool   // pane ID → was AI tool busy last cycle
 	prevPaneTitle      map[string]string // pane ID → AI pane title last cycle
@@ -110,8 +116,22 @@ type Coordinator struct {
 	pendingMenus   map[string][]menuItemDef
 	pendingMenusMu sync.Mutex
 
-	// Background theme detector
+	// Background theme detector (deprecated, kept for fallback)
 	bgDetector *colors.BackgroundDetector
+
+	// Color theme (new preset-based system)
+	theme *colors.Theme
+}
+
+// GetWindows returns the current list of windows
+func (c *Coordinator) GetWindows() []tmux.Window {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+
+	// Return a copy to avoid race conditions
+	result := make([]tmux.Window, len(c.windows))
+	copy(result, c.windows)
+	return result
 }
 
 func (c *Coordinator) collapseWindowPanes(windowTarget string, win *tmux.Window) {
@@ -339,17 +359,33 @@ func NewCoordinator(sessionID string) *Coordinator {
 		cfg = &config.Config{}
 	}
 
-	// Initialize background detector based on theme_mode config
+	// Set up debug logging from config if enabled
+	if cfg.Sidebar.Debug {
+		f, err := os.OpenFile("/tmp/tabby-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			coordinatorDebugLog = log.New(f, "[coord] ", log.LstdFlags|log.Lmicroseconds)
+		}
+	}
+
+	// Initialize background detector based on theme_mode config (deprecated fallback)
 	themeMode := cfg.Sidebar.ThemeMode
 	if themeMode == "" {
 		themeMode = "auto" // Default to auto-detection
 	}
 	bgDetector := colors.NewBackgroundDetector(colors.ThemeMode(themeMode))
 
+	// Load color theme (new preset-based system)
+	var theme *colors.Theme
+	if cfg.Sidebar.Theme != "" {
+		t := colors.GetTheme(cfg.Sidebar.Theme)
+		theme = &t
+	}
+
 	c := &Coordinator{
 		sessionID:          sessionID,
 		config:             cfg,
 		bgDetector:         bgDetector,
+		theme:              theme,
 		collapsedGroups:    make(map[string]bool),
 		clientWidths:       make(map[string]int),
 		pendingMenus:       make(map[string][]menuItemDef),
@@ -371,14 +407,18 @@ func NewCoordinator(sessionID string) *Coordinator {
 		},
 	}
 
-	// Log detected background theme if debug enabled
+	// Log theme and background detection if debug enabled
 	if cfg.Sidebar.Debug {
-		isDark := bgDetector.IsDarkBackground()
-		detectedColor := bgDetector.GetDetectedColor()
-		if detectedColor != "" {
-			coordinatorDebugLog.Printf("Background detection: theme_mode=%s, detected_dark=%v, color=%s", themeMode, isDark, detectedColor)
+		if theme != nil {
+			coordinatorDebugLog.Printf("Theme loaded: %s (dark=%v, sidebar_bg=%s)", theme.Name, theme.Dark, theme.SidebarBg)
 		} else {
-			coordinatorDebugLog.Printf("Background detection: theme_mode=%s, detected_dark=%v (fallback)", themeMode, isDark)
+			isDark := bgDetector.IsDarkBackground()
+			detectedColor := bgDetector.GetDetectedColor()
+			if detectedColor != "" {
+				coordinatorDebugLog.Printf("Background detection: theme_mode=%s, detected_dark=%v, color=%s", themeMode, isDark, detectedColor)
+			} else {
+				coordinatorDebugLog.Printf("Background detection: theme_mode=%s, detected_dark=%v (fallback)", themeMode, isDark)
+			}
 		}
 	}
 
@@ -440,28 +480,199 @@ func (c *Coordinator) GetConfig() *config.Config {
 	return c.config
 }
 
-// getTextColorWithFallback returns the specified color, or a background-aware default if empty
+// getTextColorWithFallback returns the specified color, or a theme/background-aware default if empty
 func (c *Coordinator) getTextColorWithFallback(configColor string) string {
 	if configColor != "" {
 		return configColor
 	}
+	if c.theme != nil {
+		return c.theme.ActiveFg
+	}
 	return c.bgDetector.GetDefaultTextColor()
 }
 
-// getHeaderTextColorWithFallback returns the specified color, or a background-aware default if empty
+// getHeaderTextColorWithFallback returns the specified color, or a theme/background-aware default if empty
 func (c *Coordinator) getHeaderTextColorWithFallback(configColor string) string {
 	if configColor != "" {
 		return configColor
 	}
+	if c.theme != nil {
+		return c.theme.HeaderFg
+	}
 	return c.bgDetector.GetDefaultHeaderTextColor()
 }
 
-// getInactiveTextColorWithFallback returns the specified color, or a background-aware default if empty
+// getInactiveTextColorWithFallback returns the specified color, or a theme/background-aware default if empty
 func (c *Coordinator) getInactiveTextColorWithFallback(configColor string) string {
 	if configColor != "" {
 		return configColor
 	}
+	if c.theme != nil {
+		return c.theme.InactiveFg
+	}
 	return c.bgDetector.GetDefaultInactiveTextColor()
+}
+
+// getTreeFgWithFallback returns tree branch color from config, theme, or detector
+func (c *Coordinator) getTreeFgWithFallback(configColor string) string {
+	if configColor != "" {
+		return configColor
+	}
+	if c.theme != nil {
+		return c.theme.TreeFg
+	}
+	return c.bgDetector.GetDefaultTreeFg()
+}
+
+// getDisclosureFgWithFallback returns disclosure icon color from config, theme, or detector
+func (c *Coordinator) getDisclosureFgWithFallback(configColor string) string {
+	if configColor != "" {
+		return configColor
+	}
+	if c.theme != nil {
+		return c.theme.DisclosureFg
+	}
+	return c.bgDetector.GetDefaultDisclosureFg()
+}
+
+// getPaneHeaderActiveBg returns active pane header background from config, theme, or detector
+func (c *Coordinator) getPaneHeaderActiveBg() string {
+	if c.config.PaneHeader.ActiveBg != "" {
+		return c.config.PaneHeader.ActiveBg
+	}
+	if c.theme != nil {
+		return c.theme.PaneActiveBg
+	}
+	return c.bgDetector.GetDefaultPaneHeaderActiveBg()
+}
+
+// getPaneHeaderActiveFg returns active pane header foreground from config, theme, or detector
+func (c *Coordinator) getPaneHeaderActiveFg() string {
+	if c.config.PaneHeader.ActiveFg != "" {
+		return c.config.PaneHeader.ActiveFg
+	}
+	if c.theme != nil {
+		return c.theme.PaneActiveFg
+	}
+	return c.bgDetector.GetDefaultPaneHeaderActiveFg()
+}
+
+// getPaneHeaderInactiveBg returns inactive pane header background from config, theme, or detector
+func (c *Coordinator) getPaneHeaderInactiveBg() string {
+	if c.config.PaneHeader.InactiveBg != "" {
+		return c.config.PaneHeader.InactiveBg
+	}
+	if c.theme != nil {
+		return c.theme.PaneInactiveBg
+	}
+	return c.bgDetector.GetDefaultPaneHeaderInactiveBg()
+}
+
+// getPaneHeaderInactiveFg returns inactive pane header foreground from config, theme, or detector
+func (c *Coordinator) getPaneHeaderInactiveFg() string {
+	if c.config.PaneHeader.InactiveFg != "" {
+		return c.config.PaneHeader.InactiveFg
+	}
+	if c.theme != nil {
+		return c.theme.PaneInactiveFg
+	}
+	return c.bgDetector.GetDefaultPaneHeaderInactiveFg()
+}
+
+// getCommandFg returns command text color from config, theme, or detector
+func (c *Coordinator) getCommandFg() string {
+	if c.config.PaneHeader.CommandFg != "" {
+		return c.config.PaneHeader.CommandFg
+	}
+	if c.theme != nil {
+		return c.theme.CommandFg
+	}
+	return c.bgDetector.GetDefaultCommandFg()
+}
+
+// getButtonFg returns button text color from config, theme, or detector
+func (c *Coordinator) getButtonFg() string {
+	if c.config.PaneHeader.ButtonFg != "" {
+		return c.config.PaneHeader.ButtonFg
+	}
+	if c.theme != nil {
+		return c.theme.ButtonFg
+	}
+	return c.bgDetector.GetDefaultButtonFg()
+}
+
+// getBorderFg returns border color from config, theme, or detector
+func (c *Coordinator) getBorderFg() string {
+	if c.config.PaneHeader.BorderFg != "" {
+		return c.config.PaneHeader.BorderFg
+	}
+	if c.theme != nil {
+		return c.theme.BorderFg
+	}
+	return c.bgDetector.GetDefaultBorderFg()
+}
+
+// getHandleColor returns drag handle color from config, theme, or detector
+func (c *Coordinator) getHandleColor() string {
+	if c.config.PaneHeader.HandleColor != "" {
+		return c.config.PaneHeader.HandleColor
+	}
+	if c.theme != nil {
+		return c.theme.HandleColor
+	}
+	return c.bgDetector.GetDefaultHandleColor()
+}
+
+// GetTerminalBg returns terminal background color from config, theme, or detector
+func (c *Coordinator) GetTerminalBg() string {
+	if c.config.PaneHeader.TerminalBg != "" {
+		return c.config.PaneHeader.TerminalBg
+	}
+	if c.theme != nil {
+		return c.theme.TerminalBg
+	}
+	return c.bgDetector.GetDefaultTerminalBg()
+}
+
+// getDividerFg returns divider color from config, theme, or detector
+func (c *Coordinator) getDividerFg() string {
+	if c.config.PaneHeader.DividerFg != "" {
+		return c.config.PaneHeader.DividerFg
+	}
+	if c.theme != nil {
+		return c.theme.DividerFg
+	}
+	return c.bgDetector.GetDefaultDividerFg()
+}
+
+// getWidgetFg returns widget text color from theme or detector
+func (c *Coordinator) getWidgetFg() string {
+	if c.theme != nil {
+		return c.theme.WidgetFg
+	}
+	return c.bgDetector.GetDefaultWidgetFg()
+}
+
+// getPromptFg returns prompt text color from config, theme, or detector
+func (c *Coordinator) getPromptFg() string {
+	if c.config.Prompt.Fg != "" {
+		return c.config.Prompt.Fg
+	}
+	if c.theme != nil {
+		return c.theme.PromptFg
+	}
+	return c.bgDetector.GetDefaultPromptFg()
+}
+
+// getPromptBg returns prompt background color from config, theme, or detector
+func (c *Coordinator) getPromptBg() string {
+	if c.config.Prompt.Bg != "" {
+		return c.config.Prompt.Bg
+	}
+	if c.theme != nil {
+		return c.theme.PromptBg
+	}
+	return c.bgDetector.GetDefaultPromptBg()
 }
 
 // getMainPaneDirection returns the tmux select-pane flag to navigate
@@ -655,7 +866,15 @@ func (c *Coordinator) processAIToolStates() {
 	now := time.Now().Unix()
 
 	// Load process table once per cycle for CPU-based busy detection
-	pt := loadProcessTree()
+	// Throttle this expensive operation (ps -A) to max once per 2s
+	var pt *processTree
+	if time.Since(c.lastProcessCheck) > 2*time.Second {
+		pt = loadProcessTree()
+		c.cachedProcessTree = pt
+		c.lastProcessCheck = time.Now()
+	} else {
+		pt = c.cachedProcessTree
+	}
 
 	// Track which pane IDs we see this cycle for stale cleanup
 	seenPanes := make(map[string]bool)
@@ -1142,36 +1361,29 @@ func (c *Coordinator) updatePaneHeaderColors() {
 				if win.CustomColor != "" {
 					color = win.CustomColor
 				}
-				inactive := grouping.LightenColor(color, 0.15)
+				// No color manipulation - use same color for active/inactive
 				if len(args) > 0 {
 					args = append(args, ";")
 				}
 				args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", color)
-				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", inactive)
+				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", color)
 
 				// Auto-set tmux pane border colors from the window's resolved color
 				if autoBorder {
-					// Set window-level defaults
+					// Set window-level defaults - same color for all borders
 					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
 						"pane-active-border-style", fmt.Sprintf("fg=%s", color))
 					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
-						"pane-border-style", fmt.Sprintf("fg=%s", inactive))
+						"pane-border-style", fmt.Sprintf("fg=%s", color))
 
-					// Set per-pane border colors: active pane in active window gets full color,
-					// all other panes (inactive or in inactive window) get lightened color
+					// Set per-pane border colors - same color for all
 					for _, p := range win.Panes {
 						// Skip sidebar and pane-header panes
 						if strings.Contains(p.Command, "sidebar") || strings.Contains(p.Command, "pane-header") {
 							continue
 						}
-						var borderColor string
-						if p.Active && win.Active {
-							borderColor = color
-						} else {
-							borderColor = inactive
-						}
 						args = append(args, ";", "set-option", "-p", "-t", p.ID,
-							"pane-border-style", fmt.Sprintf("fg=%s", borderColor))
+							"pane-border-style", fmt.Sprintf("fg=%s", color))
 					}
 				}
 			}
@@ -1782,11 +1994,29 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		return
 	}
 
+	c.widthSyncMu.Lock()
+
+	// Query tmux directly for the active window FIRST (before any debounce)
+	activeWindowID := ""
+	if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+		activeWindowID = strings.TrimSpace(string(out))
+	}
+	isActive := (clientID == activeWindowID)
+
+	// Detect if this window just became active
+	justBecameActive := isActive && c.lastActiveWindowID != clientID
+	if justBecameActive {
+		coordinatorDebugLog.Printf("Width sync: active window changed to %s", clientID)
+	}
+
 	// Debounce: ignore resize events within 500ms of our last sync
 	// to avoid cascading syncs when we resize multiple panes
-	c.widthSyncMu.Lock()
 	sinceLast := time.Since(c.lastWidthSync)
 	if sinceLast < 500*time.Millisecond {
+		// Still update the active window tracker even if debounced
+		if justBecameActive {
+			c.lastActiveWindowID = clientID
+		}
 		c.widthSyncMu.Unlock()
 		return
 	}
@@ -1802,6 +2032,9 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	c.stateMu.RUnlock()
 
 	if win == nil || !win.SyncWidth {
+		if justBecameActive {
+			c.lastActiveWindowID = clientID
+		}
 		c.widthSyncMu.Unlock()
 		return
 	}
@@ -1810,17 +2043,79 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		c.globalWidth = currentWidth
 	}
 
-	if currentWidth != c.globalWidth {
-		coordinatorDebugLog.Printf("Width sync: %s resized %d -> %d, syncing other sidebars", clientID, c.globalWidth, currentWidth)
-		c.globalWidth = currentWidth
+	// If sidebar got squeezed or stretched to extreme values by tmux resize, restore to global
+	// Use wide bounds (10-80) to only catch clearly broken cases, not user preferences
+	if (currentWidth < 10 || currentWidth > 80) && c.globalWidth >= 10 && c.globalWidth <= 80 {
+		coordinatorDebugLog.Printf("Width sync: %s out of bounds (%d), restoring to global %d", clientID, currentWidth, c.globalWidth)
 		c.lastWidthSync = time.Now()
+		if justBecameActive {
+			c.lastActiveWindowID = clientID
+		}
+		targetWidth := c.globalWidth
 		c.widthSyncMu.Unlock()
 
-		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", currentWidth)).Run()
+		if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				parts := strings.Split(line, " ")
+				if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+					exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+					break
+				}
+			}
+		}
+		return
+	}
 
-		// Sync OTHER sidebars to match, but skip the one being dragged
-		syncOtherSidebarWidths(currentWidth, clientID)
+	if currentWidth != c.globalWidth {
+		if !isActive {
+			// INACTIVE window: sync it TO global
+			coordinatorDebugLog.Printf("Width sync: inactive %s has width %d, syncing to global %d", clientID, currentWidth, c.globalWidth)
+			c.lastWidthSync = time.Now()
+			targetWidth := c.globalWidth
+			c.widthSyncMu.Unlock()
+
+			if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
+				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+					parts := strings.Split(line, " ")
+					if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+						exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+						break
+					}
+				}
+			}
+		} else if justBecameActive {
+			// Window JUST became active with stale width: sync it TO global once
+			coordinatorDebugLog.Printf("Width sync: %s just active with width %d, syncing to global %d", clientID, currentWidth, c.globalWidth)
+			c.lastActiveWindowID = clientID
+			c.lastWidthSync = time.Now()
+			targetWidth := c.globalWidth
+			c.widthSyncMu.Unlock()
+
+			if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
+				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+					parts := strings.Split(line, " ")
+					if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+						exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+						break
+					}
+				}
+			}
+		} else {
+			// ACTIVE window (was already active): user drag-resized, update global and sync others
+			// No clamping - user can set any width they want
+			coordinatorDebugLog.Printf("Width sync: active %s resized to %d, syncing others", clientID, currentWidth)
+			c.globalWidth = currentWidth
+			c.lastWidthSync = time.Now()
+			c.widthSyncMu.Unlock()
+
+			exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", currentWidth)).Run()
+			syncOtherSidebarWidths(currentWidth, clientID)
+		}
 	} else {
+		// Widths match
+		if justBecameActive {
+			c.lastActiveWindowID = clientID
+		}
 		c.widthSyncMu.Unlock()
 	}
 }
@@ -1941,6 +2236,11 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 
 	// Combine everything: header + top_widgets + main + bottom_widgets
 	fullContent := headerContent + topWidgets + mainContent + bottomWidgets
+
+	// Apply sidebar background fill to all content lines
+	sidebarBg := c.GetSidebarBg()
+	fullContent = c.applyBackgroundFill(fullContent, sidebarBg, width)
+
 	allRegions := append(headerRegions, topWRegions...)
 	allRegions = append(allRegions, mainRegions...)
 	allRegions = append(allRegions, bottomWRegions...)
@@ -2112,12 +2412,13 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 	}
 
-	// Find the group for this window's theme color
-	var bgColor string
+	// Find the group for this window's theme color (bg and fg)
+	var bgColor, fgColor string
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
 			if win.ID == foundWindow.ID {
 				bgColor = group.Theme.Bg
+				fgColor = group.Theme.Fg
 				if win.CustomColor != "" {
 					bgColor = win.CustomColor
 				}
@@ -2129,27 +2430,23 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 	}
 	if bgColor == "" {
-		bgColor = c.config.PaneHeader.ActiveBg
-		if bgColor == "" {
-			bgColor = "#3498db"
-		}
+		bgColor = c.getPaneHeaderActiveBg()
+	}
+	if fgColor == "" {
+		fgColor = c.getPaneHeaderActiveFg()
 	}
 
 	// Window-level active state determines header bg
+	// Just use the defined colors directly - no manipulation
 	isWindowActive := foundWindow.Active
 	var headerBg, headerFg string
 	if isWindowActive {
 		headerBg = bgColor
-		headerFg = c.config.PaneHeader.ActiveFg
-		if headerFg == "" {
-			headerFg = "#ffffff"
-		}
+		headerFg = fgColor
 	} else {
-		headerBg = grouping.LightenColor(bgColor, 0.15)
-		headerFg = c.config.PaneHeader.InactiveFg
-		if headerFg == "" {
-			headerFg = "#cccccc"
-		}
+		// Use group's colors for inactive too (consistent look)
+		headerBg = bgColor
+		headerFg = fgColor
 	}
 
 	dimFg := c.config.PaneHeader.CommandFg
@@ -2157,11 +2454,18 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	collapseBtn := ""
 	isCollapsed := false
-	if len(foundWindow.Panes) > 1 {
-		winTarget := fmt.Sprintf(":%d", foundWindow.Index)
-		if out, err := exec.Command("tmux", "show-window-option", "-v", "-t", winTarget, "@tabby_collapsed").Output(); err == nil {
+	// Count content panes (exclude sidebar and header panes)
+	contentPaneCount := 0
+	for _, p := range foundWindow.Panes {
+		if !strings.Contains(p.Command, "sidebar") && p.Command != "pane-header" {
+			contentPaneCount++
+		}
+	}
+	if contentPaneCount > 1 {
+		// Check this specific pane's collapsed state
+		if out, err := exec.Command("tmux", "show-options", "-pqv", "-t", paneID, "@tabby_pane_collapsed").Output(); err == nil {
 			val := strings.TrimSpace(string(out))
-			if val == "1" || strings.EqualFold(val, "true") {
+			if val == "1" {
 				isCollapsed = true
 			}
 		}
@@ -2247,40 +2551,15 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	segStyle := baseStyle.Copy()
 	btnStyle := baseStyle.Copy()
 
-	// Apply additional dimming if configured for inactive panes
-	if !isActive && c.config.PaneHeader.DimInactive {
-		dimAmount := c.config.PaneHeader.DimOpacity
-		if dimAmount == 0 {
-			dimAmount = 0.7 // default to 70% brightness (30% dimming)
-		}
-		// Invert: DimOpacity is target brightness, so we darken by (1 - opacity)
-		darkenAmount := 1.0 - dimAmount
-
-		// Darken the background
-		headerBg = grouping.DarkenColor(headerBg, darkenAmount)
-		baseStyle = baseStyle.Background(lipgloss.Color(headerBg))
-		segStyle = baseStyle.Copy()
-		btnStyle = baseStyle.Copy()
-
-		// Also darken the foreground colors for consistency
-		if headerFg != "" {
-			headerFg = grouping.DarkenColor(headerFg, darkenAmount*0.5) // Less dimming on text
-		}
-		if dimFg != "" {
-			dimFg = grouping.DarkenColor(dimFg, darkenAmount*0.5)
-		}
+	// Always use group's fg color - no manipulation
+	if headerFg != "" {
+		segStyle = segStyle.Foreground(lipgloss.Color(headerFg))
+		btnStyle = btnStyle.Foreground(lipgloss.Color(headerFg))
 	}
-
 	if isActive {
-		if headerFg != "" {
-			segStyle = segStyle.Foreground(lipgloss.Color(headerFg))
-			btnStyle = btnStyle.Foreground(lipgloss.Color(headerFg))
-		}
 		segStyle = segStyle.Bold(true)
-	} else if dimFg != "" {
-		segStyle = segStyle.Foreground(lipgloss.Color(dimFg))
-		btnStyle = btnStyle.Foreground(lipgloss.Color(dimFg))
 	}
+	_ = dimFg // unused now
 
 	// Build rendered line and click regions
 	var regions []daemon.ClickableRegion
@@ -2318,11 +2597,11 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		collapseEnd := btnAreaStart + 6 // "  ▼   " = 6 chars
 		splitVEnd := collapseEnd + 4    // "│   " = 4 chars
 		splitHEnd := splitVEnd + 4      // "─   " = 4 chars
-		targetWindow := fmt.Sprintf(":%d", foundWindow.Index)
+		// Collapse targets individual pane, not whole window
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: btnAreaStart, EndCol: collapseEnd,
-			Action: "toggle_pane_collapse", Target: targetWindow,
+			Action: "toggle_pane_collapse", Target: paneID,
 		})
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
@@ -2407,10 +2686,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		hasPaneAbove := foundPane.Top > 5
 
 		if hasPaneAbove {
-			handleColor := c.config.PaneHeader.HandleColor
-			if handleColor == "" {
-				handleColor = "#666666"
-			}
+			handleColor := c.getHandleColor()
 			handleIcon := c.config.PaneHeader.HandleIcon
 			if handleIcon == "" {
 				handleIcon = "..."
@@ -2421,8 +2697,10 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			leftBorderWidth := (width - handleWidth) / 2
 			rightBorderWidth := width - handleWidth - leftBorderWidth
 
-			borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor))
-			handleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor)).Bold(true)
+			// Use terminal background from theme for border line
+			terminalBg := c.GetTerminalBg()
+			borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor)).Background(lipgloss.Color(terminalBg))
+			handleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor)).Background(lipgloss.Color(terminalBg)).Bold(true)
 
 			borderLine := borderStyle.Render(strings.Repeat(borderChar, leftBorderWidth)) +
 				handleStyle.Render(handleIcon) +
@@ -2727,12 +3005,11 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 	// Tree color
 	treeStyle := lipgloss.NewStyle()
-	if c.config.Sidebar.Colors.TreeFg != "" {
-		treeStyle = treeStyle.Foreground(lipgloss.Color(c.config.Sidebar.Colors.TreeFg))
-	}
+	treeFg := c.getTreeFgWithFallback(c.config.Sidebar.Colors.TreeFg)
+	treeStyle = treeStyle.Foreground(lipgloss.Color(treeFg))
 
 	// Disclosure color (use config or terminal default)
-	disclosureColor := c.config.Sidebar.Colors.DisclosureFg
+	disclosureColor := c.getDisclosureFgWithFallback(c.config.Sidebar.Colors.DisclosureFg)
 
 	// Active indicator config
 	activeIndicator := c.config.Sidebar.Colors.ActiveIndicator
@@ -5115,9 +5392,98 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true // Trigger immediate refresh to show collapse/expand change
 
 	case "toggle_pane_collapse":
-		// Toggle collapse/expand for panes with actual resize (from pane header button)
-		// Target format is ":N" where N is the window index
-		c.togglePaneCollapse(input.ResolvedTarget)
+		// Toggle collapse/expand for individual pane (from pane header button)
+		// Target is the pane ID (e.g., "%5") - the CONTENT pane, not the header pane
+		paneID := input.ResolvedTarget
+		coordinatorDebugLog.Printf("toggle_pane_collapse: paneID=%s", paneID)
+		if paneID == "" {
+			coordinatorDebugLog.Printf("toggle_pane_collapse: empty paneID, returning false")
+			return false
+		}
+		// Check if pane is currently collapsed
+		out, err := exec.Command("tmux", "show-options", "-pqv", "-t", paneID, "@tabby_pane_collapsed").Output()
+		isCollapsed := err == nil && strings.TrimSpace(string(out)) == "1"
+		coordinatorDebugLog.Printf("toggle_pane_collapse: isCollapsed=%v (out=%q, err=%v)", isCollapsed, strings.TrimSpace(string(out)), err)
+
+		// Minimum height for collapsed pane (1 line - tmux minimum)
+		collapsedHeight := 1
+		// Header panes should be 2 lines (with border) or 1 line
+		headerHeight := 1
+		if c.config.PaneHeader.CustomBorder {
+			headerHeight = 2
+		}
+
+		// Get window ID for this pane so we can fix header heights after resize
+		windowIDOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{window_id}").Output()
+		windowID := strings.TrimSpace(string(windowIDOut))
+
+		if isCollapsed {
+			// Expand: restore previous height
+			prevHeightOut, _ := exec.Command("tmux", "show-options", "-pqv", "-t", paneID, "@tabby_pane_prev_height").Output()
+			prevHeight := strings.TrimSpace(string(prevHeightOut))
+			if prevHeight != "" && prevHeight != "0" {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-y", prevHeight).Run()
+			}
+			exec.Command("tmux", "set-option", "-p", "-t", paneID, "-u", "@tabby_pane_collapsed").Run()
+			exec.Command("tmux", "set-option", "-p", "-t", paneID, "-u", "@tabby_pane_prev_height").Run()
+		} else {
+			// Collapse: save height and minimize content pane to 1 line
+			heightOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{pane_height}").Output()
+			currentHeight := strings.TrimSpace(string(heightOut))
+			if currentHeight == "" {
+				currentHeight = "10"
+			}
+			exec.Command("tmux", "set-option", "-p", "-t", paneID, "@tabby_pane_prev_height", currentHeight).Run()
+			exec.Command("tmux", "set-option", "-p", "-t", paneID, "@tabby_pane_collapsed", "1").Run()
+			exec.Command("tmux", "resize-pane", "-t", paneID, "-y", fmt.Sprintf("%d", collapsedHeight)).Run()
+		}
+
+		// Fix layout after collapse/expand - ensure headers stay at correct height
+		// and other content panes get the freed/taken space
+		if windowID != "" {
+			listOut, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}:#{pane_current_command}:#{pane_height}").Output()
+			var headerPanes []string
+			var otherContentPanes []string
+			for _, line := range strings.Split(string(listOut), "\n") {
+				parts := strings.SplitN(strings.TrimSpace(line), ":", 3)
+				if len(parts) < 2 {
+					continue
+				}
+				pid := parts[0]
+				cmd := parts[1]
+				if cmd == "pane-header" {
+					headerPanes = append(headerPanes, pid)
+				} else if !strings.Contains(cmd, "sidebar") && pid != paneID {
+					otherContentPanes = append(otherContentPanes, pid)
+				}
+			}
+
+			// If we just collapsed, expand the other content panes to fill space
+			if !isCollapsed && len(otherContentPanes) > 0 {
+				// Get total window height
+				winHeightOut, _ := exec.Command("tmux", "display-message", "-t", windowID, "-p", "#{window_height}").Output()
+				totalHeight, _ := strconv.Atoi(strings.TrimSpace(string(winHeightOut)))
+				if totalHeight > 0 {
+					// Calculate space for other content panes:
+					// total - (headers * headerHeight) - collapsedHeight
+					numHeaders := len(headerPanes)
+					availableForContent := totalHeight - (numHeaders * headerHeight) - collapsedHeight
+					if availableForContent > 0 {
+						perPane := availableForContent / len(otherContentPanes)
+						if perPane > 1 {
+							for _, contentID := range otherContentPanes {
+								exec.Command("tmux", "resize-pane", "-t", contentID, "-y", fmt.Sprintf("%d", perPane)).Run()
+							}
+						}
+					}
+				}
+			}
+
+			// Fix all header pane heights LAST (after content pane resizes)
+			for _, hdrID := range headerPanes {
+				exec.Command("tmux", "resize-pane", "-t", hdrID, "-y", fmt.Sprintf("%d", headerHeight)).Run()
+			}
+		}
 		return true
 
 	case "select_pane":
@@ -6650,11 +7016,62 @@ func randomThought(category string) string {
 
 // GetSidebarBg returns the configured sidebar background color.
 func (c *Coordinator) GetSidebarBg() string {
-	bg := c.config.Sidebar.Colors.Bg
-	if bg == "" {
-		bg = "#1a1a2e"
+	// Config override takes priority
+	if c.config.Sidebar.Colors.Bg != "" {
+		return c.config.Sidebar.Colors.Bg
 	}
-	return bg
+	// Then use theme
+	if c.theme != nil {
+		return c.theme.SidebarBg
+	}
+	// Fallback to detector
+	return c.bgDetector.GetDefaultSidebarBg()
+}
+
+// applyBackgroundFill applies the sidebar background color to all content lines
+// ensuring the entire sidebar area has a consistent background
+func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width int) string {
+	if bgColor == "" {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+
+	// ANSI escape code for background color
+	r, g, b := hexToRGB(bgColor)
+	bgEsc := fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+	resetEsc := "\x1b[0m"
+
+	for i, line := range lines {
+		// Get visual width of line (stripping ANSI codes)
+		plainLine := stripAnsi(line)
+		visualWidth := runewidth.StringWidth(plainLine)
+
+		// Calculate padding needed
+		padding := ""
+		if visualWidth < width {
+			padding = strings.Repeat(" ", width-visualWidth)
+		}
+
+		// Wrap entire line: bg color prefix + content + padding + reset
+		// This ensures the background fills from start to end
+		lines[i] = bgEsc + line + padding + resetEsc
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// hexToRGB converts hex color to RGB values
+func hexToRGB(hexColor string) (int, int, int) {
+	hex := strings.TrimPrefix(hexColor, "#")
+	if len(hex) != 6 {
+		return 0, 0, 0
+	}
+	var r, g, b int64
+	r, _ = strconv.ParseInt(hex[0:2], 16, 64)
+	g, _ = strconv.ParseInt(hex[2:4], 16, 64)
+	b, _ = strconv.ParseInt(hex[4:6], 16, 64)
+	return int(r), int(g), int(b)
 }
 
 // HeaderColors holds the fg/bg colors for a pane header border.
@@ -6706,12 +7123,13 @@ func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
 		return HeaderColors{}
 	}
 
-	// Get the group theme color
-	var bgColor string
+	// Get the group theme color (bg and fg)
+	var bgColor, fgColor string
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
 			if win.ID == foundWindow.ID {
 				bgColor = group.Theme.Bg
+				fgColor = group.Theme.Fg
 				if win.CustomColor != "" {
 					bgColor = win.CustomColor
 				}
@@ -6723,26 +7141,22 @@ func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
 		}
 	}
 	if bgColor == "" {
-		bgColor = c.config.PaneHeader.ActiveBg
-		if bgColor == "" {
-			bgColor = "#3498db"
-		}
+		bgColor = c.getPaneHeaderActiveBg()
+	}
+	if fgColor == "" {
+		fgColor = c.getPaneHeaderActiveFg()
 	}
 
 	// Fg/Bg based on active/inactive state
+	// Just use the defined colors directly - no manipulation
 	var headerBg, headerFg string
 	if foundPaneActive {
 		headerBg = bgColor
-		headerFg = c.config.PaneHeader.ActiveFg
-		if headerFg == "" {
-			headerFg = "#ffffff"
-		}
+		headerFg = fgColor
 	} else {
-		headerBg = grouping.LightenColor(bgColor, 0.15)
-		headerFg = c.config.PaneHeader.InactiveFg
-		if headerFg == "" {
-			headerFg = "#cccccc"
-		}
+		// Use group's colors for inactive too (consistent look)
+		headerBg = bgColor
+		headerFg = fgColor
 	}
 
 	return HeaderColors{Fg: headerFg, Bg: headerBg}
