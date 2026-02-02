@@ -86,6 +86,7 @@ type rendererModel struct {
 	viewportOffset int
 	totalLines     int
 	sequenceNum    uint64
+	isTouchMode    bool // Touch mode status from coordinator
 
 	// Viewport scroll state
 	scrollY int
@@ -233,6 +234,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.regions = msg.payload.Regions
 		m.totalLines = msg.payload.TotalLines
 		m.sequenceNum = msg.payload.SequenceNum
+		m.isTouchMode = msg.payload.IsTouchMode
 
 		// SIMPLIFIED: Clamp scroll based on simple height calculation
 		maxScroll := m.totalLines - m.height
@@ -315,8 +317,8 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if *debugMode {
 				debugLog.Printf("Long-press detected at X=%d Y=%d", msg.X, msg.Y)
 			}
-			// Treat as right-click
-			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight)
+			// Treat as right-click (simulated)
+			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
 		}
 		return m, nil
 
@@ -388,7 +390,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if *debugMode {
 				debugLog.Printf("  Shift/Ctrl+click detected (Shift=%v Ctrl=%v), treating as right-click", msg.Shift, msg.Ctrl)
 			}
-			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight)
+			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
 		}
 
 		if msg.Button == tea.MouseButtonLeft {
@@ -404,8 +406,8 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				return longPressMsg{X: msg.X, Y: msg.Y}
 			})
 		}
-		// Right or middle click - process immediately
-		return m.processMouseClick(msg.X, msg.Y, msg.Button)
+		// Right or middle click - process immediately (not simulated)
+		return m.processMouseClick(msg.X, msg.Y, msg.Button, false)
 
 	case tea.MouseActionMotion:
 		// Check if movement exceeds threshold - cancel long-press if so
@@ -457,12 +459,12 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			tapDy := abs(msg.Y - m.lastTapPos.Y)
 
 			if timeSinceLastTap < doubleTapThreshold && tapDx <= doubleTapDistance && tapDy <= doubleTapDistance {
-				// Double-tap detected - treat as right-click
+				// Double-tap detected - treat as right-click (simulated)
 				if *debugMode {
 					debugLog.Printf("  Double-tap detected (interval=%v, distance=%d,%d) -> right-click", timeSinceLastTap, tapDx, tapDy)
 				}
 				m.lastTapTime = time.Time{} // Reset to prevent triple-tap
-				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight)
+				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
 			}
 
 			// Single tap - record for potential double-tap and process as left-click
@@ -471,7 +473,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 			m.lastTapTime = time.Now()
 			m.lastTapPos = struct{ X, Y int }{msg.X, msg.Y}
-			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft)
+			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
 		}
 		// Long-press would have already triggered via timer
 		return m, nil
@@ -481,14 +483,14 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 // processMouseClick handles the actual click processing after determining button type
-func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.Model, tea.Cmd) {
+func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSimulated bool) (tea.Model, tea.Cmd) {
 	var resolvedAction, resolvedTarget string
 
 	// Translate Y to content line (accounting for scroll)
 	contentY := y + m.scrollY
 
 	if *debugMode {
-		debugLog.Printf("  Processing click: button=%v Y=%d ContentY=%d (scroll=%d)", button, y, contentY, m.scrollY)
+		debugLog.Printf("  Processing click: button=%v Y=%d ContentY=%d (scroll=%d) simulated=%v", button, y, contentY, m.scrollY, isSimulated)
 	}
 
 	// Check all regions with simple Y-based matching
@@ -540,16 +542,18 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.
 	}
 
 	input := &daemon.InputPayload{
-		SequenceNum:    m.sequenceNum,
-		Type:           "action",
-		MouseX:         x,
-		MouseY:         y,
-		Button:         buttonStr,
-		Action:         "press",
-		ViewportOffset: m.scrollY,
-		ResolvedAction: resolvedAction,
-		ResolvedTarget: resolvedTarget,
-		PaneID:         paneID,
+		SequenceNum:           m.sequenceNum,
+		Type:                  "action",
+		MouseX:                x,
+		MouseY:                y,
+		Button:                buttonStr,
+		Action:                "press",
+		ViewportOffset:        m.scrollY,
+		ResolvedAction:        resolvedAction,
+		ResolvedTarget:        resolvedTarget,
+		PaneID:                paneID,
+		IsSimulatedRightClick: isSimulated,
+		IsTouchMode:           m.isTouchMode,
 	}
 
 	m.sendInput(input)
@@ -984,8 +988,9 @@ var spinnerFrames = []string{"◐", "◓", "◑", "◒"}
 
 // View implements tea.Model
 func (m rendererModel) View() string {
-	if !m.connected {
-		// Show animated loading indicator
+	if !m.connected || m.content == "" {
+		// Show minimal loading indicator - no background color set
+		// so terminal's native background shows through (works for light & dark themes)
 		frame := spinnerFrames[int(time.Now().UnixMilli()/100)%len(spinnerFrames)]
 		style := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#888888"))
