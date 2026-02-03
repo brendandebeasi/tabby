@@ -137,4 +137,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Indicators.Last.Icon = "-"
 		cfg.Indicators.Last.Color = "#3498db"
 	}
+	// Note: PaneHeader.CustomBorder defaults (HandleColor, HandleIcon, Draggable)
+	// are applied at render time in coordinator.go since we can't distinguish
+	// between unset and false for Draggable in YAML.
 }

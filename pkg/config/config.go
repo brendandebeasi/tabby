@@ -6,28 +6,28 @@ import (
 )
 
 type Config struct {
-	Position       string         `yaml:"position"`
-	Height         int            `yaml:"height"`
-	Style          Style          `yaml:"style"`
-	Overflow       Overflow       `yaml:"overflow"`
-	Groups         []Group        `yaml:"groups"`
-	Bindings       Bindings       `yaml:"bindings"`
-	Sidebar        Sidebar        `yaml:"sidebar"`
-	PaneHeader     PaneHeader     `yaml:"pane_header"`
-	Indicators     Indicators     `yaml:"indicators"`
-	Prompt         PromptStyle    `yaml:"prompt"`
-	Widgets        Widgets        `yaml:"widgets"`
-	BusyDetection  BusyDetection  `yaml:"busy_detection"`
-	TerminalTitle  TerminalTitle  `yaml:"terminal_title"`
+	Position      string        `yaml:"position"`
+	Height        int           `yaml:"height"`
+	Style         Style         `yaml:"style"`
+	Overflow      Overflow      `yaml:"overflow"`
+	Groups        []Group       `yaml:"groups"`
+	Bindings      Bindings      `yaml:"bindings"`
+	Sidebar       Sidebar       `yaml:"sidebar"`
+	PaneHeader    PaneHeader    `yaml:"pane_header"`
+	Indicators    Indicators    `yaml:"indicators"`
+	Prompt        PromptStyle   `yaml:"prompt"`
+	Widgets       Widgets       `yaml:"widgets"`
+	BusyDetection BusyDetection `yaml:"busy_detection"`
+	TerminalTitle TerminalTitle `yaml:"terminal_title"`
 }
 
 // BusyDetection configures which pane commands trigger the busy indicator.
 // By default, any foreground process that isn't a shell or editor is "busy".
 // AI tools have activity-based detection: busy when outputting, input when idle.
 type BusyDetection struct {
-	ExtraIdle   []string `yaml:"extra_idle"`    // Additional commands to treat as idle (not busy)
-	AITools     []string `yaml:"ai_tools"`      // Interactive AI tools (busy when active, input when idle)
-	IdleTimeout int      `yaml:"idle_timeout"`  // Seconds of no output before AI tool shows as "input needed" (default: 10)
+	ExtraIdle   []string `yaml:"extra_idle"`   // Additional commands to treat as idle (not busy)
+	AITools     []string `yaml:"ai_tools"`     // Interactive AI tools (busy when active, input when idle)
+	IdleTimeout int      `yaml:"idle_timeout"` // Seconds of no output before AI tool shows as "input needed" (default: 10)
 }
 
 type TerminalTitle struct {
@@ -72,47 +72,47 @@ type StatsWidget struct {
 // SessionWidget shows tmux session info
 type SessionWidget struct {
 	Enabled         bool   `yaml:"enabled"`
-	Style           string `yaml:"style"`            // nerd | emoji | ascii | minimal
-	ShowClients     bool   `yaml:"show_clients"`     // Show connected clients count
-	ShowWindowCount bool   `yaml:"show_windows"`     // Show window count
-	Position        string `yaml:"position"`         // top | bottom
-	Pin             bool   `yaml:"pin"`              // Pin to position
-	Priority        int    `yaml:"priority"`         // Order among widgets
-	Fg              string `yaml:"fg"`               // Text color
-	Bg              string `yaml:"bg"`               // Background color
-	SessionFg       string `yaml:"session_fg"`       // Session name color
-	Divider         string `yaml:"divider"`          // Divider line above widget
-	DividerFg       string `yaml:"divider_fg"`       // Divider color
-	PaddingTop      int    `yaml:"padding_top"`      // Blank lines above content
-	PaddingBot      int    `yaml:"padding_bottom"`   // Blank lines below content
-	MarginTop       int    `yaml:"margin_top"`       // Lines above top divider
-	MarginBot       int    `yaml:"margin_bottom"`    // Lines below bottom divider
+	Style           string `yaml:"style"`          // nerd | emoji | ascii | minimal
+	ShowClients     bool   `yaml:"show_clients"`   // Show connected clients count
+	ShowWindowCount bool   `yaml:"show_windows"`   // Show window count
+	Position        string `yaml:"position"`       // top | bottom
+	Pin             bool   `yaml:"pin"`            // Pin to position
+	Priority        int    `yaml:"priority"`       // Order among widgets
+	Fg              string `yaml:"fg"`             // Text color
+	Bg              string `yaml:"bg"`             // Background color
+	SessionFg       string `yaml:"session_fg"`     // Session name color
+	Divider         string `yaml:"divider"`        // Divider line above widget
+	DividerFg       string `yaml:"divider_fg"`     // Divider color
+	PaddingTop      int    `yaml:"padding_top"`    // Blank lines above content
+	PaddingBot      int    `yaml:"padding_bottom"` // Blank lines below content
+	MarginTop       int    `yaml:"margin_top"`     // Lines above top divider
+	MarginBot       int    `yaml:"margin_bottom"`  // Lines below bottom divider
 }
 
 // GitWidget shows git repository status
 type GitWidget struct {
-	Enabled         bool   `yaml:"enabled"`
-	Style           string `yaml:"style"`            // nerd | emoji | ascii | minimal
-	ShowCounts      bool   `yaml:"show_counts"`      // Show file counts (+3 -2)
-	ShowInsertions  bool   `yaml:"show_insertions"`  // Show line changes
-	ShowStash       bool   `yaml:"show_stash"`       // Show stash count
-	UpdateInterval  int    `yaml:"update_interval"`  // Seconds between updates (default: 5)
-	Position        string `yaml:"position"`         // top | bottom
-	Pin             bool   `yaml:"pin"`              // Pin to position
-	Priority        int    `yaml:"priority"`         // Order among widgets
-	Fg              string `yaml:"fg"`               // Text color
-	Bg              string `yaml:"bg"`               // Background color
-	BranchFg        string `yaml:"branch_fg"`        // Branch name color
-	CleanFg         string `yaml:"clean_fg"`         // Clean status color
-	DirtyFg         string `yaml:"dirty_fg"`         // Dirty status color
-	AheadFg         string `yaml:"ahead_fg"`         // Ahead indicator color
-	BehindFg        string `yaml:"behind_fg"`        // Behind indicator color
-	Divider         string `yaml:"divider"`          // Divider line above widget
-	DividerFg       string `yaml:"divider_fg"`       // Divider color
-	PaddingTop      int    `yaml:"padding_top"`      // Blank lines above content
-	PaddingBot      int    `yaml:"padding_bottom"`   // Blank lines below content
-	MarginTop       int    `yaml:"margin_top"`       // Lines above top divider
-	MarginBot       int    `yaml:"margin_bottom"`    // Lines below bottom divider
+	Enabled        bool   `yaml:"enabled"`
+	Style          string `yaml:"style"`           // nerd | emoji | ascii | minimal
+	ShowCounts     bool   `yaml:"show_counts"`     // Show file counts (+3 -2)
+	ShowInsertions bool   `yaml:"show_insertions"` // Show line changes
+	ShowStash      bool   `yaml:"show_stash"`      // Show stash count
+	UpdateInterval int    `yaml:"update_interval"` // Seconds between updates (default: 5)
+	Position       string `yaml:"position"`        // top | bottom
+	Pin            bool   `yaml:"pin"`             // Pin to position
+	Priority       int    `yaml:"priority"`        // Order among widgets
+	Fg             string `yaml:"fg"`              // Text color
+	Bg             string `yaml:"bg"`              // Background color
+	BranchFg       string `yaml:"branch_fg"`       // Branch name color
+	CleanFg        string `yaml:"clean_fg"`        // Clean status color
+	DirtyFg        string `yaml:"dirty_fg"`        // Dirty status color
+	AheadFg        string `yaml:"ahead_fg"`        // Ahead indicator color
+	BehindFg       string `yaml:"behind_fg"`       // Behind indicator color
+	Divider        string `yaml:"divider"`         // Divider line above widget
+	DividerFg      string `yaml:"divider_fg"`      // Divider color
+	PaddingTop     int    `yaml:"padding_top"`     // Blank lines above content
+	PaddingBot     int    `yaml:"padding_bottom"`  // Blank lines below content
+	MarginTop      int    `yaml:"margin_top"`      // Lines above top divider
+	MarginBot      int    `yaml:"margin_bottom"`   // Lines below bottom divider
 }
 
 // PetWidget configures the virtual pet (cat, dog, etc.)
@@ -138,16 +138,16 @@ type PetWidget struct {
 	// Custom icons (override style preset)
 	Icons PetIcons `yaml:"icons"` // Custom icons for each element
 	// Styling (same as other widgets)
-	Fg            string `yaml:"fg"`              // Text color
-	Bg            string `yaml:"bg"`              // Background color
-	Priority      int    `yaml:"priority"`        // Order when multiple widgets pinned (lower = closer to bottom)
-	Divider       string `yaml:"divider"`         // Divider line above widget
-	DividerBottom string `yaml:"divider_bottom"`  // Divider line below widget
-	DividerFg     string `yaml:"divider_fg"`      // Divider color
-	PaddingTop    int    `yaml:"padding_top"`     // Blank lines above content
-	PaddingBot    int    `yaml:"padding_bottom"`  // Blank lines below content
-	MarginTop     int    `yaml:"margin_top"`      // Lines above top divider
-	MarginBot     int    `yaml:"margin_bottom"`   // Lines below bottom divider
+	Fg            string `yaml:"fg"`             // Text color
+	Bg            string `yaml:"bg"`             // Background color
+	Priority      int    `yaml:"priority"`       // Order when multiple widgets pinned (lower = closer to bottom)
+	Divider       string `yaml:"divider"`        // Divider line above widget
+	DividerBottom string `yaml:"divider_bottom"` // Divider line below widget
+	DividerFg     string `yaml:"divider_fg"`     // Divider color
+	PaddingTop    int    `yaml:"padding_top"`    // Blank lines above content
+	PaddingBot    int    `yaml:"padding_bottom"` // Blank lines below content
+	MarginTop     int    `yaml:"margin_top"`     // Lines above top divider
+	MarginBot     int    `yaml:"margin_bottom"`  // Lines below bottom divider
 }
 
 // PetIcons allows customizing individual icons in the pet widget
@@ -177,21 +177,21 @@ type PetIcons struct {
 
 type ClockWidget struct {
 	Enabled       bool   `yaml:"enabled"`
-	Format        string `yaml:"format"`          // Go time format (default: "15:04:05")
-	ShowDate      bool   `yaml:"show_date"`       // Show date below time
-	DateFmt       string `yaml:"date_format"`     // Date format (default: "Mon Jan 2")
-	Fg            string `yaml:"fg"`              // Text color
-	Bg            string `yaml:"bg"`              // Background color
-	Position      string `yaml:"position"`        // "top" or "bottom" (default: bottom)
-	Pin           bool   `yaml:"pin"`             // Pin to bottom of sidebar (scrolls with content if false)
-	Priority      int    `yaml:"priority"`        // Order when multiple widgets pinned (lower = closer to bottom)
-	Divider       string `yaml:"divider"`         // Divider line above widget
-	DividerBottom string `yaml:"divider_bottom"`  // Divider line below widget
-	DividerFg     string `yaml:"divider_fg"`      // Divider color
-	PaddingTop    int    `yaml:"padding_top"`     // Blank lines above content
-	PaddingBot    int    `yaml:"padding_bottom"`  // Blank lines below content
-	MarginTop     int    `yaml:"margin_top"`      // Lines above top divider
-	MarginBot     int    `yaml:"margin_bottom"`   // Lines below bottom divider
+	Format        string `yaml:"format"`         // Go time format (default: "15:04:05")
+	ShowDate      bool   `yaml:"show_date"`      // Show date below time
+	DateFmt       string `yaml:"date_format"`    // Date format (default: "Mon Jan 2")
+	Fg            string `yaml:"fg"`             // Text color
+	Bg            string `yaml:"bg"`             // Background color
+	Position      string `yaml:"position"`       // "top" or "bottom" (default: bottom)
+	Pin           bool   `yaml:"pin"`            // Pin to bottom of sidebar (scrolls with content if false)
+	Priority      int    `yaml:"priority"`       // Order when multiple widgets pinned (lower = closer to bottom)
+	Divider       string `yaml:"divider"`        // Divider line above widget
+	DividerBottom string `yaml:"divider_bottom"` // Divider line below widget
+	DividerFg     string `yaml:"divider_fg"`     // Divider color
+	PaddingTop    int    `yaml:"padding_top"`    // Blank lines above content
+	PaddingBot    int    `yaml:"padding_bottom"` // Blank lines below content
+	MarginTop     int    `yaml:"margin_top"`     // Lines above top divider
+	MarginBot     int    `yaml:"margin_bottom"`  // Lines below bottom divider
 }
 
 type PromptStyle struct {
@@ -201,35 +201,47 @@ type PromptStyle struct {
 }
 
 type PaneHeader struct {
-	ActiveFg      string `yaml:"active_fg"`       // Active pane header text (default: #ffffff)
-	ActiveBg      string `yaml:"active_bg"`       // Active pane header bg fallback (default: #3498db)
-	InactiveFg    string `yaml:"inactive_fg"`     // Inactive pane header text (default: #cccccc)
-	InactiveBg    string `yaml:"inactive_bg"`     // Inactive pane header bg fallback (default: #333333)
-	CommandFg     string `yaml:"command_fg"`      // Dimmed pane text color (default: #aaaaaa)
-	ButtonFg      string `yaml:"button_fg"`       // Button text color for [|] [-] [x] (default: #888888)
-	DividerFg     string `yaml:"divider_fg"`      // Divider "|" between panes (default: same as button_fg)
-	BorderFromTab bool   `yaml:"border_from_tab"` // Use tab's color for active pane border (default: false)
-	AutoBorder    bool   `yaml:"auto_border"`     // Auto-set pane border color from window's resolved color (default: false)
-	BorderLines   string `yaml:"border_lines"`    // Border style: single, double, heavy, simple, number (default: single)
-	BorderFg      string `yaml:"border_fg"`       // Border foreground color (default: #444444)
+	ActiveFg      string  `yaml:"active_fg"`       // Active pane header text (default: #ffffff)
+	ActiveBg      string  `yaml:"active_bg"`       // Active pane header bg fallback (default: #3498db)
+	InactiveFg    string  `yaml:"inactive_fg"`     // Inactive pane header text (default: #cccccc)
+	InactiveBg    string  `yaml:"inactive_bg"`     // Inactive pane header bg fallback (default: #333333)
+	CommandFg     string  `yaml:"command_fg"`      // Dimmed pane text color (default: #aaaaaa)
+	ButtonFg      string  `yaml:"button_fg"`       // Button text color for [|] [-] [x] (default: #888888)
+	DividerFg     string  `yaml:"divider_fg"`      // Divider "|" between panes (default: same as button_fg)
+	BorderFromTab bool    `yaml:"border_from_tab"` // Use tab's color for active pane border (default: false)
+	AutoBorder    bool    `yaml:"auto_border"`     // Auto-set pane border color from window's resolved color (default: false)
+	BorderLines   string  `yaml:"border_lines"`    // Border style: single, double, heavy, simple, number (default: single)
+	BorderFg      string  `yaml:"border_fg"`       // Border foreground color (default: #444444)
+	DimInactive   bool    `yaml:"dim_inactive"`    // Enable dimming of inactive panes (default: false)
+	DimOpacity    float64 `yaml:"dim_opacity"`     // Opacity for dimmed panes 0.0-1.0 (default: 0.7)
+	// Custom border settings - render our own border instead of tmux's
+	CustomBorder bool   `yaml:"custom_border"` // Enable custom border rendering (default: false)
+	HandleColor  string `yaml:"handle_color"`  // Drag handle color (default: #666666)
+	HandleIcon   string `yaml:"handle_icon"`   // Drag handle icon (default: "⋯")
+	Draggable    bool   `yaml:"draggable"`     // Allow drag-to-resize via custom border (default: true)
+	LargeMode    bool   `yaml:"large_mode"`
+	TerminalBg   string `yaml:"terminal_bg"` // Terminal background color for hiding borders (default: #000000)
 }
 
 type Sidebar struct {
-	Position        string        `yaml:"position"`      // "left" (default) or "right"
-	Mode            string        `yaml:"mode"`          // "full" (default) or "partial"
-	PaneHeaders     bool          `yaml:"pane_headers"`  // Enable clickable overlay pane headers
+	Position        string        `yaml:"position"`     // "left" (default) or "right"
+	Mode            string        `yaml:"mode"`         // "full" (default) or "partial"
+	PaneHeaders     bool          `yaml:"pane_headers"` // Enable clickable overlay pane headers
 	NewTabButton    bool          `yaml:"new_tab_button"`
 	CloseButton     bool          `yaml:"close_button"`
 	NewGroupButton  bool          `yaml:"new_group_button"`
 	ShowEmptyGroups bool          `yaml:"show_empty_groups"`
 	SortBy          string        `yaml:"sort_by"`
-	Debug           bool          `yaml:"debug"`         // Enable debug logging to /tmp/tabby-debug.log
-	TouchMode       bool          `yaml:"touch_mode"`    // Larger tap targets for mobile/touch
-	LineHeight      int           `yaml:"line_height"`   // Extra blank lines between items (0=compact, 1+=spaced)
+	Debug           bool          `yaml:"debug"`           // Enable debug logging to /tmp/tabby-debug.log
+	TouchMode       bool          `yaml:"touch_mode"`      // Larger tap targets for mobile/touch
+	LineHeight      int           `yaml:"line_height"`     // Extra blank lines between items (0=compact, 1+=spaced)
 	ActionZone      string        `yaml:"action_zone"`     // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
 	ActionPriority  int           `yaml:"action_priority"` // Priority within zone (default: 90)
-	Colors          SidebarColors `yaml:"colors"`
-	TouchButtons    TouchButtons  `yaml:"touch_buttons"` // Touch mode button styling
+	PrefixMode      bool          `yaml:"prefix_mode"`     // Flat window list with group prefixes (SD| NAME) instead of hierarchy
+	Theme           string        `yaml:"theme"`           // Color theme: rose-pine-dawn, catppuccin-mocha, dracula, nord, etc.
+	ThemeMode       string        `yaml:"theme_mode"`      // Theme detection: "auto" (default), "dark", or "light" (deprecated, use theme)
+	Colors          SidebarColors `yaml:"colors"`          // Manual color overrides (applied on top of theme)
+	TouchButtons    TouchButtons  `yaml:"touch_buttons"`   // Touch mode button styling
 }
 
 // TouchButtons configures colors for touch mode buttons
@@ -285,14 +297,14 @@ type Group struct {
 }
 
 type Theme struct {
-	Bg                 string `yaml:"bg"`
-	Fg                 string `yaml:"fg"`
-	ActiveBg           string `yaml:"active_bg"`
-	ActiveFg           string `yaml:"active_fg"`
-	InactiveBg         string `yaml:"inactive_bg"`          // Inactive tab background (default: computed from bg)
-	InactiveFg         string `yaml:"inactive_fg"`          // Inactive tab text
-	Icon               string `yaml:"icon"`
-	ActiveIndicatorBg  string `yaml:"active_indicator_bg"`  // Lighter color for active indicator block
+	Bg                string `yaml:"bg"`
+	Fg                string `yaml:"fg"`
+	ActiveBg          string `yaml:"active_bg"`
+	ActiveFg          string `yaml:"active_fg"`
+	InactiveBg        string `yaml:"inactive_bg"` // Inactive tab background (default: computed from bg)
+	InactiveFg        string `yaml:"inactive_fg"` // Inactive tab text
+	Icon              string `yaml:"icon"`
+	ActiveIndicatorBg string `yaml:"active_indicator_bg"` // Lighter color for active indicator block
 }
 
 type Bindings struct {

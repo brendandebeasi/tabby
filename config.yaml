@@ -20,39 +20,41 @@ groups:
   - name: "StudioDome"
     pattern: "^SD\\|"
     working_dir: "~/git/studiodome"
-    theme        :
-      bg: "#8b1a1a"
-      fg: "#ffffff"
-      active_bg: "#6b0f0f"
-      active_fg: "#ffffff"
+    theme:
+      bg: "#b4637a"           # Rose Pine Dawn rose
+      active_bg: "#9d4e6a"    # Darker rose
       icon: ""
-      active_indicator_bg: "#26c6da"  # Bright teal
+      active_indicator_bg: "#d7827e"  # Rose Pine Dawn love
 
   - name: "Gunpowder"
     pattern: "^GP\\|"
     working_dir: "~/git/gunpowder"
     theme:
-      bg: "#7f8c8d"
-      fg: "#ecf0f1"
-      active_bg: "#34495e"
-      active_fg: "#ffffff"
-      icon: "🔫"
-      active_indicator_bg: "#26c6da"  # Bright teal
+      bg: "#907aa9"           # Rose Pine Dawn iris
+      active_bg: "#7a6593"    # Darker iris
+      icon: ""
+      active_indicator_bg: "#d7827e"  # Rose Pine Dawn love
 
   - name: "Default"
     pattern: ".*"
     theme:
-      bg: "#3498db"
-      fg: "#ecf0f1"
-      active_bg: "#3498db"
-      active_fg: "#ffffff"
+      bg: "#56949f"           # Rose Pine Dawn foam (teal)
+      active_bg: "#286983"    # Rose Pine Dawn pine
       icon: ""
-      active_indicator_bg: "#26c6da"  # Bright teal
+      active_indicator_bg: "#d7827e"  # Rose Pine Dawn love
 
 bindings:
   toggle_sidebar: "prefix + Tab"
-  next_           tab: "prefix + n"
+  next_tab: "prefix + n"
   prev_tab: "prefix + p"
+  new_window: "prefix + c"
+  kill_pane: "prefix + x"
+  split_horizontal: "prefix + \""
+  split_vertical: "prefix + %"
+  rename_window: "prefix + ,"
+  window_list: "prefix + w"
+  display_panes: "prefix + q"
+  detach: "prefix + d"
 
 sidebar:
   pane_headers: true    # Enable clickable overlay pane headers (replaces native border headers)
@@ -64,19 +66,22 @@ sidebar:
   debug: true  # Enable debug logging to /tmp/tabby-debug.log
   touch_mode: false  # Auto-detects small screens (width < 40) or set TABBY_TOUCH=1
   line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
+  # Theme presets: rose-pine-dawn, rose-pine, rose-pine-moon, catppuccin-mocha,
+  #   catppuccin-latte, dracula, nord, solarized-dark, solarized-light,
+  #   gruvbox-dark, gruvbox-light, tokyo-night, one-dark, dark
+  theme: rose-pine-dawn  # Light theme matching Ghostty
   colors:
-    disclosure_fg: "#e8e8e8"        # Disclosure icon color (off white)
     disclosure_expanded: "⊟"        # Expanded state icon (boxed minus)
     disclosure_collapsed: "⊞"       # Collapsed state icon (boxed plus)
     active_indicator: "█"           # Active window/pane indicator character (solid block)
     active_indicator_fg: "auto"     # Foreground: "auto" = same as bg (solid color)
     active_indicator_bg: "auto"     # Background: "auto" = group's active_indicator_bg color
-    tree_fg: "#888888"              # Tree branch color
     tree_branch: "├─"               # Branch connector
     tree_branch_last: "└─"          # Last branch connector
     tree_connector: "─"             # Horizontal connector
     tree_connector_panes: "┬"       # Connector when has panes
     tree_continue: "│"              # Vertical continuation
+    # Colors auto-derived from terminal theme detection
   touch_buttons:
     # new_tab_bg: "#27ae60"         # New Tab button background (green)
     # new_tab_fg: "#ffffff"         # New Tab button text
@@ -91,22 +96,20 @@ sidebar:
     # inactive_border: ""           # Inactive tab border (default: theme accent)
 
 pane_header:
-  active_fg: "#ffffff"
-  active_bg: "#3498db"
-  inactive_fg: "#cccccc"
-  inactive_bg: "#333333"
-  command_fg: "#aaaaaa"
+  # Colors auto-derived from terminal theme
+  terminal_bg: "#faf4ed"  # Rose Pine Dawn background - must match your terminal
   border_from_tab: true  # Use the tab's color for active pane border
   auto_border: false     # Auto-set tmux pane-border colors from window's group/custom color
-  # Border line style: single, double, heavy, simple, number
+  dim_inactive: true     # Enable dimming of inactive panes
+  dim_opacity: 0.6       # Opacity for dimmed panes 0.0-1.0 (default: 0.7)
   border_lines: heavy
-  # Border style for inactive panes (fg color)
-  border_fg: "#444444"
+  custom_border: true
+  handle_icon: "..."
+  draggable: true
 
 # Prompt styling (for rename dialogs, etc.)
 prompt:
-  fg: "#000000"      # Black text for legibility
-  bg: "#f0f0f0"      # Light gray background
+  # Colors auto-derived from terminal theme
   bold: true
 
 # Terminal app for notifications deep-linking (used by focus_pane.sh)
