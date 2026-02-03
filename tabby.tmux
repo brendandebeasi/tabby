@@ -23,6 +23,10 @@ tmux set-option -g monitor-activity off
 tmux set-option -g monitor-bell on
 tmux set-option -g bell-action other  # Flag bells from non-active windows
 
+# Window sizing: resize all windows/panes together when terminal resizes
+tmux set-option -g window-size largest
+tmux set-option -g aggressive-resize on
+
 # New panes/windows open in the current pane's directory
 tmux bind-key '"' split-window -v -c "#{pane_current_path}"
 tmux bind-key '%' split-window -h -c "#{pane_current_path}"
@@ -156,9 +160,6 @@ else
 fi
 
 # Pane header format: hide for utility panes (sidebar, pane-bar, tabbar)
-# Shows window.pane number, title and command - right-click border for pane actions menu
-# Uses @tabby_pane_active and @tabby_pane_inactive for per-window dynamic coloring
-tmux set-option -g pane-border-format "#{?#{||:#{||:#{==:#{pane_current_command},sidebar},#{==:#{pane_current_command},pane-bar}},#{==:#{pane_current_command},tabbar}},,#{?pane_active,#[fg=#{@tabby_pane_active_fg}#,bg=#{?#{@tabby_pane_active},#{@tabby_pane_active},#{@tabby_pane_active_bg_default}}#,bold],#[fg=#{@tabby_pane_inactive_fg}#,bg=#{?#{@tabby_pane_inactive},#{@tabby_pane_inactive},#{@tabby_pane_inactive_bg_default}}]} #{window_index}.#{pane_index} #{pane_title} #[fg=#{@tabby_pane_command_fg}]#{pane_current_command} }"
 
 # Unbind right-click on pane so it passes through to apps with mouse capture
 # (sidebar-renderer / pane-header use BubbleTea mouse mode and handle right-click internally)
@@ -191,12 +192,16 @@ SCRIPT_EOF
 chmod +x "$CLICK_HANDLER_SCRIPT"
 
 # Bind MouseDown1Pane:
-# - Pane-header: store click position and select pane (triggers FocusMsg for button handling)
-# - Everything else (sidebar, normal panes): send-keys -M passes mouse through to app
+# 1. Check target pane command
+# 2. If Sidebar: send-keys -M (Pass mouse ONLY. Do not select-pane, let app handle it)
+# 3. If Header: Store click, then select-pane
+# 4. If Normal: select-pane (Instant focus) AND signal daemon immediately
 tmux bind-key -T root MouseDown1Pane \
-    if-shell -F "#{m:pane-header,#{pane_current_command}}" \
-        "set-option -g @tabby_last_click_x '#{mouse_x}' ; set-option -g @tabby_last_click_y '#{mouse_y}' ; set-option -g @tabby_last_click_pane '#{mouse_pane}' ; select-pane -t '#{mouse_pane}'" \
-        "send-keys -M"
+    if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
+        "send-keys -M" \
+        "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
+            \"set-option -g @tabby_last_click_x '#{mouse_x}' ; set-option -g @tabby_last_click_y '#{mouse_y}' ; set-option -g @tabby_last_click_pane '#{mouse_pane}' ; select-pane -t =\" \
+            \"select-pane -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 
 # Enable focus events
 tmux set-option -g focus-events on
@@ -364,8 +369,12 @@ tmux bind-key , command-prompt -I "#W" "rename-window '%%' ; set-window-option @
 # Refresh sidebar and pane bar when pane focus changes
 ON_PANE_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_pane_select.sh"
 chmod +x "$ON_PANE_SELECT_SCRIPT"
-tmux set-hook -g after-select-pane "run-shell '$ON_PANE_SELECT_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT'"
-tmux set-hook -g pane-focus-in "run-shell '$ON_PANE_SELECT_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT'"
+# Use -b flag to run scripts in background so focus happens immediately
+# Combined into a single run-shell to reduce process overhead
+# optimization: pass args to avoid internal tmux calls
+tmux set-hook -g after-select-pane "run-shell -b '$ON_PANE_SELECT_SCRIPT \"#{session_id}\"; $SAVE_LAYOUT_SCRIPT \"#{window_id}\" \"#{window_layout}\"'"
+# pane-focus-in is redundant/unreliable, using after-select-pane is sufficient
+# tmux set-hook -g pane-focus-in "run-shell '$ON_PANE_SELECT_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT'"
 # Update pane bar when panes are split, and preserve group prefixes
 PRESERVE_NAME_SCRIPT="$CURRENT_DIR/scripts/preserve_window_name.sh"
 chmod +x "$PRESERVE_NAME_SCRIPT"
