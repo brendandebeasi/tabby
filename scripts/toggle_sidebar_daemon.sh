@@ -111,8 +111,11 @@ else
 
     tmux set-option -g status off
 
-    # Get current window before making changes
+    # Save current window and pane before making changes
     CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
+    CURRENT_PANE=$(tmux display-message -p '#{pane_id}')
+    tmux set-option -g @tabby_last_window "$CURRENT_WINDOW"
+    tmux set-option -g @tabby_last_pane "$CURRENT_PANE"
 
     if [ "${TABBY_DEBUG:-}" = "1" ]; then
         "$DAEMON_BIN" -session "$SESSION_ID" -debug &
@@ -141,12 +144,24 @@ else
     # Get all windows
     WINDOWS=$(tmux list-windows -F "#{window_id}")
 
-    # Return to original window and focus main pane
-    tmux select-window -t "$CURRENT_WINDOW" 2>/dev/null || true
-    if [ "$SIDEBAR_POSITION" = "left" ]; then
-        tmux select-pane -t "{right}" 2>/dev/null || true
+    # Restore focus to the saved window and pane
+    SAVED_WINDOW=$(tmux show-option -gqv @tabby_last_window)
+    SAVED_PANE=$(tmux show-option -gqv @tabby_last_pane)
+
+    if [ -n "$SAVED_WINDOW" ]; then
+        tmux select-window -t "$SAVED_WINDOW" 2>/dev/null || true
+    fi
+
+    if [ -n "$SAVED_PANE" ]; then
+        # Try to restore the exact pane
+        tmux select-pane -t "$SAVED_PANE" 2>/dev/null || true
     else
-        tmux select-pane -t "{left}" 2>/dev/null || true
+        # Fallback: focus main pane based on sidebar position
+        if [ "$SIDEBAR_POSITION" = "left" ]; then
+            tmux select-pane -t "{right}" 2>/dev/null || true
+        else
+            tmux select-pane -t "{left}" 2>/dev/null || true
+        fi
     fi
 
     # Clear activity flags that may have been set during sidebar setup

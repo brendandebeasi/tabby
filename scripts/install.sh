@@ -12,15 +12,19 @@ mkdir -p "$PLUGIN_DIR/bin"
 
 cd "$PLUGIN_DIR"
 
-go build -o bin/render-status cmd/render-status/main.go
-go build -o bin/render-tab cmd/render-tab/main.go
-go build -o bin/sidebar cmd/sidebar/main.go
-go build -o bin/pane-bar cmd/pane-bar/main.go
+go build -o bin/render-status ./cmd/render-status
+go build -o bin/render-tab ./cmd/render-tab
+go build -o bin/tabby-daemon ./cmd/tabby-daemon
+go build -o bin/sidebar-renderer ./cmd/sidebar-renderer
+go build -o bin/pane-header ./cmd/pane-header
+go build -o bin/tabbar ./cmd/tabbar
 
 chmod +x bin/render-status
 chmod +x bin/render-tab
-chmod +x bin/sidebar
-chmod +x bin/pane-bar
+chmod +x bin/tabby-daemon
+chmod +x bin/sidebar-renderer
+chmod +x bin/pane-header
+chmod +x bin/tabbar
 chmod +x scripts/toggle_sidebar.sh
 chmod +x scripts/ensure_pane_bar.sh
 chmod +x scripts/signal_pane_bar.sh

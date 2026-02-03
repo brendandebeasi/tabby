@@ -6,6 +6,20 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 SESSION_ID=$(tmux display-message -p '#{session_id}')
+
+# Debounce - skip if called within 100ms to prevent flicker
+DEBOUNCE_FILE="/tmp/tabby-ensure-debounce-${SESSION_ID:-default}.ts"
+DEBOUNCE_MS=100
+
+if [ -f "$DEBOUNCE_FILE" ]; then
+    LAST_RUN=$(cat "$DEBOUNCE_FILE" 2>/dev/null || echo "0")
+    NOW=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null || date +%s000)
+    DIFF=$((NOW - LAST_RUN))
+    if [ "$DIFF" -lt "$DEBOUNCE_MS" ]; then
+        exit 0
+    fi
+fi
+perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null > "$DEBOUNCE_FILE" || date +%s000 > "$DEBOUNCE_FILE"
 SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
 DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
