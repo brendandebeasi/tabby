@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kill a window and switch to last/first window, then refresh sidebars
+# Kill a window and switch to previous from history, then refresh sidebars
 # Usage: kill_window.sh <window_index>
 
 WINDOW_INDEX="$1"
@@ -9,11 +9,8 @@ if [ -z "$WINDOW_INDEX" ]; then
     exit 1
 fi
 
-# Kill the window
+# Kill the window (window-unlinked hook will handle history-based selection)
 tmux kill-window -t ":$WINDOW_INDEX"
-
-# Switch to last window or first available
-tmux last-window 2>/dev/null || tmux select-window -t :0 2>/dev/null || true
 
 # Focus the main pane (not the sidebar)
 main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)

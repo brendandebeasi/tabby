@@ -6,7 +6,7 @@
 tmux set-option -w @tabby_input "" 2>/dev/null || true
 tmux set-option -w @tabby_bell "" 2>/dev/null || true
 
-# Signal daemon to refresh immediately
+# Signal daemon to refresh immediately (daemon handles width sync)
 DAEMON_PID_FILE="/tmp/tabby-daemon-$(tmux display-message -p '#{session_id}').pid"
 [ -f "$DAEMON_PID_FILE" ] && kill -USR1 "$(cat "$DAEMON_PID_FILE")" 2>/dev/null || true
 

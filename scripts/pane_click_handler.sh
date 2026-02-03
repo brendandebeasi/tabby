@@ -1,27 +1,16 @@
 #!/usr/bin/env bash
+# Handle click on pane-header panes. Store click position and select pane to trigger FocusMsg.
+# The pane-header's BubbleTea receives FocusMsg, reads stored position, sends to daemon.
+# Daemon handles all button logic (single source of truth).
 PANE_ID="$1"
 MOUSE_X="$2"
 MOUSE_Y="$3"
 
-# Debug log
-echo "$(date): PANE_ID='$PANE_ID' X='$MOUSE_X' Y='$MOUSE_Y'" >> /tmp/click-debug.log
+# Store click position for pane-header to read on focus gain
+tmux set-option -g @tabby_last_click_x "$MOUSE_X"
+tmux set-option -g @tabby_last_click_y "$MOUSE_Y"
+tmux set-option -g @tabby_last_click_pane "$PANE_ID"
 
-# Fallback if format wasn't expanded
-if [[ -z "$PANE_ID" ]] || [[ "$PANE_ID" == *"mouse_pane"* ]]; then
-    echo "$(date): Format not expanded, using active pane" >> /tmp/click-debug.log
-    PANE_ID=$(tmux display-message -p "#{pane_id}")
-fi
-
-PANE_CMD=$(tmux display-message -t "$PANE_ID" -p "#{pane_current_command}" 2>/dev/null)
-echo "$(date): PANE_CMD='$PANE_CMD'" >> /tmp/click-debug.log
-
-if [[ "$PANE_CMD" == "pane-header" ]]; then
-    tmux set-option -g @tabby_last_click_x "$MOUSE_X"
-    tmux set-option -g @tabby_last_click_y "$MOUSE_Y"
-    tmux set-option -g @tabby_last_click_pane "$PANE_ID"
-    tmux select-pane -t "$PANE_ID"
-    echo "$(date): Handled as pane-header" >> /tmp/click-debug.log
-else
-    tmux select-pane -t "$PANE_ID"
-    echo "$(date): Selected pane" >> /tmp/click-debug.log
-fi
+# Select the header pane - this triggers FocusMsg in its BubbleTea
+# The header's handleFocusGain() reads the stored click position and processes it
+tmux select-pane -t "$PANE_ID"

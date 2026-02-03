@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Combined handler for pane selection - minimal for speed
 
-SESSION_ID=$(tmux display-message -p '#{session_id}')
+# optimization: Accept session ID as arg to avoid tmux call overhead
+SESSION_ID="$1"
+
+if [ -z "$SESSION_ID" ]; then
+    # Fallback for manual calls
+    SESSION_ID=$(tmux display-message -p '#{session_id}')
+fi
 
 # Signal daemon to refresh immediately
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
