@@ -1027,6 +1027,12 @@ func (m rendererModel) View() string {
 		visibleEnd = len(lines)
 	}
 
+	// Create style for padding/blank lines with terminal background
+	var padStyle lipgloss.Style
+	if *terminalBg != "" {
+		padStyle = lipgloss.NewStyle().Background(lipgloss.Color(*terminalBg)).Width(m.width)
+	}
+
 	// Build visible content, padding each line to full width
 	// This ensures old content is always overwritten
 	var visible []string
@@ -1035,13 +1041,24 @@ func (m rendererModel) View() string {
 		// Pad line to full width if shorter
 		lineWidth := runewidth.StringWidth(stripAnsi(line))
 		if lineWidth < m.width {
-			line += strings.Repeat(" ", m.width-lineWidth)
+			if *terminalBg != "" {
+				// Apply terminal bg to padding spaces
+				padding := padStyle.Render(strings.Repeat(" ", m.width-lineWidth))
+				line += padding
+			} else {
+				line += strings.Repeat(" ", m.width-lineWidth)
+			}
 		}
 		visible = append(visible, line)
 	}
 
-	// Pad remaining lines with full-width blank lines
-	blankLine := strings.Repeat(" ", m.width)
+	// Pad remaining lines with full-width blank lines using terminal bg
+	var blankLine string
+	if *terminalBg != "" {
+		blankLine = padStyle.Render(strings.Repeat(" ", m.width))
+	} else {
+		blankLine = strings.Repeat(" ", m.width)
+	}
 	for len(visible) < m.height {
 		visible = append(visible, blankLine)
 	}
