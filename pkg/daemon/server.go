@@ -41,13 +41,13 @@ type Server struct {
 	OnRenderNeeded func(clientID string, width, height int) *RenderPayload
 
 	// Callback for new client connections
-	OnConnect func(clientID string)
+	OnConnect func(clientID string, paneID string)
 
 	// Callback for handling input events
 	OnInput func(clientID string, input *InputPayload)
 
 	// Callback for resize events
-	OnResize func(clientID string, width, height int)
+	OnResize func(clientID string, width, height int, paneID string)
 
 	// Callback for client disconnect
 	OnDisconnect func(clientID string)
@@ -200,6 +200,7 @@ func (s *Server) handleClient(conn net.Conn) {
 			// Parse resize payload if included
 			width, height := 80, 24 // defaults
 			colorProfile := "ANSI256"
+			paneID := ""
 			if msg.Payload != nil {
 				payloadBytes, _ := json.Marshal(msg.Payload)
 				var resize ResizePayload
@@ -213,6 +214,7 @@ func (s *Server) handleClient(conn net.Conn) {
 					if resize.ColorProfile != "" {
 						colorProfile = resize.ColorProfile
 					}
+					paneID = resize.PaneID
 				}
 			}
 			s.clientsMu.Lock()
@@ -224,7 +226,7 @@ func (s *Server) handleClient(conn net.Conn) {
 			}
 			s.clientsMu.Unlock()
 			if s.OnConnect != nil {
-				s.OnConnect(clientID)
+				s.OnConnect(clientID, paneID)
 			}
 			// Send initial render
 			s.sendRenderToClient(clientID)
@@ -248,7 +250,7 @@ func (s *Server) handleClient(conn net.Conn) {
 					s.clientsMu.Unlock()
 					// Notify and re-render
 					if s.OnResize != nil {
-						s.OnResize(clientID, resize.Width, resize.Height)
+						s.OnResize(clientID, resize.Width, resize.Height, resize.PaneID)
 					}
 					s.sendRenderToClient(clientID)
 				}

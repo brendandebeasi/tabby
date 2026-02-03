@@ -50,6 +50,9 @@ type RenderPayload struct {
 	ViewportOffset int               `json:"viewport_offset"` // Suggested scroll position
 	Regions        []ClickableRegion `json:"regions"`         // Clickable regions for hit testing
 	PinnedRegions  []ClickableRegion `json:"pinned_regions"`  // Clickable regions in pinned content (Y relative to pinned start)
+	IsTouchMode    bool              `json:"is_touch_mode"`   // True if coordinator is in touch mode for this render
+	SidebarBg      string            `json:"sidebar_bg,omitempty"`
+	TerminalBg     string            `json:"terminal_bg,omitempty"`
 }
 
 // InputPayload contains input events from renderer
@@ -69,6 +72,9 @@ type InputPayload struct {
 	// Semantic action (resolved by renderer from clickable regions)
 	ResolvedAction string `json:"resolved_action,omitempty"` // "select_window", "select_pane", "toggle_group", "button"
 	ResolvedTarget string `json:"resolved_target,omitempty"` // window index, pane ID, group name, or button action
+	// Context menu control
+	IsSimulatedRightClick bool `json:"is_simulated_right_click,omitempty"` // True if right-click came from long-press or double-tap
+	IsTouchMode           bool `json:"is_touch_mode,omitempty"`            // True if renderer is in touch mode
 }
 
 // ResizePayload contains terminal dimensions and capabilities
@@ -76,6 +82,7 @@ type ResizePayload struct {
 	Width        int    `json:"width"`
 	Height       int    `json:"height"`
 	ColorProfile string `json:"color_profile,omitempty"` // "Ascii", "ANSI", "ANSI256", "TrueColor"
+	PaneID       string `json:"pane_id,omitempty"`       // tmux pane ID of the renderer
 }
 
 // ViewportUpdatePayload contains scroll position update
