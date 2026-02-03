@@ -91,7 +91,7 @@ func getPaneHeaderBin() string {
 }
 
 // spawnRenderersForNewWindows checks for windows without renderers and spawns them
-func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window, terminalBg string) {
+func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window) {
 	rendererBin := getRendererBin()
 	if rendererBin == "" {
 		return
@@ -158,17 +158,13 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		// Optimization: We can skip this log or assume activeWindow is correct enough
 		logEvent("SPAWN_RENDERER window=%s pane=%s", windowID, firstPane)
 		debugLog.Printf("Spawning renderer for new window %s (pane %s)", windowID, firstPane)
-		
+
 		// Use exec to replace shell with renderer (matches toggle_sidebar_daemon.sh behavior)
 		debugFlag := ""
 		if *debugMode {
 			debugFlag = "-debug"
 		}
-		termBgFlag := ""
-		if terminalBg != "" {
-			termBgFlag = fmt.Sprintf("-terminal-bg '%s'", terminalBg)
-		}
-		cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s' %s %s", rendererBin, sessionID, windowID, debugFlag, termBgFlag)
+		cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
 		cmd := exec.Command("tmux", "split-window", "-d", "-t", firstPane, "-h", "-b", "-f", "-l", width, cmdStr)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			debugLog.Printf("Failed to spawn renderer: %v, output: %s", err, string(out))
@@ -177,7 +173,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 
 		// Ensure sidebar is configured correctly
 		// Since we just spawned it, we can't rely on cached panes to find it immediately.
-		// However, we know split-window was successful. 
+		// However, we know split-window was successful.
 		// We can let the next refresh cycle handle detailed cleanup/resize if needed.
 		// Or assume the split-window flags (-l width) handled the sizing.
 
@@ -185,7 +181,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		if windowID == activeWindow {
 			exec.Command("tmux", "select-pane", "-t", firstPane).Run()
 		}
-		
+
 		logEvent("SPAWN_COMPLETE window=%s", windowID)
 	}
 }
@@ -202,11 +198,11 @@ func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Windo
 		// Clients are usually window IDs (e.g. "@1") or "header:@1"
 		targetID := clientID
 		if strings.HasPrefix(clientID, "header:") {
-			// For headers, we need to map back to the window. 
+			// For headers, we need to map back to the window.
 			// But currently headers are tracked by pane ID in clientID?
 			// Actually, clientID for renderers IS the window ID.
 			// ClientID for headers is "header:<paneID>".
-			// We can't easily check if a pane exists from just window list efficiently 
+			// We can't easily check if a pane exists from just window list efficiently
 			// without iterating all panes.
 			// But since we have all panes in 'windows', we can check.
 			continue // Skip headers for now, let them die naturally when pane dies
@@ -229,12 +225,12 @@ func cleanupOrphanedSidebars(windows []tmux.Window) {
 		for _, p := range win.Panes {
 			cmd := p.Command
 			startCmd := p.StartCommand
-			
+
 			// Check if this is a system pane
-			isSystem := strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") || 
-			           strings.Contains(cmd, "tabby") || strings.Contains(cmd, "pane-header") ||
-					   strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") ||
-					   strings.Contains(startCmd, "tabby") || strings.Contains(startCmd, "pane-header")
+			isSystem := strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") ||
+				strings.Contains(cmd, "tabby") || strings.Contains(cmd, "pane-header") ||
+				strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") ||
+				strings.Contains(startCmd, "tabby") || strings.Contains(startCmd, "pane-header")
 
 			if isSystem {
 				// We only care about the sidebar specifically for cleanup, but generic "system" check is safer
@@ -829,8 +825,16 @@ func main() {
 	}
 
 	// Set up connect/disconnect callbacks
-	server.OnConnect = func(clientID string) {
-		logEvent("CLIENT_CONNECT client=%s", clientID)
+	server.OnConnect = func(clientID string, paneID string) {
+		logEvent("CLIENT_CONNECT client=%s pane=%s", clientID, paneID)
+		if paneID != "" {
+			coordinator.ApplyThemeToPane(paneID)
+		}
+	}
+	server.OnResize = func(clientID string, width, height int, paneID string) {
+		if paneID != "" {
+			coordinator.ApplyThemeToPane(paneID)
+		}
 	}
 	server.OnDisconnect = func(clientID string) {
 		coordinator.RemoveClient(clientID)
@@ -931,50 +935,51 @@ func main() {
 			}
 		}
 
-		        for {
-		            select {
-		            			case <-refreshCh:
-		            				start := time.Now()
-		            				logEvent("SIGNAL_REFRESH session=%s", *sessionID)
-		            				
-		            				coordinator.RefreshWindows()
-		            				t1 := time.Now()
-		            				
-		            				// Optimization: Reuse window/pane data fetched by coordinator
-		            				windows := coordinator.GetWindows()
-		            				spawnRenderersForNewWindows(server, *sessionID, windows, coordinator.GetTerminalBg())
-		            				t2 := time.Now()
-		            
-		            				cleanupOrphanedSidebars(windows)
-		            				t3 := time.Now()
-		            
-		            				cleanupSidebarsForClosedWindows(server, windows)
-		            				t4 := time.Now()
-		            				
-		            				doPaneLayoutOps()
-		            				t5 := time.Now()
-		            
-		            				currentHash := coordinator.GetWindowsHash()
-		            				if currentHash != lastWindowsHash {
-		            					updateHeaderBorderStyles(coordinator)
-		            				}
-		            				server.BroadcastRender()
-		            				t6 := time.Now()
-		            				lastWindowsHash = currentHash
-		            
-		            								debugLog.Printf("PERF: RefreshWindows=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v Render=%v TOTAL=%v", 
-		            									t1.Sub(start), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t6.Sub(t5), t6.Sub(start))
-		            							case <-windowCheckTicker.C:		                // Fallback polling: spawn/cleanup for missed events
-		                logEvent("WINDOW_CHECK_TICK")
-		                // Refresh windows first to get latest state for fallback ops
-		                coordinator.RefreshWindows()
-		                windows := coordinator.GetWindows()
-		                
-		                spawnRenderersForNewWindows(server, *sessionID, windows, coordinator.GetTerminalBg())
-		                cleanupOrphanedSidebars(windows)
-		                cleanupSidebarsForClosedWindows(server, windows)
-		                doPaneLayoutOps()
-		            case <-watchdogTicker.C:				watchdogCheckRenderers(server, *sessionID)
+		for {
+			select {
+			case <-refreshCh:
+				start := time.Now()
+				logEvent("SIGNAL_REFRESH session=%s", *sessionID)
+
+				coordinator.RefreshWindows()
+				t1 := time.Now()
+
+				// Optimization: Reuse window/pane data fetched by coordinator
+				windows := coordinator.GetWindows()
+				spawnRenderersForNewWindows(server, *sessionID, windows)
+				t2 := time.Now()
+
+				cleanupOrphanedSidebars(windows)
+				t3 := time.Now()
+
+				cleanupSidebarsForClosedWindows(server, windows)
+				t4 := time.Now()
+
+				doPaneLayoutOps()
+				t5 := time.Now()
+
+				currentHash := coordinator.GetWindowsHash()
+				if currentHash != lastWindowsHash {
+					updateHeaderBorderStyles(coordinator)
+				}
+				server.BroadcastRender()
+				t6 := time.Now()
+				lastWindowsHash = currentHash
+
+				debugLog.Printf("PERF: RefreshWindows=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v Render=%v TOTAL=%v",
+					t1.Sub(start), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t6.Sub(t5), t6.Sub(start))
+			case <-windowCheckTicker.C: // Fallback polling: spawn/cleanup for missed events
+				logEvent("WINDOW_CHECK_TICK")
+				// Refresh windows first to get latest state for fallback ops
+				coordinator.RefreshWindows()
+				windows := coordinator.GetWindows()
+
+				spawnRenderersForNewWindows(server, *sessionID, windows)
+				cleanupOrphanedSidebars(windows)
+				cleanupSidebarsForClosedWindows(server, windows)
+				doPaneLayoutOps()
+			case <-watchdogTicker.C:
+				watchdogCheckRenderers(server, *sessionID)
 			case <-refreshTicker.C:
 				// Fallback polling: always refresh windows (needed for staleness
 				// detection of stuck @tabby_busy), but only broadcast render and

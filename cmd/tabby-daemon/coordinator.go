@@ -101,7 +101,7 @@ type Coordinator struct {
 	pendingNewWindowTime  time.Time
 
 	// Process tree caching
-	lastProcessCheck time.Time
+	lastProcessCheck  time.Time
 	cachedProcessTree *processTree
 
 	// AI tool state tracking — per-pane (for busy→idle transition detection)
@@ -351,8 +351,8 @@ var sessionIconsByStyle = map[string]struct{ Session, Clients, Windows string }{
 
 // NewCoordinator creates a new coordinator instance
 func NewCoordinator(sessionID string) *Coordinator {
-	// Force ANSI256 color mode
-	lipgloss.SetColorProfile(termenv.ANSI256)
+	// Enable TrueColor for accurate theme rendering
+	lipgloss.SetColorProfile(termenv.TrueColor)
 
 	cfg, err := config.LoadConfig(config.DefaultConfigPath())
 	if err != nil {
@@ -471,6 +471,9 @@ func NewCoordinator(sessionID string) *Coordinator {
 			}
 		}
 	}
+
+	// Apply global theme styles to tmux (borders, messages, etc.)
+	c.applyThemeToTmux()
 
 	return c
 }
@@ -1348,6 +1351,52 @@ func (c *Coordinator) syncWindowIndices() {
 // updatePaneHeaderColors sets per-window tmux options for pane header colors
 // based on the group theme. Uses @tabby_pane_active and @tabby_pane_inactive.
 // When auto_border is enabled, also sets pane-border-style and pane-active-border-style.
+// applyThemeToTmux applies the current theme's global styles to tmux options
+func (c *Coordinator) applyThemeToTmux() {
+	if c.theme == nil {
+		return
+	}
+
+	// Apply border colors if defined
+	if c.theme.BorderFg != "" {
+		// Set global border styles
+		// Use BorderFg for both active and inactive to ensure theme consistency
+		style := fmt.Sprintf("fg=%s", c.theme.BorderFg)
+		exec.Command("tmux", "set-option", "-g", "pane-border-style", style).Run()
+		exec.Command("tmux", "set-option", "-g", "pane-active-border-style", style).Run()
+	}
+
+	// Apply message/mode styles (command prompt)
+	if c.theme.PromptBg != "" && c.theme.PromptFg != "" {
+		style := fmt.Sprintf("fg=%s,bg=%s", c.theme.PromptFg, c.theme.PromptBg)
+		exec.Command("tmux", "set-option", "-g", "message-style", style).Run()
+		exec.Command("tmux", "set-option", "-g", "message-command-style", style).Run()
+	}
+}
+
+// ApplyThemeToPane applies theme-specific styles (like background) to a tmux pane
+func (c *Coordinator) ApplyThemeToPane(paneID string) {
+	if c.theme == nil || paneID == "" {
+		return
+	}
+
+	// Use TerminalBg from theme, or fall back to SidebarBg
+	bg := c.theme.TerminalBg
+	if bg == "" {
+		bg = c.theme.SidebarBg
+	}
+
+	coordinatorDebugLog.Printf("ApplyThemeToPane: pane=%s bg=%s", paneID, bg)
+
+	if bg != "" {
+		// Set pane-specific window-style to match the theme background
+		// This makes transparency in renderers work correctly
+		style := fmt.Sprintf("bg=%s", bg)
+		exec.Command("tmux", "set-option", "-p", "-t", paneID, "window-style", style).Run()
+		exec.Command("tmux", "set-option", "-p", "-t", paneID, "window-active-style", style).Run()
+	}
+}
+
 func (c *Coordinator) updatePaneHeaderColors() {
 	// Run async to avoid blocking the coordinator
 	grouped := c.grouped // capture under existing lock
@@ -2136,12 +2185,10 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	if c.sidebarCollapsed {
 		var s strings.Builder
 		expandStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#ffffff")).
-			Background(lipgloss.Color("#3498db")).
+			Foreground(lipgloss.Color(c.getTextColorWithFallback(""))).
 			Bold(true)
 		dimStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#666666")).
-			Background(lipgloss.Color("#2a2a2a"))
+			Foreground(lipgloss.Color(c.getInactiveTextColorWithFallback("")))
 
 		// 3-row tall expand button near the top for easy touch access
 		// Row 0: top border
@@ -2237,9 +2284,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	// Combine everything: header + top_widgets + main + bottom_widgets
 	fullContent := headerContent + topWidgets + mainContent + bottomWidgets
 
-	// Apply sidebar background fill to all content lines
-	sidebarBg := c.GetSidebarBg()
-	fullContent = c.applyBackgroundFill(fullContent, sidebarBg, width)
+	// Don't apply background fill - let terminal's natural background (set via ApplyThemeToPane) show through
 
 	allRegions := append(headerRegions, topWRegions...)
 	allRegions = append(allRegions, mainRegions...)
@@ -2250,8 +2295,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	// Button is 2 columns wide, 3 rows tall
 	if width >= 6 { // Only show if sidebar is wide enough
 		collapseBtn := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#ffffff")).
-			Background(lipgloss.Color("#e74c3c")).
+			Foreground(lipgloss.Color(c.getTextColorWithFallback(""))).
 			Bold(true)
 
 		btnChars := []string{"< ", "< ", "< "} // 3 rows of button, 2 chars each
@@ -2296,6 +2340,13 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		totalLines, headerLines, topWidgetLines, mainLines, strings.Count(bottomWidgets, "\n"))
 	coordinatorDebugLog.Printf("  Regions: %d total", len(allRegions))
 
+	sidebarBg := ""
+	terminalBg := ""
+	if c.theme != nil {
+		sidebarBg = c.theme.SidebarBg
+		terminalBg = c.theme.TerminalBg
+	}
+
 	return &daemon.RenderPayload{
 		Content:       fullContent,
 		PinnedContent: "", // No longer using pinned content
@@ -2306,6 +2357,8 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		Regions:       allRegions,
 		PinnedRegions: nil,                  // All regions are in main Regions array now
 		IsTouchMode:   c.isTouchMode(width), // Pass touch mode status to renderer
+		SidebarBg:     sidebarBg,
+		TerminalBg:    terminalBg,
 	}
 }
 
@@ -2412,45 +2465,39 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 	}
 
-	// Find the group for this window's theme color (bg and fg)
-	var bgColor, fgColor string
+	// Find the group for this window's theme color (for accent mark)
+	var groupColor string
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
 			if win.ID == foundWindow.ID {
-				bgColor = group.Theme.Bg
-				fgColor = group.Theme.Fg
+				groupColor = group.Theme.Bg
 				if win.CustomColor != "" {
-					bgColor = win.CustomColor
+					groupColor = win.CustomColor
 				}
 				break
 			}
 		}
-		if bgColor != "" {
+		if groupColor != "" {
 			break
 		}
 	}
-	if bgColor == "" {
-		bgColor = c.getPaneHeaderActiveBg()
-	}
-	if fgColor == "" {
-		fgColor = c.getPaneHeaderActiveFg()
-	}
 
-	// Window-level active state determines header bg
-	// Just use the defined colors directly - no manipulation
+	// Use theme for header background and foreground
 	isWindowActive := foundWindow.Active
 	var headerBg, headerFg string
 	if isWindowActive {
-		headerBg = bgColor
-		headerFg = fgColor
+		headerBg = c.getPaneHeaderActiveBg()
+		headerFg = c.getPaneHeaderActiveFg()
 	} else {
-		// Use group's colors for inactive too (consistent look)
-		headerBg = bgColor
-		headerFg = fgColor
+		headerBg = c.getPaneHeaderInactiveBg()
+		headerFg = c.getPaneHeaderInactiveFg()
 	}
 
-	dimFg := c.config.PaneHeader.CommandFg
-	baseStyle := lipgloss.NewStyle().Background(lipgloss.Color(headerBg))
+	dimFg := c.getCommandFg()
+	baseStyle := lipgloss.NewStyle()
+	if headerBg != "" {
+		baseStyle = baseStyle.Background(lipgloss.Color(headerBg))
+	}
 
 	collapseBtn := ""
 	isCollapsed := false
@@ -2563,32 +2610,22 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	// Build rendered line and click regions
 	var regions []daemon.ClickableRegion
-	currentCol := 1 // after leading space
 
-	renderedLabel := segStyle.Render(labelText)
-
-	// Button area starts here
-	btnAreaStart := width - buttonsWidth
-
-	// Click region to select this pane (covers label + spacer, up to buttons)
-	regions = append(regions, daemon.ClickableRegion{
-		StartLine: 0, EndLine: 0,
-		StartCol: 0, EndCol: btnAreaStart,
-		Action: "header_select_pane", Target: paneID,
-	})
-	currentCol += textWidth
-
-	// Spacer to push buttons to the right
-	spacerWidth := width - currentCol - buttonsWidth
-	if spacerWidth < 0 {
-		spacerWidth = 0
+	groupAccent := " "
+	if groupColor != "" {
+		groupAccent = lipgloss.NewStyle().SetString("▇").Foreground(lipgloss.Color(groupColor)).String()
 	}
 
-	leadStyle := baseStyle.Copy().Foreground(lipgloss.Color(headerFg))
-	line := leadStyle.Render(" ") +
+	// Pad the full line with the header background
+	fullLineStyle := baseStyle.Copy().Width(width)
+
+	line := groupAccent + " " +
 		renderedLabel +
-		baseStyle.Render(strings.Repeat(" ", spacerWidth)) +
+		strings.Repeat(" ", spacerWidth) +
 		btnStyle.Render(buttonsStr)
+
+	// Ensure the final rendered line has the correct background applied everywhere
+	line = fullLineStyle.Render(line)
 
 	if collapseBtn != "" {
 		// Button string: "  ▼   │   ─   ×  "
@@ -2698,9 +2735,8 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			rightBorderWidth := width - handleWidth - leftBorderWidth
 
 			// Use terminal background from theme for border line
-			terminalBg := c.GetTerminalBg()
-			borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor)).Background(lipgloss.Color(terminalBg))
-			handleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor)).Background(lipgloss.Color(terminalBg)).Bold(true)
+			borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor))
+			handleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor)).Bold(true)
 
 			borderLine := borderStyle.Render(strings.Repeat(borderChar, leftBorderWidth)) +
 				handleStyle.Render(handleIcon) +
@@ -2736,12 +2772,21 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 	}
 
+	sidebarBg := ""
+	terminalBg := ""
+	if c.theme != nil {
+		sidebarBg = c.theme.SidebarBg
+		terminalBg = c.theme.TerminalBg
+	}
+
 	return &daemon.RenderPayload{
 		Content:    line,
 		Width:      width,
 		Height:     1,
 		TotalLines: 1,
 		Regions:    regions,
+		SidebarBg:  sidebarBg,
+		TerminalBg: terminalBg,
 	}
 }
 
@@ -2789,16 +2834,10 @@ func (c *Coordinator) lineSpacing() string {
 // touchPadLine renders a blank padding line with background color for touch mode.
 // Returns empty string when touch mode is off.
 func (c *Coordinator) touchPadLine(width int, bgColor string) string {
-	if !c.isTouchMode(width) {
-		return ""
-	}
-	if bgColor == "" {
+	if width < 1 {
 		return "\n"
 	}
-	padStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color(bgColor)).
-		Width(width)
-	return padStyle.Render("") + "\n"
+	return strings.Repeat(" ", width) + "\n"
 }
 
 // touchButtonOpts configures renderTouchButton appearance.
@@ -2815,7 +2854,7 @@ type touchButtonOpts struct {
 //	│ + New Tab        │
 //	╰──────────────────╯
 func (c *Coordinator) renderTouchButton(width int, label string, bgColor string, opts ...touchButtonOpts) string {
-	fgColor := "#ffffff"
+	fgColor := c.getTextColorWithFallback("")
 	bold := false
 	borderFg := ""
 	if len(opts) > 0 {
@@ -2834,12 +2873,10 @@ func (c *Coordinator) renderTouchButton(width int, label string, bgColor string,
 	}
 	boxStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(fgColor)).
-		Background(lipgloss.Color(bgColor)).
 		Bold(bold).
 		Width(width - 2).
 		Border(borderType).
-		BorderForeground(lipgloss.Color(borderFg)).
-		BorderBackground(lipgloss.Color(bgColor))
+		BorderForeground(lipgloss.Color(borderFg))
 	return boxStyle.Render(label)
 }
 
@@ -2917,8 +2954,9 @@ func (c *Coordinator) generateSidebarHeader(width int) (string, []daemon.Clickab
 	// Collapse button is now a floating 3x3 overlay added separately
 	sessionName := "TABBY"
 
+	// Get terminal background for consistent styling
 	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#ffffff")).
+		Foreground(lipgloss.Color(c.getHeaderTextColorWithFallback(""))).
 		Bold(true)
 
 	// Leave space on right for floating collapse button (3 chars)
@@ -3033,6 +3071,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 		// Auto-fill missing theme colors with intelligent defaults
 		isDarkBg := c.bgDetector.IsDarkBackground()
+		if c.theme != nil {
+			isDarkBg = c.theme.Dark
+		}
 		theme = grouping.ResolveThemeColors(theme, isDarkBg)
 
 		isCollapsed := c.collapsedGroups[group.Name]
@@ -3040,7 +3081,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		// Group header style
 		headerStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color(theme.Fg)).
-			Background(lipgloss.Color(theme.Bg)).
 			Bold(true)
 
 		// Collapse indicator
@@ -3051,9 +3091,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		collapseStyle := lipgloss.NewStyle()
 		if disclosureColor != "" {
 			collapseStyle = collapseStyle.Foreground(lipgloss.Color(disclosureColor))
-		}
-		if theme.Bg != "" {
-			collapseStyle = collapseStyle.Background(lipgloss.Color(theme.Bg))
 		}
 
 		// Build header
@@ -3183,9 +3220,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			if fgColor != "" {
 				style = style.Foreground(lipgloss.Color(fgColor))
 			}
-			if bgColor != "" {
-				style = style.Background(lipgloss.Color(bgColor))
-			}
+
 			if isActive {
 				style = style.Bold(true)
 			}
@@ -3196,9 +3231,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			if ind.Busy.Enabled && win.Busy {
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
-				if ind.Busy.Bg != "" {
-					alertStyle = alertStyle.Background(lipgloss.Color(ind.Busy.Bg))
-				}
+
 				busyFrames := c.getBusyFrames()
 				alertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
 			} else if ind.Input.Enabled && win.Input {
@@ -3207,9 +3240,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					inputIcon = "?"
 				}
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Input.Color))
-				if ind.Input.Bg != "" {
-					alertStyle = alertStyle.Background(lipgloss.Color(ind.Input.Bg))
-				}
+
 				if len(ind.Input.Frames) > 0 {
 					alertIcon = alertStyle.Render(ind.Input.Frames[c.spinnerFrame%len(ind.Input.Frames)])
 				} else {
@@ -3218,21 +3249,15 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			} else if !isActive {
 				if ind.Bell.Enabled && win.Bell {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
-					if ind.Bell.Bg != "" {
-						alertStyle = alertStyle.Background(lipgloss.Color(ind.Bell.Bg))
-					}
+
 					alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Bell))
 				} else if ind.Activity.Enabled && win.Activity {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
-					if ind.Activity.Bg != "" {
-						alertStyle = alertStyle.Background(lipgloss.Color(ind.Activity.Bg))
-					}
+
 					alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Activity))
 				} else if ind.Silence.Enabled && win.Silence {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
-					if ind.Silence.Bg != "" {
-						alertStyle = alertStyle.Background(lipgloss.Color(ind.Silence.Bg))
-					}
+
 					alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Silence))
 				}
 			}
@@ -3303,10 +3328,11 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			if disclosureColor != "" {
 				windowCollapseStyle = windowCollapseStyle.Foreground(lipgloss.Color(disclosureColor))
 			}
+
+			contentStyle := style.Copy()
 			if bgColor != "" {
-				windowCollapseStyle = windowCollapseStyle.Background(lipgloss.Color(bgColor))
+				contentStyle = contentStyle.Background(lipgloss.Color(bgColor))
 			}
-			contentStyle := style.Width(windowContentWidth)
 
 			// Render tab line - touch mode uses bordered box, normal mode uses inline
 			if c.isTouchMode(width) {
@@ -3345,7 +3371,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				s.WriteString(c.renderTouchButton(width, tabLabel, tabBg, tabOpts) + "\n")
 				currentLine += 3
 			} else if hasPanes {
-				s.WriteString(indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(contentText) + "\n")
+				paddedContent := contentText + strings.Repeat(" ", windowContentWidth-runewidth.StringWidth(contentText))
+				s.WriteString(indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(paddedContent) + "\n")
 				currentLine++
 			} else if isActive {
 				// Active indicator replaces part of tree branch
@@ -3369,10 +3396,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 
 				activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Background(lipgloss.Color(indicatorBg)).Bold(true)
-				s.WriteString(indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator) + contentStyle.Render(contentText) + "\n")
+				paddedContent := contentText + strings.Repeat(" ", windowContentWidth-runewidth.StringWidth(contentText))
+				s.WriteString(indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator) + contentStyle.Render(paddedContent) + "\n")
 				currentLine++
 			} else {
-				s.WriteString(indicatorPart + treeStyle.Render(treeBranch) + contentStyle.Render(contentText) + "\n")
+				paddedContent := contentText + strings.Repeat(" ", windowContentWidth-runewidth.StringWidth(contentText))
+				s.WriteString(indicatorPart + treeStyle.Render(treeBranch) + contentStyle.Render(paddedContent) + "\n")
 				currentLine++
 			}
 
@@ -3409,33 +3438,30 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			// Show panes if window has multiple panes and is not collapsed
 			if len(win.Panes) > 1 && !isWindowCollapsed {
-				var paneBg, paneFg, activePaneBg string
+				var paneFg string
 				if win.CustomColor != "" {
-					paneBg = grouping.LightenColor(win.CustomColor, 0.3)
-					activePaneBg = win.CustomColor
 					paneFg = "#ffffff"
 				} else {
-					paneBg = grouping.LightenColor(theme.Bg, 0.3)
-					activePaneBg = theme.ActiveBg
 					paneFg = theme.Fg
 					if paneFg == "" {
-						paneFg = "#ffffff"
+						paneFg = c.getInactiveTextColorWithFallback("")
 					}
 				}
 
 				paneStyle := lipgloss.NewStyle().
-					Foreground(lipgloss.Color(paneFg)).
-					Background(lipgloss.Color(paneBg))
+					Foreground(lipgloss.Color(paneFg))
 
 				activePaneStyle := paneStyle
 				if isActive {
-					activePaneFg := "#ffffff"
+					activePaneFg := c.getTextColorWithFallback("")
 					if win.CustomColor == "" && theme.ActiveFg != "" {
 						activePaneFg = theme.ActiveFg
+					} else if win.CustomColor != "" {
+						// Only use white for custom colors (they have dark backgrounds)
+						activePaneFg = "#ffffff"
 					}
 					activePaneStyle = lipgloss.NewStyle().
 						Foreground(lipgloss.Color(activePaneFg)).
-						Background(lipgloss.Color(activePaneBg)).
 						Bold(true)
 				}
 
@@ -3498,9 +3524,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					pInd := c.config.Indicators
 					if pane.AIBusy && pInd.Busy.Enabled {
 						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
-						if pInd.Busy.Bg != "" {
-							alertStyle = alertStyle.Background(lipgloss.Color(pInd.Busy.Bg))
-						}
 						busyFrames := c.getBusyFrames()
 						paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
 					} else if pane.AIInput && pInd.Input.Enabled {
@@ -3509,9 +3532,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 							inputIcon = "?"
 						}
 						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Input.Color))
-						if pInd.Input.Bg != "" {
-							alertStyle = alertStyle.Background(lipgloss.Color(pInd.Input.Bg))
-						}
 						if len(pInd.Input.Frames) > 0 {
 							paneAlertIcon = alertStyle.Render(pInd.Input.Frames[c.spinnerFrame%len(pInd.Input.Frames)])
 						} else {
@@ -3520,9 +3540,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) {
 						// Non-AI pane with foreground process
 						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
-						if pInd.Busy.Bg != "" {
-							alertStyle = alertStyle.Background(lipgloss.Color(pInd.Busy.Bg))
-						}
 						busyFrames := c.getBusyFrames()
 						paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
 					}
@@ -3549,7 +3566,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						} else {
 							paneIndicatorFg = activeIndFgConfig
 						}
-						paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Background(lipgloss.Color(paneIndicatorBg)).Bold(true)
+						paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
 						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
 						s.WriteString(paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText) + "\n")
 					} else {
@@ -3559,10 +3576,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 					// Touch mode: bottom padding for pane (2 lines total: content + pad)
 					if c.isTouchMode(width) {
-						currentPaneBg := paneBg
-						if pane.Active && isActive {
-							currentPaneBg = activePaneBg
-						}
 						// Pane tree continuation: │ if not last pane, space if last
 						var panePadBranch string
 						if isLastPane {
@@ -3573,7 +3586,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						// paneIndentWidth = 6: " " + treeContinue + " " + branch + connector + connector
 						panePadFillWidth := width - 6
 						panePadFillStyle := lipgloss.NewStyle().
-							Background(lipgloss.Color(currentPaneBg)).
 							Width(panePadFillWidth)
 						s.WriteString(" " + treeContinue + " " + panePadBranch + "  " + panePadFillStyle.Render("") + "\n")
 						currentLine++
@@ -3671,6 +3683,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			} else {
 				bgColor = grouping.ShadeColorByIndex(win.CustomColor, 1)
 			}
+			// Custom colors typically have dark backgrounds, use white text
 			fgColor = "#ffffff"
 		} else if isActive {
 			bgColor = theme.ActiveBg
@@ -3691,9 +3704,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		if fgColor != "" {
 			style = style.Foreground(lipgloss.Color(fgColor))
 		}
-		if bgColor != "" {
-			style = style.Background(lipgloss.Color(bgColor))
-		}
+
 		if isActive {
 			style = style.Bold(true)
 		}
@@ -3704,9 +3715,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 		if ind.Busy.Enabled && win.Busy {
 			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
-			if ind.Busy.Bg != "" {
-				alertStyle = alertStyle.Background(lipgloss.Color(ind.Busy.Bg))
-			}
+
 			busyFrames := c.getBusyFrames()
 			alertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
 		} else if ind.Input.Enabled && win.Input {
@@ -3715,9 +3724,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				inputIcon = "?"
 			}
 			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Input.Color))
-			if ind.Input.Bg != "" {
-				alertStyle = alertStyle.Background(lipgloss.Color(ind.Input.Bg))
-			}
+
 			if len(ind.Input.Frames) > 0 {
 				alertIcon = alertStyle.Render(ind.Input.Frames[c.spinnerFrame%len(ind.Input.Frames)])
 			} else {
@@ -3726,21 +3733,15 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		} else if !isActive {
 			if ind.Bell.Enabled && win.Bell {
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
-				if ind.Bell.Bg != "" {
-					alertStyle = alertStyle.Background(lipgloss.Color(ind.Bell.Bg))
-				}
+
 				alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Bell))
 			} else if ind.Activity.Enabled && win.Activity {
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
-				if ind.Activity.Bg != "" {
-					alertStyle = alertStyle.Background(lipgloss.Color(ind.Activity.Bg))
-				}
+
 				alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Activity))
 			} else if ind.Silence.Enabled && win.Silence {
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
-				if ind.Silence.Bg != "" {
-					alertStyle = alertStyle.Background(lipgloss.Color(ind.Silence.Bg))
-				}
+
 				alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Silence))
 			}
 		}
@@ -3750,6 +3751,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		if alertIcon != "" {
 			indicatorPart = alertIcon
 		} else {
+			// Use empty space
 			indicatorPart = " "
 		}
 
@@ -3802,9 +3804,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		if disclosureColor != "" {
 			windowCollapseStyle = windowCollapseStyle.Foreground(lipgloss.Color(disclosureColor))
 		}
-		if bgColor != "" {
-			windowCollapseStyle = windowCollapseStyle.Background(lipgloss.Color(bgColor))
-		}
+
 		contentStyle := style.Width(windowContentWidth)
 
 		// Render window line - touch mode uses bordered box, normal mode uses inline
@@ -3859,7 +3859,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				indicatorFg = activeIndFgConf
 			}
 
-			activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Background(lipgloss.Color(indicatorBg)).Bold(true)
+			activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Bold(true)
 			s.WriteString(indicatorPart + " " + activeIndStyle.Render(activeIndicator) + contentStyle.Render(contentText) + "\n")
 			currentLine++
 		} else {
@@ -3898,33 +3898,36 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		// Show panes if window has multiple panes and is not collapsed
 		// Panes still get hierarchy (tree structure) in prefix mode
 		if len(win.Panes) > 1 && !isWindowCollapsed {
-			var paneBg, paneFg, activePaneBg string
+			var paneFg string
 			if win.CustomColor != "" {
-				paneBg = grouping.LightenColor(win.CustomColor, 0.3)
-				activePaneBg = win.CustomColor
+				// When window has a custom color (usually dark background), use white text
 				paneFg = "#ffffff"
 			} else {
-				paneBg = grouping.LightenColor(theme.Bg, 0.3)
-				activePaneBg = theme.ActiveBg
+				// Use theme's foreground color
 				paneFg = theme.Fg
 				if paneFg == "" {
-					paneFg = "#ffffff"
+					// Fall back to theme-aware default
+					paneFg = c.getInactiveTextColorWithFallback("")
 				}
 			}
 
 			paneStyle := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(paneFg)).
-				Background(lipgloss.Color(paneBg))
+				Foreground(lipgloss.Color(paneFg))
 
 			activePaneStyle := paneStyle
 			if isActive {
-				activePaneFg := "#ffffff"
+				var activePaneFg string
 				if win.CustomColor == "" && theme.ActiveFg != "" {
 					activePaneFg = theme.ActiveFg
+				} else if win.CustomColor != "" {
+					// Custom colors use white text (dark backgrounds)
+					activePaneFg = "#ffffff"
+				} else {
+					// Fall back to theme-aware text color
+					activePaneFg = c.getTextColorWithFallback("")
 				}
 				activePaneStyle = lipgloss.NewStyle().
 					Foreground(lipgloss.Color(activePaneFg)).
-					Background(lipgloss.Color(activePaneBg)).
 					Bold(true)
 			}
 
@@ -3980,9 +3983,6 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				pInd := c.config.Indicators
 				if pane.AIBusy && pInd.Busy.Enabled {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
-					if pInd.Busy.Bg != "" {
-						alertStyle = alertStyle.Background(lipgloss.Color(pInd.Busy.Bg))
-					}
 					busyFrames := c.getBusyFrames()
 					paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
 				} else if pane.AIInput && pInd.Input.Enabled {
@@ -3991,9 +3991,6 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 						inputIcon = "?"
 					}
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Input.Color))
-					if pInd.Input.Bg != "" {
-						alertStyle = alertStyle.Background(lipgloss.Color(pInd.Input.Bg))
-					}
 					if len(pInd.Input.Frames) > 0 {
 						paneAlertIcon = alertStyle.Render(pInd.Input.Frames[c.spinnerFrame%len(pInd.Input.Frames)])
 					} else {
@@ -4001,9 +3998,6 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					}
 				} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
-					if pInd.Busy.Bg != "" {
-						alertStyle = alertStyle.Background(lipgloss.Color(pInd.Busy.Bg))
-					}
 					busyFrames := c.getBusyFrames()
 					paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
 				}
@@ -4029,7 +4023,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					} else {
 						paneIndicatorFg = activeIndFgConf
 					}
-					paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Background(lipgloss.Color(paneIndicatorBg)).Bold(true)
+					paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
 					fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
 					s.WriteString(paneLeadChar + "  " + treeStyle.Render(paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText) + "\n")
 				} else {
@@ -4039,15 +4033,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 				// Touch mode: bottom padding for pane
 				if c.isTouchMode(width) {
-					currentPaneBg := paneBg
-					if pane.Active && isActive {
-						currentPaneBg = activePaneBg
-					}
-					panePadFillWidth := width - 5
-					panePadFillStyle := lipgloss.NewStyle().
-						Background(lipgloss.Color(currentPaneBg)).
-						Width(panePadFillWidth)
-					s.WriteString("     " + panePadFillStyle.Render("") + "\n")
+					s.WriteString(strings.Repeat(" ", width) + "\n")
 					currentLine++
 				}
 
@@ -4272,9 +4258,6 @@ func (c *Coordinator) renderClockWidget(width int) string {
 	style := lipgloss.NewStyle()
 	if fgColor != "" {
 		style = style.Foreground(lipgloss.Color(fgColor))
-	}
-	if clock.Bg != "" {
-		style = style.Background(lipgloss.Color(clock.Bg))
 	}
 
 	dividerStyle := lipgloss.NewStyle()
@@ -5043,11 +5026,9 @@ func (c *Coordinator) renderPetTouchButtons(width int, sprites petSprites) strin
 	var result strings.Builder
 
 	// Simple button style without Width/Padding (we'll handle width manually)
-	buttonBg := lipgloss.Color("#333333")
 	buttonFg := lipgloss.Color("#ffffff")
 	buttonStyle := lipgloss.NewStyle().
-		Foreground(buttonFg).
-		Background(buttonBg)
+		Foreground(buttonFg)
 
 	// Divider line (constrain to exact width) - fall back to background-aware default
 	touchDividerFg := c.getInactiveTextColorWithFallback(c.config.Widgets.Pet.DividerFg)
@@ -5108,8 +5089,8 @@ func (c *Coordinator) renderPetTouchButtons(width int, sprites petSprites) strin
 // renderSmallButton renders a single-line flat button with background color.
 func renderSmallButton(width int, label string, bgColor, fgColor string) string {
 	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color(fgColor)).
 		Background(lipgloss.Color(bgColor)).
+		Foreground(lipgloss.Color(fgColor)).
 		Bold(true).
 		Width(width).
 		Align(lipgloss.Center).
@@ -5127,125 +5108,74 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 	tb := c.config.Sidebar.TouchButtons
 	large := c.isTouchMode(width)
 
+	// Get button colors from theme, with fallbacks
+	primaryBg := c.getThemeColor(c.theme.ButtonPrimaryBg, "#27ae60")
+	primaryFg := c.getThemeColor(c.theme.ButtonPrimaryFg, "#ffffff")
+	secondaryBg := c.getThemeColor(c.theme.ButtonSecondaryBg, "#9b59b6")
+	secondaryFg := c.getThemeColor(c.theme.ButtonSecondaryFg, "#ffffff")
+	destructiveBg := c.getThemeColor(c.theme.ButtonDestructiveBg, "#e74c3c")
+	destructiveFg := c.getThemeColor(c.theme.ButtonDestructiveFg, "#ffffff")
+	defaultBg := c.getThemeColor(c.theme.ButtonBg, "#555555")
+	defaultFg := c.getThemeColor(c.theme.ButtonFg, "#ffffff")
+
 	// New Tab + New Group side by side
 	if c.config.Sidebar.NewTabButton && c.config.Sidebar.NewGroupButton {
-		tabColor := "#27ae60"
-		tabFg := "#ffffff"
-		tabBorder := ""
-		if tb.NewTabBg != "" {
-			tabColor = tb.NewTabBg
-		}
-		if tb.NewTabFg != "" {
-			tabFg = tb.NewTabFg
-		}
-		if tb.NewTabBorder != "" {
-			tabBorder = tb.NewTabBorder
-		}
 		leftWidth := width / 2
-
-		grpColor := "#9b59b6"
-		grpFg := "#ffffff"
-		grpBorder := ""
-		if tb.NewGroupBg != "" {
-			grpColor = tb.NewGroupBg
-		}
-		if tb.NewGroupFg != "" {
-			grpFg = tb.NewGroupFg
-		}
-		if tb.NewGroupBorder != "" {
-			grpBorder = tb.NewGroupBorder
-		}
 		rightWidth := width - leftWidth
 
 		var leftBtn, rightBtn string
 		if large {
-			leftBtn = c.renderTouchButton(leftWidth, "+ Tab", tabColor, touchButtonOpts{FgColor: tabFg, BorderFg: tabBorder})
-			rightBtn = c.renderTouchButton(rightWidth, "+ Group", grpColor, touchButtonOpts{FgColor: grpFg, BorderFg: grpBorder})
+			leftBtn = c.renderTouchButton(leftWidth, "+ Tab", primaryBg, touchButtonOpts{FgColor: primaryFg})
+			rightBtn = c.renderTouchButton(rightWidth, "+ Group", secondaryBg, touchButtonOpts{FgColor: secondaryFg})
 		} else {
-			leftBtn = renderSmallButton(leftWidth, "+ Tab", tabColor, tabFg)
-			rightBtn = renderSmallButton(rightWidth, "+ Group", grpColor, grpFg)
+			leftBtn = renderSmallButton(leftWidth, "+ Tab", primaryBg, primaryFg)
+			rightBtn = renderSmallButton(rightWidth, "+ Group", secondaryBg, secondaryFg)
 		}
 
 		left := zone.Mark("sidebar:new_tab", leftBtn)
 		right := zone.Mark("sidebar:new_group", rightBtn)
 		s.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, right) + "\n")
 	} else if c.config.Sidebar.NewTabButton {
-		tabColor := "#27ae60"
-		tabFg := "#ffffff"
-		tabBorder := ""
-		if tb.NewTabBg != "" {
-			tabColor = tb.NewTabBg
-		}
-		if tb.NewTabFg != "" {
-			tabFg = tb.NewTabFg
-		}
-		if tb.NewTabBorder != "" {
-			tabBorder = tb.NewTabBorder
-		}
 		var btn string
 		if large {
-			btn = c.renderTouchButton(width, "+ New Tab", tabColor, touchButtonOpts{FgColor: tabFg, BorderFg: tabBorder})
+			btn = c.renderTouchButton(width, "+ New Tab", primaryBg, touchButtonOpts{FgColor: primaryFg})
 		} else {
-			btn = renderSmallButton(width, "+ New Tab", tabColor, tabFg)
+			btn = renderSmallButton(width, "+ New Tab", primaryBg, primaryFg)
 		}
 		s.WriteString(zone.Mark("sidebar:new_tab", btn) + "\n")
 	} else if c.config.Sidebar.NewGroupButton {
-		grpColor := "#9b59b6"
-		grpFg := "#ffffff"
-		grpBorder := ""
-		if tb.NewGroupBg != "" {
-			grpColor = tb.NewGroupBg
-		}
-		if tb.NewGroupFg != "" {
-			grpFg = tb.NewGroupFg
-		}
-		if tb.NewGroupBorder != "" {
-			grpBorder = tb.NewGroupBorder
-		}
 		var btn string
 		if large {
-			btn = c.renderTouchButton(width, "+ New Group", grpColor, touchButtonOpts{FgColor: grpFg, BorderFg: grpBorder})
+			btn = c.renderTouchButton(width, "+ New Group", secondaryBg, touchButtonOpts{FgColor: secondaryFg})
 		} else {
-			btn = renderSmallButton(width, "+ New Group", grpColor, grpFg)
+			btn = renderSmallButton(width, "+ New Group", secondaryBg, secondaryFg)
 		}
 		s.WriteString(zone.Mark("sidebar:new_group", btn) + "\n")
 	}
 
 	// Close Tab button
 	if c.config.Sidebar.CloseButton {
-		closeColor := "#e74c3c"
-		closeFg := "#ffffff"
-		closeBorder := ""
-		if tb.CloseBg != "" {
-			closeColor = tb.CloseBg
-		}
-		if tb.CloseFg != "" {
-			closeFg = tb.CloseFg
-		}
-		if tb.CloseBorder != "" {
-			closeBorder = tb.CloseBorder
-		}
 		var btn string
 		if large {
-			btn = c.renderTouchButton(width, "x Close Tab", closeColor, touchButtonOpts{FgColor: closeFg, BorderFg: closeBorder})
+			btn = c.renderTouchButton(width, "x Close Tab", destructiveBg, touchButtonOpts{FgColor: destructiveFg})
 		} else {
-			btn = renderSmallButton(width, "x Close Tab", closeColor, closeFg)
+			btn = renderSmallButton(width, "x Close Tab", destructiveBg, destructiveFg)
 		}
 		s.WriteString(zone.Mark("sidebar:close_tab", btn) + "\n")
 	}
 
 	// Touch mode toggle button - label describes what clicking will do
 	touchLabel := "Large Mode"
-	touchColor := "#555555"
+	touchColor := defaultBg
 	if large {
 		touchLabel = "Small Mode"
-		touchColor = "#2980b9"
+		touchColor = c.getThemeColor(c.theme.ButtonPrimaryBg, "#2980b9") // Use primary color when active
 	}
 	var btn string
 	if large {
-		btn = c.renderTouchButton(width, touchLabel, touchColor, touchButtonOpts{FgColor: "#ffffff"})
+		btn = c.renderTouchButton(width, touchLabel, touchColor, touchButtonOpts{FgColor: defaultFg})
 	} else {
-		btn = renderSmallButton(width, touchLabel, touchColor, "#ffffff")
+		btn = renderSmallButton(width, touchLabel, touchColor, defaultFg)
 	}
 	s.WriteString(zone.Mark("sidebar:toggle_touch_mode", btn) + "\n")
 
@@ -5253,22 +5183,26 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 }
 
 // renderSidebarResizeButtons renders resize buttons at bottom of sidebar.
-// Large mode: 3-line bordered buttons. Small mode: single-line flat buttons.
 func (c *Coordinator) renderSidebarResizeButtons(width int) string {
 	if width < 1 {
 		width = 1
 	}
+
+	destructiveBg := c.getThemeColor(c.theme.ButtonDestructiveBg, "#e74c3c")
+	destructiveFg := c.getThemeColor(c.theme.ButtonDestructiveFg, "#ffffff")
+	primaryBg := c.getThemeColor(c.theme.ButtonPrimaryBg, "#27ae60")
+	primaryFg := c.getThemeColor(c.theme.ButtonPrimaryFg, "#ffffff")
 
 	leftWidth := width / 2
 	rightWidth := width - leftWidth
 
 	var shrinkBtn, growBtn string
 	if c.isTouchMode(width) {
-		shrinkBtn = c.renderTouchButton(leftWidth, "<", "#e74c3c", touchButtonOpts{FgColor: "#ffffff"})
-		growBtn = c.renderTouchButton(rightWidth, ">", "#27ae60", touchButtonOpts{FgColor: "#ffffff"})
+		shrinkBtn = c.renderTouchButton(leftWidth, "<", destructiveBg, touchButtonOpts{FgColor: destructiveFg})
+		growBtn = c.renderTouchButton(rightWidth, ">", primaryBg, touchButtonOpts{FgColor: primaryFg})
 	} else {
-		shrinkBtn = renderSmallButton(leftWidth, "<", "#e74c3c", "#ffffff")
-		growBtn = renderSmallButton(rightWidth, ">", "#27ae60", "#ffffff")
+		shrinkBtn = renderSmallButton(leftWidth, "<", destructiveBg, destructiveFg)
+		growBtn = renderSmallButton(rightWidth, ">", primaryBg, primaryFg)
 	}
 
 	left := zone.Mark("sidebar:shrink", shrinkBtn)
@@ -5277,6 +5211,13 @@ func (c *Coordinator) renderSidebarResizeButtons(width int) string {
 
 	return combined + "\n"
 }
+func (c *Coordinator) getThemeColor(themeColor, fallback string) string {
+	if c.theme != nil && themeColor != "" {
+		return themeColor
+	}
+	return fallback
+}
+
 
 // getClientWidth returns the width for a specific client, with fallback to lastWidth
 func (c *Coordinator) getClientWidth(clientID string) int {
