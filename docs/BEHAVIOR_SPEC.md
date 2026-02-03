@@ -11,6 +11,9 @@ This document specifies the expected behavior of the Tabby tmux plugin and provi
 5. [Mode Transitions](#5-mode-transitions)
 6. [Edge Cases](#6-edge-cases)
 7. [Test Procedures](#7-test-procedures)
+8. [Pane Border Colors](#8-pane-border-colors)
+9. [Context Menus](#9-context-menus)
+10. [Pane Collapse/Expand](#10-pane-collapseexpand)
 
 ---
 
@@ -60,7 +63,7 @@ These pane commands are ALWAYS filtered from display:
 
 ### 2.1 Window Creation
 
-**Trigger**: `prefix + c`, `Alt + n`, `[+] New Tab` button, or `tmux new-window`
+**Trigger**: `prefix + c`, `[+] New Tab` button, or `tmux new-window`
 
 **Expected Behavior**:
 1. New window created at next available index
@@ -78,7 +81,7 @@ tmux new-window
 
 ### 2.2 Window Selection
 
-**Trigger**: Click in sidebar, `Alt + h/l`, `Alt + 1-9`, or `tmux select-window`
+**Trigger**: Click in sidebar, `prefix + n/p`, `prefix + 1-9`, or `tmux select-window`
 
 **Expected Behavior**:
 1. Target window becomes active
@@ -590,6 +593,86 @@ View() re-renders with new window/pane data
     v
 Terminal displays updated sidebar
 ```
+
+---
+
+## 8. Pane Border Colors
+
+### 8.1 Dynamic Border Coloring
+
+When `auto_border` is enabled in config, pane borders are colored dynamically based on group theme:
+
+| Pane State | Border Color |
+|------------|--------------|
+| Active pane in active window | Full group color (e.g., `#3498db`) |
+| Inactive pane | Lightened color (15% towards white) |
+| Any pane in inactive window | Lightened color |
+
+### 8.2 Configuration
+
+Enable in `config.yaml`:
+
+```yaml
+pane_header:
+  auto_border: true
+```
+
+### 8.3 Per-Pane Overrides
+
+The daemon sets `pane-border-style` per-pane using `tmux set-option -p -t <pane_id>`. This allows different borders on different panes in the same window.
+
+---
+
+## 9. Context Menus
+
+### 9.1 Menu Locations
+
+| Click Target | Menu Type | Actions |
+|--------------|-----------|---------|
+| Window name | Window Menu | Rename, Kill, Move to Group, New Window |
+| Window indicator (left edge) | Indicator Menu | Toggle indicators (busy, input, etc.) |
+| Pane entry | Pane Menu | Select, Split, Break to Window, Kill |
+| Group header | Group Menu | Collapse/Expand, New Window in Group |
+| Sidebar header area | Settings Menu | Toggle options, Resize sidebar |
+
+### 9.2 Triggers
+
+- **Right-click (Mouse button 3)**: Opens context menu
+- **Middle-click (Mouse button 2)**: Quick actions (kill window/pane with confirmation)
+
+### 9.3 Menu Display
+
+Menus are displayed using `tmux display-menu` at the click position. The daemon calculates menu position based on pane coordinates and mouse position.
+
+### 9.4 Troubleshooting
+
+If context menus don't appear:
+1. Check that `MouseDown3Pane` is unbound: `tmux show-keys | grep MouseDown3`
+2. Enable daemon debug mode: `TABBY_DEBUG=1` and check logs
+3. Verify sidebar-renderer is receiving mouse events
+
+---
+
+## 10. Pane Collapse/Expand
+
+### 10.1 Collapsed State
+
+Windows can have their pane list collapsed in the sidebar to save space:
+
+| State | Display |
+|-------|---------|
+| Expanded (default) | Window + all panes shown indented |
+| Collapsed | Window only, pane count shown as badge |
+
+### 10.2 Toggle Collapse
+
+- **Click**: Toggle pane visibility via click on window entry
+- **Right-click > Collapse/Expand**: Via context menu
+- **tmux option**: `tmux set-window-option @tabby_collapsed on`
+
+### 10.3 Persistence
+
+Collapsed state is stored in `@tabby_collapsed` window option and persists across sidebar refreshes.
 
 ---
 

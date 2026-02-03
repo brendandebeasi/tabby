@@ -82,16 +82,34 @@ set -g @tmux_tabs_test 1  # Currently gated - required for activation
 
 ### Keyboard Shortcuts
 
+Tabby follows standard tmux keybindings. All standard tmux shortcuts work as expected.
+
+#### Standard tmux shortcuts (prefix + key)
+
+| Key | Action |
+|-----|--------|
+| `prefix + c` | Create new window |
+| `prefix + n` | Next window |
+| `prefix + p` | Previous window |
+| `prefix + x` | Kill current pane |
+| `prefix + q` | Display pane numbers |
+| `prefix + w` | Window list |
+| `prefix + ,` | Rename window |
+| `prefix + "` | Split horizontal |
+| `prefix + %` | Split vertical |
+| `prefix + d` | Detach from session |
+| `prefix + 1-9,0` | Switch to window by number |
+
+#### Tabby-specific shortcuts
+
 | Key | Action |
 |-----|--------|
 | `prefix + Tab` | Toggle vertical sidebar |
+| `prefix + G` | Create new group |
+| `prefix + M` | Toggle mode |
+| `prefix + V` | Switch to vertical mode |
+| `prefix + H` | Switch to horizontal mode |
 | `Ctrl + <` or `Alt + <` | Collapse/expand sidebar |
-| `Alt + h` | Previous window |
-| `Alt + l` | Next window |
-| `Alt + n` | Create new window |
-| `Alt + x` | Kill current pane |
-| `Alt + q` | Display pane numbers |
-| `Alt + 1-9,0` | Switch to window by number |
 
 ### Mouse Support (Vertical Sidebar)
 
