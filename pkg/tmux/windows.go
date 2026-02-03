@@ -29,6 +29,7 @@ type Pane struct {
 	Index        int
 	Active       bool
 	Command      string // Current command running in pane
+	StartCommand string // Initial command pane was started with
 	Title        string // Pane title if set
 	LockedTitle  string // Locked title that won't be overwritten (from @tabby_pane_title)
 	Busy         bool   // Pane has a foreground process (not shell)
@@ -36,9 +37,12 @@ type Pane struct {
 	AIInput      bool   // AI tool in this pane is waiting for user input
 	Remote       bool   // Pane is running a remote connection (ssh, mosh, etc.)
 	Top          int    // Y position of pane in window layout (for visual ordering)
+	Width        int    // Pane width
+	Height       int    // Pane height
 	CurrentPath  string // Current working directory of pane
 	LastActivity int64  // Unix timestamp of last pane output (for idle detection)
 	PID          int    // Process ID of the shell in this pane
+	Collapsed    bool   // Pane is collapsed to header only
 }
 
 // idleCommands are processes that indicate "idle" state (not busy)
@@ -177,6 +181,7 @@ type Window struct {
 	Group       string // User-assigned group name (set via @tabby_group option)
 	Collapsed   bool   // Panes are hidden in sidebar (set via @tabby_collapsed option)
 	NameLocked  bool   // Window name was explicitly set by user (set via @tabby_name_locked)
+	SyncWidth   bool   // Sync sidebar width with global setting (set via @tabby_sync_width, default true)
 	Panes       []Pane
 }
 
@@ -185,7 +190,7 @@ func ListWindows() ([]Window, error) {
 	defer t.Stop()
 
 	cmd := exec.Command("tmux", "list-windows", "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -261,6 +266,15 @@ func ListWindows() ([]Window, error) {
 			tabbyNameLocked := strings.TrimSpace(parts[16])
 			nameLocked = tabbyNameLocked == "1" || tabbyNameLocked == "true"
 		}
+		// Sync width state from @tabby_sync_width option (default true)
+		syncWidth := true
+		if len(parts) >= 18 {
+			tabbySyncWidth := strings.TrimSpace(parts[17])
+			// If explicitly "0" or "false", set to false. Otherwise (empty or "1"), true.
+			if tabbySyncWidth == "0" || tabbySyncWidth == "false" {
+				syncWidth = false
+			}
+		}
 		windows = append(windows, Window{
 			ID:          parts[0],
 			Index:       index,
@@ -276,6 +290,7 @@ func ListWindows() ([]Window, error) {
 			Group:       group,
 			Collapsed:   collapsed,
 			NameLocked:  nameLocked,
+			SyncWidth:   syncWidth,
 		})
 	}
 
@@ -288,7 +303,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 	defer t.Stop()
 
 	cmd := exec.Command("tmux", "list-panes", "-t", fmt.Sprintf(":%d", windowIndex), "-F",
-		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}")
+		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -362,6 +377,11 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 			panePID, _ = strconv.Atoi(parts[5])
 		}
 
+		collapsed := false
+		if len(parts) >= 11 {
+			collapsedVal := strings.TrimSpace(parts[10])
+			collapsed = collapsedVal == "1" || strings.EqualFold(collapsedVal, "true")
+		}
 		panes = append(panes, Pane{
 			ID:           parts[0],
 			Index:        index,
@@ -375,6 +395,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 			CurrentPath:  currentPath,
 			LastActivity: lastActivityTS,
 			PID:          panePID,
+			Collapsed:    collapsed,
 		})
 	}
 	return panes, nil
@@ -386,8 +407,9 @@ func ListAllPanes() (map[int][]Pane, error) {
 	t := perf.Start("tmux.ListAllPanes")
 	defer t.Stop()
 
+	// Added pane_start_command, pane_width, pane_height
 	cmd := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}")
+		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_width}\x1f#{pane_height}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -460,20 +482,44 @@ func ListAllPanes() (map[int][]Pane, error) {
 		if len(parts) >= 7 {
 			panePID, _ = strconv.Atoi(parts[6])
 		}
+		
+		startCommand := ""
+		if len(parts) >= 14 {
+			startCommand = parts[13]
+		}
+		
+		width := 0
+		if len(parts) >= 15 {
+			width, _ = strconv.Atoi(parts[14])
+		}
+		
+		height := 0
+		if len(parts) >= 16 {
+			height, _ = strconv.Atoi(parts[15])
+		}
 
 		pane := Pane{
 			ID:           parts[1],
 			Index:        paneIdx,
 			Active:       parts[3] == "1",
 			Command:      command,
+			StartCommand: startCommand,
 			Title:        stripANSI(parts[5]),
 			LockedTitle:  lockedTitle,
 			Busy:         busy,
 			Remote:       isRemote,
 			Top:          top,
+			Width:        width,
+			Height:       height,
 			CurrentPath:  currentPath,
 			LastActivity: lastActivityTS,
 			PID:          panePID,
+		}
+		if len(parts) >= 12 {
+			collapsedVal := strings.TrimSpace(parts[11])
+			if collapsedVal == "1" || collapsedVal == "true" {
+				pane.Collapsed = true
+			}
 		}
 
 		result[windowIdx] = append(result[windowIdx], pane)
