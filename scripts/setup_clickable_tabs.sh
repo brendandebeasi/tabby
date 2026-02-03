@@ -15,10 +15,8 @@ tmux set-option -g status-right "#[fg=#27ae60][+] "
 tmux bind-key -T root MouseUp2Status kill-window
 tmux bind-key -T root MouseUp3Status command-prompt -I "#W" "rename-window '%%'"
 
-tmux bind-key -n M-n new-window
-
 echo "Clickable tabs configured. Mouse support enabled."
 echo "- Left click: Switch to window"
 echo "- Middle click: Close window"
 echo "- Right click: Rename window"
-echo "- Alt+n: Create new window"
+echo "- prefix + c: Create new window"
