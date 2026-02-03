@@ -599,7 +599,7 @@ func (c *Coordinator) getButtonFg() string {
 		return c.config.PaneHeader.ButtonFg
 	}
 	if c.theme != nil {
-		return c.theme.ButtonFg
+		return c.theme.PaneButtonFg
 	}
 	return c.bgDetector.GetDefaultButtonFg()
 }
@@ -5217,7 +5217,6 @@ func (c *Coordinator) getThemeColor(themeColor, fallback string) string {
 	}
 	return fallback
 }
-
 
 // getClientWidth returns the width for a specific client, with fallback to lastWidth
 func (c *Coordinator) getClientWidth(clientID string) int {

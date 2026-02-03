@@ -55,7 +55,7 @@ func (m model) getButtonFg() string {
 		return m.config.PaneHeader.ButtonFg
 	}
 	if m.theme != nil {
-		return m.theme.ButtonFg
+		return m.theme.PaneButtonFg
 	}
 	return "#888888"
 }

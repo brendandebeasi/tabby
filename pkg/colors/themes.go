@@ -20,7 +20,7 @@ type Theme struct {
 	PaneInactiveBg string
 	PaneInactiveFg string
 	CommandFg      string
-	ButtonFg       string
+	PaneButtonFg   string
 	BorderFg       string
 	HandleColor    string
 	TerminalBg     string
@@ -34,11 +34,11 @@ type Theme struct {
 	PromptBg string
 
 	// Group defaults (for tabs without custom colors)
-	DefaultGroupBg       string
-	DefaultGroupFg       string
-	DefaultActiveBg      string
-	DefaultActiveFg      string
-	DefaultIndicatorBg   string
+	DefaultGroupBg     string
+	DefaultGroupFg     string
+	DefaultActiveBg    string
+	DefaultActiveFg    string
+	DefaultIndicatorBg string
 
 	// Sidebar Buttons
 	ButtonBg            string
@@ -78,7 +78,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#fffaf3",
 		PaneInactiveFg: "#9893a5",
 		CommandFg:      "#797593",
-		ButtonFg:       "#575279",
+		PaneButtonFg:   "#575279",
 		HandleColor:    "#9893a5",
 
 		// Widgets
@@ -120,7 +120,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#1f1d2e",
 		PaneInactiveFg: "#6e6a86",
 		CommandFg:      "#908caa",
-		ButtonFg:       "#6e6a86",
+		PaneButtonFg:   "#6e6a86",
 		BorderFg:       "#403d52",
 		HandleColor:    "#6e6a86",
 		TerminalBg:     "#191724",
@@ -155,7 +155,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#2a273f",
 		PaneInactiveFg: "#6e6a86",
 		CommandFg:      "#908caa",
-		ButtonFg:       "#6e6a86",
+		PaneButtonFg:   "#6e6a86",
 		BorderFg:       "#44415a",
 		HandleColor:    "#6e6a86",
 		TerminalBg:     "#232136",
@@ -190,7 +190,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#181825",
 		PaneInactiveFg: "#6c7086",
 		CommandFg:      "#9399b2",
-		ButtonFg:       "#6c7086",
+		PaneButtonFg:   "#6c7086",
 		BorderFg:       "#45475a",
 		HandleColor:    "#6c7086",
 		TerminalBg:     "#1e1e2e",
@@ -225,7 +225,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#dce0e8",
 		PaneInactiveFg: "#9ca0b0",
 		CommandFg:      "#7c7f93",
-		ButtonFg:       "#9ca0b0",
+		PaneButtonFg:   "#9ca0b0",
 		BorderFg:       "#bcc0cc",
 		HandleColor:    "#9ca0b0",
 		TerminalBg:     "#eff1f5",
@@ -260,7 +260,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#21222c",
 		PaneInactiveFg: "#6272a4",
 		CommandFg:      "#6272a4",
-		ButtonFg:       "#6272a4",
+		PaneButtonFg:   "#6272a4",
 		BorderFg:       "#44475a",
 		HandleColor:    "#6272a4",
 		TerminalBg:     "#282a36",
@@ -295,7 +295,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#2e3440",
 		PaneInactiveFg: "#4c566a",
 		CommandFg:      "#d8dee9",
-		ButtonFg:       "#4c566a",
+		PaneButtonFg:   "#4c566a",
 		BorderFg:       "#4c566a",
 		HandleColor:    "#4c566a",
 		TerminalBg:     "#2e3440",
@@ -330,7 +330,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#002b36",
 		PaneInactiveFg: "#586e75",
 		CommandFg:      "#657b83",
-		ButtonFg:       "#586e75",
+		PaneButtonFg:   "#586e75",
 		BorderFg:       "#073642",
 		HandleColor:    "#586e75",
 		TerminalBg:     "#002b36",
@@ -365,7 +365,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#fdf6e3",
 		PaneInactiveFg: "#93a1a1",
 		CommandFg:      "#839496",
-		ButtonFg:       "#93a1a1",
+		PaneButtonFg:   "#93a1a1",
 		BorderFg:       "#eee8d5",
 		HandleColor:    "#93a1a1",
 		TerminalBg:     "#fdf6e3",
@@ -400,7 +400,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#282828",
 		PaneInactiveFg: "#928374",
 		CommandFg:      "#a89984",
-		ButtonFg:       "#928374",
+		PaneButtonFg:   "#928374",
 		BorderFg:       "#504945",
 		HandleColor:    "#928374",
 		TerminalBg:     "#282828",
@@ -435,7 +435,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#fbf1c7",
 		PaneInactiveFg: "#928374",
 		CommandFg:      "#7c6f64",
-		ButtonFg:       "#928374",
+		PaneButtonFg:   "#928374",
 		BorderFg:       "#d5c4a1",
 		HandleColor:    "#928374",
 		TerminalBg:     "#fbf1c7",
@@ -470,7 +470,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#1a1b26",
 		PaneInactiveFg: "#565f89",
 		CommandFg:      "#9aa5ce",
-		ButtonFg:       "#565f89",
+		PaneButtonFg:   "#565f89",
 		BorderFg:       "#414868",
 		HandleColor:    "#565f89",
 		TerminalBg:     "#1a1b26",
@@ -505,7 +505,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#282c34",
 		PaneInactiveFg: "#5c6370",
 		CommandFg:      "#828997",
-		ButtonFg:       "#5c6370",
+		PaneButtonFg:   "#5c6370",
 		BorderFg:       "#3e4451",
 		HandleColor:    "#5c6370",
 		TerminalBg:     "#282c34",
@@ -541,7 +541,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "", // Default
 		PaneInactiveFg: "", // Default
 		CommandFg:      "", // Default
-		ButtonFg:       "", // Default
+		PaneButtonFg:   "", // Default
 		BorderFg:       "", // Default
 		HandleColor:    "", // Default
 		TerminalBg:     "", // Default
@@ -577,7 +577,7 @@ var Themes = map[string]Theme{
 		PaneInactiveBg: "#333333",
 		PaneInactiveFg: "#cccccc",
 		CommandFg:      "#aaaaaa",
-		ButtonFg:       "#888888",
+		PaneButtonFg:   "#888888",
 		BorderFg:       "#444444",
 		HandleColor:    "#666666",
 		TerminalBg:     "#1e1e1e",
