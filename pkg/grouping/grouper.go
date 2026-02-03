@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/b/tmux-tabs/pkg/colors"
 	"github.com/b/tmux-tabs/pkg/config"
 	"github.com/b/tmux-tabs/pkg/tmux"
 )
@@ -103,6 +104,74 @@ func FindGroupTheme(groupName string, groups []config.Group) config.Theme {
 		ActiveBg: "#333333",
 		ActiveFg: "#ffffff",
 		Icon:     "",
+	}
+}
+
+// FindGroupThemeWithDefaults finds a group theme and auto-fills missing colors
+// using intelligent derivation based on terminal background
+func FindGroupThemeWithDefaults(groupName string, groups []config.Group, isDarkTerminalBg bool, groupIndex int) config.Theme {
+	// Try to find the configured theme
+	var theme config.Theme
+	found := false
+	for _, group := range groups {
+		if group.Name == groupName {
+			theme = group.Theme
+			found = true
+			break
+		}
+	}
+
+	// If not found or has no base color, use a nice default from palette
+	if !found || theme.Bg == "" {
+		theme.Bg = colors.GetDefaultGroupColor(groupIndex)
+	}
+
+	// Auto-fill missing colors using intelligent derivation
+	bg, fg, activeBg, activeFg, inactiveBg, inactiveFg := colors.AutoFillTheme(
+		theme.Bg,
+		theme.Fg,
+		theme.ActiveBg,
+		theme.ActiveFg,
+		theme.InactiveBg,
+		theme.InactiveFg,
+		isDarkTerminalBg,
+	)
+
+	// Return the fully populated theme
+	return config.Theme{
+		Bg:                bg,
+		Fg:                fg,
+		ActiveBg:          activeBg,
+		ActiveFg:          activeFg,
+		InactiveBg:        inactiveBg,
+		InactiveFg:        inactiveFg,
+		Icon:              theme.Icon,
+		ActiveIndicatorBg: theme.ActiveIndicatorBg,
+	}
+}
+
+// ResolveThemeColors ensures all theme colors are populated with good defaults
+// This is a helper for existing themes that may have partial color definitions
+func ResolveThemeColors(theme config.Theme, isDarkTerminalBg bool) config.Theme {
+	bg, fg, activeBg, activeFg, inactiveBg, inactiveFg := colors.AutoFillTheme(
+		theme.Bg,
+		theme.Fg,
+		theme.ActiveBg,
+		theme.ActiveFg,
+		theme.InactiveBg,
+		theme.InactiveFg,
+		isDarkTerminalBg,
+	)
+
+	return config.Theme{
+		Bg:                bg,
+		Fg:                fg,
+		ActiveBg:          activeBg,
+		ActiveFg:          activeFg,
+		InactiveBg:        inactiveBg,
+		InactiveFg:        inactiveFg,
+		Icon:              theme.Icon,
+		ActiveIndicatorBg: theme.ActiveIndicatorBg,
 	}
 }
 
@@ -331,6 +400,44 @@ func LightenColor(baseColor string, amount float64) string {
 	}
 	if nb > 255 {
 		nb = 255
+	}
+
+	return fmt.Sprintf("#%02x%02x%02x", nr, ng, nb)
+}
+
+// DarkenColor darkens a hex color by the given amount (0.0 to 1.0)
+// amount = 0.3 means reduce brightness by 30% (multiply by 0.7)
+func DarkenColor(baseColor string, amount float64) string {
+	hex := baseColor
+	if len(hex) > 0 && hex[0] == '#' {
+		hex = hex[1:]
+	}
+	if len(hex) != 6 {
+		return baseColor
+	}
+
+	r, errR := strconv.ParseInt(hex[0:2], 16, 64)
+	g, errG := strconv.ParseInt(hex[2:4], 16, 64)
+	b, errB := strconv.ParseInt(hex[4:6], 16, 64)
+	if errR != nil || errG != nil || errB != nil {
+		return baseColor
+	}
+
+	// Darken by moving towards black (0)
+	multiplier := 1.0 - amount
+	nr := int64(float64(r) * multiplier)
+	ng := int64(float64(g) * multiplier)
+	nb := int64(float64(b) * multiplier)
+
+	// Clamp to 0
+	if nr < 0 {
+		nr = 0
+	}
+	if ng < 0 {
+		ng = 0
+	}
+	if nb < 0 {
+		nb = 0
 	}
 
 	return fmt.Sprintf("#%02x%02x%02x", nr, ng, nb)
