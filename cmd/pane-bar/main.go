@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/b/tmux-tabs/pkg/colors"
 	"github.com/b/tmux-tabs/pkg/config"
 	"github.com/b/tmux-tabs/pkg/grouping"
 	"github.com/b/tmux-tabs/pkg/tmux"
@@ -22,121 +23,41 @@ type model struct {
 	window     *tmux.Window
 	groupTheme config.Theme
 	config     *config.Config
+	theme      *colors.Theme
 	width      int
 	windowIdx  int
 }
 
-type refreshMsg struct{}
+// ... (skipping some parts to find View)
 
-// clickRegion tracks where clickable elements are
-type clickRegion struct {
-	startX int
-	endX   int
-	action string // "pane:ID", "split-v", "split-h", "close"
-	paneID string
-}
-
-var clickRegions []clickRegion
-
-func (m model) Init() tea.Cmd {
-	return triggerRefresh()
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "h", "left":
-			// Previous pane
-			_ = exec.Command("tmux", "select-pane", "-t", ":.{previous}").Run()
-			return m, triggerRefresh()
-		case "l", "right":
-			// Next pane
-			_ = exec.Command("tmux", "select-pane", "-t", ":.{next}").Run()
-			return m, triggerRefresh()
-		case "|", "v":
-			// Split vertical
-			_ = exec.Command("tmux", "split-window", "-h", "-c", "#{pane_current_path}").Run()
-			return m, triggerRefresh()
-		case "-", "s":
-			// Split horizontal
-			_ = exec.Command("tmux", "split-window", "-v", "-c", "#{pane_current_path}").Run()
-			return m, triggerRefresh()
-		case "x":
-			// Close current pane (but not if it's the pane-bar itself)
-			if m.window != nil {
-				for _, pane := range m.window.Panes {
-					if pane.Active && pane.Command != "pane-bar" {
-						_ = exec.Command("tmux", "kill-pane", "-t", pane.ID).Run()
-						break
-					}
-				}
-			}
-			return m, delayedRefresh()
-		}
-
-	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			// Find which region was clicked
-			for _, region := range clickRegions {
-				if msg.X >= region.startX && msg.X < region.endX {
-					switch {
-					case strings.HasPrefix(region.action, "pane:"):
-						// Select pane
-						_ = exec.Command("tmux", "select-pane", "-t", region.paneID).Run()
-						return m, triggerRefresh()
-					case region.action == "split-v":
-						_ = exec.Command("tmux", "split-window", "-h", "-c", "#{pane_current_path}").Run()
-						return m, triggerRefresh()
-					case region.action == "split-h":
-						_ = exec.Command("tmux", "split-window", "-v", "-c", "#{pane_current_path}").Run()
-						return m, triggerRefresh()
-					case region.action == "close":
-						// Close active pane (not the pane-bar)
-						if m.window != nil {
-							for _, pane := range m.window.Panes {
-								if pane.Active && pane.Command != "pane-bar" {
-									_ = exec.Command("tmux", "kill-pane", "-t", pane.ID).Run()
-									break
-								}
-							}
-						}
-						return m, delayedRefresh()
-					}
-				}
-			}
-		}
-
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-
-	case refreshMsg:
-		// Refresh window and pane data
-		windows, _ := tmux.ListWindowsWithPanes()
-		for i := range windows {
-			if windows[i].Active {
-				m.window = &windows[i]
-				m.windowIdx = windows[i].Index
-				break
-			}
-		}
-		// Get group theme for active window
-		if m.window != nil {
-			grouped := grouping.GroupWindows(windows, m.config.Groups)
-			for _, group := range grouped {
-				for _, win := range group.Windows {
-					if win.Index == m.windowIdx {
-						m.groupTheme = group.Theme
-						break
-					}
-				}
-			}
-		}
-		return m, nil
+func (m model) getActiveFg() string {
+	if m.config.PaneHeader.ActiveFg != "" {
+		return m.config.PaneHeader.ActiveFg
 	}
-	return m, nil
+	if m.theme != nil {
+		return m.theme.PaneActiveFg
+	}
+	return "#ffffff"
+}
+
+func (m model) getInactiveFg() string {
+	if m.config.PaneHeader.InactiveFg != "" {
+		return m.config.PaneHeader.InactiveFg
+	}
+	if m.theme != nil {
+		return m.theme.PaneInactiveFg
+	}
+	return "#cccccc"
+}
+
+func (m model) getButtonFg() string {
+	if m.config.PaneHeader.ButtonFg != "" {
+		return m.config.PaneHeader.ButtonFg
+	}
+	if m.theme != nil {
+		return m.theme.ButtonFg
+	}
+	return "#888888"
 }
 
 func (m model) View() string {
@@ -159,33 +80,23 @@ func (m model) View() string {
 		return ""
 	}
 
-	// Determine base color
-	var baseColor string
-	if m.window.CustomColor != "" {
-		baseColor = m.window.CustomColor
-	} else if m.groupTheme.Bg != "" {
-		baseColor = m.groupTheme.Bg
-	} else {
-		baseColor = "#3498db"
-	}
-
 	var parts []string
 	currentX := 0
 
+	activeFg := m.getActiveFg()
+	inactiveFg := m.getInactiveFg()
+
 	// Pane entries
 	for _, pane := range panes {
-		var bg, fg string
+		var fg string
 		if pane.Active {
-			bg = baseColor
-			fg = "#ffffff"
+			fg = activeFg
 		} else {
-			bg = grouping.InactiveTabColor(baseColor, 0, 0) // Use default lighten/saturate values
-			fg = "#cccccc"
+			fg = inactiveFg
 		}
 
 		style := lipgloss.NewStyle().
 			Foreground(lipgloss.Color(fg)).
-			Background(lipgloss.Color(bg)).
 			Padding(0, 1)
 
 		if pane.Active {
@@ -223,8 +134,9 @@ func (m model) View() string {
 	panesPart := strings.Join(parts, " ")
 
 	// Button styles
+	buttonFg := m.getButtonFg()
 	buttonStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#27ae60")).
+		Foreground(lipgloss.Color(buttonFg)).
 		Padding(0, 1)
 
 	closeStyle := lipgloss.NewStyle().
@@ -315,10 +227,18 @@ func main() {
 		}
 	}
 
+	// Load color theme
+	var theme *colors.Theme
+	if cfg.Sidebar.Theme != "" {
+		t := colors.GetTheme(cfg.Sidebar.Theme)
+		theme = &t
+	}
+
 	m := model{
 		window:     activeWindow,
 		groupTheme: groupTheme,
 		config:     cfg,
+		theme:      theme,
 		width:      120,
 		windowIdx:  windowIdx,
 	}

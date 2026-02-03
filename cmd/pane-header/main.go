@@ -71,6 +71,8 @@ type rendererModel struct {
 	content     string
 	regions     []daemon.ClickableRegion
 	sequenceNum uint64
+	sidebarBg   string
+	terminalBg  string
 
 	// The header pane's own tmux pane ID (for menu positioning)
 	headerPaneID string
@@ -179,19 +181,8 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.content = msg.payload.Content
 		m.regions = msg.payload.Regions
 		m.sequenceNum = msg.payload.SequenceNum
-
-		// Debug logging
-		if *debugMode {
-			debugLog.Printf("=== RENDER PAYLOAD ===")
-			debugLog.Printf("  SequenceNum: %d", m.sequenceNum)
-			debugLog.Printf("  Content: %d bytes", len(m.content))
-			debugLog.Printf("  Regions: %d total", len(m.regions))
-			// Log regions for debugging
-			for i, r := range m.regions {
-				debugLog.Printf("  Region[%d]: lines %d-%d, cols %d-%d, action=%s target=%s",
-					i, r.StartLine, r.EndLine, r.StartCol, r.EndCol, r.Action, r.Target)
-			}
-		}
+		m.sidebarBg = msg.payload.SidebarBg
+		m.terminalBg = msg.payload.TerminalBg
 		return m, nil
 
 	case tickMsg:
@@ -443,24 +434,34 @@ var spinnerFrames = []string{"◐", "◓", "◑", "◒"}
 
 // View implements tea.Model
 func (m rendererModel) View() string {
-	if !m.connected {
-		// Show animated loading indicator
-		frame := spinnerFrames[int(time.Now().UnixMilli()/100)%len(spinnerFrames)]
-		style := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#888888"))
-		return style.Render(fmt.Sprintf(" %s Loading...", frame))
+	if !m.connected || m.content == "" {
+		return ""
 	}
 
-	// Single line - just render the content, padded to width
-	line := strings.TrimSuffix(m.content, "\n")
-
-	// Pad line to full width if shorter
-	lineWidth := runewidth.StringWidth(stripAnsi(line))
-	if lineWidth < m.width {
-		line += strings.Repeat(" ", m.width-lineWidth)
+	bgStyle := lipgloss.NewStyle()
+	if m.terminalBg != "" {
+		bgStyle = bgStyle.Background(lipgloss.Color(m.terminalBg))
+	} else if m.sidebarBg != "" {
+		bgStyle = bgStyle.Background(lipgloss.Color(m.sidebarBg))
 	}
 
-	return line
+	lines := strings.Split(m.content, "\n")
+	var visible []string
+	for i := 0; i < m.height && i < len(lines); i++ {
+		line := lines[i]
+		// Pad line to full width if shorter
+		lineWidth := runewidth.StringWidth(stripAnsi(line))
+		if lineWidth < m.width {
+			line += strings.Repeat(" ", m.width-lineWidth)
+		}
+		if m.terminalBg != "" || m.sidebarBg != "" {
+			visible = append(visible, bgStyle.Render(line))
+		} else {
+			visible = append(visible, line)
+		}
+	}
+
+	return strings.Join(visible, "\n")
 }
 
 // receiveLoop reads messages from the daemon
@@ -515,8 +516,8 @@ func (m *rendererModel) sendMessage(msg daemon.Message) {
 }
 
 func (m *rendererModel) sendSubscribe() {
-	// Force ANSI256 color profile for consistency
-	colorProfile := "ANSI256"
+	// Force TrueColor profile for consistency
+	colorProfile := "TrueColor"
 
 	m.sendMessage(daemon.Message{
 		Type:     daemon.MsgSubscribe,
@@ -525,6 +526,7 @@ func (m *rendererModel) sendSubscribe() {
 			Width:        m.width,
 			Height:       m.height,
 			ColorProfile: colorProfile,
+			PaneID:       m.headerPaneID,
 		},
 	})
 }
@@ -543,6 +545,7 @@ func (m *rendererModel) sendResize() {
 		Payload: daemon.ResizePayload{
 			Width:  m.width,
 			Height: m.height,
+			PaneID: m.headerPaneID,
 		},
 	})
 }
@@ -602,8 +605,8 @@ func main() {
 	debugLog.Printf("Starting pane header renderer for session %s, pane %s (header pane: %s)", *sessionID, *paneID, headerPaneID)
 	crashLog.Printf("Header renderer started for pane %s, session %s (header pane: %s)", *paneID, *sessionID, headerPaneID)
 
-	// Force ANSI256 color mode
-	lipgloss.SetColorProfile(termenv.ANSI256)
+	// Force TrueColor mode for accurate theme rendering
+	lipgloss.SetColorProfile(termenv.TrueColor)
 
 	// Reset terminal state before starting to clean up any stale modes
 	resetTerminal := func() {

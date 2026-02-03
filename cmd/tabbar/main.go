@@ -13,18 +13,20 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/b/tmux-tabs/pkg/colors"
 	"github.com/b/tmux-tabs/pkg/config"
 	"github.com/b/tmux-tabs/pkg/grouping"
 	"github.com/b/tmux-tabs/pkg/tmux"
 )
 
 type model struct {
-	windows    []tmux.Window
-	grouped    []grouping.GroupedWindows
-	config     *config.Config
-	width      int
-	height     int
-	scrollPos  int // First visible tab index for overflow handling
+	windows   []tmux.Window
+	grouped   []grouping.GroupedWindows
+	config    *config.Config
+	theme     *colors.Theme
+	width     int
+	height    int
+	scrollPos int // First visible tab index for overflow handling
 }
 
 type refreshMsg struct{}
@@ -171,9 +173,21 @@ func (m model) buildTabs() []tabEntry {
 			} else if win.Active {
 				bg = group.Theme.ActiveBg
 				fg = group.Theme.ActiveFg
+				if bg == "" && m.theme != nil {
+					bg = m.theme.DefaultActiveBg
+				}
+				if fg == "" && m.theme != nil {
+					fg = m.theme.DefaultActiveFg
+				}
 			} else {
 				bg = group.Theme.Bg
 				fg = group.Theme.Fg
+				if bg == "" && m.theme != nil {
+					bg = m.theme.DefaultGroupBg
+				}
+				if fg == "" && m.theme != nil {
+					fg = m.theme.DefaultGroupFg
+				}
 			}
 			if bg == "" {
 				bg = "#333333"
@@ -185,8 +199,13 @@ func (m model) buildTabs() []tabEntry {
 			// Build tab style
 			style := lipgloss.NewStyle().
 				Foreground(lipgloss.Color(fg)).
-				Background(lipgloss.Color(bg)).
 				Padding(0, 1)
+
+			if m.theme != nil && m.theme.SidebarBg != "" {
+				style = style.Background(lipgloss.Color(bg))
+			} else {
+				// If no theme background, use transparent (default)
+			}
 
 			if win.Active {
 				style = style.Bold(true)
@@ -332,15 +351,11 @@ func (m model) buildPaneBar() string {
 	}
 
 	// Use lighter version of colors for pane styling - prefer custom color
-	var paneBg, paneFg, activePaneBg, activePaneFg string
+	var paneFg, activePaneFg string
 	if activeWindow.CustomColor != "" {
-		paneBg = grouping.LightenColor(activeWindow.CustomColor, 0.3)
-		activePaneBg = activeWindow.CustomColor
 		paneFg = "#ffffff"
 		activePaneFg = "#ffffff"
 	} else {
-		paneBg = grouping.LightenColor(activeGroup.Theme.Bg, 0.3)
-		activePaneBg = activeGroup.Theme.ActiveBg
 		paneFg = activeGroup.Theme.Fg
 		activePaneFg = activeGroup.Theme.ActiveFg
 		if paneFg == "" {
@@ -353,12 +368,10 @@ func (m model) buildPaneBar() string {
 
 	paneStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(paneFg)).
-		Background(lipgloss.Color(paneBg)).
 		Padding(0, 1)
 
 	activePaneStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(activePaneFg)).
-		Background(lipgloss.Color(activePaneBg)).
 		Bold(true).
 		Padding(0, 1)
 
@@ -577,10 +590,18 @@ func main() {
 	windows, _ := tmux.ListWindows()
 	grouped := grouping.GroupWindows(windows, cfg.Groups)
 
+	// Load color theme
+	var theme *colors.Theme
+	if cfg.Sidebar.Theme != "" {
+		t := colors.GetTheme(cfg.Sidebar.Theme)
+		theme = &t
+	}
+
 	m := model{
 		windows:   windows,
 		grouped:   grouped,
 		config:    cfg,
+		theme:     theme,
 		width:     120, // Will be updated by WindowSizeMsg
 		scrollPos: 0,
 	}

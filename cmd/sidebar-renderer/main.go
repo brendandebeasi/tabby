@@ -29,10 +29,9 @@ import (
 )
 
 var (
-	sessionID    = flag.String("session", "", "tmux session ID")
-	windowID     = flag.String("window", "", "tmux window ID this renderer is for")
-	debugMode    = flag.Bool("debug", false, "Enable debug logging")
-	terminalBg   = flag.String("terminal-bg", "", "Terminal background color for loading state")
+	sessionID = flag.String("session", "", "tmux session ID")
+	windowID  = flag.String("window", "", "tmux window ID this renderer is for")
+	debugMode = flag.Bool("debug", false, "Enable debug logging")
 )
 
 var debugLog *log.Logger
@@ -88,6 +87,8 @@ type rendererModel struct {
 	totalLines     int
 	sequenceNum    uint64
 	isTouchMode    bool // Touch mode status from coordinator
+	sidebarBg      string
+	terminalBg     string
 
 	// Viewport scroll state
 	scrollY int
@@ -236,6 +237,8 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.totalLines = msg.payload.TotalLines
 		m.sequenceNum = msg.payload.SequenceNum
 		m.isTouchMode = msg.payload.IsTouchMode
+		m.sidebarBg = msg.payload.SidebarBg
+		m.terminalBg = msg.payload.TerminalBg
 
 		// SIMPLIFIED: Clamp scroll based on simple height calculation
 		maxScroll := m.totalLines - m.height
@@ -888,8 +891,8 @@ func (m rendererModel) renderMenuLines() []string {
 	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
 	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ddd"))
 	highlightStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#2563eb")).
-		Foreground(lipgloss.Color("#fff"))
+		Foreground(lipgloss.Color("#2563eb")).
+		Bold(true)
 	headerStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#999")).
 		Bold(true)
@@ -990,24 +993,25 @@ var spinnerFrames = []string{"◐", "◓", "◑", "◒"}
 // View implements tea.Model
 func (m rendererModel) View() string {
 	if !m.connected || m.content == "" {
-		// Show loading indicator with terminal background color
 		frame := spinnerFrames[int(time.Now().UnixMilli()/100)%len(spinnerFrames)]
 		loadingText := fmt.Sprintf(" %s Loading...", frame)
 		style := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#888888")).
 			Width(m.width)
 
-		// Use terminal background if provided, otherwise no background
-		if *terminalBg != "" {
-			style = style.Background(lipgloss.Color(*terminalBg))
+		if m.sidebarBg != "" {
+			style = style.Background(lipgloss.Color(m.sidebarBg))
 		}
 
-		// Fill entire pane with background color
+		// Don't set background - let terminal's natural background show through
 		var lines []string
 		lines = append(lines, style.Render(loadingText))
-		blankLine := style.Render("")
 		for i := 1; i < m.height; i++ {
-			lines = append(lines, blankLine)
+			if m.sidebarBg != "" {
+				lines = append(lines, style.Render(strings.Repeat(" ", m.width)))
+			} else {
+				lines = append(lines, "")
+			}
 		}
 		return strings.Join(lines, "\n")
 	}
@@ -1027,10 +1031,9 @@ func (m rendererModel) View() string {
 		visibleEnd = len(lines)
 	}
 
-	// Create style for padding/blank lines with terminal background
-	var padStyle lipgloss.Style
-	if *terminalBg != "" {
-		padStyle = lipgloss.NewStyle().Background(lipgloss.Color(*terminalBg)).Width(m.width)
+	bgStyle := lipgloss.NewStyle()
+	if m.sidebarBg != "" {
+		bgStyle = bgStyle.Background(lipgloss.Color(m.sidebarBg))
 	}
 
 	// Build visible content, padding each line to full width
@@ -1041,23 +1044,19 @@ func (m rendererModel) View() string {
 		// Pad line to full width if shorter
 		lineWidth := runewidth.StringWidth(stripAnsi(line))
 		if lineWidth < m.width {
-			if *terminalBg != "" {
-				// Apply terminal bg to padding spaces
-				padding := padStyle.Render(strings.Repeat(" ", m.width-lineWidth))
-				line += padding
-			} else {
-				line += strings.Repeat(" ", m.width-lineWidth)
-			}
+			line += strings.Repeat(" ", m.width-lineWidth)
 		}
-		visible = append(visible, line)
+		if m.sidebarBg != "" {
+			visible = append(visible, bgStyle.Render(line))
+		} else {
+			visible = append(visible, line)
+		}
 	}
 
-	// Pad remaining lines with full-width blank lines using terminal bg
-	var blankLine string
-	if *terminalBg != "" {
-		blankLine = padStyle.Render(strings.Repeat(" ", m.width))
-	} else {
-		blankLine = strings.Repeat(" ", m.width)
+	// Pad remaining lines with full-width blank lines
+	blankLine := strings.Repeat(" ", m.width)
+	if m.sidebarBg != "" {
+		blankLine = bgStyle.Render(blankLine)
 	}
 	for len(visible) < m.height {
 		visible = append(visible, blankLine)
@@ -1141,15 +1140,8 @@ func (m *rendererModel) sendMessage(msg daemon.Message) {
 }
 
 func (m *rendererModel) sendSubscribe() {
-	// Detect color profile
-	colorProfile := "ANSI256"
-	if termenv.ColorProfile() == termenv.TrueColor {
-		colorProfile = "TrueColor"
-	} else if termenv.ColorProfile() == termenv.Ascii {
-		colorProfile = "Ascii"
-	} else if termenv.ColorProfile() == termenv.ANSI {
-		colorProfile = "ANSI"
-	}
+	// Detect color profile - prefer TrueColor
+	colorProfile := "TrueColor"
 
 	m.sendMessage(daemon.Message{
 		Type:     daemon.MsgSubscribe,
@@ -1158,6 +1150,7 @@ func (m *rendererModel) sendSubscribe() {
 			Width:        m.width,
 			Height:       m.height,
 			ColorProfile: colorProfile,
+			PaneID:       m.sidebarPaneID,
 		},
 	})
 }
@@ -1176,6 +1169,7 @@ func (m *rendererModel) sendResize() {
 		Payload: daemon.ResizePayload{
 			Width:  m.width,
 			Height: m.height,
+			PaneID: m.sidebarPaneID,
 		},
 	})
 }
@@ -1242,8 +1236,8 @@ func main() {
 	debugLog.Printf("Starting renderer for session %s", *sessionID)
 	crashLog.Printf("Renderer started for window %s, session %s", *windowID, *sessionID)
 
-	// Force ANSI256 color mode
-	lipgloss.SetColorProfile(termenv.ANSI256)
+	// Force TrueColor mode for accurate theme rendering
+	lipgloss.SetColorProfile(termenv.TrueColor)
 
 	// Get our own pane ID for focus management (context menu keyboard input)
 	sidebarPane := os.Getenv("TMUX_PANE")
