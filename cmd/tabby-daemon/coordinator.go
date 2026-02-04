@@ -1398,9 +1398,9 @@ func (c *Coordinator) ApplyThemeToPane(paneID string) {
 }
 
 func (c *Coordinator) updatePaneHeaderColors() {
-	// Run async to avoid blocking the coordinator
-	grouped := c.grouped // capture under existing lock
+	grouped := c.grouped
 	autoBorder := c.config.PaneHeader.AutoBorder
+	borderFromTab := c.config.PaneHeader.BorderFromTab
 	go func() {
 		var args []string
 		for _, group := range grouped {
@@ -1410,24 +1410,21 @@ func (c *Coordinator) updatePaneHeaderColors() {
 				if win.CustomColor != "" {
 					color = win.CustomColor
 				}
-				// No color manipulation - use same color for active/inactive
 				if len(args) > 0 {
 					args = append(args, ";")
 				}
 				args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", color)
 				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", color)
 
-				// Auto-set tmux pane border colors from the window's resolved color
-				if autoBorder {
-					// Set window-level defaults - same color for all borders
+				if autoBorder || borderFromTab {
 					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
 						"pane-active-border-style", fmt.Sprintf("fg=%s", color))
 					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
 						"pane-border-style", fmt.Sprintf("fg=%s", color))
+				}
 
-					// Set per-pane border colors - same color for all
+				if autoBorder {
 					for _, p := range win.Panes {
-						// Skip sidebar and pane-header panes
 						if strings.Contains(p.Command, "sidebar") || strings.Contains(p.Command, "pane-header") {
 							continue
 						}
@@ -2465,35 +2462,12 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 	}
 
-	// Find the group for this window's theme color (for accent mark)
-	var groupColor string
-	for _, group := range c.grouped {
-		for _, win := range group.Windows {
-			if win.ID == foundWindow.ID {
-				groupColor = group.Theme.Bg
-				if win.CustomColor != "" {
-					groupColor = win.CustomColor
-				}
-				break
-			}
-		}
-		if groupColor != "" {
-			break
-		}
-	}
-
-	// Use theme for header background and foreground
+	headerColors := c.GetHeaderColorsForPane(paneID)
+	headerBg := headerColors.Bg
+	headerFg := headerColors.Fg
+	groupColor := headerBg
 	isWindowActive := foundWindow.Active
-	var headerBg, headerFg string
-	if isWindowActive {
-		headerBg = c.getPaneHeaderActiveBg()
-		headerFg = c.getPaneHeaderActiveFg()
-	} else {
-		headerBg = c.getPaneHeaderInactiveBg()
-		headerFg = c.getPaneHeaderInactiveFg()
-	}
 
-	dimFg := c.getCommandFg()
 	baseStyle := lipgloss.NewStyle()
 	if headerBg != "" {
 		baseStyle = baseStyle.Background(lipgloss.Color(headerBg))
@@ -2591,7 +2565,6 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	if runewidth.StringWidth(labelText) > availWidth {
 		labelText = runewidth.Truncate(labelText, availWidth, "~")
 	}
-	textWidth := runewidth.StringWidth(labelText)
 
 	// Style: active pane bold+bright, others dimmed
 	isActive := foundPane.Active && isWindowActive
@@ -2606,7 +2579,6 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	if isActive {
 		segStyle = segStyle.Bold(true)
 	}
-	_ = dimFg // unused now
 
 	// Build rendered line and click regions
 	var regions []daemon.ClickableRegion
@@ -2615,6 +2587,16 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	if groupColor != "" {
 		groupAccent = lipgloss.NewStyle().SetString("▇").Foreground(lipgloss.Color(groupColor)).String()
 	}
+
+	groupAccentWidth := runewidth.StringWidth(stripAnsi(groupAccent))
+	labelWidth := runewidth.StringWidth(labelText)
+	renderedLabel := segStyle.Render(labelText)
+	currentCol := groupAccentWidth + 1 + labelWidth
+	btnAreaStart := width - buttonsWidth
+	if btnAreaStart < currentCol {
+		btnAreaStart = currentCol
+	}
+	spacerWidth := btnAreaStart - currentCol
 
 	// Pad the full line with the header background
 	fullLineStyle := baseStyle.Copy().Width(width)
@@ -2720,48 +2702,13 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 
 	if c.config.PaneHeader.CustomBorder {
-		hasPaneAbove := foundPane.Top > 5
-
-		if hasPaneAbove {
-			handleColor := c.getHandleColor()
-			handleIcon := c.config.PaneHeader.HandleIcon
-			if handleIcon == "" {
-				handleIcon = "..."
-			}
-
-			borderChar := "─"
-			handleWidth := runewidth.StringWidth(handleIcon)
-			leftBorderWidth := (width - handleWidth) / 2
-			rightBorderWidth := width - handleWidth - leftBorderWidth
-
-			// Use terminal background from theme for border line
-			borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor))
-			handleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(handleColor)).Bold(true)
-
-			borderLine := borderStyle.Render(strings.Repeat(borderChar, leftBorderWidth)) +
-				handleStyle.Render(handleIcon) +
-				borderStyle.Render(strings.Repeat(borderChar, rightBorderWidth))
-
-			for i := range regions {
-				regions[i].StartLine = 1
-				regions[i].EndLine = 1
-			}
-
-			if c.config.PaneHeader.Draggable {
-				regions = append(regions, daemon.ClickableRegion{
-					StartLine: 0, EndLine: 0,
-					StartCol: 0, EndCol: width,
-					Action: "header_drag_resize", Target: paneID,
-				})
-			}
-
-			return &daemon.RenderPayload{
-				Content:    borderLine + "\n" + line,
-				Width:      width,
-				Height:     2,
-				TotalLines: 2,
-				Regions:    regions,
-			}
+		// Always 1-row output; add drag region on line 0 if Draggable is enabled
+		if c.config.PaneHeader.Draggable {
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: 0, EndCol: width,
+				Action: "header_drag_resize", Target: paneID,
+			})
 		}
 		return &daemon.RenderPayload{
 			Content:    line,
@@ -2877,6 +2824,11 @@ func (c *Coordinator) renderTouchButton(width int, label string, bgColor string,
 		Width(width - 2).
 		Border(borderType).
 		BorderForeground(lipgloss.Color(borderFg))
+
+	if bgColor != "" {
+		boxStyle = boxStyle.Background(lipgloss.Color(bgColor))
+	}
+
 	return boxStyle.Render(label)
 }
 
@@ -3125,6 +3077,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			s.WriteString(c.renderTouchButton(width, headerLabel, theme.Bg, headerOpts) + "\n")
 			currentLine += 3 // Touch button is 3 lines tall
 		} else {
+			lineStyle := lipgloss.NewStyle().Background(lipgloss.Color(theme.Bg)).Width(width)
 			// Large mode: single line with collapse icon
 			if hasWindows {
 				// Truncate header text to fit width (accounting for collapse icon)
@@ -3139,23 +3092,30 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					}
 					headerText = truncated + "~"
 				}
-				headerContentStyle := headerStyle.Width(headerMaxWidth)
-				s.WriteString(collapseStyle.Render(collapseIcon+" ") + headerContentStyle.Render(headerText) + "\n")
+				headerContent := collapseStyle.Render(collapseIcon+" ") + headerStyle.Render(headerText)
+				renderedHeader := lineStyle.Render(headerContent)
+				if theme.Bg != "" {
+					renderedHeader = c.applyBackgroundFill(renderedHeader, theme.Bg, width)
+				}
+				s.WriteString(renderedHeader + "\n")
 			} else {
 				// No windows - just show header without collapse icon
-				headerMaxWidth := width - 2
-				if lipgloss.Width(headerText) > headerMaxWidth {
+				if lipgloss.Width(headerText) > width-2 {
 					truncated := ""
 					for _, r := range headerText {
-						if lipgloss.Width(truncated+string(r)) > headerMaxWidth-1 {
+						if lipgloss.Width(truncated+string(r)) > width-3 {
 							break
 						}
 						truncated += string(r)
 					}
 					headerText = truncated + "~"
 				}
-				headerContentStyle := headerStyle.Width(width)
-				s.WriteString(headerContentStyle.Render("  "+headerText) + "\n")
+				headerContent := headerStyle.Render("  " + headerText)
+				renderedHeader := lineStyle.Render(headerContent)
+				if theme.Bg != "" {
+					renderedHeader = c.applyBackgroundFill(renderedHeader, theme.Bg, width)
+				}
+				s.WriteString(renderedHeader + "\n")
 			}
 			currentLine++
 		}
@@ -3278,8 +3238,15 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				treeBranch = treeBranchChar
 			}
 
+			var contentPanes []tmux.Pane
+			for _, pane := range win.Panes {
+				if strings.Contains(pane.Command, "pane-header") || strings.Contains(pane.Command, "sidebar") {
+					continue
+				}
+				contentPanes = append(contentPanes, pane)
+			}
 			// Window collapse indicator if has panes
-			hasPanes := len(win.Panes) > 1
+			hasPanes := len(contentPanes) > 1
 			isWindowCollapsed := win.Collapsed
 			var windowCollapseIcon string
 
@@ -3300,7 +3267,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			// Add pane count if collapsed
 			if hasPanes && isWindowCollapsed {
-				baseContent = fmt.Sprintf("%s (%d)", baseContent, len(win.Panes))
+				baseContent = fmt.Sprintf("%s (%d)", baseContent, len(contentPanes))
 			}
 
 			// Calculate widths
@@ -3370,38 +3337,42 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 				s.WriteString(c.renderTouchButton(width, tabLabel, tabBg, tabOpts) + "\n")
 				currentLine += 3
-			} else if hasPanes {
-				paddedContent := contentText + strings.Repeat(" ", windowContentWidth-runewidth.StringWidth(contentText))
-				s.WriteString(indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(paddedContent) + "\n")
-				currentLine++
-			} else if isActive {
-				// Active indicator replaces part of tree branch
-				treeBranchRunes := []rune(treeBranch)
-				treeBranchFirst := string(treeBranchRunes[0])
-
-				var indicatorBg, indicatorFg string
-				if activeIndBgConfig == "" || activeIndBgConfig == "auto" {
-					if theme.ActiveIndicatorBg != "" {
-						indicatorBg = theme.ActiveIndicatorBg
-					} else {
-						indicatorBg = theme.Bg
-					}
-				} else {
-					indicatorBg = activeIndBgConfig
-				}
-				if activeIndFgConfig == "" || activeIndFgConfig == "auto" {
-					indicatorFg = indicatorBg
-				} else {
-					indicatorFg = activeIndFgConfig
-				}
-
-				activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Background(lipgloss.Color(indicatorBg)).Bold(true)
-				paddedContent := contentText + strings.Repeat(" ", windowContentWidth-runewidth.StringWidth(contentText))
-				s.WriteString(indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator) + contentStyle.Render(paddedContent) + "\n")
-				currentLine++
 			} else {
-				paddedContent := contentText + strings.Repeat(" ", windowContentWidth-runewidth.StringWidth(contentText))
-				s.WriteString(indicatorPart + treeStyle.Render(treeBranch) + contentStyle.Render(paddedContent) + "\n")
+				windowLineStyle := lipgloss.NewStyle().Width(width)
+
+				var lineContent string
+				if hasPanes {
+					lineContent = indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + style.Render(contentText)
+				} else if isActive {
+					treeBranchRunes := []rune(treeBranch)
+					treeBranchFirst := string(treeBranchRunes[0])
+
+					var indicatorBg, indicatorFg string
+					if activeIndBgConfig == "" || activeIndBgConfig == "auto" {
+						if theme.ActiveIndicatorBg != "" {
+							indicatorBg = theme.ActiveIndicatorBg
+						} else {
+							indicatorBg = theme.Bg
+						}
+					} else {
+						indicatorBg = activeIndBgConfig
+					}
+					if activeIndFgConfig == "" || activeIndFgConfig == "auto" {
+						indicatorFg = indicatorBg
+					} else {
+						indicatorFg = activeIndFgConfig
+					}
+
+					activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Background(lipgloss.Color(indicatorBg)).Bold(true)
+					lineContent = indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator) + style.Render(contentText)
+				} else {
+					lineContent = indicatorPart + treeStyle.Render(treeBranch) + style.Render(contentText)
+				}
+				renderedLine := windowLineStyle.Render(lineContent)
+				if bgColor != "" {
+					renderedLine = c.applyBackgroundFill(renderedLine, bgColor, width)
+				}
+				s.WriteString(renderedLine + "\n")
 				currentLine++
 			}
 
@@ -3437,7 +3408,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			}
 
 			// Show panes if window has multiple panes and is not collapsed
-			if len(win.Panes) > 1 && !isWindowCollapsed {
+			if len(contentPanes) > 1 && !isWindowCollapsed {
 				var paneFg string
 				if win.CustomColor != "" {
 					paneFg = "#ffffff"
@@ -3472,8 +3443,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					treeContinue = treeStyle.Render(treeContinueChar)
 				}
 
-				numPanes := len(win.Panes)
-				for pi, pane := range win.Panes {
+				numPanes := len(contentPanes)
+				for pi, pane := range contentPanes {
 					isLastPane := pi == numPanes-1
 					paneStartLine := currentLine
 
@@ -3550,6 +3521,14 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						paneLeadChar = paneAlertIcon
 					}
 
+					var paneLineBg string
+					if bgColor != "" {
+						paneLineBg = bgColor
+					} else {
+						paneLineBg = theme.Bg
+					}
+					paneLineStyle := lipgloss.NewStyle().Background(lipgloss.Color(paneLineBg)).Width(width)
+
 					if pane.Active && isActive {
 						var paneIndicatorBg, paneIndicatorFg string
 						if activeIndBgConfig == "" || activeIndBgConfig == "auto" {
@@ -3568,9 +3547,19 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						}
 						paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
 						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-						s.WriteString(paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText) + "\n")
+						lineContent := paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText)
+						renderedPane := paneLineStyle.Render(lineContent)
+						if paneLineBg != "" {
+							renderedPane = c.applyBackgroundFill(renderedPane, paneLineBg, width)
+						}
+						s.WriteString(renderedPane + "\n")
 					} else {
-						s.WriteString(paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText) + "\n")
+						lineContent := paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText)
+						renderedPane := paneLineStyle.Render(lineContent)
+						if paneLineBg != "" {
+							renderedPane = c.applyBackgroundFill(renderedPane, paneLineBg, width)
+						}
+						s.WriteString(renderedPane + "\n")
 					}
 					currentLine++
 
@@ -3755,8 +3744,15 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			indicatorPart = " "
 		}
 
+		var contentPanes []tmux.Pane
+		for _, pane := range win.Panes {
+			if strings.Contains(pane.Command, "pane-header") || strings.Contains(pane.Command, "sidebar") {
+				continue
+			}
+			contentPanes = append(contentPanes, pane)
+		}
 		// Window collapse indicator if has panes
-		hasPanes := len(win.Panes) > 1
+		hasPanes := len(contentPanes) > 1
 		isWindowCollapsed := win.Collapsed
 		var windowCollapseIcon string
 
@@ -3776,7 +3772,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 		// Add pane count if collapsed
 		if hasPanes && isWindowCollapsed {
-			baseContent = fmt.Sprintf("%s (%d)", baseContent, len(win.Panes))
+			baseContent = fmt.Sprintf("%s (%d)", baseContent, len(contentPanes))
 		}
 
 		// Calculate widths
@@ -3804,8 +3800,6 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		if disclosureColor != "" {
 			windowCollapseStyle = windowCollapseStyle.Foreground(lipgloss.Color(disclosureColor))
 		}
-
-		contentStyle := style.Width(windowContentWidth)
 
 		// Render window line - touch mode uses bordered box, normal mode uses inline
 		if c.isTouchMode(width) {
@@ -3838,32 +3832,43 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			}
 			s.WriteString(c.renderTouchButton(width, tabLabel, tabBg, tabOpts) + "\n")
 			currentLine += 3
-		} else if hasPanes {
-			s.WriteString(indicatorPart + " " + windowCollapseStyle.Render(windowCollapseIcon+" ") + contentStyle.Render(contentText) + "\n")
-			currentLine++
-		} else if isActive {
-			// Active indicator
-			var indicatorBg, indicatorFg string
-			if activeIndBgConf == "" || activeIndBgConf == "auto" {
-				if theme.ActiveIndicatorBg != "" {
-					indicatorBg = theme.ActiveIndicatorBg
-				} else {
-					indicatorBg = theme.Bg
-				}
-			} else {
-				indicatorBg = activeIndBgConf
-			}
-			if activeIndFgConf == "" || activeIndFgConf == "auto" {
-				indicatorFg = indicatorBg
-			} else {
-				indicatorFg = activeIndFgConf
+		} else {
+			windowLineStyle := lipgloss.NewStyle().Width(width)
+			effectiveBg := bgColor
+			if effectiveBg == "" {
+				effectiveBg = theme.Bg
 			}
 
-			activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Bold(true)
-			s.WriteString(indicatorPart + " " + activeIndStyle.Render(activeIndicator) + contentStyle.Render(contentText) + "\n")
-			currentLine++
-		} else {
-			s.WriteString(indicatorPart + "  " + contentStyle.Render(contentText) + "\n")
+			var lineContent string
+			if hasPanes {
+				lineContent = indicatorPart + " " + windowCollapseStyle.Render(windowCollapseIcon+" ") + style.Render(contentText)
+			} else if isActive {
+				var indicatorBg, indicatorFg string
+				if activeIndBgConf == "" || activeIndBgConf == "auto" {
+					if theme.ActiveIndicatorBg != "" {
+						indicatorBg = theme.ActiveIndicatorBg
+					} else {
+						indicatorBg = theme.Bg
+					}
+				} else {
+					indicatorBg = activeIndBgConf
+				}
+				if activeIndFgConf == "" || activeIndFgConf == "auto" {
+					indicatorFg = indicatorBg
+				} else {
+					indicatorFg = activeIndFgConf
+				}
+
+				activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Bold(true)
+				lineContent = indicatorPart + " " + activeIndStyle.Render(activeIndicator) + style.Render(contentText)
+			} else {
+				lineContent = indicatorPart + "  " + style.Render(contentText)
+			}
+			renderedLine := windowLineStyle.Render(lineContent)
+			if effectiveBg != "" {
+				renderedLine = c.applyBackgroundFill(renderedLine, effectiveBg, width)
+			}
+			s.WriteString(renderedLine + "\n")
 			currentLine++
 		}
 
@@ -3897,7 +3902,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 		// Show panes if window has multiple panes and is not collapsed
 		// Panes still get hierarchy (tree structure) in prefix mode
-		if len(win.Panes) > 1 && !isWindowCollapsed {
+		if len(contentPanes) > 1 && !isWindowCollapsed {
 			var paneFg string
 			if win.CustomColor != "" {
 				// When window has a custom color (usually dark background), use white text
@@ -3931,8 +3936,8 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					Bold(true)
 			}
 
-			numPanes := len(win.Panes)
-			for pi, pane := range win.Panes {
+			numPanes := len(contentPanes)
+			for pi, pane := range contentPanes {
 				isLastPane := pi == numPanes-1
 				paneStartLine := currentLine
 
@@ -4007,6 +4012,14 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					paneLeadChar = paneAlertIcon
 				}
 
+				var paneLineBg string
+				if bgColor != "" {
+					paneLineBg = bgColor
+				} else {
+					paneLineBg = theme.Bg
+				}
+				paneLineStyle := lipgloss.NewStyle().Background(lipgloss.Color(paneLineBg)).Width(width)
+
 				if pane.Active && isActive {
 					var paneIndicatorBg, paneIndicatorFg string
 					if activeIndBgConf == "" || activeIndBgConf == "auto" {
@@ -4025,9 +4038,19 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					}
 					paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
 					fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-					s.WriteString(paneLeadChar + "  " + treeStyle.Render(paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText) + "\n")
+					lineContent := paneLeadChar + "  " + treeStyle.Render(paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText)
+					renderedPane := paneLineStyle.Render(lineContent)
+					if paneLineBg != "" {
+						renderedPane = c.applyBackgroundFill(renderedPane, paneLineBg, width)
+					}
+					s.WriteString(renderedPane + "\n")
 				} else {
-					s.WriteString(paneLeadChar + "  " + treeStyle.Render(paneBranchChar+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText) + "\n")
+					lineContent := paneLeadChar + "  " + treeStyle.Render(paneBranchChar+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText)
+					renderedPane := paneLineStyle.Render(lineContent)
+					if paneLineBg != "" {
+						renderedPane = c.applyBackgroundFill(renderedPane, paneLineBg, width)
+					}
+					s.WriteString(renderedPane + "\n")
 				}
 				currentLine++
 
@@ -5105,7 +5128,7 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 		width = 1
 	}
 	var s strings.Builder
-	tb := c.config.Sidebar.TouchButtons
+	_ = c.config.Sidebar.TouchButtons
 	large := c.isTouchMode(width)
 
 	// Get button colors from theme, with fallbacks
@@ -5475,8 +5498,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "new_group":
-		// Could implement group creation dialog
-		return true
+		exe, _ := os.Executable()
+		pluginDir := filepath.Join(filepath.Dir(exe), "..")
+		scriptPath := filepath.Join(pluginDir, "scripts", "new_group.sh")
+		cmd := fmt.Sprintf("command-prompt -p 'New group name:' \"run-shell '%s %%%% '\"", scriptPath)
+		exec.Command("tmux", strings.Split(cmd, " ")...).Run()
+		return false
 
 	case "close_tab":
 		exec.Command("tmux", "kill-window").Run()
@@ -6969,7 +6996,9 @@ func (c *Coordinator) GetSidebarBg() string {
 }
 
 // applyBackgroundFill applies the sidebar background color to all content lines
-// ensuring the entire sidebar area has a consistent background
+// ensuring the entire sidebar area has a consistent background.
+// It also re-injects the bg escape after any ANSI resets within the line
+// so background color survives style resets mid-line.
 func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width int) string {
 	if bgColor == "" {
 		return content
@@ -6983,6 +7012,10 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 	resetEsc := "\x1b[0m"
 
 	for i, line := range lines {
+		// Re-inject bg escape after any ANSI resets within the line
+		// This ensures the background persists even when styles are reset mid-line
+		line = strings.ReplaceAll(line, resetEsc, resetEsc+bgEsc)
+
 		// Get visual width of line (stripping ANSI codes)
 		plainLine := stripAnsi(line)
 		visualWidth := runewidth.StringWidth(plainLine)
@@ -7020,38 +7053,19 @@ type HeaderColors struct {
 	Bg string
 }
 
-// GetHeaderColorsForPane returns the fg and bg colors for a pane header border.
-// Fg is the text color (for border line characters), Bg is the header background.
+// GetHeaderColorsForPane returns the fg and bg colors for a pane header.
+// Mirrors the tab color logic from sidebar rendering (custom colors, shading, active/inactive).
 func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 
-	// Find the window containing this pane
 	var foundWindow *tmux.Window
-	var foundPaneActive bool
+	var isWindowActive bool
 	for i := range c.windows {
 		for j := range c.windows[i].Panes {
 			if c.windows[i].Panes[j].ID == paneID {
 				foundWindow = &c.windows[i]
-				foundPaneActive = c.windows[i].Panes[j].Active && c.windows[i].Active
-				// If window is active but no content pane is marked active
-				// (sidebar has focus), treat as active for styling
-				if !foundPaneActive && c.windows[i].Active {
-					anyContentActive := false
-					for _, p := range c.windows[i].Panes {
-						if p.Active {
-							anyContentActive = true
-							break
-						}
-					}
-					if !anyContentActive {
-						// Sidebar has focus - treat single pane as active,
-						// or first pane in multi-pane layout
-						if len(c.windows[i].Panes) == 1 || j == 0 {
-							foundPaneActive = true
-						}
-					}
-				}
+				isWindowActive = c.windows[i].Active
 				break
 			}
 		}
@@ -7060,26 +7074,69 @@ func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
 		}
 	}
 	if foundWindow == nil {
-		return HeaderColors{}
+		return HeaderColors{
+			Fg: c.getPaneHeaderActiveFg(),
+			Bg: c.getPaneHeaderActiveBg(),
+		}
 	}
 
-	// Get the group theme color (bg and fg)
-	var bgColor, fgColor string
+	var theme config.Theme
+	var customColor string
+	var foundGroup bool
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
 			if win.ID == foundWindow.ID {
-				bgColor = group.Theme.Bg
-				fgColor = group.Theme.Fg
-				if win.CustomColor != "" {
-					bgColor = win.CustomColor
-				}
+				theme = group.Theme
+				customColor = win.CustomColor
+				foundGroup = true
 				break
 			}
 		}
-		if bgColor != "" {
+		if foundGroup {
 			break
 		}
 	}
+
+	isDarkBg := c.bgDetector.IsDarkBackground()
+	if c.theme != nil {
+		isDarkBg = c.theme.Dark
+	}
+	theme = grouping.ResolveThemeColors(theme, isDarkBg)
+
+	var bgColor, fgColor string
+	isTransparent := customColor == "transparent"
+
+	if isTransparent {
+		bgColor = ""
+		if isWindowActive {
+			fgColor = theme.ActiveFg
+			if fgColor == "" {
+				fgColor = theme.Fg
+			}
+		} else {
+			fgColor = theme.Fg
+		}
+	} else if customColor != "" {
+		if isWindowActive {
+			bgColor = customColor
+		} else {
+			bgColor = grouping.ShadeColorByIndex(customColor, 1)
+		}
+		fgColor = "#ffffff"
+	} else if isWindowActive {
+		bgColor = theme.ActiveBg
+		if bgColor == "" {
+			bgColor = theme.Bg
+		}
+		fgColor = theme.ActiveFg
+		if fgColor == "" {
+			fgColor = theme.Fg
+		}
+	} else {
+		bgColor = theme.Bg
+		fgColor = theme.Fg
+	}
+
 	if bgColor == "" {
 		bgColor = c.getPaneHeaderActiveBg()
 	}
@@ -7087,19 +7144,7 @@ func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
 		fgColor = c.getPaneHeaderActiveFg()
 	}
 
-	// Fg/Bg based on active/inactive state
-	// Just use the defined colors directly - no manipulation
-	var headerBg, headerFg string
-	if foundPaneActive {
-		headerBg = bgColor
-		headerFg = fgColor
-	} else {
-		// Use group's colors for inactive too (consistent look)
-		headerBg = bgColor
-		headerFg = fgColor
-	}
-
-	return HeaderColors{Fg: headerFg, Bg: headerBg}
+	return HeaderColors{Fg: fgColor, Bg: bgColor}
 }
 
 // GetGitStateHash returns a hash of current git state for change detection
