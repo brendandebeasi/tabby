@@ -203,8 +203,6 @@ func (m model) buildTabs() []tabEntry {
 
 			if m.theme != nil && m.theme.SidebarBg != "" {
 				style = style.Background(lipgloss.Color(bg))
-			} else {
-				// If no theme background, use transparent (default)
 			}
 
 			if win.Active {
