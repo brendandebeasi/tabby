@@ -303,7 +303,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 	defer t.Stop()
 
 	cmd := exec.Command("tmux", "list-panes", "-t", fmt.Sprintf(":%d", windowIndex), "-F",
-		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}")
+		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -332,7 +332,11 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		// Skip sidebar/tabbar/daemon panes by command name
 		// Check for exact matches and also suffix matches (for path-qualified commands)
 		cmd := parts[3]
-		if isSidebarCommand(cmd) {
+		startCommand := ""
+		if len(parts) >= 12 {
+			startCommand = parts[11]
+		}
+		if isSidebarCommand(cmd) || isSidebarCommand(startCommand) {
 			continue
 		}
 		// Skip our own pane (in case command name hasn't updated yet)
@@ -387,6 +391,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 			Index:        index,
 			Active:       parts[2] == "1",
 			Command:      command,
+			StartCommand: startCommand,
 			Title:        stripANSI(parts[4]),
 			LockedTitle:  lockedTitle,
 			Busy:         busy,
@@ -440,7 +445,11 @@ func ListAllPanes() (map[int][]Pane, error) {
 
 		// Skip sidebar/tabbar/daemon panes by command name
 		cmd := parts[4]
-		if isSidebarCommand(cmd) {
+		startCommand := ""
+		if len(parts) >= 14 {
+			startCommand = parts[13]
+		}
+		if isSidebarCommand(cmd) || isSidebarCommand(startCommand) {
 			continue
 		}
 		// Skip our own pane
@@ -482,17 +491,12 @@ func ListAllPanes() (map[int][]Pane, error) {
 		if len(parts) >= 7 {
 			panePID, _ = strconv.Atoi(parts[6])
 		}
-		
-		startCommand := ""
-		if len(parts) >= 14 {
-			startCommand = parts[13]
-		}
-		
+
 		width := 0
 		if len(parts) >= 15 {
 			width, _ = strconv.Atoi(parts[14])
 		}
-		
+
 		height := 0
 		if len(parts) >= 16 {
 			height, _ = strconv.Atoi(parts[15])
