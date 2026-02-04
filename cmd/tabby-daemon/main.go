@@ -131,15 +131,27 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			continue
 		}
 
-		// Check if window already has a sidebar/renderer pane using cached panes
+		// Live check: query tmux directly for ANY sidebar/renderer pane in this window.
+		// The cached win.Panes has sidebar panes filtered out by ListWindowsWithPanes,
+		// so we must ask tmux directly. This also catches renderers from other daemons.
 		hasRenderer := false
-		for _, p := range win.Panes {
-			curCmd := p.Command
-			startCmd := p.StartCommand
-			if strings.Contains(curCmd, "sidebar") || strings.Contains(curCmd, "renderer") ||
-				strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") {
-				hasRenderer = true
-				break
+		if rawOut, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+			"#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
+			for _, rawLine := range strings.Split(strings.TrimSpace(string(rawOut)), "\n") {
+				if rawLine == "" {
+					continue
+				}
+				rawParts := strings.SplitN(rawLine, "\x1f", 2)
+				curCmd := rawParts[0]
+				startCmd := ""
+				if len(rawParts) >= 2 {
+					startCmd = rawParts[1]
+				}
+				if strings.Contains(curCmd, "sidebar") || strings.Contains(curCmd, "renderer") ||
+					strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") {
+					hasRenderer = true
+					break
+				}
 			}
 		}
 		if hasRenderer {
@@ -390,8 +402,14 @@ var paneTargetRegex = regexp.MustCompile(`-pane\s+'([^']+)'`)
 // (target pane no longer exists).
 func cleanupOrphanedHeaders(customBorder bool) {
 	// Get all panes with start command, width, height, and window ID
-	out, err := exec.Command("tmux", "list-panes", "-s", "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_width}\x1f#{pane_start_command}\x1f#{pane_height}\x1f#{window_id}").Output()
+	// Scoped to our session with -t to avoid cross-session interference
+	listArgs := []string{"list-panes", "-s"}
+	if *sessionID != "" {
+		listArgs = append(listArgs, "-t", *sessionID)
+	}
+	listArgs = append(listArgs, "-F",
+		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_width}\x1f#{pane_start_command}\x1f#{pane_height}\x1f#{window_id}")
+	out, err := exec.Command("tmux", listArgs...).Output()
 	if err != nil {
 		return
 	}
@@ -549,9 +567,14 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 		return
 	}
 
-	// Get all panes with PID info
-	out, err := exec.Command("tmux", "list-panes", "-s", "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_pid}\x1f#{window_id}\x1f#{pane_dead}").Output()
+	// Get all panes with PID info, scoped to our session
+	watchdogArgs := []string{"list-panes", "-s"}
+	if sessionID != "" {
+		watchdogArgs = append(watchdogArgs, "-t", sessionID)
+	}
+	watchdogArgs = append(watchdogArgs, "-F",
+		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_pid}\x1f#{window_id}\x1f#{pane_dead}")
+	out, err := exec.Command("tmux", watchdogArgs...).Output()
 	if err != nil {
 		return
 	}
@@ -635,8 +658,14 @@ func restoreSidebarWidths() {
 		}
 	}
 
-	out, err := exec.Command("tmux", "list-panes", "-s", "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_width}").Output()
+	// Scoped to our session to avoid resizing panes in other sessions
+	restoreArgs := []string{"list-panes", "-s"}
+	if *sessionID != "" {
+		restoreArgs = append(restoreArgs, "-t", *sessionID)
+	}
+	restoreArgs = append(restoreArgs, "-F",
+		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_width}")
+	out, err := exec.Command("tmux", restoreArgs...).Output()
 	if err != nil {
 		return
 	}
@@ -766,6 +795,9 @@ func main() {
 	initCrashLog(*sessionID)
 	initEventLog(*sessionID)
 	defer recoverAndLog("main")
+
+	// Scope tmux queries to this session
+	tmux.SetSessionTarget(*sessionID)
 
 	if *debugMode {
 		debugLog = log.New(os.Stderr, "[daemon] ", log.LstdFlags|log.Lmicroseconds)
@@ -1060,7 +1092,7 @@ func main() {
 				}
 
 				// Check if any windows remain
-				out, err := exec.Command("tmux", "list-windows", "-F", "#{window_id}").Output()
+				out, err := exec.Command("tmux", "list-windows", "-t", *sessionID, "-F", "#{window_id}").Output()
 				if err != nil || strings.TrimSpace(string(out)) == "" {
 					logEvent("SHUTDOWN_REASON session=%s reason=no_windows", *sessionID)
 					debugLog.Printf("No windows remaining, shutting down")

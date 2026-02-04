@@ -66,6 +66,13 @@ var aiToolCommands = map[string]bool{}
 // is considered "waiting for input" rather than "busy working".
 var aiIdleTimeout int64 = 10
 
+var sessionTarget string
+
+// SetSessionTarget scopes tmux queries to a specific session.
+func SetSessionTarget(sessionID string) {
+	sessionTarget = strings.TrimSpace(sessionID)
+}
+
 // ConfigureBusyDetection applies user config to idle/busy detection.
 // extraIdle adds commands to the idle list.
 // aiTools lists interactive AI tools that distinguish busy vs waiting-for-input.
@@ -189,8 +196,13 @@ func ListWindows() ([]Window, error) {
 	t := perf.Start("tmux.ListWindows")
 	defer t.Stop()
 
-	cmd := exec.Command("tmux", "list-windows", "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}")
+	args := []string{"list-windows"}
+	if sessionTarget != "" {
+		args = append(args, "-t", sessionTarget)
+	}
+	args = append(args, "-F",
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}")
+	cmd := exec.Command("tmux", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -275,6 +287,14 @@ func ListWindows() ([]Window, error) {
 				syncWidth = false
 			}
 		}
+		// Session ID safety net: skip windows that belong to a different session.
+		// tmux list-windows -t $SESSION can transiently return wrong-session windows.
+		if sessionTarget != "" && len(parts) >= 19 {
+			winSessionID := strings.TrimSpace(parts[18])
+			if winSessionID != "" && winSessionID != sessionTarget {
+				continue
+			}
+		}
 		windows = append(windows, Window{
 			ID:          parts[0],
 			Index:       index,
@@ -302,7 +322,11 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 	t := perf.Start(fmt.Sprintf("tmux.ListPanesForWindow(%d)", windowIndex))
 	defer t.Stop()
 
-	cmd := exec.Command("tmux", "list-panes", "-t", fmt.Sprintf(":%d", windowIndex), "-F",
+	windowTarget := fmt.Sprintf(":%d", windowIndex)
+	if sessionTarget != "" {
+		windowTarget = fmt.Sprintf("%s:%d", sessionTarget, windowIndex)
+	}
+	cmd := exec.Command("tmux", "list-panes", "-t", windowTarget, "-F",
 		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}")
 	out, err := cmd.Output()
 	if err != nil {
@@ -413,8 +437,17 @@ func ListAllPanes() (map[int][]Pane, error) {
 	defer t.Stop()
 
 	// Added pane_start_command, pane_width, pane_height
-	cmd := exec.Command("tmux", "list-panes", "-a", "-F",
+	// Use -s (session) instead of -a (all) when scoped to a session,
+	// to prevent cross-session pane mixing via window index collision.
+	args := []string{"list-panes"}
+	if sessionTarget != "" {
+		args = append(args, "-s", "-t", sessionTarget)
+	} else {
+		args = append(args, "-a")
+	}
+	args = append(args, "-F",
 		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_width}\x1f#{pane_height}")
+	cmd := exec.Command("tmux", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -556,6 +589,21 @@ func ListWindowsWithPanes() ([]Window, error) {
 		for i := range windows {
 			windows[i].Panes = allPanes[windows[i].Index]
 		}
+	}
+
+	// Filter out sidebar/header panes defensively before sorting/reindexing.
+	for i := range windows {
+		if len(windows[i].Panes) == 0 {
+			continue
+		}
+		filtered := windows[i].Panes[:0]
+		for _, pane := range windows[i].Panes {
+			if isSidebarCommand(pane.Command) || isSidebarCommand(pane.StartCommand) {
+				continue
+			}
+			filtered = append(filtered, pane)
+		}
+		windows[i].Panes = filtered
 	}
 
 	// Sort panes by visual position (top to bottom) and re-index sequentially.
