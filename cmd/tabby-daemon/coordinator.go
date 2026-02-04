@@ -1425,7 +1425,7 @@ func (c *Coordinator) updatePaneHeaderColors() {
 
 				if autoBorder {
 					for _, p := range win.Panes {
-						if strings.Contains(p.Command, "sidebar") || strings.Contains(p.Command, "pane-header") {
+						if isAuxiliaryPaneCommand(p.Command) {
 							continue
 						}
 						args = append(args, ";", "set-option", "-p", "-t", p.ID,
@@ -2478,7 +2478,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	// Count content panes (exclude sidebar and header panes)
 	contentPaneCount := 0
 	for _, p := range foundWindow.Panes {
-		if !strings.Contains(p.Command, "sidebar") && p.Command != "pane-header" {
+		if !isAuxiliaryPaneCommand(p.Command) {
 			contentPaneCount++
 		}
 	}
@@ -2608,6 +2608,9 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	// Ensure the final rendered line has the correct background applied everywhere
 	line = fullLineStyle.Render(line)
+	if headerBg != "" {
+		line = c.applyBackgroundFill(line, headerBg, width)
+	}
 
 	if collapseBtn != "" {
 		// Button string: "  ▼   │   ─   ×  "
@@ -3240,7 +3243,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			var contentPanes []tmux.Pane
 			for _, pane := range win.Panes {
-				if strings.Contains(pane.Command, "pane-header") || strings.Contains(pane.Command, "sidebar") {
+				if isAuxiliaryPaneCommand(pane.Command) {
 					continue
 				}
 				contentPanes = append(contentPanes, pane)
@@ -3746,7 +3749,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 		var contentPanes []tmux.Pane
 		for _, pane := range win.Panes {
-			if strings.Contains(pane.Command, "pane-header") || strings.Contains(pane.Command, "sidebar") {
+			if isAuxiliaryPaneCommand(pane.Command) {
 				continue
 			}
 			contentPanes = append(contentPanes, pane)
@@ -5331,7 +5334,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 					paneID := parts[0]
 					cmd := parts[1]
 					// Skip sidebar and header panes
-					if !strings.Contains(cmd, "sidebar") && cmd != "pane-header" {
+					if !isAuxiliaryPaneCommand(cmd) {
 						exec.Command("tmux", "select-pane", "-t", paneID).Run()
 						break
 					}
@@ -5370,11 +5373,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 		// Minimum height for collapsed pane (1 line - tmux minimum)
 		collapsedHeight := 1
-		// Header panes should be 2 lines (with border) or 1 line
+		// Header panes are always 1 line tall
 		headerHeight := 1
-		if c.config.PaneHeader.CustomBorder {
-			headerHeight = 2
-		}
 
 		// Get window ID for this pane so we can fix header heights after resize
 		windowIDOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{window_id}").Output()
@@ -5414,9 +5414,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				}
 				pid := parts[0]
 				cmd := parts[1]
-				if cmd == "pane-header" {
+				if isAuxiliaryPaneCommand(cmd) {
 					headerPanes = append(headerPanes, pid)
-				} else if !strings.Contains(cmd, "sidebar") && pid != paneID {
+				} else if pid != paneID {
 					otherContentPanes = append(otherContentPanes, pid)
 				}
 			}
@@ -7032,6 +7032,20 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func isAuxiliaryPaneCommand(cmd string) bool {
+	if cmd == "" {
+		return false
+	}
+	lower := strings.ToLower(cmd)
+	if strings.Contains(lower, "sidebar") {
+		return true
+	}
+	if strings.Contains(lower, "pane-header") || strings.Contains(lower, "pane header") || strings.Contains(lower, "pane_header") {
+		return true
+	}
+	return false
 }
 
 // hexToRGB converts hex color to RGB values
