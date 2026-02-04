@@ -885,11 +885,21 @@ func (c *Coordinator) processAIToolStates() {
 	for i := range c.windows {
 		win := &c.windows[i]
 		idx := win.Index
-		multiPane := len(win.Panes) > 1
+		contentPaneCount := 0
+		for j := range win.Panes {
+			if isAuxiliaryPane(win.Panes[j]) {
+				continue
+			}
+			contentPaneCount++
+		}
+		multiPane := contentPaneCount > 1
 
 		// Find all AI tool panes in this window
 		var aiPanes []*tmux.Pane
 		for j := range win.Panes {
+			if isAuxiliaryPane(win.Panes[j]) {
+				continue
+			}
 			if tmux.IsAITool(win.Panes[j].Command) {
 				aiPanes = append(aiPanes, &win.Panes[j])
 			}
@@ -909,6 +919,9 @@ func (c *Coordinator) processAIToolStates() {
 			// Check if any pane in this window WAS an AI tool last cycle (tool exited).
 			anyPrevAI := false
 			for j := range win.Panes {
+				if isAuxiliaryPane(win.Panes[j]) {
+					continue
+				}
 				pid := win.Panes[j].ID
 				if c.prevPaneBusy[pid] || c.prevPaneTitle[pid] != "" {
 					anyPrevAI = true
@@ -1425,7 +1438,7 @@ func (c *Coordinator) updatePaneHeaderColors() {
 
 				if autoBorder {
 					for _, p := range win.Panes {
-						if isAuxiliaryPaneCommand(p.Command) {
+						if isAuxiliaryPane(p) {
 							continue
 						}
 						args = append(args, ";", "set-option", "-p", "-t", p.ID,
@@ -2478,7 +2491,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	// Count content panes (exclude sidebar and header panes)
 	contentPaneCount := 0
 	for _, p := range foundWindow.Panes {
-		if !isAuxiliaryPaneCommand(p.Command) {
+		if !isAuxiliaryPane(p) {
 			contentPaneCount++
 		}
 	}
@@ -3243,7 +3256,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			var contentPanes []tmux.Pane
 			for _, pane := range win.Panes {
-				if isAuxiliaryPaneCommand(pane.Command) {
+				if isAuxiliaryPane(pane) {
 					continue
 				}
 				contentPanes = append(contentPanes, pane)
@@ -3749,7 +3762,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 		var contentPanes []tmux.Pane
 		for _, pane := range win.Panes {
-			if isAuxiliaryPaneCommand(pane.Command) {
+			if isAuxiliaryPane(pane) {
 				continue
 			}
 			contentPanes = append(contentPanes, pane)
@@ -6366,7 +6379,14 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 	args = append(args, "Unlock Name", "u", unlockCmd)
 
 	// Collapse/Expand panes option (only for windows with multiple panes)
-	if len(win.Panes) > 1 {
+	contentPaneCount := 0
+	for _, pane := range win.Panes {
+		if isAuxiliaryPane(pane) {
+			continue
+		}
+		contentPaneCount++
+	}
+	if contentPaneCount > 1 {
 		args = append(args, "", "", "") // Separator
 		if win.Collapsed {
 			expandCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_collapsed", win.Index)
@@ -6435,7 +6455,19 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 	// Split options - use active pane ID to avoid index issues with header panes
 	activePaneID := ""
 	for _, p := range win.Panes {
+		if isAuxiliaryPane(p) {
+			continue
+		}
 		if p.Active {
+			activePaneID = p.ID
+			break
+		}
+	}
+	if activePaneID == "" {
+		for _, p := range win.Panes {
+			if isAuxiliaryPane(p) {
+				continue
+			}
 			activePaneID = p.ID
 			break
 		}
@@ -7046,6 +7078,10 @@ func isAuxiliaryPaneCommand(cmd string) bool {
 		return true
 	}
 	return false
+}
+
+func isAuxiliaryPane(p tmux.Pane) bool {
+	return isAuxiliaryPaneCommand(p.Command) || isAuxiliaryPaneCommand(p.StartCommand)
 }
 
 // hexToRGB converts hex color to RGB values
