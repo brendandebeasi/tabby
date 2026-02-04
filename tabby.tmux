@@ -142,22 +142,9 @@ if [[ "$CUSTOM_BORDER" != "true" ]]; then
     tmux set-option -g pane-active-border-style "fg=$PANE_ACTIVE_BG"
 fi
 
-# Check if dimming inactive panes is enabled
-DIM_INACTIVE=$(grep -A20 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "dim_inactive:" | awk '{print $2}' || echo "false")
-DIM_OPACITY=$(grep -A20 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "dim_opacity:" | awk '{print $2}' || echo "0.7")
-
-# Apply window-style for dimming inactive panes
-if [[ "$DIM_INACTIVE" == "true" ]]; then
-    # Calculate dimmed background: darker version of terminal background
-    # Using bg=colour234 (dark gray) as a subtle dim - tmux doesn't support transparency
-    # The header dimming will provide the main visual feedback
-    tmux set-option -g window-style "bg=colour234"
-    tmux set-option -g window-active-style "bg=default"
-else
-    # Use default styling for both active and inactive panes
-    tmux set-option -g window-style "default"
-    tmux set-option -g window-active-style "default"
-fi
+# Always use default pane backgrounds (no forced dimming)
+tmux set-option -g window-style "default"
+tmux set-option -g window-active-style "default"
 
 # Pane header format: hide for utility panes (sidebar, pane-bar, tabbar)
 
@@ -193,14 +180,13 @@ chmod +x "$CLICK_HANDLER_SCRIPT"
 
 # Bind MouseDown1Pane:
 # 1. Check target pane command
-# 2. If Sidebar: send-keys -M (Pass mouse ONLY. Do not select-pane, let app handle it)
-# 3. If Header: Store click, then select-pane
-# 4. If Normal: select-pane (Instant focus) AND signal daemon immediately
+# 2. If Sidebar or Header: send-keys -M (Pass mouse ONLY. Do not select-pane, let app handle it)
+# 3. If Normal: select-pane (Instant focus) AND signal daemon immediately
 tmux bind-key -T root MouseDown1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M" \
         "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
-            \"set-option -g @tabby_last_click_x '#{mouse_x}' ; set-option -g @tabby_last_click_y '#{mouse_y}' ; set-option -g @tabby_last_click_pane '#{mouse_pane}' ; select-pane -t =\" \
+            \"send-keys -M\" \
             \"select-pane -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 
 # Enable focus events
