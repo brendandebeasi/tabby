@@ -359,11 +359,8 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 		logEvent("SPAWN_HEADER pane=%s window=%s active_before=%s width=%d height=%d custom_border=%v", pane.id, pane.windowID, activeBeforeHeader, pane.width, pane.height, customBorder)
 		cmdStr := fmt.Sprintf("exec '%s' -session '%s' -pane '%s' %s", headerBin, sessionID, pane.id, debugFlag)
 		// Split the target pane vertically (-v), placing header before/above (-b).
-		// Height is 1 line normally, or 2 lines when custom_border is enabled (extra line for drag handle).
+		// Height is 1 line normally. CustomBorder drag handle is rendered within the single line.
 		headerHeight := "1"
-		if customBorder {
-			headerHeight = "2"
-		}
 		spawnCmd := exec.Command("tmux", "split-window", "-d", "-t", pane.id, "-v", "-b", "-l", headerHeight, cmdStr)
 		if out, err := spawnCmd.CombinedOutput(); err != nil {
 			debugLog.Printf("Failed to spawn pane header for %s: %v, output: %s", pane.id, err, string(out))
@@ -508,11 +505,8 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		}
 
 		// Force header height to expected size if it's grown beyond it
-		// Expected: 1 line normally, 2 lines when custom_border is enabled
+		// Expected: always 1 line (custom_border drag handle is rendered inline)
 		expectedHeight := 1
-		if customBorder {
-			expectedHeight = 2
-		}
 		if hdr.height > expectedHeight {
 			debugLog.Printf("Header %s height=%d, forcing to %d", hdr.paneID, hdr.height, expectedHeight)
 			exec.Command("tmux", "resize-pane", "-t", hdr.paneID, "-y", fmt.Sprintf("%d", expectedHeight)).Run()
