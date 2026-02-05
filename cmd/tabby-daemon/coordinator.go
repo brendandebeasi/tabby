@@ -884,13 +884,17 @@ func (c *Coordinator) processAIToolStates() {
 
 	// Load process table once per cycle for CPU-based busy detection
 	// Throttle this expensive operation (ps -A) to max once per 2s
+	// Skip entirely if busy/input indicators are disabled (saves ~31ms/2s)
 	var pt *processTree
-	if time.Since(c.lastProcessCheck) > 2*time.Second {
-		pt = loadProcessTree()
-		c.cachedProcessTree = pt
-		c.lastProcessCheck = time.Now()
-	} else {
-		pt = c.cachedProcessTree
+	needsProcessTree := c.config.Indicators.Busy.Enabled || c.config.Indicators.Input.Enabled
+	if needsProcessTree {
+		if time.Since(c.lastProcessCheck) > 2*time.Second {
+			pt = loadProcessTree()
+			c.cachedProcessTree = pt
+			c.lastProcessCheck = time.Now()
+		} else {
+			pt = c.cachedProcessTree
+		}
 	}
 
 	// Track which pane IDs we see this cycle for stale cleanup
