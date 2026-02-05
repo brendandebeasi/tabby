@@ -211,7 +211,10 @@ type PaneHeader struct {
 	BorderFromTab bool    `yaml:"border_from_tab"` // Use tab's color for active pane border (default: false)
 	AutoBorder    bool    `yaml:"auto_border"`     // Auto-set pane border color from window's resolved color (default: false)
 	BorderLines   string  `yaml:"border_lines"`    // Border style: single, double, heavy, simple, number (default: single)
-	BorderFg      string  `yaml:"border_fg"`       // Border foreground color (default: #444444)
+	BorderFg        string  `yaml:"border_fg"`         // Border foreground color (default: #444444)
+	BorderBg        string  `yaml:"border_bg"`         // Border background color (default: "")
+	ActiveBorderFg  string  `yaml:"active_border_fg"`  // Active pane border fg (default: same as border_fg)
+	ActiveBorderBg  string  `yaml:"active_border_bg"`  // Active pane border bg (default: same as border_bg)
 	DimInactive   bool    `yaml:"dim_inactive"`    // Enable dimming of inactive panes (default: false)
 	DimOpacity    float64 `yaml:"dim_opacity"`     // Opacity for dimmed panes 0.0-1.0 (default: 0.7)
 	// Custom border settings - render our own border instead of tmux's

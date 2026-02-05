@@ -604,6 +604,19 @@ func (c *Coordinator) getButtonFg() string {
 	return c.bgDetector.GetDefaultButtonFg()
 }
 
+// buildBorderStyle builds a tmux style string from fg and bg colors.
+// Returns "" if fg is empty.
+func buildBorderStyle(fg, bg string) string {
+	if fg == "" {
+		return ""
+	}
+	s := "fg=" + fg
+	if bg != "" {
+		s += ",bg=" + bg
+	}
+	return s
+}
+
 // getBorderFg returns border color from config, theme, or detector
 func (c *Coordinator) getBorderFg() string {
 	if c.config.PaneHeader.BorderFg != "" {
@@ -1370,13 +1383,35 @@ func (c *Coordinator) applyThemeToTmux() {
 		return
 	}
 
-	// Apply border colors if defined
-	if c.theme.BorderFg != "" {
-		// Set global border styles
-		// Use BorderFg for both active and inactive to ensure theme consistency
-		style := fmt.Sprintf("fg=%s", c.theme.BorderFg)
-		exec.Command("tmux", "set-option", "-g", "pane-border-style", style).Run()
-		exec.Command("tmux", "set-option", "-g", "pane-active-border-style", style).Run()
+	// Resolve border colors: config > theme > detector fallback
+	borderFg := c.config.PaneHeader.BorderFg
+	if borderFg == "" {
+		borderFg = c.theme.BorderFg
+	}
+	borderBg := c.config.PaneHeader.BorderBg
+
+	activeFg := c.config.PaneHeader.ActiveBorderFg
+	if activeFg == "" {
+		activeFg = borderFg // fallback to inactive fg
+	}
+	activeBg := c.config.PaneHeader.ActiveBorderBg
+	if activeBg == "" {
+		activeBg = borderBg // fallback to inactive bg
+	}
+
+	// Apply inactive border style
+	if inactiveStyle := buildBorderStyle(borderFg, borderBg); inactiveStyle != "" {
+		exec.Command("tmux", "set-option", "-g", "pane-border-style", inactiveStyle).Run()
+	}
+
+	// Apply active border style
+	if activeStyle := buildBorderStyle(activeFg, activeBg); activeStyle != "" {
+		exec.Command("tmux", "set-option", "-g", "pane-active-border-style", activeStyle).Run()
+	}
+
+	// Apply border line style if configured
+	if c.config.PaneHeader.BorderLines != "" {
+		exec.Command("tmux", "set-option", "-g", "pane-border-lines", c.config.PaneHeader.BorderLines).Run()
 	}
 
 	// Apply message/mode styles (command prompt)
@@ -1414,35 +1449,89 @@ func (c *Coordinator) updatePaneHeaderColors() {
 	grouped := c.grouped
 	autoBorder := c.config.PaneHeader.AutoBorder
 	borderFromTab := c.config.PaneHeader.BorderFromTab
+	borderBg := c.config.PaneHeader.BorderBg
+	activeBorderFg := c.config.PaneHeader.ActiveBorderFg
+	activeBorderBg := c.config.PaneHeader.ActiveBorderBg
+	if activeBorderBg == "" {
+		activeBorderBg = borderBg
+	}
+	// Resolve border fg: config border_fg > group theme fg > same as bg (transparent/solid bar)
+	configBorderFg := c.config.PaneHeader.BorderFg
 	go func() {
 		var args []string
 		for _, group := range grouped {
-			baseColor := group.Theme.Bg
+			baseBg := group.Theme.Bg
 			for _, win := range group.Windows {
-				color := baseColor
+				tabBg := baseBg
 				if win.CustomColor != "" {
-					color = win.CustomColor
+					tabBg = win.CustomColor
+				}
+				// Border fg: config > group fg > same as bg (solid color bar)
+				baseFg := configBorderFg
+				if baseFg == "" {
+					baseFg = group.Theme.Fg
+				}
+				if baseFg == "" {
+					baseFg = tabBg
 				}
 				if len(args) > 0 {
 					args = append(args, ";")
 				}
-				args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", color)
-				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", color)
+				args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", tabBg)
+				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", tabBg)
 
 				if autoBorder || borderFromTab {
+					// Border fg = tab's text color, border bg = tab's bg color
+					bFg := baseFg
+					bBg := tabBg
+
+					// Active border: config overrides > tab colors
+					aFg := activeBorderFg
+					if aFg == "" {
+						aFg = bFg
+					}
+					aBg := activeBorderBg
+					if aBg == "" {
+						aBg = bBg
+					}
+					activeStyle := buildBorderStyle(aFg, aBg)
+					if activeStyle == "" {
+						activeStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
+					}
 					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
-						"pane-active-border-style", fmt.Sprintf("fg=%s", color))
+						"pane-active-border-style", activeStyle)
+
+					// Inactive border: tab fg on tab bg, with config bg override
+					iFg := bFg
+					iBg := borderBg
+					if iBg == "" {
+						iBg = bBg
+					}
+					inactiveStyle := buildBorderStyle(iFg, iBg)
+					if inactiveStyle == "" {
+						inactiveStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
+					}
 					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
-						"pane-border-style", fmt.Sprintf("fg=%s", color))
+						"pane-border-style", inactiveStyle)
 				}
 
 				if autoBorder {
+					bFg := baseFg
+					bBg := tabBg
 					for _, p := range win.Panes {
 						if isAuxiliaryPane(p) {
 							continue
 						}
+						iBg := borderBg
+						if iBg == "" {
+							iBg = bBg
+						}
+						inactiveStyle := buildBorderStyle(bFg, iBg)
+						if inactiveStyle == "" {
+							inactiveStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
+						}
 						args = append(args, ";", "set-option", "-p", "-t", p.ID,
-							"pane-border-style", fmt.Sprintf("fg=%s", color))
+							"pane-border-style", inactiveStyle)
 					}
 				}
 			}
@@ -3579,7 +3668,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					content = contentText
 				}
 
-				// Apply bg color only to the content portion (not tree branch)
+				// Apply bg color from start of name to the right edge of the sidebar
 				prefixPlain := stripAnsi(prefix)
 				prefixWidth := runewidth.StringWidth(prefixPlain)
 				contentWidth := width - prefixWidth
@@ -3589,15 +3678,18 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 				contentRendered := style.Render(content)
 				if bgColor != "" {
-					// Pad content to fill remaining width with bg color
+					r, g, b := hexToRGB(bgColor)
+					bgEsc := fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+					resetEsc := "\x1b[0m"
+					// Re-inject bg after any ANSI resets so bg persists through style changes
+					contentRendered = strings.ReplaceAll(contentRendered, resetEsc, resetEsc+bgEsc)
 					contentPlain := stripAnsi(contentRendered)
 					contentVisualWidth := runewidth.StringWidth(contentPlain)
 					pad := contentWidth - contentVisualWidth
 					if pad < 0 {
 						pad = 0
 					}
-					bgStyle := lipgloss.NewStyle().Background(lipgloss.Color(bgColor))
-					contentRendered = bgStyle.Render(contentRendered + strings.Repeat(" ", pad))
+					contentRendered = bgEsc + contentRendered + strings.Repeat(" ", pad) + resetEsc
 				}
 
 				s.WriteString(prefix + contentRendered + "\n")
@@ -3754,7 +3846,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					}
 
 					// Build prefix (tree parts) and content separately
-					// so bg color only applies to the content portion
+					// bg color extends from start of pane name to the right edge
 					var panePrefix, paneContent string
 					if pane.Active && isActive {
 						var paneIndicatorBg, paneIndicatorFg string
@@ -3780,7 +3872,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						paneContent = paneStyle.Render(paneText)
 					}
 
-					// Apply bg color only to the content portion (not tree branch)
+					// Apply bg color from start of pane name to right edge
 					panePrefixPlain := stripAnsi(panePrefix)
 					panePrefixW := runewidth.StringWidth(panePrefixPlain)
 					paneContentW := width - panePrefixW
@@ -3789,14 +3881,17 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					}
 
 					if paneLineBg != "" {
+						r, g, b := hexToRGB(paneLineBg)
+						bgEsc := fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+						resetEsc := "\x1b[0m"
+						paneContent = strings.ReplaceAll(paneContent, resetEsc, resetEsc+bgEsc)
 						paneContentPlain := stripAnsi(paneContent)
 						paneContentVisualW := runewidth.StringWidth(paneContentPlain)
 						panePad := paneContentW - paneContentVisualW
 						if panePad < 0 {
 							panePad = 0
 						}
-						paneBgStyle := lipgloss.NewStyle().Background(lipgloss.Color(paneLineBg))
-						paneContent = paneBgStyle.Render(paneContent + strings.Repeat(" ", panePad))
+						paneContent = bgEsc + paneContent + strings.Repeat(" ", panePad) + resetEsc
 					}
 
 					s.WriteString(panePrefix + paneContent + "\n")
