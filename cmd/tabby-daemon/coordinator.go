@@ -3478,10 +3478,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			}
 
 			// Calculate widths
-			prefixWidth := 3 // indicator + tree branch
-			if hasPanes {
-				prefixWidth += 2 // collapse icon + space
-			}
+			// All windows: indicator(1) + branch first char(1) + [collapse icon or branch second char](1) = 3
+			prefixWidth := 3
 			windowContentWidth := width - prefixWidth
 
 			// Truncate if needed
@@ -3549,7 +3547,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				// so background color only applies to the content portion
 				var prefix, content string
 				if hasPanes {
-					prefix = indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ")
+					treeBranchRunes := []rune(treeBranch)
+					treeBranchFirst := string(treeBranchRunes[0])
+					prefix = indicatorPart + treeStyle.Render(treeBranchFirst) + windowCollapseStyle.Render(windowCollapseIcon)
 					content = contentText
 				} else if isActive {
 					treeBranchRunes := []rune(treeBranch)
@@ -3695,7 +3695,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					}
 					paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
 
-					paneIndentWidth := 6
+					paneIndentWidth := 5
 					paneContentWidth := width - paneIndentWidth
 
 					// Truncate using proper rune width (handles Unicode/emoji)
@@ -3773,10 +3773,10 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 							paneIndicatorFg = activeIndFgConfig
 						}
 						paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
-						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator)
+						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar) + paneIndStyle.Render(paneActiveIndicator)
 						paneContent = activePaneStyle.Render(paneText)
 					} else {
-						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar+treeConnectorChar)
+						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar)
 						paneContent = paneStyle.Render(paneText)
 					}
 
