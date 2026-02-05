@@ -13,6 +13,7 @@ type Theme struct {
 	InactiveFg   string
 	DisclosureFg string
 	TreeFg       string
+	TreeBg       string
 
 	// Pane Headers
 	PaneActiveBg   string
@@ -71,6 +72,7 @@ var Themes = map[string]Theme{
 		InactiveFg:   "#9893a5",
 		DisclosureFg: "#797593",
 		TreeFg:       "#9893a5",
+		TreeBg:       "",
 
 		// Pane Headers
 		PaneActiveBg:   "#f2e9e1",
@@ -114,6 +116,7 @@ var Themes = map[string]Theme{
 		InactiveFg:   "#6e6a86",
 		DisclosureFg: "#908caa",
 		TreeFg:       "#6e6a86",
+		TreeBg:       "",
 
 		PaneActiveBg:   "#26233a",
 		PaneActiveFg:   "#e0def4",
@@ -149,6 +152,7 @@ var Themes = map[string]Theme{
 		InactiveFg:   "#6e6a86",
 		DisclosureFg: "#908caa",
 		TreeFg:       "#6e6a86",
+		TreeBg:       "",
 
 		PaneActiveBg:   "#393552",
 		PaneActiveFg:   "#e0def4",

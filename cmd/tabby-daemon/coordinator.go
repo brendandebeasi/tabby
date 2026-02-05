@@ -3192,6 +3192,18 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	treeStyle := lipgloss.NewStyle()
 	treeFg := c.getTreeFgWithFallback(c.config.Sidebar.Colors.TreeFg)
 	treeStyle = treeStyle.Foreground(lipgloss.Color(treeFg))
+	treeBg := c.config.Sidebar.Colors.TreeBg
+	if treeBg == "" && c.theme != nil {
+		treeBg = c.theme.TreeBg
+	}
+	if strings.EqualFold(treeBg, "transparent") {
+		treeBg = ""
+	}
+	if treeBg != "" {
+		treeStyle = treeStyle.Background(lipgloss.Color(treeBg))
+	}
+
+	inactiveFg := c.getInactiveTextColorWithFallback(c.config.Sidebar.Colors.InactiveFg)
 
 	// Disclosure color (use config or terminal default)
 	disclosureColor := c.getDisclosureFgWithFallback(c.config.Sidebar.Colors.DisclosureFg)
@@ -3227,7 +3239,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 		// Group header style
 		headerStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(theme.Fg)).
+			Foreground(lipgloss.Color(inactiveFg)).
 			Bold(true)
 
 		// Collapse indicator
@@ -3266,7 +3278,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			// Use touch button for consistent 3-line bordered appearance
 			headerOpts := touchButtonOpts{
-				FgColor:  theme.Fg,
+				FgColor:  inactiveFg,
 				BoldText: true,
 			}
 			s.WriteString(c.renderTouchButton(width, headerLabel, theme.Bg, headerOpts) + "\n")
@@ -3348,7 +3360,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						fgColor = theme.Fg
 					}
 				} else {
-					fgColor = theme.Fg
+					fgColor = inactiveFg
 				}
 			} else if win.CustomColor != "" {
 				if isActive {
@@ -3368,7 +3380,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 			} else {
 				bgColor = theme.Bg
-				fgColor = theme.Fg
+				fgColor = inactiveFg
 			}
 			// Build style
 			style := lipgloss.NewStyle()
@@ -3533,11 +3545,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				s.WriteString(c.renderTouchButton(width, tabLabel, tabBg, tabOpts) + "\n")
 				currentLine += 3
 			} else {
-				windowLineStyle := lipgloss.NewStyle().Width(width)
-
-				var lineContent string
+				// Build prefix (indicator + tree branch) separately from content
+				// so background color only applies to the content portion
+				var prefix, content string
 				if hasPanes {
-					lineContent = indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ") + style.Render(contentText)
+					prefix = indicatorPart + treeStyle.Render(treeBranch) + windowCollapseStyle.Render(windowCollapseIcon+" ")
+					content = contentText
 				} else if isActive {
 					treeBranchRunes := []rune(treeBranch)
 					treeBranchFirst := string(treeBranchRunes[0])
@@ -3559,15 +3572,35 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					}
 
 					activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Background(lipgloss.Color(indicatorBg)).Bold(true)
-					lineContent = indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator) + style.Render(contentText)
+					prefix = indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator)
+					content = contentText
 				} else {
-					lineContent = indicatorPart + treeStyle.Render(treeBranch) + style.Render(contentText)
+					prefix = indicatorPart + treeStyle.Render(treeBranch)
+					content = contentText
 				}
-				renderedLine := windowLineStyle.Render(lineContent)
+
+				// Apply bg color only to the content portion (not tree branch)
+				prefixPlain := stripAnsi(prefix)
+				prefixWidth := runewidth.StringWidth(prefixPlain)
+				contentWidth := width - prefixWidth
+				if contentWidth < 0 {
+					contentWidth = 0
+				}
+
+				contentRendered := style.Render(content)
 				if bgColor != "" {
-					renderedLine = c.applyBackgroundFill(renderedLine, bgColor, width)
+					// Pad content to fill remaining width with bg color
+					contentPlain := stripAnsi(contentRendered)
+					contentVisualWidth := runewidth.StringWidth(contentPlain)
+					pad := contentWidth - contentVisualWidth
+					if pad < 0 {
+						pad = 0
+					}
+					bgStyle := lipgloss.NewStyle().Background(lipgloss.Color(bgColor))
+					contentRendered = bgStyle.Render(contentRendered + strings.Repeat(" ", pad))
 				}
-				s.WriteString(renderedLine + "\n")
+
+				s.WriteString(prefix + contentRendered + "\n")
 				currentLine++
 			}
 
@@ -3608,10 +3641,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if win.CustomColor != "" {
 					paneFg = "#ffffff"
 				} else {
-					paneFg = theme.Fg
-					if paneFg == "" {
-						paneFg = c.getInactiveTextColorWithFallback("")
-					}
+					paneFg = inactiveFg
 				}
 
 				paneStyle := lipgloss.NewStyle().
@@ -3722,8 +3752,10 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					} else {
 						paneLineBg = theme.Bg
 					}
-					paneLineStyle := lipgloss.NewStyle().Background(lipgloss.Color(paneLineBg)).Width(width)
 
+					// Build prefix (tree parts) and content separately
+					// so bg color only applies to the content portion
+					var panePrefix, paneContent string
 					if pane.Active && isActive {
 						var paneIndicatorBg, paneIndicatorFg string
 						if activeIndBgConfig == "" || activeIndBgConfig == "auto" {
@@ -3741,21 +3773,33 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 							paneIndicatorFg = activeIndFgConfig
 						}
 						paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
-						fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-						lineContent := paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText)
-						renderedPane := paneLineStyle.Render(lineContent)
-						if paneLineBg != "" {
-							renderedPane = c.applyBackgroundFill(renderedPane, paneLineBg, width)
-						}
-						s.WriteString(renderedPane + "\n")
+						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator)
+						paneContent = activePaneStyle.Render(paneText)
 					} else {
-						lineContent := paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText)
-						renderedPane := paneLineStyle.Render(lineContent)
-						if paneLineBg != "" {
-							renderedPane = c.applyBackgroundFill(renderedPane, paneLineBg, width)
-						}
-						s.WriteString(renderedPane + "\n")
+						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar+treeConnectorChar)
+						paneContent = paneStyle.Render(paneText)
 					}
+
+					// Apply bg color only to the content portion (not tree branch)
+					panePrefixPlain := stripAnsi(panePrefix)
+					panePrefixW := runewidth.StringWidth(panePrefixPlain)
+					paneContentW := width - panePrefixW
+					if paneContentW < 0 {
+						paneContentW = 0
+					}
+
+					if paneLineBg != "" {
+						paneContentPlain := stripAnsi(paneContent)
+						paneContentVisualW := runewidth.StringWidth(paneContentPlain)
+						panePad := paneContentW - paneContentVisualW
+						if panePad < 0 {
+							panePad = 0
+						}
+						paneBgStyle := lipgloss.NewStyle().Background(lipgloss.Color(paneLineBg))
+						paneContent = paneBgStyle.Render(paneContent + strings.Repeat(" ", panePad))
+					}
+
+					s.WriteString(panePrefix + paneContent + "\n")
 					currentLine++
 
 					// Touch mode: bottom padding for pane (2 lines total: content + pad)
@@ -3806,6 +3850,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 	activeIndFgConf := activeIndFgConfig
 	activeIndBgConf := activeIndBgConfig
+	inactiveFg := c.getInactiveTextColorWithFallback(c.config.Sidebar.Colors.InactiveFg)
 
 	// Collect all windows from all groups into a flat list
 	type flatWindow struct {
@@ -3859,7 +3904,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					fgColor = theme.Fg
 				}
 			} else {
-				fgColor = theme.Fg
+				fgColor = inactiveFg
 			}
 		} else if win.CustomColor != "" {
 			if isActive {
@@ -3880,7 +3925,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			}
 		} else {
 			bgColor = theme.Bg
-			fgColor = theme.Fg
+			fgColor = inactiveFg
 		}
 
 		// Build style
@@ -4103,12 +4148,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				// When window has a custom color (usually dark background), use white text
 				paneFg = "#ffffff"
 			} else {
-				// Use theme's foreground color
-				paneFg = theme.Fg
-				if paneFg == "" {
-					// Fall back to theme-aware default
-					paneFg = c.getInactiveTextColorWithFallback("")
-				}
+				paneFg = inactiveFg
 			}
 
 			paneStyle := lipgloss.NewStyle().

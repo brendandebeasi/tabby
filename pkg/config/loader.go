@@ -154,4 +154,9 @@ func applyDefaults(cfg *Config) {
 	// Bool defaults (Centered, ActiveColor, Bold) default to true.
 	// Since Go zero-value is false, we use *bool pointers in the struct
 	// so nil = unset = use default (true). See headerBoolDefault() in coordinator.
+
+	// Sidebar text defaults
+	if cfg.Sidebar.Colors.InactiveFg == "" {
+		cfg.Sidebar.Colors.InactiveFg = "#f2f2ee"
+	}
 }

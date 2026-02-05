@@ -270,10 +270,7 @@ func (d *BackgroundDetector) GetDefaultDisclosureFg() string {
 
 // GetDefaultTreeFg returns appropriate tree branch color
 func (d *BackgroundDetector) GetDefaultTreeFg() string {
-	if d.IsDarkBackground() {
-		return "#888888" // Mid gray
-	}
-	return "#9893a5" // Muted purple-gray
+	return "#666666" // Mid gray
 }
 
 // GetDefaultPaneHeaderActiveBg returns default active pane header background
