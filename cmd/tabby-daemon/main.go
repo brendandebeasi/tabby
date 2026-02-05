@@ -921,6 +921,15 @@ func main() {
 
 		lastWindowsHash := ""
 		lastGitState := ""
+		activeWindowID := "" // Track active window for optimized rendering
+
+		// Helper to get current active window ID (cached, updated on events)
+		updateActiveWindow := func() {
+			if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+				activeWindowID = strings.TrimSpace(string(out))
+			}
+		}
+		updateActiveWindow() // Initial fetch
 
 		// Initial call to set sidebar pane backgrounds (before any events)
 		go func() {
@@ -966,6 +975,8 @@ func main() {
 				start := time.Now()
 				logEvent("SIGNAL_REFRESH session=%s", *sessionID)
 
+				// Update active window on refresh (SIGUSR1 often from focus changes)
+				updateActiveWindow()
 				coordinator.RefreshWindows()
 				t1 := time.Now()
 
@@ -1023,7 +1034,8 @@ func main() {
 				petChanged := coordinator.UpdatePetState()
 				if spinnerVisible || petChanged {
 					perf.Log("animationTick (render)")
-					server.BroadcastRender()
+					// Only render active window during animation ticks (hidden windows don't need updates)
+					server.RenderActiveWindowOnly(activeWindowID)
 				}
 			case <-gitTicker.C:
 				// Only broadcast if git state changed

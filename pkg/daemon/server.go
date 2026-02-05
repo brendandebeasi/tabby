@@ -324,6 +324,31 @@ func (s *Server) BroadcastRender() {
 	}
 }
 
+// RenderActiveWindowOnly sends render only to the active window's sidebar and headers.
+// This is an optimization for animation ticks - hidden windows don't need constant updates.
+// activeWindowID is the tmux window ID like "@1", "@4", etc.
+func (s *Server) RenderActiveWindowOnly(activeWindowID string) {
+	t := perf.Start("RenderActiveOnly")
+	defer t.Stop()
+
+	s.clientsMu.RLock()
+	clientIDs := make([]string, 0, len(s.clients))
+	for id := range s.clients {
+		clientIDs = append(clientIDs, id)
+	}
+	s.clientsMu.RUnlock()
+
+	for _, id := range clientIDs {
+		// Render if: sidebar for active window, or header in active window
+		// ClientID format: "@1" for sidebar, "header:%123" for pane headers
+		if id == activeWindowID {
+			s.sendRenderToClient(id)
+		}
+		// Note: headers are per-pane, not per-window, so we skip them during
+		// animation-only renders. They'll get updated on window state changes.
+	}
+}
+
 // sendRenderToClient generates and sends render content to a specific client
 func (s *Server) sendRenderToClient(clientID string) {
 	s.clientsMu.RLock()
