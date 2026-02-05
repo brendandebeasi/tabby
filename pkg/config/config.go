@@ -223,9 +223,21 @@ type PaneHeader struct {
 	TerminalBg   string `yaml:"terminal_bg"` // Terminal background color for hiding borders (default: #000000)
 }
 
+type SidebarHeader struct {
+	Text          string `yaml:"text"`           // Header text (default: "TABBY")
+	Height        int    `yaml:"height"`         // Total header rows (default: 3)
+	PaddingBottom int    `yaml:"padding_bottom"` // Transparent rows below header (default: 1)
+	Centered      *bool  `yaml:"centered"`       // Center text horizontally and vertically (default: true)
+	ActiveColor   *bool  `yaml:"active_color"`   // Color based on active window group (default: true)
+	Fg            string `yaml:"fg"`             // Override text color (default: "" = auto from active group or theme)
+	Bg            string `yaml:"bg"`             // Override background color (default: "" = transparent/sidebar bg)
+	Bold          *bool  `yaml:"bold"`           // Bold text (default: true)
+}
+
 type Sidebar struct {
 	Position        string        `yaml:"position"`     // "left" (default) or "right"
 	Mode            string        `yaml:"mode"`         // "full" (default) or "partial"
+	Header          SidebarHeader `yaml:"header"`       // Sidebar header configuration
 	PaneHeaders     bool          `yaml:"pane_headers"` // Enable clickable overlay pane headers
 	NewTabButton    bool          `yaml:"new_tab_button"`
 	CloseButton     bool          `yaml:"close_button"`

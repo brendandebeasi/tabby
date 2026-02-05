@@ -2255,7 +2255,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	defer c.stateMu.RUnlock()
 
 	// Generate sidebar header (session name, gear, position toggle, collapse)
-	headerContent, headerRegions := c.generateSidebarHeader(width)
+	headerContent, headerRegions := c.generateSidebarHeader(width, clientID)
 	headerLines := strings.Count(headerContent, "\n")
 
 	// Generate widget zones (top and bottom) using priority-based layout
@@ -2300,19 +2300,22 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	allRegions = append(allRegions, mainRegions...)
 	allRegions = append(allRegions, bottomWRegions...)
 
-	// Overlay 2x3 floating collapse button in top-right corner
+	// Overlay floating collapse button in top-right corner of header
 	// This makes the collapse button easy to tap on mobile
-	// Button is 2 columns wide, 3 rows tall
+	// Button is 2 columns wide, spans header height rows
+	btnRows := c.config.Sidebar.Header.Height
+	if btnRows < 1 {
+		btnRows = 3
+	}
 	if width >= 6 { // Only show if sidebar is wide enough
 		collapseBtn := lipgloss.NewStyle().
 			Foreground(lipgloss.Color(c.getTextColorWithFallback(""))).
 			Bold(true)
 
-		btnChars := []string{"< ", "< ", "< "} // 3 rows of button, 2 chars each
 		btnWidth := 2
 
 		lines := strings.Split(fullContent, "\n")
-		for row := 0; row < 3 && row < len(lines); row++ {
+		for row := 0; row < btnRows && row < len(lines); row++ {
 			// Strip any trailing whitespace/newline from line
 			line := strings.TrimRight(lines[row], " \t")
 
@@ -2329,13 +2332,13 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 			// Note: if visualWidth >= targetCol, button may overlap content
 			// That's acceptable for the floating overlay effect
 
-			lines[row] = line + collapseBtn.Render(btnChars[row])
+			lines[row] = line + collapseBtn.Render("< ")
 		}
 		fullContent = strings.Join(lines, "\n")
 
-		// Add collapse button click region (2x3 in top-right)
+		// Add collapse button click region in top-right
 		allRegions = append([]daemon.ClickableRegion{{
-			StartLine: 0, EndLine: 2,
+			StartLine: 0, EndLine: btnRows - 1,
 			StartCol: width - btnWidth, EndCol: width,
 			Action: "collapse_sidebar", Target: "",
 		}}, allRegions...) // Prepend so it has priority
@@ -2907,37 +2910,185 @@ func (c *Coordinator) getIndicatorIcon(ind config.Indicator) string {
 	return "●"
 }
 
+// headerBoolDefault returns the value of a *bool config field, defaulting to true if nil.
+func headerBoolDefault(p *bool) bool {
+	if p == nil {
+		return true
+	}
+	return *p
+}
+
+// getActiveWindowGroupTheme returns the theme of the active window's group.
+// Returns nil if no active window or group is found.
+func (c *Coordinator) getActiveWindowGroupTheme() *config.Theme {
+	// Find the active window
+	var activeWin *tmux.Window
+	for i := range c.windows {
+		if c.windows[i].Active {
+			activeWin = &c.windows[i]
+			break
+		}
+	}
+	if activeWin == nil {
+		return nil
+	}
+
+	// Find which group contains this window
+	for i, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.ID == activeWin.ID {
+				return &c.grouped[i].Theme
+			}
+		}
+	}
+	return nil
+}
+
+// getWindowTabColors returns the tab fg/bg colors for a window using the same
+// logic as the sidebar window list. isActive controls whether active or inactive
+// variants are used for group/theme colors.
+func (c *Coordinator) getWindowTabColors(windowID string, isActive bool) (string, string, bool) {
+	var targetWin *tmux.Window
+	for i := range c.windows {
+		if c.windows[i].ID == windowID {
+			targetWin = &c.windows[i]
+			break
+		}
+	}
+	if targetWin == nil {
+		return "", "", false
+	}
+
+	var theme config.Theme
+	var customColor string
+	var foundGroup bool
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.ID == targetWin.ID {
+				theme = group.Theme
+				customColor = win.CustomColor
+				foundGroup = true
+				break
+			}
+		}
+		if foundGroup {
+			break
+		}
+	}
+	if !foundGroup {
+		return "", "", false
+	}
+
+	isDarkBg := c.bgDetector.IsDarkBackground()
+	if c.theme != nil {
+		isDarkBg = c.theme.Dark
+	}
+	theme = grouping.ResolveThemeColors(theme, isDarkBg)
+
+	var bgColor, fgColor string
+	isTransparent := customColor == "transparent"
+
+	if isTransparent {
+		bgColor = ""
+		if isActive {
+			fgColor = theme.ActiveFg
+			if fgColor == "" {
+				fgColor = theme.Fg
+			}
+		} else {
+			fgColor = theme.Fg
+		}
+	} else if customColor != "" {
+		if isActive {
+			bgColor = customColor
+		} else {
+			bgColor = grouping.ShadeColorByIndex(customColor, 1)
+		}
+		fgColor = "#ffffff"
+	} else if isActive {
+		bgColor = theme.ActiveBg
+		if bgColor == "" {
+			bgColor = theme.Bg
+		}
+		fgColor = theme.ActiveFg
+		if fgColor == "" {
+			fgColor = theme.Fg
+		}
+	} else {
+		bgColor = theme.Bg
+		fgColor = theme.Fg
+	}
+
+	return fgColor, bgColor, true
+}
+
 // generateSidebarHeader renders the pinned header bar at the top of the sidebar.
 // Returns the header content string (with trailing newline) and click regions.
-// Layout:  SessionName
-//
-//	─────────────────────────────
-//
 // Left-click collapses sidebar. Right-click opens settings context menu.
-func (c *Coordinator) generateSidebarHeader(width int) (string, []daemon.ClickableRegion) {
+func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string, []daemon.ClickableRegion) {
 	var s strings.Builder
 	var regions []daemon.ClickableRegion
 
-	// Simple header: session name + divider
-	// Collapse button is now a floating 3x3 overlay added separately
-	sessionName := "TABBY"
+	hdr := c.config.Sidebar.Header
+	headerText := hdr.Text
+	headerHeight := hdr.Height
+	paddingBottom := hdr.PaddingBottom
+	centered := headerBoolDefault(hdr.Centered)
+	activeColor := headerBoolDefault(hdr.ActiveColor)
+	bold := headerBoolDefault(hdr.Bold)
 
-	// Get terminal background for consistent styling
+	// Resolve colors from this window's tab colors
+	fgColor := hdr.Fg
+	bgColor := hdr.Bg
+	if strings.EqualFold(fgColor, "auto") {
+		fgColor = ""
+	}
+	if strings.EqualFold(bgColor, "auto") {
+		bgColor = ""
+	}
+	if activeColor && (fgColor == "" || bgColor == "") {
+		activeWindowID := ""
+		for i := range c.windows {
+			if c.windows[i].Active {
+				activeWindowID = c.windows[i].ID
+				break
+			}
+		}
+		if activeWindowID != "" {
+			if tabFg, tabBg, ok := c.getWindowTabColors(activeWindowID, true); ok {
+				if fgColor == "" {
+					fgColor = tabFg
+				}
+				if bgColor == "" {
+					bgColor = tabBg
+				}
+			}
+		}
+	}
+	if fgColor == "" {
+		fgColor = c.getHeaderTextColorWithFallback("")
+	}
+
+	// Build style
 	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(c.getHeaderTextColorWithFallback(""))).
-		Bold(true)
+		Foreground(lipgloss.Color(fgColor)).
+		Bold(bold)
 
-	// Leave space on right for floating collapse button (3 chars)
+	if bgColor != "" {
+		headerStyle = headerStyle.Background(lipgloss.Color(bgColor))
+	}
+
+	// Truncate text if needed (leave space for collapse button overlay)
 	maxNameWidth := width - 5 // 1 padding + 3 button + 1 gap
 	if maxNameWidth < 3 {
 		maxNameWidth = 3
 	}
 
-	nameWidth := runewidth.StringWidth(sessionName)
+	nameWidth := runewidth.StringWidth(headerText)
 	if nameWidth > maxNameWidth {
 		truncated := ""
 		w := 0
-		for _, r := range sessionName {
+		for _, r := range headerText {
 			rw := runewidth.RuneWidth(r)
 			if w+rw > maxNameWidth-1 {
 				break
@@ -2945,28 +3096,57 @@ func (c *Coordinator) generateSidebarHeader(width int) (string, []daemon.Clickab
 			truncated += string(r)
 			w += rw
 		}
-		sessionName = truncated + "~"
-		nameWidth = runewidth.StringWidth(sessionName)
+		headerText = truncated + "~"
+		nameWidth = runewidth.StringWidth(headerText)
 	}
 
-	// Line 0: " TABBY" (button overlaid on right by RenderSidebar)
-	spacerWidth := width - 1 - nameWidth
-	if spacerWidth < 0 {
-		spacerWidth = 0
+	// Row style applies bg color across the full width
+	rowStyle := lipgloss.NewStyle()
+	if bgColor != "" {
+		rowStyle = rowStyle.Background(lipgloss.Color(bgColor))
 	}
-	s.WriteString(" " + headerStyle.Render(sessionName) + strings.Repeat(" ", spacerWidth) + "\n")
 
-	// Line 1: empty (button middle row overlaid)
-	s.WriteString(strings.Repeat(" ", width) + "\n")
+	// Determine which row gets the text (vertical centering)
+	textRow := 0
+	if centered && headerHeight > 1 {
+		textRow = headerHeight / 2
+	}
 
-	// Line 2: empty (button bottom row overlaid)
-	s.WriteString(strings.Repeat(" ", width) + "\n")
+	// Render header rows
+	for line := 0; line < headerHeight; line++ {
+		if line == textRow {
+			if centered {
+				// Horizontal centering
+				leftPad := (width - nameWidth) / 2
+				if leftPad < 0 {
+					leftPad = 0
+				}
+				rightPad := width - leftPad - nameWidth
+				if rightPad < 0 {
+					rightPad = 0
+				}
+				s.WriteString(rowStyle.Render(strings.Repeat(" ", leftPad)) + headerStyle.Render(headerText) + rowStyle.Render(strings.Repeat(" ", rightPad)) + "\n")
+			} else {
+				// Left-aligned (legacy layout)
+				spacerWidth := width - 1 - nameWidth
+				if spacerWidth < 0 {
+					spacerWidth = 0
+				}
+				s.WriteString(rowStyle.Render(" ") + headerStyle.Render(headerText) + rowStyle.Render(strings.Repeat(" ", spacerWidth)) + "\n")
+			}
+		} else {
+			s.WriteString(rowStyle.Render(strings.Repeat(" ", width)) + "\n")
+		}
+	}
 
-	// No divider line - window headers provide visual separation
+	// Transparent padding rows below header (no bg color)
+	for i := 0; i < paddingBottom; i++ {
+		s.WriteString(strings.Repeat(" ", width) + "\n")
+	}
 
-	// Right-click anywhere: settings context menu
+	// Clickable region covers the header rows (not padding)
 	regions = append(regions, daemon.ClickableRegion{
-		StartLine: 0, EndLine: 2,
+		StartLine: 0, EndLine: headerHeight - 1,
 		Action: "sidebar_header_area", Target: "",
 	})
 

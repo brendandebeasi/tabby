@@ -57,6 +57,10 @@ bindings:
   detach: "prefix + d"
 
 sidebar:
+  header:
+    fg: "auto"
+    bg: "auto"
+    active_color: true
   pane_headers: true    # Enable clickable overlay pane headers (replaces native border headers)
   new_tab_button: true
   new_group_button: true

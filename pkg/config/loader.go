@@ -140,4 +140,18 @@ func applyDefaults(cfg *Config) {
 	// Note: PaneHeader.CustomBorder defaults (HandleColor, HandleIcon, Draggable)
 	// are applied at render time in coordinator.go since we can't distinguish
 	// between unset and false for Draggable in YAML.
+
+	// Sidebar header defaults
+	if cfg.Sidebar.Header.Text == "" {
+		cfg.Sidebar.Header.Text = "TABBY"
+	}
+	if cfg.Sidebar.Header.Height == 0 {
+		cfg.Sidebar.Header.Height = 3
+	}
+	if cfg.Sidebar.Header.PaddingBottom == 0 {
+		cfg.Sidebar.Header.PaddingBottom = 1
+	}
+	// Bool defaults (Centered, ActiveColor, Bold) default to true.
+	// Since Go zero-value is false, we use *bool pointers in the struct
+	// so nil = unset = use default (true). See headerBoolDefault() in coordinator.
 }
