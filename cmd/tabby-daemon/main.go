@@ -1018,10 +1018,13 @@ func main() {
 				}
 			case <-animationTicker.C:
 				// Combined spinner + pet animation tick (was two separate tickers causing 2x BroadcastRender)
-				perf.Log("animationTick")
-				coordinator.IncrementSpinner()
-				coordinator.UpdatePetState()
-				server.BroadcastRender()
+				// Only render if something visual actually changed (dirty flag pattern)
+				spinnerVisible := coordinator.IncrementSpinner()
+				petChanged := coordinator.UpdatePetState()
+				if spinnerVisible || petChanged {
+					perf.Log("animationTick (render)")
+					server.BroadcastRender()
+				}
 			case <-gitTicker.C:
 				// Only broadcast if git state changed
 				currentGitState := coordinator.GetGitStateHash()

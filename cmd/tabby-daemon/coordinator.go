@@ -1636,17 +1636,48 @@ func (c *Coordinator) RefreshSession() {
 	}
 }
 
-// IncrementSpinner advances the spinner frame
-func (c *Coordinator) IncrementSpinner() {
+// IncrementSpinner advances the spinner frame and returns true if any spinner is visible
+func (c *Coordinator) IncrementSpinner() bool {
 	c.stateMu.Lock()
 	c.spinnerFrame++
+	// Check if any pane has a visible spinner (AIBusy or AIInput)
+	hasVisibleSpinner := false
+	for _, win := range c.windows {
+		if win.Busy || win.Bell || win.Activity {
+			hasVisibleSpinner = true
+			break
+		}
+		for _, pane := range win.Panes {
+			if pane.AIBusy || pane.AIInput {
+				hasVisibleSpinner = true
+				break
+			}
+		}
+		if hasVisibleSpinner {
+			break
+		}
+	}
 	c.stateMu.Unlock()
+	return hasVisibleSpinner
 }
 
 // UpdatePetState updates the pet's state (called periodically)
-func (c *Coordinator) UpdatePetState() {
+// Returns true if pet is enabled and visually changed (needs render)
+func (c *Coordinator) UpdatePetState() bool {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
+
+	// If pet widget is disabled, nothing to update
+	if !c.config.Widgets.Pet.Enabled {
+		return false
+	}
+
+	// Track previous visual state to detect changes
+	prevPos := c.pet.Pos
+	prevState := c.pet.State
+	prevYarnPos := c.pet.YarnPos
+	prevFloatingCount := len(c.pet.FloatingItems)
+	prevMousePos := c.pet.MousePos
 
 	// Reload shared state periodically (for cross-sidebar sync)
 	if c.pet.AnimFrame%5 == 0 {
@@ -2057,7 +2088,7 @@ func (c *Coordinator) UpdatePetState() {
 			c.pet.LastThought = randomThought("dead")
 		}
 		c.savePetState()
-		return
+		return false // Dead pet doesn't animate
 	}
 
 	// Track starvation time
@@ -2077,7 +2108,7 @@ func (c *Coordinator) UpdatePetState() {
 				c.pet.State = "dead"
 				c.pet.LastThought = "goodbye..."
 				c.savePetState()
-				return
+				return true // State changed to dead
 			} else {
 				// Guilt trip mode - passive aggressive thoughts every 10 seconds
 				if c.pet.AnimFrame%100 == 0 {
@@ -2138,6 +2169,14 @@ func (c *Coordinator) UpdatePetState() {
 	}
 
 	c.savePetState()
+
+	// Return true if any visual state changed
+	changed := c.pet.Pos != prevPos ||
+		c.pet.State != prevState ||
+		c.pet.YarnPos != prevYarnPos ||
+		len(c.pet.FloatingItems) != prevFloatingCount ||
+		c.pet.MousePos != prevMousePos
+	return changed
 }
 
 // handleWidthSync checks if the current width matches global state and syncs if needed
