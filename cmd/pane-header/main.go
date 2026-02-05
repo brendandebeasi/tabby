@@ -217,9 +217,61 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sendResize()
 		}
 		return m, nil
+
+	case tea.FocusMsg:
+		// When the header pane gains focus (user clicked on it), read the stored
+		// mouse position and process the click. This is the PRIMARY mechanism for
+		// handling clicks on unfocused headers - the shell script stores the click
+		// position and selects this pane, triggering FocusMsg.
+		if m.connected {
+			return m.handleFocusGain()
+		}
+		return m, nil
+
+	case tea.BlurMsg:
+		// Blur is normal - focus redirected to content pane
+		return m, nil
 	}
 
 	return m, nil
+}
+
+// handleFocusGain handles when the header pane gains focus (typically from a click)
+// It reads the stored mouse position from tmux options and simulates a click
+func (m rendererModel) handleFocusGain() (tea.Model, tea.Cmd) {
+	// Read the stored click position from tmux
+	xOut, errX := exec.Command("tmux", "show-option", "-gqv", "@tabby_last_click_x").Output()
+	yOut, errY := exec.Command("tmux", "show-option", "-gqv", "@tabby_last_click_y").Output()
+	paneOut, errP := exec.Command("tmux", "show-option", "-gqv", "@tabby_last_click_pane").Output()
+
+	if errX != nil || errY != nil || errP != nil {
+		debugLog.Printf("handleFocusGain: couldn't read click position")
+		return m, nil
+	}
+
+	xStr := strings.TrimSpace(string(xOut))
+	yStr := strings.TrimSpace(string(yOut))
+	clickedPane := strings.TrimSpace(string(paneOut))
+
+	// Only process if the click was on this header pane
+	if clickedPane != m.headerPaneID {
+		debugLog.Printf("handleFocusGain: click was on %s, not %s", clickedPane, m.headerPaneID)
+		return m, nil
+	}
+
+	x := 0
+	y := 0
+	if xStr != "" {
+		fmt.Sscanf(xStr, "%d", &x)
+	}
+	if yStr != "" {
+		fmt.Sscanf(yStr, "%d", &y)
+	}
+
+	debugLog.Printf("handleFocusGain: simulating click at X=%d Y=%d", x, y)
+
+	// Process this as a left click at the stored position
+	return m.processMouseClick(x, y, tea.MouseButtonLeft)
 }
 
 // handleMouse processes mouse events
