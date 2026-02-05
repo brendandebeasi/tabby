@@ -79,8 +79,6 @@ type rendererModel struct {
 
 	mouseDownPos  struct{ X, Y int }
 	mouseDownTime time.Time
-	dragAction    string
-	dragTarget    string
 
 	// Message sending (thread-safe)
 	sendMu sync.Mutex
@@ -291,23 +289,6 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
 		m.mouseDownTime = time.Now()
 
-		for _, region := range m.regions {
-			if msg.Y >= region.StartLine && msg.Y <= region.EndLine {
-				endCol := region.EndCol
-				if endCol == 0 {
-					endCol = m.width
-				}
-				if msg.X >= region.StartCol && msg.X < endCol {
-					if region.Action == "header_drag_resize" {
-						m.dragAction = region.Action
-						m.dragTarget = region.Target
-						return m, nil
-					}
-					break
-				}
-			}
-		}
-
 		button := msg.Button
 		if (msg.Shift || msg.Ctrl) && msg.Button == tea.MouseButtonLeft {
 			if *debugMode {
@@ -324,18 +305,6 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		elapsed := time.Since(m.mouseDownTime)
 		dx := msg.X - m.mouseDownPos.X
 		dy := msg.Y - m.mouseDownPos.Y
-
-		if m.dragAction == "header_drag_resize" && m.dragTarget != "" {
-			m.dragAction = ""
-			if dy != 0 {
-				exec.Command("tmux", "resize-pane", "-t", m.dragTarget, "-y", fmt.Sprintf("%+d", dy)).Run()
-			}
-			m.dragTarget = ""
-			return m, nil
-		}
-
-		m.dragAction = ""
-		m.dragTarget = ""
 
 		if absInt(dx) <= 2 && absInt(dy) <= 1 && elapsed < 300*time.Millisecond {
 			return m.processMouseClick(m.mouseDownPos.X, m.mouseDownPos.Y, tea.MouseButtonLeft)

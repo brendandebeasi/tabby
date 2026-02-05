@@ -2809,14 +2809,6 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 
 	if c.config.PaneHeader.CustomBorder {
-		// Always 1-row output; add drag region on line 0 if Draggable is enabled
-		if c.config.PaneHeader.Draggable {
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 0,
-				StartCol: 0, EndCol: width,
-				Action: "header_drag_resize", Target: paneID,
-			})
-		}
 		return &daemon.RenderPayload{
 			Content:    line,
 			Width:      width,
@@ -2919,7 +2911,11 @@ func (c *Coordinator) renderTouchButton(width int, label string, bgColor string,
 		borderFg = opts[0].BorderFg
 	}
 	if borderFg == "" {
-		borderFg = fgColor
+		if bgColor != "" {
+			borderFg = bgColor
+		} else {
+			borderFg = fgColor
+		}
 	}
 	borderType := lipgloss.RoundedBorder()
 	if !c.config.Style.Rounded {
@@ -5807,21 +5803,21 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	case "button":
 		switch input.ResolvedTarget {
 		case "new_tab":
-			// Create new window - the daemon's spawnRenderersForNewWindows will spawn
-			// the sidebar and handle focus. We don't call select-pane here since
-			// the sidebar doesn't exist yet.
 			exec.Command("tmux", "new-window", "-t", c.sessionID+":").Run()
+			selectContentPaneInActiveWindow()
 		case "new_group":
 			// Could implement group creation dialog
 		case "close_tab":
 			exec.Command("tmux", "kill-window").Run()
+			// Try to switch to the previously active window rather than tmux's default (next)
+			exec.Command("tmux", "last-window").Run()
+			selectContentPaneInActiveWindow()
 		}
 		return true
 
 	case "new_tab":
-		// Create new window - the daemon's spawnRenderersForNewWindows will spawn
-		// the sidebar and handle focus.
 		exec.Command("tmux", "new-window", "-t", c.sessionID+":").Run()
+		selectContentPaneInActiveWindow()
 		return true
 
 	case "new_group":
@@ -5834,6 +5830,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	case "close_tab":
 		exec.Command("tmux", "kill-window").Run()
+		exec.Command("tmux", "last-window").Run()
+		selectContentPaneInActiveWindow()
 		return true
 
 	case "drop_food":
@@ -6007,8 +6005,32 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "header_close":
-		// Close the pane
-		exec.Command("tmux", "kill-pane", "-t", input.ResolvedTarget).Run()
+		// Check if this is the last content pane in the window before killing
+		paneID := input.ResolvedTarget
+		winIDOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}").Output()
+		windowID := strings.TrimSpace(string(winIDOut))
+
+		// Count content panes in this window
+		contentCount := 0
+		if windowID != "" {
+			listOut, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}:#{pane_current_command}").Output()
+			for _, line := range strings.Split(strings.TrimSpace(string(listOut)), "\n") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) < 2 {
+					continue
+				}
+				if !isAuxiliaryPaneCommand(parts[1]) {
+					contentCount++
+				}
+			}
+		}
+
+		if contentCount <= 1 && windowID != "" {
+			// Last content pane - kill the whole window
+			exec.Command("tmux", "kill-window", "-t", windowID).Run()
+		} else {
+			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+		}
 		return true
 
 	case "header_select_pane":
@@ -7441,6 +7463,26 @@ func isAuxiliaryPaneCommand(cmd string) bool {
 
 func isAuxiliaryPane(p tmux.Pane) bool {
 	return isAuxiliaryPaneCommand(p.Command) || isAuxiliaryPaneCommand(p.StartCommand)
+}
+
+// selectContentPaneInActiveWindow finds and selects the first non-auxiliary pane
+// in the currently active window, ensuring focus goes to a content pane rather
+// than a sidebar or pane-header.
+func selectContentPaneInActiveWindow() {
+	out, err := exec.Command("tmux", "list-panes",
+		"-F", "#{pane_id}\x1f#{pane_current_command}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "\x1f", 2)
+		if len(parts) == 2 {
+			if !isAuxiliaryPaneCommand(parts[1]) {
+				exec.Command("tmux", "select-pane", "-t", parts[0]).Run()
+				return
+			}
+		}
+	}
 }
 
 // hexToRGB converts hex color to RGB values
