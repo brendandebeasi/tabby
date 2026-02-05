@@ -2052,6 +2052,9 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	if strings.HasPrefix(clientID, "header:") {
 		return
 	}
+	if c.sidebarCollapsed {
+		return
+	}
 
 	c.widthSyncMu.Lock()
 
@@ -2182,7 +2185,11 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 // RenderForClient generates content for a specific client's dimensions
 func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemon.RenderPayload {
 	// Guard dimensions
-	if width < 3 {
+	if c.sidebarCollapsed {
+		if width < 1 {
+			width = 1
+		}
+	} else if width < 3 {
 		width = 3
 	}
 	if height < 5 {
@@ -2201,25 +2208,17 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 			Foreground(lipgloss.Color(c.getInactiveTextColorWithFallback("")))
 
 		// 3-row tall expand button near the top for easy touch access
-		// Row 0: top border
-		// Row 1: [>] icon
-		// Row 2: bottom border
+		// Render as a single column when collapsed.
 		buttonStart := 1             // Start at row 1 for visibility
 		buttonEnd := buttonStart + 2 // 3 rows total
 
 		for i := 0; i < height; i++ {
 			if i >= buttonStart && i <= buttonEnd {
 				// Button rows - bright and clickable
-				if i == buttonStart {
-					s.WriteString(expandStyle.Render(" + ") + "\n") // Top of button
-				} else if i == buttonStart+1 {
-					s.WriteString(expandStyle.Render("[>]") + "\n") // Arrow icon
-				} else {
-					s.WriteString(expandStyle.Render(" + ") + "\n") // Bottom of button
-				}
+				s.WriteString(expandStyle.Render(">") + "\n")
 			} else {
 				// Non-button rows - dim background
-				s.WriteString(dimStyle.Render("   ") + "\n")
+				s.WriteString(dimStyle.Render(" ") + "\n")
 			}
 		}
 
@@ -5814,7 +5813,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return false
 
 	case "collapse_sidebar":
-		// Collapse sidebar to minimal width (3 cols)
+		// Collapse sidebar to minimal width (1 col)
 		currentWidth := c.getClientWidth(clientID)
 		c.sidebarPreviousWidth = currentWidth
 		c.sidebarCollapsed = true
@@ -5822,8 +5821,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_collapsed", "1").Run()
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_previous_width", fmt.Sprintf("%d", currentWidth)).Run()
 		// Resize ALL sidebar panes to minimal width
-		go syncAllSidebarWidths(3)
-		coordinatorDebugLog.Printf("Sidebar collapsed: saved width=%d, syncing all to 3", currentWidth)
+		go syncAllSidebarWidths(1)
+		coordinatorDebugLog.Printf("Sidebar collapsed: saved width=%d, syncing all to 1", currentWidth)
 		return false
 
 	case "expand_sidebar":
