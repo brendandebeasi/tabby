@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/b/tmux-tabs/pkg/perf"
 )
 
 // ClientInfo tracks per-client state for renderers
@@ -307,6 +309,9 @@ func (s *Server) handleClient(conn net.Conn) {
 
 // BroadcastRender sends render payloads to all connected renderers
 func (s *Server) BroadcastRender() {
+	t := perf.Start("BroadcastRender")
+	defer t.Stop()
+
 	s.clientsMu.RLock()
 	clientIDs := make([]string, 0, len(s.clients))
 	for id := range s.clients {

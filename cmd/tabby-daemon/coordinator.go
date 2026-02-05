@@ -25,6 +25,7 @@ import (
 	"github.com/b/tmux-tabs/pkg/config"
 	"github.com/b/tmux-tabs/pkg/daemon"
 	"github.com/b/tmux-tabs/pkg/grouping"
+	"github.com/b/tmux-tabs/pkg/perf"
 	"github.com/b/tmux-tabs/pkg/tmux"
 )
 
@@ -1191,6 +1192,9 @@ type processTree struct {
 
 // loadProcessTree reads the system process table once. Returns nil on error.
 func loadProcessTree() *processTree {
+	t := perf.Start("loadProcessTree")
+	defer t.Stop()
+
 	out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,%cpu=").Output()
 	if err != nil {
 		return nil

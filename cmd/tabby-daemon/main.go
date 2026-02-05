@@ -18,6 +18,7 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/b/tmux-tabs/pkg/daemon"
+	"github.com/b/tmux-tabs/pkg/perf"
 	"github.com/b/tmux-tabs/pkg/tmux"
 )
 
@@ -907,17 +908,15 @@ func main() {
 	go func() {
 		defer recoverAndLog("refresh-loop")
 
-		refreshTicker := time.NewTicker(5 * time.Second)        // Window list poll (fallback, less frequent now)
-		windowCheckTicker := time.NewTicker(2 * time.Second)    // Spawn/cleanup poll (fallback)
-		spinnerTicker := time.NewTicker(100 * time.Millisecond) // Spinner animation
-		gitTicker := time.NewTicker(5 * time.Second)            // Git status
-		petTicker := time.NewTicker(100 * time.Millisecond)     // Pet state updates (for smooth animation)
-		watchdogTicker := time.NewTicker(5 * time.Second)       // Watchdog: check renderer health
+		refreshTicker := time.NewTicker(5 * time.Second)         // Window list poll (fallback, less frequent now)
+		windowCheckTicker := time.NewTicker(2 * time.Second)     // Spawn/cleanup poll (fallback)
+		animationTicker := time.NewTicker(100 * time.Millisecond) // Combined spinner + pet animation (was two separate tickers)
+		gitTicker := time.NewTicker(5 * time.Second)             // Git status
+		watchdogTicker := time.NewTicker(5 * time.Second)        // Watchdog: check renderer health
 		defer refreshTicker.Stop()
 		defer windowCheckTicker.Stop()
-		defer spinnerTicker.Stop()
+		defer animationTicker.Stop()
 		defer gitTicker.Stop()
-		defer petTicker.Stop()
 		defer watchdogTicker.Stop()
 
 		lastWindowsHash := ""
@@ -1017,23 +1016,22 @@ func main() {
 					server.BroadcastRender()
 					lastWindowsHash = currentHash
 				}
-			case <-spinnerTicker.C:
-				// Spinner always updates (for animation)
+			case <-animationTicker.C:
+				// Combined spinner + pet animation tick (was two separate tickers causing 2x BroadcastRender)
+				perf.Log("animationTick")
 				coordinator.IncrementSpinner()
+				coordinator.UpdatePetState()
 				server.BroadcastRender()
 			case <-gitTicker.C:
 				// Only broadcast if git state changed
 				currentGitState := coordinator.GetGitStateHash()
 				if currentGitState != lastGitState {
+					perf.Log("gitTick (changed)")
 					coordinator.RefreshGit()
 					coordinator.RefreshSession()
 					server.BroadcastRender()
 					lastGitState = currentGitState
 				}
-			case <-petTicker.C:
-				// Pet always updates (for animation and state changes)
-				coordinator.UpdatePetState()
-				server.BroadcastRender()
 			}
 		}
 	}()
