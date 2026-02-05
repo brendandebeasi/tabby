@@ -6658,10 +6658,12 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 	if activePaneID != "" {
 		splitTarget = activePaneID
 	}
-	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", win.Index, splitTarget)
-	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", win.Index, splitTarget)
-	args = append(args, "Split Horizontal |", "|", splitHCmd)
-	args = append(args, "Split Vertical -", "-", splitVCmd)
+	if !c.isVerticalStackedPane(win, activePaneID) {
+		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", win.Index, splitTarget)
+		splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", win.Index, splitTarget)
+		args = append(args, "Split Horizontal |", "|", splitHCmd)
+		args = append(args, "Split Vertical -", "-", splitVCmd)
+	}
 
 	// Separator
 	args = append(args, "", "", "")
@@ -6680,6 +6682,45 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 	c.executeOrSendMenu(clientID, args, pos)
 }
 
+func (c *Coordinator) isVerticalStackedPane(win *tmux.Window, paneID string) bool {
+	if win == nil || paneID == "" {
+		return false
+	}
+
+	maxWidth := 0
+	var target *tmux.Pane
+	for i := range win.Panes {
+		pane := &win.Panes[i]
+		if isAuxiliaryPane(*pane) {
+			continue
+		}
+		if pane.Width > maxWidth {
+			maxWidth = pane.Width
+		}
+		if pane.ID == paneID {
+			target = pane
+		}
+	}
+	if target == nil || maxWidth == 0 {
+		return false
+	}
+	if target.Width < maxWidth {
+		return false
+	}
+
+	for i := range win.Panes {
+		pane := &win.Panes[i]
+		if isAuxiliaryPane(*pane) || pane.ID == paneID {
+			continue
+		}
+		if pane.Width == target.Width && pane.Top != target.Top {
+			return true
+		}
+	}
+
+	return false
+}
+
 // showPaneContextMenu displays the context menu for a pane
 func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos menuPosition) {
 	c.stateMu.RLock()
@@ -6688,11 +6729,13 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	// Find the pane
 	var pane *tmux.Pane
 	var windowIdx int
-	for _, win := range c.windows {
-		for i := range win.Panes {
-			if win.Panes[i].ID == paneID {
-				pane = &win.Panes[i]
-				windowIdx = win.Index
+	var window *tmux.Window
+	for i := range c.windows {
+		for j := range c.windows[i].Panes {
+			if c.windows[i].Panes[j].ID == paneID {
+				pane = &c.windows[i].Panes[j]
+				window = &c.windows[i]
+				windowIdx = c.windows[i].Index
 				break
 			}
 		}
@@ -6700,7 +6743,7 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 			break
 		}
 	}
-	if pane == nil {
+	if pane == nil || window == nil {
 		return
 	}
 
@@ -6749,10 +6792,12 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	args = append(args, "", "", "")
 
 	// Split options
-	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
-	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
-	args = append(args, "Split Horizontal |", "|", splitHCmd)
-	args = append(args, "Split Vertical -", "-", splitVCmd)
+	if !c.isVerticalStackedPane(window, pane.ID) {
+		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
+		splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
+		args = append(args, "Split Horizontal |", "|", splitHCmd)
+		args = append(args, "Split Vertical -", "-", splitVCmd)
+	}
 
 	// Separator
 	args = append(args, "", "", "")
