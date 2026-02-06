@@ -248,7 +248,12 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case disconnectedMsg:
 		m.connected = false
-		debugLog.Printf("Disconnected from daemon")
+		// Close old connection to clean up resources
+		if m.conn != nil {
+			m.conn.Close()
+			m.conn = nil
+		}
+		debugLog.Printf("Disconnected from daemon, will retry in 1s")
 		if inputLog != nil && isInputLogEnabled() {
 			inputLog.Printf("DISCONNECTED")
 		}

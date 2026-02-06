@@ -787,6 +787,45 @@ func restoreFocusState() {
 	}
 }
 
+// syncClientSizesFromTmux updates all client widths/heights from actual tmux pane sizes
+// This ensures background sidebars get correct dimensions on resize events
+func syncClientSizesFromTmux(server *daemon.Server) {
+	// Get all panes with their sizes and commands
+	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
+		"#{window_id}\x1f#{pane_id}\x1f#{pane_width}\x1f#{pane_height}\x1f#{pane_current_command}").Output()
+	if err != nil {
+		return
+	}
+
+	// Build a map of window ID -> sidebar pane dimensions
+	sidebarSizes := make(map[string]struct{ width, height int })
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\x1f", 5)
+		if len(parts) < 5 {
+			continue
+		}
+		windowID := parts[0]
+		// paneID := parts[1]
+		width, _ := strconv.Atoi(parts[2])
+		height, _ := strconv.Atoi(parts[3])
+		cmd := parts[4]
+
+		// Check if this is a sidebar/renderer pane
+		if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") {
+			sidebarSizes[windowID] = struct{ width, height int }{width, height}
+		}
+	}
+
+	// Update server client sizes
+	for windowID, size := range sidebarSizes {
+		server.UpdateClientSize(windowID, size.width, size.height)
+	}
+}
+
 // resetTerminalModes sends escape sequences to disable mouse tracking modes
 // This is called on daemon startup to clean up stale state from crashed renderers
 func resetTerminalModes(sessionID string) {
@@ -1051,6 +1090,9 @@ func main() {
 				if currentHash != lastWindowsHash {
 					updateHeaderBorderStyles(coordinator)
 				}
+				// Sync client sizes from tmux before broadcasting
+				// This ensures background sidebars render at correct dimensions
+				syncClientSizesFromTmux(server)
 				server.BroadcastRender()
 				t6 := time.Now()
 				lastWindowsHash = currentHash

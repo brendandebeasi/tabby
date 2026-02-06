@@ -62,8 +62,8 @@ sidebar:
     bg: "auto"
     active_color: true
   pane_headers: true    # Enable clickable overlay pane headers (replaces native border headers)
-  new_tab_button: true
-  new_group_button: true
+  new_tab_button: false
+  new_group_button: false
   show_empty_groups: true
   close_button: false
   sort_by: "group"  # "group" or "index"
@@ -102,7 +102,8 @@ sidebar:
     # inactive_border: ""           # Inactive tab border (default: theme accent)
 
 pane_header:
-  # Colors auto-derived from terminal theme
+  active_fg: "#ffffff"
+  inactive_fg: "#ffffff"
   terminal_bg: "#faf4ed"  # Rose Pine Dawn background - must match your terminal
   border_from_tab: true  # Use the tab's color for active pane border
   auto_border: false     # Auto-set tmux pane-border colors from window's group/custom color
@@ -211,8 +212,9 @@ widgets:
     position: bottom
     pin: true
     priority: 50           # Between clock (100) and stats
-    hunger_decay: 30       # Seconds between hunger ticks
+    hunger_decay: 1728     # Seconds between hunger ticks (~2 days to starve)
     poop_chance: 50        # 50% chance to poop after eating
+    debug_bar: true        # Show debug controls below pet widget
     divider: "─"
     divider_fg: "#444444"
     margin_top: 0

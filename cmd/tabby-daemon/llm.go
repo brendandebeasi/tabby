@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	gocontext "context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,11 @@ var llmClient llm.LLM
 // thoughtBuffer stores pre-generated thoughts to reduce API calls
 var thoughtBuffer []string
 var thoughtBufferMutex = &sync.Mutex{}
+
+// Thought buffer persistence and timing
+var thoughtBufferPath string
+var lastThoughtGeneration time.Time
+var thoughtGenerationInterval = 12 * time.Hour
 
 // initLLM initializes the LLM client based on config
 func initLLM(provider, model, apiKey string) error {
@@ -91,7 +98,97 @@ func initLLM(provider, model, apiKey string) error {
 	}
 
 	llmClient = client
+
+	// Set up thought buffer persistence path
+	homeDir, _ := os.UserHomeDir()
+	thoughtBufferPath = filepath.Join(homeDir, ".config", "tabby", "thought_buffer.txt")
+
+	// Load existing thoughts from disk
+	loadThoughtBuffer()
+
 	return nil
+}
+
+// SetThoughtGenerationInterval sets the interval between thought generation batches
+func SetThoughtGenerationInterval(hours int) {
+	if hours > 0 {
+		thoughtGenerationInterval = time.Duration(hours) * time.Hour
+	}
+}
+
+// loadThoughtBuffer loads thoughts from disk
+func loadThoughtBuffer() {
+	if thoughtBufferPath == "" {
+		return
+	}
+
+	file, err := os.Open(thoughtBufferPath)
+	if err != nil {
+		return // File doesn't exist yet
+	}
+	defer file.Close()
+
+	thoughtBufferMutex.Lock()
+	defer thoughtBufferMutex.Unlock()
+
+	thoughtBuffer = nil
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			thoughtBuffer = append(thoughtBuffer, line)
+		}
+	}
+}
+
+// saveThoughtBuffer saves thoughts to disk
+func saveThoughtBuffer() {
+	if thoughtBufferPath == "" {
+		return
+	}
+
+	// Ensure directory exists
+	dir := filepath.Dir(thoughtBufferPath)
+	os.MkdirAll(dir, 0755)
+
+	thoughtBufferMutex.Lock()
+	thoughts := make([]string, len(thoughtBuffer))
+	copy(thoughts, thoughtBuffer)
+	thoughtBufferMutex.Unlock()
+
+	file, err := os.Create(thoughtBufferPath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	for _, thought := range thoughts {
+		file.WriteString(thought + "\n")
+	}
+}
+
+// triggerThoughtGeneration starts background thought generation if needed
+func triggerThoughtGeneration(pet *petState, name string) {
+	if llmClient == nil {
+		return
+	}
+
+	thoughtBufferMutex.Lock()
+	needsRefresh := len(thoughtBuffer) < 50 || time.Since(lastThoughtGeneration) > thoughtGenerationInterval
+	thoughtBufferMutex.Unlock()
+
+	if needsRefresh {
+		go func() {
+			thoughts := generateBulkThoughts(pet, name, 200)
+			if len(thoughts) > 0 {
+				thoughtBufferMutex.Lock()
+				thoughtBuffer = append(thoughtBuffer, thoughts...)
+				lastThoughtGeneration = time.Now()
+				thoughtBufferMutex.Unlock()
+				saveThoughtBuffer()
+			}
+		}()
+	}
 }
 
 // generateLLMThought returns a thought from the buffer, refilling if needed
@@ -101,24 +198,31 @@ func generateLLMThought(pet *petState, name string) string {
 	}
 
 	thoughtBufferMutex.Lock()
-	defer thoughtBufferMutex.Unlock()
 
 	// If buffer has thoughts, pop one
 	if len(thoughtBuffer) > 0 {
 		thought := thoughtBuffer[0]
 		thoughtBuffer = thoughtBuffer[1:]
+		remaining := len(thoughtBuffer)
+		thoughtBufferMutex.Unlock()
+
+		// Trigger regeneration if buffer getting low
+		if remaining < 50 {
+			triggerThoughtGeneration(pet, name)
+		}
+
+		// Save buffer periodically (every 10 thoughts consumed)
+		if remaining%10 == 0 {
+			go saveThoughtBuffer()
+		}
+
 		return thought
 	}
 
-	// Buffer empty - generate a batch (do this in background)
-	go func() {
-		thoughts := generateBulkThoughts(pet, name, 10)
-		if len(thoughts) > 0 {
-			thoughtBufferMutex.Lock()
-			thoughtBuffer = append(thoughtBuffer, thoughts...)
-			thoughtBufferMutex.Unlock()
-		}
-	}()
+	thoughtBufferMutex.Unlock()
+
+	// Buffer empty - trigger generation
+	triggerThoughtGeneration(pet, name)
 
 	return "" // Return empty while generating
 }

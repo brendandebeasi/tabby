@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -336,6 +337,8 @@ type petState struct {
 	TotalMouseCatches int
 	// Adventure state
 	Adventure adventureState
+	// Debug state
+	DebugThoughtIdx int // Index into debugThoughtCategories for debug bar
 }
 
 type pos2D struct {
@@ -509,6 +512,16 @@ type petWidgetLayout struct {
 	GroundLine       int // Ground (Y=0) line - click on cat pets, click on poop cleans, else drops yarn
 	PlayWidth        int // Width of play area (safePlayWidth) - clicks beyond this are ignored
 	WidgetHeight     int // Total widget height in lines
+	DebugLine1       int // Y position of debug line 1 (mode triggers)
+	DebugLine2       int // Y position of debug line 2 (thought controls)
+}
+
+// debugThoughtCategories lists all thought categories for debug bar cycling
+var debugThoughtCategories = []string{
+	"idle", "happy", "hungry", "sleepy", "yarn", "walking",
+	"jumping", "petting", "starving", "guilt", "dead",
+	"mouse_spot", "mouse_chase", "mouse_catch", "mouse_kill",
+	"poop_jump", "wakeup", "poop",
 }
 
 // Pet sprites by style
@@ -1977,12 +1990,19 @@ func (c *Coordinator) UpdatePetState() bool {
 	// If adventure is active, update it and skip normal mechanics
 	if c.pet.Adventure.Active {
 		c.updateAdventurePhase(now, maxX)
+
+		// Clean up expired floating items (also needed during adventure)
+		var activeItems []floatingItem
+		for _, item := range c.pet.FloatingItems {
+			if now.Before(item.ExpiresAt) {
+				activeItems = append(activeItems, item)
+			}
+		}
+		c.pet.FloatingItems = activeItems
+
 		c.savePetState()
-		// Track previous visual state to detect changes
-		prevPos := c.pet.Pos
-		prevState := c.pet.State
-		changed := c.pet.Pos != prevPos || c.pet.State != prevState || c.pet.Adventure.Active
-		return changed
+		// Adventure always triggers visual change
+		return true
 	}
 
 	// === YARN EXPIRATION ===
@@ -2728,12 +2748,13 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 		if w.X < maxX-2 {
 			w.Spotted = true
 			c.pet.State = "idle" // Cat freezes
-			// Add "!" floating item
+			c.pet.LastThought = fmt.Sprintf("a %s!", w.Type)
+			// Add "!" floating item above cat's actual position
 			c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
-				Emoji:     "!",
-				Pos:       pos2D{X: adv.CatX, Y: 2},
+				Emoji:     "❗",
+				Pos:       pos2D{X: c.pet.Pos.X, Y: 2},
 				Velocity:  pos2D{X: 0, Y: 0},
-				ExpiresAt: now.Add(1 * time.Second),
+				ExpiresAt: now.Add(1500 * time.Millisecond),
 			})
 		}
 		return
@@ -2771,25 +2792,38 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 			// Pounce!
 			w.Pounced = true
 			c.pet.State = "jumping"
-			c.pet.Pos.Y = 2
+			// Cat jumps to wildlife's Y level for the pounce
+			c.pet.Pos.Y = w.Y
 
 			// Roll for catch
 			if rand.Intn(100) < w.CatchChance {
 				w.Caught = true
 				adv.TotalCatches++
 				c.pet.Happiness = min(100, c.pet.Happiness+10)
-				c.pet.LastThought = c.getAdventureThought(w.Type, "catch")
-				// Trophy emoji
+				c.pet.Hunger = min(100, c.pet.Hunger+20) // Eating prey fills hunger
+				thought := c.getAdventureThought(w.Type, "catch")
+				if thought == "" {
+					thought = fmt.Sprintf("caught a %s!", w.Type)
+				}
+				c.pet.LastThought = thought
+				// Trophy emoji at pet's actual position
 				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
 					Emoji:     "🏆",
-					Pos:       pos2D{X: adv.CatX, Y: 2},
+					Pos:       pos2D{X: c.pet.Pos.X, Y: 2},
 					Velocity:  pos2D{X: 0, Y: 0},
 					ExpiresAt: now.Add(2 * time.Second),
 				})
 			} else {
 				w.Escaped = true
-				c.pet.LastThought = c.getAdventureThought(w.Type, "escape")
+				thought := c.getAdventureThought(w.Type, "escape")
+				if thought == "" {
+					thought = fmt.Sprintf("the %s got away!", w.Type)
+				}
+				c.pet.LastThought = thought
 			}
+			// Cat lands back on ground after pounce
+			c.pet.Pos.Y = 0
+			c.pet.State = "idle"
 		}
 	}
 }
@@ -2904,15 +2938,18 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		return
 	}
 
-	trackLock("widthSyncMu", "handleWidthSync")
-	c.widthSyncMu.Lock()
-
-	// Query tmux directly for the active window FIRST (before any debounce)
+	// Query tmux BEFORE acquiring lock to prevent deadlock if tmux hangs
+	// Use a timeout context to prevent blocking forever
 	activeWindowID := ""
-	if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
 		activeWindowID = strings.TrimSpace(string(out))
 	}
 	isActive := (clientID == activeWindowID)
+
+	trackLock("widthSyncMu", "handleWidthSync")
+	c.widthSyncMu.Lock()
 
 	// Detect if this window just became active
 	justBecameActive := isActive && c.lastActiveWindowID != clientID
@@ -6371,8 +6408,13 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	}
 
 	// Place cat on top (overwrites anything at that position)
+	// When sleeping, cat curls up in bottom left corner with zzz
 	if petY == 0 {
-		placeSprite(groundSprites, petX, petSprite, safePlayWidth)
+		if c.pet.State == "sleeping" {
+			placeSprite(groundSprites, 0, "💤", safePlayWidth)
+		} else {
+			placeSprite(groundSprites, petX, petSprite, safePlayWidth)
+		}
 	}
 
 	// Build the ground row using helper
@@ -6415,17 +6457,259 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	result.WriteString(statusStyle.Render(statusLine) + "\n")
 	currentLine++
 
+	// Debug bar (if enabled)
+	if petCfg.DebugBar {
+		result.WriteString(renderDivider())
+		currentLine++
+		debugLines := c.renderDebugBar(safePlayWidth)
+		for i, line := range debugLines {
+			result.WriteString(line + "\n")
+			if i == 0 {
+				c.petLayout.DebugLine1 = currentLine
+			} else if i == 1 {
+				c.petLayout.DebugLine2 = currentLine
+			}
+			currentLine++
+		}
+	}
+
 	// Store total widget height for click detection
 	c.petLayout.WidgetHeight = currentLine
 
-	coordinatorDebugLog.Printf("Pet layout updated: Feed=%d, HighAir=%d, LowAir=%d, Ground=%d, PlayWidth=%d, Height=%d",
+	coordinatorDebugLog.Printf("Pet layout updated: Feed=%d, HighAir=%d, LowAir=%d, Ground=%d, PlayWidth=%d, Height=%d, Debug1=%d, Debug2=%d",
 		c.petLayout.FeedLine, c.petLayout.HighAirLine, c.petLayout.LowAirLine,
-		c.petLayout.GroundLine, c.petLayout.PlayWidth, c.petLayout.WidgetHeight)
+		c.petLayout.GroundLine, c.petLayout.PlayWidth, c.petLayout.WidgetHeight,
+		c.petLayout.DebugLine1, c.petLayout.DebugLine2)
 
 	// Pet touch buttons removed - using touch input on pet area instead
 	// Feed button at top of widget remains for touch access
 
 	return result.String()
+}
+
+// renderDebugBar renders the 2-line debug bar for pet widget testing
+// Line 1: DBG <state> H:<hunger> F:<food> [adv][slp][die][poo][mse][yrn]
+// Line 2: trg:<category> [<<][>>] [H+][H-][F+][F-]
+func (c *Coordinator) renderDebugBar(width int) []string {
+	// Line 1: Status + Mode Triggers
+	state := c.pet.State
+	if c.pet.IsDead {
+		state = "dead"
+	}
+	if len(state) > 4 {
+		state = state[:4]
+	}
+
+	var line1 string
+	if width >= 50 {
+		// Full layout
+		line1 = fmt.Sprintf("DBG %s H:%d F:%d [adv][slp][die][poo][mse][yrn]",
+			state, c.pet.Happiness, c.pet.Hunger)
+	} else if width >= 35 {
+		// Compact: shorter stat names
+		line1 = fmt.Sprintf("%s H%d F%d [adv][slp][die][poo]",
+			state, c.pet.Happiness, c.pet.Hunger)
+	} else {
+		// Minimal: just state and key buttons
+		line1 = fmt.Sprintf("%s [adv][slp][die]", state)
+	}
+
+	// Line 2: Thought Controls + Stats
+	category := "idle"
+	if c.pet.DebugThoughtIdx >= 0 && c.pet.DebugThoughtIdx < len(debugThoughtCategories) {
+		category = debugThoughtCategories[c.pet.DebugThoughtIdx]
+	}
+	// Truncate category to 5 chars for display
+	if len(category) > 5 {
+		category = category[:5]
+	}
+
+	var line2 string
+	if width >= 35 {
+		line2 = fmt.Sprintf("trg:%s [<<][>>] [H+][H-][F+][F-]", category)
+	} else {
+		line2 = fmt.Sprintf("%s [<<][>>] [H+][F+]", category)
+	}
+
+	return []string{line1, line2}
+}
+
+// handleDebugBarClick handles clicks on the debug bar
+// Returns true if click was handled
+func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) bool {
+	layout := c.petLayout
+
+	// Determine which debug line was clicked
+	if clickY == layout.DebugLine1 {
+		// Line 1: DBG <state> H:<hunger> F:<food> [adv][slp][die][poo][mse][yrn]
+		// Button positions (approximate, 5 chars each with brackets)
+		// Find the button clicked based on X position
+		// Format: "DBG idle H:75 F:50 [adv][slp][die][poo][mse][yrn]"
+		// Positions:              ~19   ~24  ~29  ~34  ~39  ~44
+
+		// Get client width for accurate position calculation
+		clientWidth := c.getClientWidth(clientID)
+		_ = clientWidth // May use for dynamic positioning later
+
+		// Simple position-based detection
+		// [adv] starts around position 19
+		if clickX >= 19 && clickX < 24 {
+			// [adv] - Start adventure
+			coordinatorDebugLog.Printf("Debug bar: [adv] clicked, starting adventure")
+			c.stateMu.Lock()
+			c.startAdventure(clientWidth - 1)
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 24 && clickX < 29 {
+			// [slp] - Toggle sleep
+			coordinatorDebugLog.Printf("Debug bar: [slp] clicked, toggling sleep")
+			c.stateMu.Lock()
+			if c.pet.State == "sleeping" {
+				c.pet.State = "idle"
+				c.pet.LastThought = randomThought("wakeup")
+			} else {
+				c.pet.State = "sleeping"
+				c.pet.LastThought = randomThought("sleepy")
+			}
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 29 && clickX < 34 {
+			// [die] - Toggle death
+			coordinatorDebugLog.Printf("Debug bar: [die] clicked, toggling death")
+			c.stateMu.Lock()
+			if c.pet.IsDead {
+				c.pet.IsDead = false
+				c.pet.State = "idle"
+				c.pet.Hunger = 50
+				c.pet.Happiness = 50
+				c.pet.LastThought = "I'm back!"
+			} else {
+				c.pet.IsDead = true
+				c.pet.State = "dead"
+				c.pet.DeathTime = time.Now()
+				c.pet.LastThought = randomThought("dead")
+			}
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 34 && clickX < 39 {
+			// [poo] - Spawn poop
+			coordinatorDebugLog.Printf("Debug bar: [poo] clicked, spawning poop")
+			c.stateMu.Lock()
+			poopX := rand.Intn(c.getClientWidth(clientID) - 2)
+			c.pet.PoopPositions = append(c.pet.PoopPositions, poopX)
+			c.pet.LastThought = randomThought("poop")
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 39 && clickX < 44 {
+			// [mse] - Spawn mouse
+			coordinatorDebugLog.Printf("Debug bar: [mse] clicked, spawning mouse")
+			c.stateMu.Lock()
+			clientWidth := c.getClientWidth(clientID)
+			c.pet.MousePos = pos2D{X: rand.Intn(clientWidth - 2), Y: 0}
+			c.pet.MouseAppearsAt = time.Time{} // Clear timer
+			c.pet.LastThought = randomThought("mouse_spot")
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 44 {
+			// [yrn] - Spawn yarn
+			coordinatorDebugLog.Printf("Debug bar: [yrn] clicked, spawning yarn")
+			c.stateMu.Lock()
+			clientWidth := c.getClientWidth(clientID)
+			c.pet.YarnPos = pos2D{X: rand.Intn(clientWidth - 2), Y: 0}
+			c.pet.YarnExpiresAt = time.Now().Add(30 * time.Second)
+			c.pet.YarnPushCount = 0
+			c.pet.LastThought = randomThought("yarn")
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		}
+	} else if clickY == layout.DebugLine2 {
+		// Line 2: trg:<category> [<<][>>] [H+][H-][F+][F-]
+		// Positions: trg:idle  ~10  ~14  ~19 ~23  ~28 ~32
+		if clickX >= 0 && clickX < 10 {
+			// trg:X - Trigger thought from current category
+			coordinatorDebugLog.Printf("Debug bar: trg clicked, triggering thought")
+			c.stateMu.Lock()
+			category := "idle"
+			if c.pet.DebugThoughtIdx >= 0 && c.pet.DebugThoughtIdx < len(debugThoughtCategories) {
+				category = debugThoughtCategories[c.pet.DebugThoughtIdx]
+			}
+			c.pet.LastThought = randomThought(category)
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 10 && clickX < 14 {
+			// [<<] - Previous thought category
+			coordinatorDebugLog.Printf("Debug bar: [<<] clicked, previous category")
+			c.stateMu.Lock()
+			c.pet.DebugThoughtIdx--
+			if c.pet.DebugThoughtIdx < 0 {
+				c.pet.DebugThoughtIdx = len(debugThoughtCategories) - 1
+			}
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 14 && clickX < 18 {
+			// [>>] - Next thought category
+			coordinatorDebugLog.Printf("Debug bar: [>>] clicked, next category")
+			c.stateMu.Lock()
+			c.pet.DebugThoughtIdx++
+			if c.pet.DebugThoughtIdx >= len(debugThoughtCategories) {
+				c.pet.DebugThoughtIdx = 0
+			}
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 19 && clickX < 23 {
+			// [H+] - Increase happiness
+			coordinatorDebugLog.Printf("Debug bar: [H+] clicked")
+			c.stateMu.Lock()
+			c.pet.Happiness += 10
+			if c.pet.Happiness > 100 {
+				c.pet.Happiness = 100
+			}
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 23 && clickX < 27 {
+			// [H-] - Decrease happiness
+			coordinatorDebugLog.Printf("Debug bar: [H-] clicked")
+			c.stateMu.Lock()
+			c.pet.Happiness -= 10
+			if c.pet.Happiness < 0 {
+				c.pet.Happiness = 0
+			}
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 27 && clickX < 31 {
+			// [F+] - Increase hunger (food level)
+			coordinatorDebugLog.Printf("Debug bar: [F+] clicked")
+			c.stateMu.Lock()
+			c.pet.Hunger += 10
+			if c.pet.Hunger > 100 {
+				c.pet.Hunger = 100
+			}
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		} else if clickX >= 31 {
+			// [F-] - Decrease hunger (food level)
+			coordinatorDebugLog.Printf("Debug bar: [F-] clicked")
+			c.stateMu.Lock()
+			c.pet.Hunger -= 10
+			if c.pet.Hunger < 0 {
+				c.pet.Hunger = 0
+			}
+			c.savePetState()
+			c.stateMu.Unlock()
+			return true
+		}
+	}
+
+	return false
 }
 
 // renderPetTouchButtons renders touch-friendly action buttons for the pet widget
@@ -7295,6 +7579,14 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 		c.savePetState()
 		c.stateMu.Unlock()
 		return true
+	}
+
+	// Check if click is on debug bar lines (if debug bar is enabled)
+	if c.config.Widgets.Pet.DebugBar {
+		if clickY == layout.DebugLine1 || clickY == layout.DebugLine2 {
+			coordinatorDebugLog.Printf("  -> Debug bar line clicked (line=%d, X=%d)", clickY, clickX)
+			return c.handleDebugBarClick(clientID, clickX, clickY)
+		}
 	}
 
 	// Calculate safe play width for this client (must match rendering)

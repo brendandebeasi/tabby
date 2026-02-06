@@ -157,6 +157,7 @@ type PetWidget struct {
 	ActionChance    int    `yaml:"action_chance"`    // % chance to do random action when idle (default: 15)
 	CanDie          bool   `yaml:"can_die"`          // If true, pet dies when starved; if false, just guilt trips
 	TouchButtons    bool   `yaml:"touch_buttons"`    // Show large touch-friendly action buttons
+	DebugBar        bool   `yaml:"debug_bar"`        // Show debug controls below pet widget (default: false)
 	// Adventure mode settings
 	AdventureEnabled bool `yaml:"adventure_enabled"` // Enable random adventure events (default: true)
 	AdventureChance  int  `yaml:"adventure_chance"`  // % chance per idle tick to start adventure (default: 5)

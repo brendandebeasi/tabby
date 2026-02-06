@@ -470,6 +470,19 @@ func (s *Server) GetAllClientIDs() []string {
 	return ids
 }
 
+// UpdateClientSize updates the stored width/height for a client
+// This is used to sync sizes from tmux on resize events
+func (s *Server) UpdateClientSize(clientID string, width, height int) {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	if client, ok := s.clients[clientID]; ok {
+		client.Width = width
+		client.Height = height
+		// Clear content hash to force re-render
+		client.lastContentHash = 0
+	}
+}
+
 // SendMenuToClient sends a context menu to a specific renderer client
 func (s *Server) SendMenuToClient(clientID string, menu *MenuPayload) {
 	s.clientsMu.RLock()
