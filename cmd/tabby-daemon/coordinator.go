@@ -226,6 +226,7 @@ type petState struct {
 	Happiness         int
 	YarnPos           pos2D
 	YarnExpiresAt     time.Time // When yarn disappears
+	YarnPushCount     int       // How many times yarn has been pushed (catch after 2)
 	FoodItem          pos2D
 	PoopPositions     []int
 	NeedsPoopAt       time.Time
@@ -438,6 +439,12 @@ func NewCoordinator(sessionID string) *Coordinator {
 			coordinatorDebugLog.Printf("LLM init failed: %v (using default thoughts)", err)
 		} else {
 			coordinatorDebugLog.Printf("LLM initialized with provider=%s model=%s", cfg.Widgets.Pet.LLMProvider, cfg.Widgets.Pet.LLMModel)
+			// Set thought generation interval from config
+			if cfg.Widgets.Pet.ThoughtRefreshHours > 0 {
+				SetThoughtGenerationInterval(cfg.Widgets.Pet.ThoughtRefreshHours)
+			}
+			// Trigger initial thought generation
+			triggerThoughtGeneration(&c.pet, cfg.Widgets.Pet.Name)
 		}
 	}
 
@@ -1805,13 +1812,18 @@ func (c *Coordinator) UpdatePetState() bool {
 	// Check if pet needs to poop
 	if !c.pet.NeedsPoopAt.IsZero() && now.After(c.pet.NeedsPoopAt) {
 		poopX := c.pet.Pos.X
-		if poopX > 0 {
-			poopX-- // Offset slightly
-		}
 		c.pet.PoopPositions = append(c.pet.PoopPositions, poopX)
 		c.pet.LastPoop = now
 		c.pet.NeedsPoopAt = time.Time{}
 		c.pet.LastThought = randomThought("poop")
+		// Move away from poop after placing it
+		if c.pet.Pos.X > maxX/2 {
+			c.pet.TargetPos = pos2D{X: c.pet.Pos.X - 3, Y: 0}
+		} else {
+			c.pet.TargetPos = pos2D{X: c.pet.Pos.X + 3, Y: 0}
+		}
+		c.pet.HasTarget = true
+		c.pet.State = "walking"
 	}
 
 	// === POSITION CLAMPING ===
@@ -1867,19 +1879,30 @@ func (c *Coordinator) UpdatePetState() bool {
 			c.pet.Pos.X = 0
 		}
 
-		// If chasing yarn, push it when reached
+		// If chasing yarn, push it or catch it when reached
 		if c.pet.ActionPending == "play" {
 			yarnX := c.pet.YarnPos.X
 			if yarnX < 0 {
 				yarnX = width - 4
 			}
-			// Pet pushes yarn when it reaches it
+			// Pet reached yarn
 			if c.pet.Pos.X == yarnX || c.pet.Pos.X == yarnX-1 || c.pet.Pos.X == yarnX+1 {
-				newYarnX := yarnX + c.pet.Direction*2
-				if newYarnX >= 2 && newYarnX < width-2 {
-					c.pet.YarnPos.X = newYarnX
-					c.pet.YarnPos.Y = 1 // Bounce up
-					c.pet.TargetPos.X = newYarnX
+				// After 2 pushes, catch the yarn
+				if c.pet.YarnPushCount >= 2 {
+					// Catch the yarn - don't push, let the target be reached
+					c.pet.TargetPos = c.pet.Pos // Target reached
+				} else {
+					// Push the yarn
+					newYarnX := yarnX + c.pet.Direction*2
+					if newYarnX >= 2 && newYarnX < width-2 {
+						c.pet.YarnPos.X = newYarnX
+						c.pet.YarnPos.Y = 1 // Bounce up
+						c.pet.TargetPos.X = newYarnX
+						c.pet.YarnPushCount++
+					} else {
+						// Can't push further, catch it
+						c.pet.TargetPos = c.pet.Pos
+					}
 				}
 			}
 		}
@@ -1913,11 +1936,10 @@ func (c *Coordinator) UpdatePetState() bool {
 				}
 				c.pet.TotalYarnPlays++
 				c.pet.LastThought = "got it!"
-				// 50% chance yarn disappears after being played with
-				if rand.Intn(100) < 50 {
-					c.pet.YarnPos = pos2D{X: -1, Y: 0}
-					c.pet.YarnExpiresAt = time.Time{}
-				}
+				// Yarn disappears when caught
+				c.pet.YarnPos = pos2D{X: -1, Y: 0}
+				c.pet.YarnExpiresAt = time.Time{}
+				c.pet.YarnPushCount = 0
 			default:
 				c.pet.State = "idle"
 			}
@@ -2023,6 +2045,7 @@ func (c *Coordinator) UpdatePetState() bool {
 				}
 				c.pet.YarnPos = pos2D{X: tossX, Y: 2}
 				c.pet.YarnExpiresAt = now.Add(15 * time.Second)
+				c.pet.YarnPushCount = 0
 				c.pet.TargetPos = pos2D{X: tossX, Y: 0}
 				c.pet.HasTarget = true
 				c.pet.ActionPending = "play"
@@ -2126,6 +2149,24 @@ func (c *Coordinator) UpdatePetState() bool {
 	}
 
 	// === MOUSE MECHANICS ===
+
+	// Check if it's time to spawn a mouse
+	if c.pet.MousePos.X < 0 && !c.pet.MouseAppearsAt.IsZero() && now.After(c.pet.MouseAppearsAt) {
+		// Mouse appears at edge of screen
+		c.pet.MouseDirection = []int{-1, 1}[rand.Intn(2)]
+		if c.pet.MouseDirection == 1 {
+			c.pet.MousePos = pos2D{X: 0, Y: 0}
+		} else {
+			c.pet.MousePos = pos2D{X: maxX, Y: 0}
+		}
+		c.pet.MouseAppearsAt = time.Time{} // Clear timer
+		c.pet.LastThought = randomThought("mouse_spot")
+	}
+
+	// If no mouse and no timer set, schedule one (30-90 seconds)
+	if c.pet.MousePos.X < 0 && c.pet.MouseAppearsAt.IsZero() {
+		c.pet.MouseAppearsAt = now.Add(time.Duration(30+rand.Intn(60)) * time.Second)
+	}
 
 	// If there's a mouse, handle mouse behavior
 	if c.pet.MousePos.X >= 0 {
@@ -2803,7 +2844,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		label = foundPane.Title
 	}
 	winVisualNum := c.windowVisualPos[foundWindow.ID]
-	labelText := fmt.Sprintf("%d.%d %s", winVisualNum+1, foundPane.Index, label)
+	labelText := fmt.Sprintf("%d.%d %s", winVisualNum, foundPane.Index, label)
 
 	// Add current path if available
 	if foundPane.CurrentPath != "" {
@@ -3724,10 +3765,10 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			// Build tab content - use visual position for display (stable sequential
 			// numbering that matches sidebar order regardless of tmux renumbering)
-			// Display is 1-indexed to match keyboard shortcuts (prefix 1 → window 0)
+			// Display is 0-indexed to match tmux window indices
 			displayName := win.Name
 			visualNum := c.windowVisualPos[win.ID]
-			baseContent := fmt.Sprintf("%d. %s", visualNum+1, displayName)
+			baseContent := fmt.Sprintf("%d. %s", visualNum, displayName)
 
 			// Add pane count if collapsed
 			if hasPanes && isWindowCollapsed {
@@ -3897,25 +3938,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			// Show panes if window has multiple panes and is not collapsed
 			if len(contentPanes) > 1 && !isWindowCollapsed {
-				var paneFg string
-				if win.CustomColor != "" {
-					paneFg = "#ffffff"
-				} else {
-					paneFg = c.getPaneFgWithFallback()
-				}
-
-				// Apply dimming to inactive panes if enabled
-				dimmedPaneFg := paneFg
-				if c.config.PaneHeader.DimInactive {
-					dimOpacity := c.config.PaneHeader.DimOpacity
-					if dimOpacity <= 0 || dimOpacity > 1 {
-						dimOpacity = 0.5 // Default 50% brightness for inactive panes
-					}
-					dimmedPaneFg = dimColor(paneFg, dimOpacity)
-				}
-
+				// Use inactiveFg for sidebar pane text (same as inactive windows)
 				paneStyle := lipgloss.NewStyle().
-					Foreground(lipgloss.Color(dimmedPaneFg))
+					Foreground(lipgloss.Color(inactiveFg))
 
 				activePaneStyle := paneStyle
 				if isActive {
@@ -3956,7 +3981,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						}
 					}
 
-					paneNum := fmt.Sprintf("%d.%d", visualNum+1, pane.Index)
+					paneNum := fmt.Sprintf("%d.%d", visualNum, pane.Index)
 					paneLabel := pane.Command
 					if pane.LockedTitle != "" {
 						paneLabel = pane.LockedTitle
@@ -4278,10 +4303,10 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		}
 
 		// Build tab content with group prefix
-		// Display is 1-indexed to match keyboard shortcuts (prefix 1 → window 0)
+		// Display is 0-indexed to match tmux window indices
 		displayName := win.Name
 		visualNum := c.windowVisualPos[win.ID]
-		baseContent := fmt.Sprintf("%d. %s%s", visualNum+1, groupPrefix, displayName)
+		baseContent := fmt.Sprintf("%d. %s%s", visualNum, groupPrefix, displayName)
 
 		// Add pane count if collapsed
 		if hasPanes && isWindowCollapsed {
@@ -4416,16 +4441,9 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		// Show panes if window has multiple panes and is not collapsed
 		// Panes still get hierarchy (tree structure) in prefix mode
 		if len(contentPanes) > 1 && !isWindowCollapsed {
-			var paneFg string
-			if win.CustomColor != "" {
-				// When window has a custom color (usually dark background), use white text
-				paneFg = "#ffffff"
-			} else {
-				paneFg = c.getPaneFgWithFallback()
-			}
-
+			// Use inactiveFg for sidebar pane text (same as inactive windows)
 			paneStyle := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(paneFg))
+				Foreground(lipgloss.Color(inactiveFg))
 
 			activePaneStyle := paneStyle
 			if isActive {
@@ -4462,7 +4480,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					}
 				}
 
-				paneNum := fmt.Sprintf("%d.%d", visualNum+1, pane.Index)
+				paneNum := fmt.Sprintf("%d.%d", visualNum, pane.Index)
 				paneLabel := pane.Command
 				if pane.LockedTitle != "" {
 					paneLabel = pane.LockedTitle
@@ -5872,14 +5890,23 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 	large := c.isTouchMode(width)
 
 	// Get button colors from theme, with fallbacks
-	primaryBg := c.getThemeColor(c.theme.ButtonPrimaryBg, "#27ae60")
-	primaryFg := c.getThemeColor(c.theme.ButtonPrimaryFg, "#ffffff")
-	secondaryBg := c.getThemeColor(c.theme.ButtonSecondaryBg, "#9b59b6")
-	secondaryFg := c.getThemeColor(c.theme.ButtonSecondaryFg, "#ffffff")
-	destructiveBg := c.getThemeColor(c.theme.ButtonDestructiveBg, "#e74c3c")
-	destructiveFg := c.getThemeColor(c.theme.ButtonDestructiveFg, "#ffffff")
-	defaultBg := c.getThemeColor(c.theme.ButtonBg, "#555555")
-	defaultFg := c.getThemeColor(c.theme.ButtonFg, "#ffffff")
+	var primaryBg, primaryFg, secondaryBg, secondaryFg string
+	var destructiveBg, destructiveFg, defaultBg, defaultFg string
+	if c.theme != nil {
+		primaryBg = c.getThemeColor(c.theme.ButtonPrimaryBg, "#27ae60")
+		primaryFg = c.getThemeColor(c.theme.ButtonPrimaryFg, "#ffffff")
+		secondaryBg = c.getThemeColor(c.theme.ButtonSecondaryBg, "#9b59b6")
+		secondaryFg = c.getThemeColor(c.theme.ButtonSecondaryFg, "#ffffff")
+		destructiveBg = c.getThemeColor(c.theme.ButtonDestructiveBg, "#e74c3c")
+		destructiveFg = c.getThemeColor(c.theme.ButtonDestructiveFg, "#ffffff")
+		defaultBg = c.getThemeColor(c.theme.ButtonBg, "#555555")
+		defaultFg = c.getThemeColor(c.theme.ButtonFg, "#ffffff")
+	} else {
+		primaryBg, primaryFg = "#27ae60", "#ffffff"
+		secondaryBg, secondaryFg = "#9b59b6", "#ffffff"
+		destructiveBg, destructiveFg = "#e74c3c", "#ffffff"
+		defaultBg, defaultFg = "#555555", "#ffffff"
+	}
 
 	// New Tab + New Group side by side
 	if c.config.Sidebar.NewTabButton && c.config.Sidebar.NewGroupButton {
@@ -5932,7 +5959,11 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 	touchColor := defaultBg
 	if large {
 		touchLabel = "Small Mode"
-		touchColor = c.getThemeColor(c.theme.ButtonPrimaryBg, "#2980b9") // Use primary color when active
+		if c.theme != nil {
+			touchColor = c.getThemeColor(c.theme.ButtonPrimaryBg, "#2980b9")
+		} else {
+			touchColor = "#2980b9"
+		}
 	}
 	var btn string
 	if large {
@@ -5951,10 +5982,16 @@ func (c *Coordinator) renderSidebarResizeButtons(width int) string {
 		width = 1
 	}
 
-	destructiveBg := c.getThemeColor(c.theme.ButtonDestructiveBg, "#e74c3c")
-	destructiveFg := c.getThemeColor(c.theme.ButtonDestructiveFg, "#ffffff")
-	primaryBg := c.getThemeColor(c.theme.ButtonPrimaryBg, "#27ae60")
-	primaryFg := c.getThemeColor(c.theme.ButtonPrimaryFg, "#ffffff")
+	var destructiveBg, destructiveFg, primaryBg, primaryFg string
+	if c.theme != nil {
+		destructiveBg = c.getThemeColor(c.theme.ButtonDestructiveBg, "#e74c3c")
+		destructiveFg = c.getThemeColor(c.theme.ButtonDestructiveFg, "#ffffff")
+		primaryBg = c.getThemeColor(c.theme.ButtonPrimaryBg, "#27ae60")
+		primaryFg = c.getThemeColor(c.theme.ButtonPrimaryFg, "#ffffff")
+	} else {
+		destructiveBg, destructiveFg = "#e74c3c", "#ffffff"
+		primaryBg, primaryFg = "#27ae60", "#ffffff"
+	}
 
 	leftWidth := width / 2
 	rightWidth := width - leftWidth
@@ -6217,8 +6254,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	case "button":
 		switch input.ResolvedTarget {
 		case "new_tab":
-			exec.Command("tmux", "new-window", "-t", c.sessionID+":").Run()
-			selectContentPaneInActiveWindow()
+			c.createNewWindowInCurrentGroup(clientID)
+			// Don't call selectContentPaneInActiveWindow() here - the new window only has
+			// one pane (shell) until the daemon spawns the sidebar. Let spawnRenderers
+			// handle focus correctly after creating the sidebar pane.
 		case "new_group":
 			// Could implement group creation dialog
 		case "close_tab":
@@ -6230,8 +6269,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "new_tab":
-		exec.Command("tmux", "new-window", "-t", c.sessionID+":").Run()
-		selectContentPaneInActiveWindow()
+		c.createNewWindowInCurrentGroup(clientID)
+		// Don't call selectContentPaneInActiveWindow() - let spawnRenderers handle focus
 		return true
 
 	case "new_group":
@@ -6305,6 +6344,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		c.pet.YarnPos = pos2D{X: tossX, Y: 2}                  // Toss high
 		c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second) // Yarn disappears after 15 seconds
+		c.pet.YarnPushCount = 0
 		c.pet.TargetPos = pos2D{X: tossX, Y: 0}
 		c.pet.HasTarget = true
 		c.pet.ActionPending = "play"
@@ -6580,6 +6620,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		c.pet.YarnPos = pos2D{X: tossX, Y: 2}
 		c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second)
+		c.pet.YarnPushCount = 0
 		c.pet.TargetPos = pos2D{X: tossX, Y: 0}
 		c.pet.HasTarget = true
 		c.pet.ActionPending = "play"
@@ -6914,6 +6955,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 	// Start yarn at high air, let it fall
 	c.pet.YarnPos = pos2D{X: tossX, Y: 2}
 	c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second)
+	c.pet.YarnPushCount = 0
 	c.pet.TargetPos = pos2D{X: tossX, Y: 0}
 	c.pet.HasTarget = true
 	c.pet.ActionPending = "play"
@@ -7014,6 +7056,7 @@ func (c *Coordinator) executeOrSendMenu(clientID string, args []string, pos menu
 
 	if c.OnSendMenu != nil && !isHeaderClient {
 		title, items := parseTmuxMenuArgs(args)
+		logEvent("MENU_SEND client=%s title=%s items=%d", clientID, title, len(items))
 
 		// Store items for later execution
 		c.pendingMenusMu.Lock()
@@ -7044,16 +7087,19 @@ func (c *Coordinator) executeOrSendMenu(clientID string, args []string, pos menu
 
 // HandleMenuSelect executes the tmux command for the selected menu item
 func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
+	logEvent("MENU_SELECT_START client=%s index=%d", clientID, index)
 	c.pendingMenusMu.Lock()
 	items, ok := c.pendingMenus[clientID]
 	delete(c.pendingMenus, clientID)
 	c.pendingMenusMu.Unlock()
 
 	if !ok || index < 0 || index >= len(items) {
+		logEvent("MENU_SELECT_SKIP client=%s index=%d ok=%v items=%d", clientID, index, ok, len(items))
 		return
 	}
 
 	item := items[index]
+	logEvent("MENU_SELECT_ITEM client=%s index=%d label=%s cmd=%s", clientID, index, item.Label, item.Command)
 	if item.Command == "" || item.Separator || item.Header {
 		return
 	}
@@ -7482,9 +7528,19 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 
 	// Get working directory for new windows in this group
 	var workingDir string
+	coordinatorDebugLog.Printf("showGroupContextMenu: looking for working_dir for group=%s, config has %d groups", group.Name, len(c.config.Groups))
 	for _, cfgGroup := range c.config.Groups {
+		coordinatorDebugLog.Printf("  checking cfgGroup=%s workingDir=%s", cfgGroup.Name, cfgGroup.WorkingDir)
 		if cfgGroup.Name == group.Name && cfgGroup.WorkingDir != "" {
 			workingDir = cfgGroup.WorkingDir
+			coordinatorDebugLog.Printf("  MATCH! workingDir=%s", workingDir)
+			// Expand ~ to home directory
+			if strings.HasPrefix(workingDir, "~/") {
+				if home, err := os.UserHomeDir(); err == nil {
+					workingDir = filepath.Join(home, workingDir[2:])
+					coordinatorDebugLog.Printf("  expanded to=%s", workingDir)
+				}
+			}
 			break
 		}
 	}
@@ -7493,6 +7549,7 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	if workingDir != "" {
 		dirArg = fmt.Sprintf("'%s'", workingDir)
 	}
+	coordinatorDebugLog.Printf("showGroupContextMenu: final dirArg=%s", dirArg)
 
 	if group.Name != "Default" {
 		// Set pending group for optimistic UI - if the new window appears
@@ -7521,7 +7578,7 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		for _, win := range group.Windows {
 			killCmds = append(killCmds, fmt.Sprintf("kill-window -t %s", win.ID))
 		}
-		killAllCmd := strings.Join(killCmds, " \\; ")
+		killAllCmd := strings.Join(killCmds, " ; ")
 
 		// Use confirm-before for safety
 		confirmCmd := fmt.Sprintf(`confirm-before -p "Close all %d windows in %s? (y/n)" "%s"`,
@@ -7530,6 +7587,72 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	}
 
 	c.executeOrSendMenu(clientID, args, pos)
+}
+
+// createNewWindowInCurrentGroup creates a new window in the same group as the current window,
+// using the group's configured working_dir if available.
+func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
+	logEvent("NEW_WINDOW_START client=%s", clientID)
+	c.stateMu.RLock()
+
+	// Find the current window's group from clientID (e.g., "@12" -> window @12)
+	var currentGroup string
+	windowID := clientID // clientID is the window ID like "@12"
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.ID == windowID {
+				currentGroup = group.Name
+				break
+			}
+		}
+		if currentGroup != "" {
+			break
+		}
+	}
+
+	// Look up working directory for this group
+	var workingDir string
+	for _, cfgGroup := range c.config.Groups {
+		if cfgGroup.Name == currentGroup && cfgGroup.WorkingDir != "" {
+			workingDir = cfgGroup.WorkingDir
+			break
+		}
+	}
+
+	c.stateMu.RUnlock()
+
+	// Build the new-window command
+	args := []string{"new-window", "-t", c.sessionID + ":"}
+
+	// Add working directory if configured
+	if workingDir != "" {
+		// Expand ~ to home directory
+		if strings.HasPrefix(workingDir, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				workingDir = filepath.Join(home, workingDir[2:])
+			}
+		}
+		args = append(args, "-c", workingDir)
+	}
+
+	logEvent("NEW_WINDOW_CMD args=%v group=%s workdir=%s", args, currentGroup, workingDir)
+
+	// Set the group option for non-default groups
+	if currentGroup != "" && currentGroup != "Default" {
+		// Set pending group for optimistic UI
+		c.stateMu.Lock()
+		c.pendingNewWindowGroup = currentGroup
+		c.pendingNewWindowTime = time.Now()
+		c.stateMu.Unlock()
+
+		// Create window then set group option
+		out, err := exec.Command("tmux", args...).CombinedOutput()
+		logEvent("NEW_WINDOW_RESULT err=%v out=%s", err, string(out))
+		exec.Command("tmux", "set-window-option", "@tabby_group", currentGroup).Run()
+	} else {
+		out, err := exec.Command("tmux", args...).CombinedOutput()
+		logEvent("NEW_WINDOW_RESULT err=%v out=%s", err, string(out))
+	}
 }
 
 // showIndicatorContextMenu displays the context menu for window indicators (busy, bell, etc.)

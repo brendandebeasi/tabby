@@ -24,6 +24,7 @@ import (
 
 var crashLog *log.Logger
 var eventLog *log.Logger
+var inputLog *log.Logger
 
 func initCrashLog(sessionID string) {
 	crashLogPath := fmt.Sprintf("/tmp/tabby-daemon-%s-crash.log", sessionID)
@@ -48,6 +49,41 @@ func initEventLog(sessionID string) {
 func logEvent(format string, args ...interface{}) {
 	if eventLog != nil {
 		eventLog.Printf(format, args...)
+	}
+}
+
+var inputLogEnabled bool
+var inputLogCheckTime time.Time
+
+func initInputLog(sessionID string) {
+	inputLogPath := fmt.Sprintf("/tmp/tabby-daemon-%s-input.log", sessionID)
+	f, err := os.OpenFile(inputLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		inputLog = log.New(os.Stderr, "[INPUT] ", log.LstdFlags)
+		return
+	}
+	inputLog = log.New(f, "[input] ", log.LstdFlags|log.Lmicroseconds)
+}
+
+// isInputLogEnabled checks if input logging is enabled via tmux option @tabby_input_log
+// Caches result for 10 seconds to avoid excessive tmux calls
+func isInputLogEnabled() bool {
+	if time.Since(inputLogCheckTime) > 10*time.Second {
+		out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_input_log").Output()
+		if err != nil {
+			inputLogEnabled = false
+		} else {
+			val := strings.TrimSpace(string(out))
+			inputLogEnabled = val == "on" || val == "1" || val == "true"
+		}
+		inputLogCheckTime = time.Now()
+	}
+	return inputLogEnabled
+}
+
+func logInput(format string, args ...interface{}) {
+	if inputLog != nil && isInputLogEnabled() {
+		inputLog.Printf(format, args...)
 	}
 }
 
@@ -789,6 +825,7 @@ func main() {
 	// Initialize logging early
 	initCrashLog(*sessionID)
 	initEventLog(*sessionID)
+	initInputLog(*sessionID)
 	defer recoverAndLog("main")
 
 	// Scope tmux queries to this session
@@ -818,12 +855,18 @@ func main() {
 	// Create server
 	server := daemon.NewServer(*sessionID)
 
+	// Set up debug logging for render diagnostics
+	server.DebugLog = func(format string, args ...interface{}) {
+		logEvent(format, args...)
+	}
+
 	// Set up render callback using coordinator (with panic recovery)
 	server.OnRenderNeeded = func(clientID string, width, height int) (result *daemon.RenderPayload) {
 		defer func() {
 			if r := recover(); r != nil {
-				debugLog.Printf("PANIC in OnRenderNeeded (client=%s): %v", clientID, r)
+				debugLog.Printf("PANIC in OnRenderNeeded (client=%s): %v\n%s", clientID, r, debug.Stack())
 				logEvent("PANIC_RENDER client=%s err=%v", clientID, r)
+				crashLog.Printf("PANIC_RENDER client=%s err=%v\n%s", clientID, r, debug.Stack())
 				result = nil
 			}
 		}()
@@ -836,6 +879,7 @@ func main() {
 
 	// Set up input callback with panic recovery
 	server.OnInput = func(clientID string, input *daemon.InputPayload) {
+		logEvent("INPUT_START client=%s type=%s btn=%s action=%s x=%d y=%d", clientID, input.Type, input.Button, input.Action, input.MouseX, input.MouseY)
 		defer func() {
 			if r := recover(); r != nil {
 				debugLog.Printf("PANIC in OnInput handler (client=%s): %v", clientID, r)
@@ -843,12 +887,15 @@ func main() {
 			}
 		}()
 		needsRefresh := coordinator.HandleInput(clientID, input)
+		logEvent("INPUT_HANDLED client=%s needsRefresh=%v", clientID, needsRefresh)
 		if needsRefresh {
 			// Only refresh windows for window-related actions (expensive tmux calls)
 			coordinator.RefreshWindows()
+			logEvent("INPUT_REFRESHED client=%s", clientID)
 		}
 		// Re-render all clients with fresh state
 		server.BroadcastRender()
+		logEvent("INPUT_DONE client=%s", clientID)
 	}
 
 	// Set up connect/disconnect callbacks
@@ -1006,6 +1053,8 @@ func main() {
 					t1.Sub(start), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t6.Sub(t5), t6.Sub(start))
 			case <-windowCheckTicker.C: // Fallback polling: spawn/cleanup for missed events
 				logEvent("WINDOW_CHECK_TICK")
+				// Update active window in case user switched windows without triggering refresh
+				updateActiveWindow()
 				// Refresh windows first to get latest state for fallback ops
 				coordinator.RefreshWindows()
 				windows := coordinator.GetWindows()
@@ -1015,6 +1064,7 @@ func main() {
 				cleanupSidebarsForClosedWindows(server, windows)
 				doPaneLayoutOps()
 			case <-watchdogTicker.C:
+				logInput("HEALTH clients=%d", server.ClientCount())
 				watchdogCheckRenderers(server, *sessionID)
 			case <-refreshTicker.C:
 				// Fallback polling: always refresh windows (needed for staleness
@@ -1124,8 +1174,8 @@ func main() {
 		}
 	}()
 
-	<-sigCh
-	debugLog.Printf("Shutting down daemon")
-	logEvent("DAEMON_STOP session=%s pid=%d", *sessionID, os.Getpid())
+	sig := <-sigCh
+	debugLog.Printf("Shutting down daemon (signal=%v)", sig)
+	logEvent("DAEMON_STOP session=%s pid=%d signal=%v", *sessionID, os.Getpid(), sig)
 	server.Stop()
 }

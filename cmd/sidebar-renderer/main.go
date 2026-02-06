@@ -36,6 +36,36 @@ var (
 
 var debugLog *log.Logger
 var crashLog *log.Logger
+var inputLog *log.Logger
+
+var inputLogEnabled bool
+var inputLogCheckTime time.Time
+
+func initInputLog() {
+	inputLogPath := fmt.Sprintf("/tmp/sidebar-renderer-%s-input.log", *windowID)
+	f, err := os.OpenFile(inputLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		inputLog = log.New(os.Stderr, "[INPUT] ", log.LstdFlags)
+		return
+	}
+	inputLog = log.New(f, "[input] ", log.LstdFlags|log.Lmicroseconds)
+}
+
+// isInputLogEnabled checks if input logging is enabled via tmux option @tabby_input_log
+// Caches result for 10 seconds to avoid excessive tmux calls
+func isInputLogEnabled() bool {
+	if time.Since(inputLogCheckTime) > 10*time.Second {
+		out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_input_log").Output()
+		if err != nil {
+			inputLogEnabled = false
+		} else {
+			val := strings.TrimSpace(string(out))
+			inputLogEnabled = val == "on" || val == "1" || val == "true"
+		}
+		inputLogCheckTime = time.Now()
+	}
+	return inputLogEnabled
+}
 
 func initCrashLog() {
 	crashLogPath := fmt.Sprintf("/tmp/sidebar-renderer-%s-crash.log", *windowID)
@@ -63,10 +93,10 @@ func recoverAndLog(context string) {
 
 // Long-press detection thresholds
 const (
-	longPressThreshold = 500 * time.Millisecond
-	doubleTapThreshold = 300 * time.Millisecond
-	doubleTapDistance  = 3 // max pixels between taps
-	movementThreshold  = 5 // pixels
+	longPressThreshold = 350 * time.Millisecond  // Faster for better responsiveness
+	doubleTapThreshold = 600 * time.Millisecond // Increased for mobile
+	doubleTapDistance  = 10                     // max pixels between taps (increased for mobile/touch)
+	movementThreshold  = 25                     // pixels - very lenient for mobile finger drift
 )
 
 // rendererModel is a minimal Bubbletea model for the renderer
@@ -97,6 +127,7 @@ type rendererModel struct {
 	mouseDownTime   time.Time
 	mouseDownPos    struct{ X, Y int }
 	longPressActive bool
+	skipNextRelease bool // Set when menu closes to prevent false drag detection
 
 	// Double-tap detection (alternative right-click for iOS)
 	lastTapTime time.Time
@@ -204,6 +235,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clientID = msg.clientID
 		m.connected = true
 		debugLog.Printf("Connected as %s", m.clientID)
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("CONNECTED client=%s", m.clientID)
+		}
 
 		// Start receiver goroutine
 		go m.receiveLoop()
@@ -215,6 +249,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case disconnectedMsg:
 		m.connected = false
 		debugLog.Printf("Disconnected from daemon")
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("DISCONNECTED")
+		}
 		// Try to reconnect after a delay
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
 			return connectCmd()()
@@ -232,6 +269,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case renderMsg:
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("RENDER_APPLY seq=%d lines=%d regions=%d", msg.payload.SequenceNum, msg.payload.TotalLines, len(msg.payload.Regions))
+		}
 		m.content = msg.payload.Content
 		m.regions = msg.payload.Regions
 		m.totalLines = msg.payload.TotalLines
@@ -316,13 +356,24 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 
 	case longPressMsg:
-		// Long-press timer fired - check if still valid
-		if m.longPressActive && msg.X == m.mouseDownPos.X && msg.Y == m.mouseDownPos.Y {
+		// Long-press timer fired - check if still valid (allow some tolerance for touch)
+		dx := abs(msg.X - m.mouseDownPos.X)
+		dy := abs(msg.Y - m.mouseDownPos.Y)
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("LONGPRESS_TIMER active=%v dx=%d dy=%d threshold=%d downPos=(%d,%d)",
+				m.longPressActive, dx, dy, movementThreshold, m.mouseDownPos.X, m.mouseDownPos.Y)
+		}
+		if m.longPressActive && dx <= movementThreshold && dy <= movementThreshold {
 			if *debugMode {
-				debugLog.Printf("Long-press detected at X=%d Y=%d", msg.X, msg.Y)
+				debugLog.Printf("Long-press detected at X=%d Y=%d (drift: dx=%d dy=%d)", msg.X, msg.Y, dx, dy)
 			}
+			if inputLog != nil && isInputLogEnabled() {
+				inputLog.Printf("LONGPRESS_TRIGGERED -> right-click at (%d,%d)", m.mouseDownPos.X, m.mouseDownPos.Y)
+			}
+			m.longPressActive = false  // Prevent release from triggering click
+			m.skipNextRelease = true   // Skip the release event
 			// Treat as right-click (simulated)
-			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
+			return m.processMouseClick(m.mouseDownPos.X, m.mouseDownPos.Y, tea.MouseButtonRight, true)
 		}
 		return m, nil
 
@@ -366,6 +417,12 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		debugLog.Printf("  LongPressActive: %v", m.longPressActive)
 	}
 
+	// Input logging for all mouse events (to debug mobile)
+	if inputLog != nil && isInputLogEnabled() {
+		inputLog.Printf("MOUSE btn=%v action=%v x=%d y=%d shift=%v ctrl=%v longPress=%v",
+			msg.Button, msg.Action, msg.X, msg.Y, msg.Shift, msg.Ctrl, m.longPressActive)
+	}
+
 	// Check for scroll wheel
 	if msg.Button == tea.MouseButtonWheelUp {
 		if m.scrollY > 0 {
@@ -394,10 +451,27 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if *debugMode {
 				debugLog.Printf("  Shift/Ctrl+click detected (Shift=%v Ctrl=%v), treating as right-click", msg.Shift, msg.Ctrl)
 			}
+			m.skipNextRelease = true    // Skip release to prevent false drag detection
+			m.mouseDownTime = time.Time{} // Clear stale timestamp
 			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
 		}
 
 		if msg.Button == tea.MouseButtonLeft {
+			// Check for double-click (second press within threshold)
+			timeSinceLastClick := time.Since(m.lastTapTime)
+			clickDx := abs(msg.X - m.lastTapPos.X)
+			clickDy := abs(msg.Y - m.lastTapPos.Y)
+
+			if timeSinceLastClick < doubleTapThreshold && clickDx <= doubleTapDistance && clickDy <= doubleTapDistance {
+				// Double-click detected - treat as right-click to open context menu
+				if *debugMode {
+					debugLog.Printf("  Double-click detected on PRESS (interval=%v, distance=%d,%d) -> right-click", timeSinceLastClick, clickDx, clickDy)
+				}
+				m.lastTapTime = time.Time{} // Reset to prevent triple-click
+				m.skipNextRelease = true    // Don't process the release
+				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
+			}
+
 			// Start long-press detection
 			m.mouseDownTime = time.Now()
 			m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
@@ -411,6 +485,9 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		// Right or middle click - process immediately (not simulated)
+		// Skip the release to prevent false drag detection from stale mouseDownPos
+		m.skipNextRelease = true
+		m.mouseDownTime = time.Time{} // Clear to prevent stale elapsed time checks
 		return m.processMouseClick(msg.X, msg.Y, msg.Button, false)
 
 	case tea.MouseActionMotion:
@@ -429,6 +506,14 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseActionRelease:
+		// Skip this release if menu just closed (prevents false drag detection)
+		if m.skipNextRelease {
+			m.skipNextRelease = false
+			m.longPressActive = false
+			m.mouseDownTime = time.Time{}
+			return m, nil
+		}
+
 		wasLongPressActive := m.longPressActive
 		m.longPressActive = false
 		elapsed := time.Since(m.mouseDownTime)
@@ -443,9 +528,10 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// This works even if motion events aren't received (e.g. mosh).
 		// Use larger threshold (5 chars horizontal, 2 lines vertical) to avoid
 		// false drag detection from slight mouse movement during clicks
+		// Also skip if elapsed is 0 (no valid press - stale state)
 		dx := abs(msg.X - m.mouseDownPos.X)
 		dy := abs(msg.Y - m.mouseDownPos.Y)
-		isDrag := dx > 5 || dy > 2
+		isDrag := elapsed > 0 && (dx > 5 || dy > 2)
 
 		if isDrag {
 			if *debugMode {
@@ -456,27 +542,15 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Record click time/position for double-click detection (checked on next press)
+		m.lastTapTime = time.Now()
+		m.lastTapPos = struct{ X, Y int }{msg.X, msg.Y}
+
+		// Only process left-click action if this wasn't a long-press that already triggered
 		if wasLongPressActive && elapsed < longPressThreshold {
-			// Quick click - check for double-tap (right-click alternative for iOS)
-			timeSinceLastTap := time.Since(m.lastTapTime)
-			tapDx := abs(msg.X - m.lastTapPos.X)
-			tapDy := abs(msg.Y - m.lastTapPos.Y)
-
-			if timeSinceLastTap < doubleTapThreshold && tapDx <= doubleTapDistance && tapDy <= doubleTapDistance {
-				// Double-tap detected - treat as right-click (simulated)
-				if *debugMode {
-					debugLog.Printf("  Double-tap detected (interval=%v, distance=%d,%d) -> right-click", timeSinceLastTap, tapDx, tapDy)
-				}
-				m.lastTapTime = time.Time{} // Reset to prevent triple-tap
-				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
-			}
-
-			// Single tap - record for potential double-tap and process as left-click
 			if *debugMode {
-				debugLog.Printf("  Quick click (elapsed=%v)", elapsed)
+				debugLog.Printf("  Quick click (elapsed=%v) -> left-click action", elapsed)
 			}
-			m.lastTapTime = time.Now()
-			m.lastTapPos = struct{ X, Y int }{msg.X, msg.Y}
 			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
 		}
 		// Long-press would have already triggered via timer
@@ -533,6 +607,25 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSim
 	if paneID == "" {
 		out, _ := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output()
 		paneID = strings.TrimSpace(string(out))
+	}
+
+	// Mobile menu zone: rightmost 3 columns auto-trigger right-click for context menu
+	// This provides a reliable way to open menus on mobile without long-press/double-tap
+	menuZoneStart := m.width - 3
+	if menuZoneStart < 0 {
+		menuZoneStart = 0
+	}
+	if button == tea.MouseButtonLeft && x >= menuZoneStart && resolvedAction != "" {
+		// Only convert to right-click for window/pane/group actions (not buttons)
+		if resolvedAction == "select_window" || resolvedAction == "select_pane" || resolvedAction == "toggle_panes" || resolvedAction == "toggle_group" {
+			if *debugMode {
+				debugLog.Printf("  Menu zone click (x=%d >= %d) -> converting to right-click", x, menuZoneStart)
+			}
+			if inputLog != nil && isInputLogEnabled() {
+				inputLog.Printf("MENU_ZONE x=%d width=%d -> right-click", x, m.width)
+			}
+			button = tea.MouseButtonRight
+		}
 	}
 
 	buttonStr := ""
@@ -727,6 +820,9 @@ func (m rendererModel) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Scroll wheel should close menu
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("MENU_MOUSE scroll dismiss")
+		}
 		m.menuDismiss()
 		m.menuShowing = false
 		m.menuDragActive = false
@@ -736,6 +832,12 @@ func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	inMenu := m.isInMenuBounds(msg.X, msg.Y)
 	itemIdx := m.menuItemAtScreenY(msg.Y)
+	if inputLog != nil && isInputLogEnabled() {
+		menuH := len(m.menuItems) + 2
+		startY := m.menuStartY()
+		inputLog.Printf("MENU_MOUSE action=%v btn=%v x=%d y=%d inMenu=%v itemIdx=%d startY=%d menuH=%d width=%d items=%d",
+			msg.Action, msg.Button, msg.X, msg.Y, inMenu, itemIdx, startY, menuH, m.width, len(m.menuItems))
+	}
 
 	switch msg.Action {
 	case tea.MouseActionMotion:
@@ -755,6 +857,7 @@ func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				if !item.Separator && !item.Header {
 					m.menuSelect(itemIdx)
 					m.menuShowing = false
+					m.skipNextRelease = true // Prevent false drag detection
 					m.menuRestoreFocus()
 					return m, nil
 				}
@@ -768,9 +871,13 @@ func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case tea.MouseActionPress:
 		if !inMenu {
 			// Click outside menu - close
+			if inputLog != nil && isInputLogEnabled() {
+				inputLog.Printf("MENU_DISMISS reason=click_outside x=%d y=%d", msg.X, msg.Y)
+			}
 			m.menuDismiss()
 			m.menuShowing = false
 			m.menuDragActive = false
+			m.skipNextRelease = true // Prevent false drag detection
 			m.menuRestoreFocus()
 			return m, nil
 		}
@@ -779,8 +886,12 @@ func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if itemIdx >= 0 {
 				item := m.menuItems[itemIdx]
 				if !item.Separator && !item.Header {
+					if inputLog != nil && isInputLogEnabled() {
+						inputLog.Printf("MENU_SELECT idx=%d label=%s", itemIdx, item.Label)
+					}
 					m.menuSelect(itemIdx)
 					m.menuShowing = false
+					m.skipNextRelease = true // Prevent false drag detection
 					m.menuRestoreFocus()
 					return m, nil
 				}
@@ -889,12 +1000,12 @@ func (m rendererModel) renderMenuLines() []string {
 
 	borderColor := lipgloss.Color("#666")
 	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ddd"))
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#000000"))
 	highlightStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#2563eb")).
 		Bold(true)
 	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#999")).
+		Foreground(lipgloss.Color("#000000")).
 		Bold(true)
 
 	var lines []string
@@ -1098,7 +1209,14 @@ func (m *rendererModel) receiveLoop() {
 					// Send to the tea program via a channel or direct update
 					// For simplicity, we'll use the global program reference
 					if globalProgram != nil {
+						if inputLog != nil && isInputLogEnabled() {
+							inputLog.Printf("RENDER_RECV seq=%d regions=%d content_len=%d", payload.SequenceNum, len(payload.Regions), len(payload.Content))
+						}
 						globalProgram.Send(renderMsg{payload: &payload})
+					} else {
+						if inputLog != nil && isInputLogEnabled() {
+							inputLog.Printf("RENDER_RECV_DROP seq=%d reason=globalProgram_nil", payload.SequenceNum)
+						}
 					}
 				}
 			}
@@ -1185,6 +1303,17 @@ func (m *rendererModel) sendViewportUpdate() {
 }
 
 func (m *rendererModel) sendInput(input *daemon.InputPayload) {
+	if inputLog != nil && isInputLogEnabled() {
+		inputLog.Printf("SEND button=%s x=%d y=%d action=%s target=%s connected=%v",
+			input.Button, input.MouseX, input.MouseY,
+			input.ResolvedAction, input.ResolvedTarget, m.connected)
+	}
+	if !m.connected {
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("SEND_FAILED not connected")
+		}
+		return
+	}
 	m.sendMessage(daemon.Message{
 		Type:     daemon.MsgInput,
 		ClientID: m.clientID,
@@ -1207,6 +1336,7 @@ func main() {
 
 	// Initialize crash logging early
 	initCrashLog()
+	initInputLog()
 	defer recoverAndLog("main")
 
 	// Note: BubbleZone initialization removed - zone detection happens in daemon only.

@@ -53,6 +53,9 @@ type Server struct {
 
 	// Callback for client disconnect
 	OnDisconnect func(clientID string)
+
+	// Debug logging callback (set by daemon for diagnostics)
+	DebugLog func(format string, args ...interface{})
 }
 
 // NewServer creates a new daemon server
@@ -276,6 +279,9 @@ func (s *Server) handleClient(conn net.Conn) {
 				payloadBytes, _ := json.Marshal(msg.Payload)
 				var input InputPayload
 				if json.Unmarshal(payloadBytes, &input) == nil {
+					if s.DebugLog != nil {
+						s.DebugLog("SOCKET_INPUT client=%s type=%s btn=%s action=%s", clientID, input.Type, input.Button, input.Action)
+					}
 					if s.OnInput != nil {
 						// Recover from panics in input handler to avoid killing client goroutine
 						func() {
@@ -319,6 +325,10 @@ func (s *Server) BroadcastRender() {
 	}
 	s.clientsMu.RUnlock()
 
+	if s.DebugLog != nil {
+		s.DebugLog("BROADCAST_RENDER clients=%d ids=%v", len(clientIDs), clientIDs)
+	}
+
 	for _, id := range clientIDs {
 		s.sendRenderToClient(id)
 	}
@@ -355,6 +365,9 @@ func (s *Server) sendRenderToClient(clientID string) {
 	client, ok := s.clients[clientID]
 	if !ok {
 		s.clientsMu.RUnlock()
+		if s.DebugLog != nil {
+			s.DebugLog("RENDER_SKIP client=%s reason=not_found", clientID)
+		}
 		return
 	}
 	width := client.Width
@@ -362,12 +375,18 @@ func (s *Server) sendRenderToClient(clientID string) {
 	s.clientsMu.RUnlock()
 
 	if s.OnRenderNeeded == nil {
+		if s.DebugLog != nil {
+			s.DebugLog("RENDER_SKIP client=%s reason=no_callback", clientID)
+		}
 		return
 	}
 
 	// Get render payload from callback (may take time)
 	render := s.OnRenderNeeded(clientID, width, height)
 	if render == nil {
+		if s.DebugLog != nil {
+			s.DebugLog("RENDER_SKIP client=%s reason=nil_payload", clientID)
+		}
 		return
 	}
 
@@ -378,10 +397,14 @@ func (s *Server) sendRenderToClient(clientID string) {
 	if !ok {
 		// Client disconnected during render
 		s.clientsMu.RUnlock()
+		if s.DebugLog != nil {
+			s.DebugLog("RENDER_SKIP client=%s reason=disconnected_during_render", clientID)
+		}
 		return
 	}
 	if client.lastContentHash == contentHash {
 		s.clientsMu.RUnlock()
+		// Don't log dedup skips - too noisy
 		return
 	}
 	s.clientsMu.RUnlock()
