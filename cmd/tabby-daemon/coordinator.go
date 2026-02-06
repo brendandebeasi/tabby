@@ -8134,6 +8134,15 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 	unlockCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_name_locked", win.Index)
 	args = append(args, "Unlock Name", "u", unlockCmd)
 
+	// Pin/Unpin option - pinned windows appear at the top of sidebar
+	if win.Pinned {
+		unpinCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_pinned", win.Index)
+		args = append(args, "Unpin from Top", "p", unpinCmd)
+	} else {
+		pinCmd := fmt.Sprintf("set-window-option -t :%d @tabby_pinned 1", win.Index)
+		args = append(args, "Pin to Top", "p", pinCmd)
+	}
+
 	// Collapse/Expand panes option (only for windows with multiple panes)
 	contentPaneCount := 0
 	for _, pane := range win.Panes {

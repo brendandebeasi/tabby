@@ -189,6 +189,7 @@ type Window struct {
 	Collapsed   bool   // Panes are hidden in sidebar (set via @tabby_collapsed option)
 	NameLocked  bool   // Window name was explicitly set by user (set via @tabby_name_locked)
 	SyncWidth   bool   // Sync sidebar width with global setting (set via @tabby_sync_width, default true)
+	Pinned      bool   // Window is pinned to top of sidebar (set via @tabby_pinned option)
 	Panes       []Pane
 }
 
@@ -201,7 +202,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}\x1f#{@tabby_pinned}")
 	cmd := exec.Command("tmux", args...)
 	out, err := cmd.Output()
 	if err != nil {
@@ -287,6 +288,12 @@ func ListWindows() ([]Window, error) {
 				syncWidth = false
 			}
 		}
+		// Pinned state from @tabby_pinned option
+		pinned := false
+		if len(parts) >= 20 {
+			tabbyPinned := strings.TrimSpace(parts[19])
+			pinned = tabbyPinned == "1" || tabbyPinned == "true"
+		}
 		// Session ID safety net: skip windows that belong to a different session.
 		// tmux list-windows -t $SESSION can transiently return wrong-session windows.
 		if sessionTarget != "" && len(parts) >= 19 {
@@ -311,6 +318,7 @@ func ListWindows() ([]Window, error) {
 			Collapsed:   collapsed,
 			NameLocked:  nameLocked,
 			SyncWidth:   syncWidth,
+			Pinned:      pinned,
 		})
 	}
 

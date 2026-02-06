@@ -24,9 +24,23 @@ func GroupWindows(windows []tmux.Window, groups []config.Group) []GroupedWindows
 }
 
 // GroupWindowsWithOptions is like GroupWindows but allows including empty groups.
+// Pinned windows are placed in a special "Pinned" group at the very top.
 func GroupWindowsWithOptions(windows []tmux.Window, groups []config.Group, includeEmpty bool) []GroupedWindows {
 	var result []*GroupedWindows
 	groupMap := make(map[string]*GroupedWindows)
+
+	// Create a special "Pinned" group for pinned windows
+	pinnedGroup := &GroupedWindows{
+		Name: "Pinned",
+		Theme: config.Theme{
+			Bg:       "#f1c40f", // Gold/yellow for pinned
+			Fg:       "#000000",
+			ActiveBg: "#f39c12",
+			ActiveFg: "#000000",
+			Icon:     "\uf08d", // Nerd font pin icon
+		},
+		Windows: []tmux.Window{},
+	}
 
 	for _, group := range groups {
 		gw := &GroupedWindows{
@@ -39,6 +53,12 @@ func GroupWindowsWithOptions(windows []tmux.Window, groups []config.Group, inclu
 	}
 
 	for _, win := range windows {
+		// Pinned windows go to the special Pinned group
+		if win.Pinned {
+			pinnedGroup.Windows = append(pinnedGroup.Windows, win)
+			continue
+		}
+
 		// Use the @tabby_group window option if set, otherwise Default
 		groupName := win.Group
 		if groupName == "" {
@@ -55,6 +75,11 @@ func GroupWindowsWithOptions(windows []tmux.Window, groups []config.Group, inclu
 			}
 		}
 	}
+
+	// Sort pinned windows by index
+	sort.Slice(pinnedGroup.Windows, func(i, j int) bool {
+		return pinnedGroup.Windows[i].Index < pinnedGroup.Windows[j].Index
+	})
 
 	// Collect groups: Default first, then others alphabetically
 	var defaultGroup *GroupedWindows
@@ -82,8 +107,11 @@ func GroupWindowsWithOptions(windows []tmux.Window, groups []config.Group, inclu
 		return otherGroups[i].Name < otherGroups[j].Name
 	})
 
-	// Default first, then alphabetical
+	// Build final list: Pinned first (if has windows), then Default, then alphabetical
 	var grouped []GroupedWindows
+	if len(pinnedGroup.Windows) > 0 {
+		grouped = append(grouped, *pinnedGroup)
+	}
 	if defaultGroup != nil {
 		grouped = append(grouped, *defaultGroup)
 	}
