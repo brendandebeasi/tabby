@@ -7005,10 +7005,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	switch input.ResolvedAction {
 	case "select_window":
 		// Run synchronously so RefreshWindows() sees the new state
-		exec.Command("tmux", "select-window", "-t", input.ResolvedTarget).Run()
+		// Use timeout context to prevent hanging if tmux is slow
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		exec.CommandContext(ctx, "tmux", "select-window", "-t", input.ResolvedTarget).Run()
 		// Find and select the first content pane (not sidebar or header)
 		// Get panes in the target window
-		out, err := exec.Command("tmux", "list-panes", "-t", input.ResolvedTarget,
+		out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", input.ResolvedTarget,
 			"-F", "#{pane_id}:#{pane_current_command}").Output()
 		if err == nil {
 			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -7019,7 +7022,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 					cmd := parts[1]
 					// Skip sidebar and header panes
 					if !isAuxiliaryPaneCommand(cmd) {
-						exec.Command("tmux", "select-pane", "-t", paneID).Run()
+						exec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID).Run()
 						break
 					}
 				}
