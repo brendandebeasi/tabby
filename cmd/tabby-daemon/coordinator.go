@@ -32,6 +32,22 @@ import (
 // coordinatorDebugLog is the logger for coordinator debug output
 var coordinatorDebugLog *log.Logger
 
+// Deadlock detection
+var (
+	lastHeartbeat     int64 // Unix nano timestamp of last main loop tick
+	heartbeatMu       sync.Mutex
+	lockHolders       = make(map[string]lockInfo) // lock name -> holder info
+	lockHoldersMu     sync.Mutex
+	deadlockWatchdog  bool
+	deadlockThreshold = 5 * time.Second // Alert if no heartbeat for this long
+)
+
+type lockInfo struct {
+	goroutine string
+	acquired  time.Time
+	location  string
+}
+
 func init() {
 	// Default to discard (no logging)
 	coordinatorDebugLog = log.New(io.Discard, "", 0)
@@ -40,6 +56,71 @@ func init() {
 // SetCoordinatorDebugLog sets the debug logger for the coordinator
 func SetCoordinatorDebugLog(logger *log.Logger) {
 	coordinatorDebugLog = logger
+}
+
+// StartDeadlockWatchdog starts a goroutine that monitors for deadlocks
+func StartDeadlockWatchdog() {
+	deadlockWatchdog = true
+	// Initialize heartbeat
+	heartbeatMu.Lock()
+	lastHeartbeat = time.Now().UnixNano()
+	heartbeatMu.Unlock()
+
+	go func() {
+		for deadlockWatchdog {
+			time.Sleep(1 * time.Second)
+
+			heartbeatMu.Lock()
+			lastBeat := lastHeartbeat
+			heartbeatMu.Unlock()
+
+			elapsed := time.Since(time.Unix(0, lastBeat))
+			if elapsed > deadlockThreshold {
+				coordinatorDebugLog.Printf("DEADLOCK WARNING: No heartbeat for %v", elapsed)
+
+				// Dump lock holders
+				lockHoldersMu.Lock()
+				if len(lockHolders) > 0 {
+					coordinatorDebugLog.Printf("DEADLOCK: Current lock holders:")
+					for name, info := range lockHolders {
+						coordinatorDebugLog.Printf("  %s: held by %s at %s for %v",
+							name, info.goroutine, info.location, time.Since(info.acquired))
+					}
+				}
+				lockHoldersMu.Unlock()
+			}
+		}
+	}()
+}
+
+// StopDeadlockWatchdog stops the watchdog
+func StopDeadlockWatchdog() {
+	deadlockWatchdog = false
+}
+
+// recordHeartbeat updates the heartbeat timestamp
+func recordHeartbeat() {
+	heartbeatMu.Lock()
+	lastHeartbeat = time.Now().UnixNano()
+	heartbeatMu.Unlock()
+}
+
+// trackLock records when a lock is acquired
+func trackLock(name, location string) {
+	lockHoldersMu.Lock()
+	lockHolders[name] = lockInfo{
+		goroutine: fmt.Sprintf("goroutine-%d", time.Now().UnixNano()%10000),
+		acquired:  time.Now(),
+		location:  location,
+	}
+	lockHoldersMu.Unlock()
+}
+
+// untrackLock removes lock tracking when released
+func untrackLock(name string) {
+	lockHoldersMu.Lock()
+	delete(lockHolders, name)
+	lockHoldersMu.Unlock()
 }
 
 // Coordinator manages centralized state and rendering for all renderers
@@ -2229,7 +2310,7 @@ func (c *Coordinator) UpdatePetState() bool {
 		// Use config for hunger decay rate (frames = seconds * 10 since ~10fps)
 		hungerDecayFrames := c.config.Widgets.Pet.HungerDecay * 10
 		if hungerDecayFrames <= 0 {
-			hungerDecayFrames = 600 // Default: 60 seconds (less needy)
+			hungerDecayFrames = 17280 // Default: ~2 days to starve (1728 sec/tick)
 		}
 		if c.pet.Hunger > 0 && c.pet.AnimFrame%hungerDecayFrames == 0 {
 			c.pet.Hunger--
@@ -2237,7 +2318,7 @@ func (c *Coordinator) UpdatePetState() bool {
 		// Happiness decays 1.5x faster when hungry
 		happyDecayFrames := hungerDecayFrames * 2 / 3
 		if happyDecayFrames <= 0 {
-			happyDecayFrames = 400 // Default: 40 seconds when hungry
+			happyDecayFrames = 11520 // Default: proportional to hunger decay
 		}
 		if c.pet.Hunger < 30 && c.pet.Happiness > 0 && c.pet.AnimFrame%happyDecayFrames == 0 {
 			c.pet.Happiness--
@@ -2352,6 +2433,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		return
 	}
 
+	trackLock("widthSyncMu", "handleWidthSync")
 	c.widthSyncMu.Lock()
 
 	// Query tmux directly for the active window FIRST (before any debounce)
@@ -2375,6 +2457,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
+		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 		return
 	}
@@ -2393,6 +2476,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
+		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 		return
 	}
@@ -2410,6 +2494,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 			c.lastActiveWindowID = clientID
 		}
 		targetWidth := c.globalWidth
+		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 
 		if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
@@ -2430,7 +2515,8 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 			coordinatorDebugLog.Printf("Width sync: inactive %s has width %d, syncing to global %d", clientID, currentWidth, c.globalWidth)
 			c.lastWidthSync = time.Now()
 			targetWidth := c.globalWidth
-			c.widthSyncMu.Unlock()
+			untrackLock("widthSyncMu")
+		c.widthSyncMu.Unlock()
 
 			if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
 				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -2447,7 +2533,8 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 			c.lastActiveWindowID = clientID
 			c.lastWidthSync = time.Now()
 			targetWidth := c.globalWidth
-			c.widthSyncMu.Unlock()
+			untrackLock("widthSyncMu")
+		c.widthSyncMu.Unlock()
 
 			if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
 				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -2464,7 +2551,8 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 			coordinatorDebugLog.Printf("Width sync: active %s resized to %d, syncing others", clientID, currentWidth)
 			c.globalWidth = currentWidth
 			c.lastWidthSync = time.Now()
-			c.widthSyncMu.Unlock()
+			untrackLock("widthSyncMu")
+		c.widthSyncMu.Unlock()
 
 			exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", currentWidth)).Run()
 			syncOtherSidebarWidths(currentWidth, clientID)
@@ -2474,6 +2562,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
+		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 	}
 }

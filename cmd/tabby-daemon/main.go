@@ -928,6 +928,9 @@ func main() {
 	debugLog.Printf("Server listening on %s", server.GetSocketPath())
 	logEvent("DAEMON_START session=%s pid=%d", *sessionID, os.Getpid())
 
+	// Start deadlock watchdog
+	StartDeadlockWatchdog()
+
 	// Restore focus after daemon initialization completes
 	// Wait for renderers to spawn and settle before restoring focus
 	go func() {
@@ -1017,6 +1020,9 @@ func main() {
 		}
 
 		for {
+			// Record heartbeat at each loop iteration for deadlock detection
+			recordHeartbeat()
+
 			select {
 			case <-refreshCh:
 				start := time.Now()
