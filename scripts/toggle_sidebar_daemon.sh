@@ -84,7 +84,6 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
     tmux set-hook -gu after-resize-pane 2>/dev/null || true
     tmux set-hook -gu after-resize-window 2>/dev/null || true
     tmux set-hook -gu client-resized 2>/dev/null || true
-    tmux set-hook -gu after-select-window 2>/dev/null || true
 
     echo "disabled" > "$SIDEBAR_STATE_FILE"
     tmux set-option @tmux-tabs-sidebar "disabled"
@@ -150,10 +149,11 @@ else
     # Set up tmux hooks to notify daemon of resize events (sends SIGUSR1)
     # These ensure background sidebars update when layouts change
     # Use tmux option to get PID dynamically (survives daemon restarts)
+    # NOTE: Do NOT add after-select-window hook - it causes feedback loops when
+    # clicking select_window in sidebar (click -> tmux select-window -> hook -> SIGUSR1)
     tmux set-hook -g after-resize-pane 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     tmux set-hook -g after-resize-window 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     tmux set-hook -g client-resized 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
-    tmux set-hook -g after-select-window 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
 
     # The daemon handles spawning sidebar renderers and pane headers
     # via its windowCheckTicker loop. Just wait briefly for it to spawn them.
