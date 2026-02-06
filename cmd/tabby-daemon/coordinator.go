@@ -334,6 +334,8 @@ type petState struct {
 	MouseDirection    int       // Direction mouse is moving
 	MouseAppearsAt    time.Time // When a mouse will appear next
 	TotalMouseCatches int
+	// Adventure state
+	Adventure adventureState
 }
 
 type pos2D struct {
@@ -346,6 +348,132 @@ type floatingItem struct {
 	Pos       pos2D
 	Velocity  pos2D
 	ExpiresAt time.Time
+}
+
+// Adventure mode types
+type adventurePhase string
+
+const (
+	advPhaseNone      adventurePhase = ""
+	advPhaseDeparting adventurePhase = "departing"
+	advPhaseExploring adventurePhase = "exploring"
+	advPhaseEncounter adventurePhase = "encounter"
+	advPhaseReturning adventurePhase = "returning"
+	advPhaseArriving  adventurePhase = "arriving"
+)
+
+type adventureState struct {
+	Active        bool
+	Phase         adventurePhase
+	PhaseStart    time.Time
+	PhaseDuration time.Duration
+	Biome         string
+	SceneOffset   int // How far cat has traveled (for scenery scrolling)
+	Wildlife      *wildlifeEncounter
+	CatX          int // Cat position during adventure (relative to play area)
+	LastThought   string
+	TotalCatches  int
+}
+
+type wildlifeEncounter struct {
+	Type       string
+	Emoji      string
+	X          int // Position in scene
+	Y          int // 0=ground, 1=low air, 2=high air
+	Speed      int
+	CatchChance int
+	Spotted    bool
+	Stalking   bool
+	Pounced    bool
+	Caught     bool
+	Escaped    bool
+}
+
+type biomeData struct {
+	Ground   string
+	Scenery  []string
+	Wildlife []string
+}
+
+type wildlifeData struct {
+	Emoji       string
+	YLevel      int // 0=ground, 1=low air, 2=high air
+	Speed       int
+	CatchChance int
+}
+
+// Biome definitions
+var adventureBiomes = map[string]biomeData{
+	"forest": {
+		Ground:   "~",
+		Scenery:  []string{"🌳", "🌲", "🪨", "🍂", "🌿"},
+		Wildlife: []string{"squirrel", "bird", "bug"},
+	},
+	"meadow": {
+		Ground:   ",",
+		Scenery:  []string{"🌸", "🌾", "🌻", "🦋", "🌿"},
+		Wildlife: []string{"butterfly", "bird", "mouse", "bug"},
+	},
+	"garden": {
+		Ground:   ".",
+		Scenery:  []string{"🌷", "🌹", "🪴", "🪨", "🍃"},
+		Wildlife: []string{"bird", "lizard", "bug", "butterfly"},
+	},
+	"backyard": {
+		Ground:   "_",
+		Scenery:  []string{"🪵", "🪨", "🌿", "🍂"},
+		Wildlife: []string{"mouse", "bird", "squirrel", "lizard"},
+	},
+}
+
+// Wildlife definitions
+var adventureWildlife = map[string]wildlifeData{
+	"squirrel":  {Emoji: "🐿️", YLevel: 0, Speed: 2, CatchChance: 30},
+	"bird":      {Emoji: "🐦", YLevel: 2, Speed: 3, CatchChance: 15},
+	"butterfly": {Emoji: "🦋", YLevel: 1, Speed: 1, CatchChance: 60},
+	"bug":       {Emoji: "🐛", YLevel: 0, Speed: 1, CatchChance: 80},
+	"mouse":     {Emoji: "🐭", YLevel: 0, Speed: 2, CatchChance: 50},
+	"lizard":    {Emoji: "🦎", YLevel: 0, Speed: 3, CatchChance: 25},
+}
+
+// Adventure thoughts by wildlife type and phase
+var adventureThoughts = map[string]map[string][]string{
+	"squirrel": {
+		"spot":   []string{"squirrel.", "prey detected.", "target acquired.", "fluffy tail..."},
+		"stalk":  []string{"creeping...", "patience...", "closer...", "silent paws..."},
+		"catch":  []string{"got you!", "mine now.", "natural order.", "victory!"},
+		"escape": []string{"next time.", "curse you, tree.", "too fast.", "the hunt continues."},
+	},
+	"bird": {
+		"spot":   []string{"bird.", "wings.", "foolish creature.", "come down here..."},
+		"stalk":  []string{"watching...", "waiting...", "soon...", "calculating..."},
+		"catch":  []string{"impossible!", "got one!", "legendary.", "I am apex."},
+		"escape": []string{"fly away then.", "gravity wins.", "next time, bird.", "curse these paws."},
+	},
+	"butterfly": {
+		"spot":   []string{"flutter.", "pretty prey.", "floating snack.", "must catch."},
+		"stalk":  []string{"gentle...", "easy...", "almost...", "focus..."},
+		"catch":  []string{"got it!", "delicate.", "mine.", "beautiful catch."},
+		"escape": []string{"too floaty.", "wind took it.", "next one.", "pretty but quick."},
+	},
+	"bug": {
+		"spot":   []string{"bug.", "crunchy.", "protein.", "easy prey."},
+		"stalk":  []string{"sneaking...", "closer...", "simple...", "patience..."},
+		"catch":  []string{"crunch.", "tasty.", "got it.", "efficient."},
+		"escape": []string{"fast bug.", "under leaf.", "next bug.", "how?"},
+	},
+	"mouse": {
+		"spot":   []string{"mouse!", "classic.", "the chase.", "ancient rivalry."},
+		"stalk":  []string{"creeping...", "silent...", "focused...", "instinct guides..."},
+		"catch":  []string{"gotcha!", "mouse mine.", "perfect.", "legendary catch."},
+		"escape": []string{"quick mouse.", "hole escape.", "rivalry continues.", "next time, mouse."},
+	},
+	"lizard": {
+		"spot":   []string{"lizard.", "scaly one.", "fast prey.", "challenge accepted."},
+		"stalk":  []string{"careful...", "they sense heat...", "slow...", "steady..."},
+		"catch":  []string{"scales!", "got it!", "cold-blooded victory.", "impressive."},
+		"escape": []string{"too quick.", "tail trick?", "slippery.", "lizards cheat."},
+	},
 }
 
 // petWidgetLayout tracks line offsets for custom click detection
@@ -1845,6 +1973,18 @@ func (c *Coordinator) UpdatePetState() bool {
 		maxX = 1
 	}
 
+	// === ADVENTURE MODE ===
+	// If adventure is active, update it and skip normal mechanics
+	if c.pet.Adventure.Active {
+		c.updateAdventurePhase(now, maxX)
+		c.savePetState()
+		// Track previous visual state to detect changes
+		prevPos := c.pet.Pos
+		prevState := c.pet.State
+		changed := c.pet.Pos != prevPos || c.pet.State != prevState || c.pet.Adventure.Active
+		return changed
+	}
+
 	// === YARN EXPIRATION ===
 
 	// Yarn disappears after expiration time
@@ -2070,7 +2210,7 @@ func (c *Coordinator) UpdatePetState() bool {
 				actionChance = 15 // Default: less hyper than before
 			}
 			if rand.Intn(100) < actionChance {
-				action := rand.Intn(9)
+				action := rand.Intn(10)
 			switch action {
 			case 0:
 				// Run across the screen (avoid poop as destination)
@@ -2223,6 +2363,16 @@ func (c *Coordinator) UpdatePetState() bool {
 						c.pet.MousePos = pos2D{X: maxX, Y: 0}
 					}
 					c.pet.LastThought = randomThought("mouse_spot")
+				}
+			case 9:
+				// Start an adventure! (if enabled and happy enough)
+				adventureEnabled := c.config.Widgets.Pet.AdventureEnabled
+				// Default to enabled if not explicitly set
+				if !adventureEnabled && c.config.Widgets.Pet.AdventureChance == 0 {
+					adventureEnabled = true
+				}
+				if adventureEnabled && c.pet.Happiness >= 50 && !c.pet.Adventure.Active {
+					c.startAdventure(maxX)
 				}
 			}
 			}
@@ -2422,6 +2572,327 @@ func (c *Coordinator) UpdatePetState() bool {
 		len(c.pet.FloatingItems) != prevFloatingCount ||
 		c.pet.MousePos != prevMousePos
 	return changed
+}
+
+// startAdventure initiates a new adventure sequence
+func (c *Coordinator) startAdventure(maxX int) {
+	// Pick a random biome
+	biomes := []string{"forest", "meadow", "garden", "backyard"}
+	biome := biomes[rand.Intn(len(biomes))]
+
+	c.pet.Adventure = adventureState{
+		Active:        true,
+		Phase:         advPhaseDeparting,
+		PhaseStart:    time.Now(),
+		PhaseDuration: time.Duration(2+rand.Intn(2)) * time.Second,
+		Biome:         biome,
+		SceneOffset:   0,
+		CatX:          c.pet.Pos.X,
+		LastThought:   "adventure calls...",
+	}
+	c.pet.State = "walking"
+	c.pet.Direction = 1 // Walking right (departing)
+	c.pet.LastThought = "adventure calls..."
+}
+
+// updateAdventurePhase handles adventure state transitions and mechanics
+func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
+	adv := &c.pet.Adventure
+	elapsed := now.Sub(adv.PhaseStart)
+
+	switch adv.Phase {
+	case advPhaseDeparting:
+		// Cat walks off screen to the right
+		if c.pet.AnimFrame%3 == 0 {
+			adv.CatX++
+		}
+		if elapsed >= adv.PhaseDuration || adv.CatX > maxX+5 {
+			// Transition to exploring
+			adv.Phase = advPhaseExploring
+			adv.PhaseStart = now
+			adv.PhaseDuration = time.Duration(5+rand.Intn(10)) * time.Second
+			adv.CatX = maxX / 2 // Cat centered during exploration
+			c.pet.LastThought = "exploring..."
+		}
+
+	case advPhaseExploring:
+		// Scenery scrolls past, cat stays centered
+		if c.pet.AnimFrame%2 == 0 {
+			adv.SceneOffset++
+		}
+
+		// Random chance to encounter wildlife
+		if adv.Wildlife == nil && rand.Intn(100) < 3 {
+			c.spawnWildlife(maxX)
+		}
+
+		// Check for transition to encounter or returning
+		if adv.Wildlife != nil {
+			adv.Phase = advPhaseEncounter
+			adv.PhaseStart = now
+			adv.PhaseDuration = time.Duration(5+rand.Intn(5)) * time.Second
+		} else if elapsed >= adv.PhaseDuration {
+			// No encounter, start returning
+			adv.Phase = advPhaseReturning
+			adv.PhaseStart = now
+			adv.PhaseDuration = time.Duration(3+rand.Intn(3)) * time.Second
+			c.pet.Direction = -1
+			c.pet.LastThought = "heading home..."
+		}
+
+	case advPhaseEncounter:
+		c.updateEncounter(now, maxX)
+
+		// Check if encounter is resolved
+		if adv.Wildlife != nil && (adv.Wildlife.Caught || adv.Wildlife.Escaped) {
+			// Brief pause then return
+			if elapsed >= adv.PhaseDuration {
+				adv.Phase = advPhaseReturning
+				adv.PhaseStart = now
+				adv.PhaseDuration = time.Duration(3+rand.Intn(3)) * time.Second
+				adv.Wildlife = nil
+				c.pet.Direction = -1
+				c.pet.LastThought = "heading home..."
+			}
+		}
+
+	case advPhaseReturning:
+		// Scenery scrolls back
+		if c.pet.AnimFrame%2 == 0 && adv.SceneOffset > 0 {
+			adv.SceneOffset--
+		}
+
+		if elapsed >= adv.PhaseDuration || adv.SceneOffset <= 0 {
+			adv.Phase = advPhaseArriving
+			adv.PhaseStart = now
+			adv.PhaseDuration = time.Duration(1+rand.Intn(2)) * time.Second
+			adv.CatX = maxX + 3 // Cat re-enters from right
+		}
+
+	case advPhaseArriving:
+		// Cat walks back to normal position
+		if c.pet.AnimFrame%3 == 0 && adv.CatX > c.pet.Pos.X {
+			adv.CatX--
+		}
+
+		if elapsed >= adv.PhaseDuration || adv.CatX <= c.pet.Pos.X {
+			// Adventure complete!
+			c.pet.Adventure = adventureState{
+				TotalCatches: adv.TotalCatches,
+			}
+			c.pet.State = "happy"
+			c.pet.LastThought = "good adventure."
+		}
+	}
+}
+
+// spawnWildlife creates a wildlife encounter based on current biome
+func (c *Coordinator) spawnWildlife(maxX int) {
+	adv := &c.pet.Adventure
+	biome := adventureBiomes[adv.Biome]
+	if len(biome.Wildlife) == 0 {
+		return
+	}
+
+	// Pick random wildlife from biome
+	wildlifeType := biome.Wildlife[rand.Intn(len(biome.Wildlife))]
+	data := adventureWildlife[wildlifeType]
+
+	adv.Wildlife = &wildlifeEncounter{
+		Type:        wildlifeType,
+		Emoji:       data.Emoji,
+		X:           maxX + 5, // Appears from right
+		Y:           data.YLevel,
+		Speed:       data.Speed,
+		CatchChance: data.CatchChance,
+	}
+
+	// Get spot thought
+	c.pet.LastThought = c.getAdventureThought(wildlifeType, "spot")
+}
+
+// updateEncounter handles the wildlife encounter mechanics
+func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
+	adv := &c.pet.Adventure
+	w := adv.Wildlife
+	if w == nil {
+		return
+	}
+
+	// Phase 1: Spotting (wildlife enters view)
+	if !w.Spotted {
+		if c.pet.AnimFrame%3 == 0 {
+			w.X--
+		}
+		// Wildlife is spotted when it enters play area
+		if w.X < maxX-2 {
+			w.Spotted = true
+			c.pet.State = "idle" // Cat freezes
+			// Add "!" floating item
+			c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+				Emoji:     "!",
+				Pos:       pos2D{X: adv.CatX, Y: 2},
+				Velocity:  pos2D{X: 0, Y: 0},
+				ExpiresAt: now.Add(1 * time.Second),
+			})
+		}
+		return
+	}
+
+	// Phase 2: Stalking (cat approaches)
+	if !w.Stalking && w.Spotted && !w.Pounced {
+		w.Stalking = true
+		c.pet.State = "walking"
+		c.pet.LastThought = c.getAdventureThought(w.Type, "stalk")
+	}
+
+	if w.Stalking && !w.Pounced {
+		// Cat creeps closer (slower than normal walking)
+		if c.pet.AnimFrame%5 == 0 {
+			if adv.CatX < w.X-2 {
+				adv.CatX++
+			}
+		}
+
+		// Wildlife might move
+		if c.pet.AnimFrame%7 == 0 {
+			w.X += rand.Intn(3) - 1 // Random movement
+			if w.X < 3 {
+				w.X = 3
+			}
+		}
+
+		// Check if close enough to pounce
+		dist := w.X - adv.CatX
+		if dist < 0 {
+			dist = -dist
+		}
+		if dist <= 3 {
+			// Pounce!
+			w.Pounced = true
+			c.pet.State = "jumping"
+			c.pet.Pos.Y = 2
+
+			// Roll for catch
+			if rand.Intn(100) < w.CatchChance {
+				w.Caught = true
+				adv.TotalCatches++
+				c.pet.Happiness = min(100, c.pet.Happiness+10)
+				c.pet.LastThought = c.getAdventureThought(w.Type, "catch")
+				// Trophy emoji
+				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+					Emoji:     "🏆",
+					Pos:       pos2D{X: adv.CatX, Y: 2},
+					Velocity:  pos2D{X: 0, Y: 0},
+					ExpiresAt: now.Add(2 * time.Second),
+				})
+			} else {
+				w.Escaped = true
+				c.pet.LastThought = c.getAdventureThought(w.Type, "escape")
+			}
+		}
+	}
+}
+
+// getAdventureThought returns a random thought for the given wildlife and phase
+func (c *Coordinator) getAdventureThought(wildlife, phase string) string {
+	if thoughts, ok := adventureThoughts[wildlife]; ok {
+		if phaseThoughts, ok := thoughts[phase]; ok && len(phaseThoughts) > 0 {
+			return phaseThoughts[rand.Intn(len(phaseThoughts))]
+		}
+	}
+	return ""
+}
+
+// renderAdventurePlayArea renders the play area during an adventure
+func (c *Coordinator) renderAdventurePlayArea(safePlayWidth int, petSprite string, sprites petSprites) (highAir, lowAir, ground string) {
+	adv := &c.pet.Adventure
+	biome := adventureBiomes[adv.Biome]
+
+	// Get biome ground character
+	groundChar := biome.Ground
+	if groundChar == "" {
+		groundChar = "·"
+	}
+
+	// Build sprite maps for each row
+	highAirSprites := make(map[int]string)
+	lowAirSprites := make(map[int]string)
+	groundSprites := make(map[int]string)
+
+	// Deterministic scenery placement based on scene offset
+	// Place scenery elements at fixed intervals, offset by scroll position
+	for i := 0; i < safePlayWidth; i++ {
+		worldX := i + adv.SceneOffset
+		// Ground scenery every 7 columns
+		if worldX%7 == 0 && len(biome.Scenery) > 0 {
+			idx := (worldX / 7) % len(biome.Scenery)
+			emoji := biome.Scenery[idx]
+			// Only place on ground if not a flying creature
+			if emoji != "🦋" {
+				groundSprites[i] = emoji
+			}
+		}
+		// Air scenery every 11 columns (less frequent)
+		if worldX%11 == 0 && len(biome.Scenery) > 0 {
+			idx := (worldX / 11) % len(biome.Scenery)
+			emoji := biome.Scenery[idx]
+			// Butterflies and birds in air
+			if emoji == "🦋" || emoji == "🐦" {
+				lowAirSprites[i] = emoji
+			}
+		}
+	}
+
+	// Place cat at its adventure position
+	catX := adv.CatX
+	if catX >= 0 && catX < safePlayWidth {
+		// Cat is on ground or in air based on pet.Pos.Y
+		if c.pet.Pos.Y >= 2 {
+			highAirSprites[catX] = petSprite
+		} else if c.pet.Pos.Y == 1 {
+			lowAirSprites[catX] = petSprite
+		} else {
+			groundSprites[catX] = petSprite
+		}
+	}
+
+	// Place wildlife if present
+	if adv.Wildlife != nil && !adv.Wildlife.Escaped {
+		w := adv.Wildlife
+		wx := w.X
+		if wx >= 0 && wx < safePlayWidth {
+			switch w.Y {
+			case 2:
+				highAirSprites[wx] = w.Emoji
+			case 1:
+				lowAirSprites[wx] = w.Emoji
+			default:
+				groundSprites[wx] = w.Emoji
+			}
+		}
+	}
+
+	// Place floating items (like "!" for spotting)
+	for _, item := range c.pet.FloatingItems {
+		if item.Pos.X >= 0 && item.Pos.X < safePlayWidth {
+			switch item.Pos.Y {
+			case 2:
+				highAirSprites[item.Pos.X] = item.Emoji
+			case 1:
+				lowAirSprites[item.Pos.X] = item.Emoji
+			default:
+				groundSprites[item.Pos.X] = item.Emoji
+			}
+		}
+	}
+
+	// Build the rows
+	highAir = buildAirRow(highAirSprites, safePlayWidth)
+	lowAir = buildAirRow(lowAirSprites, safePlayWidth)
+	ground = buildSpriteRow(groundSprites, groundChar, safePlayWidth)
+
+	return highAir, lowAir, ground
 }
 
 // handleWidthSync checks if the current width matches global state and syncs if needed
@@ -5719,6 +6190,72 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	safePlayWidth := playWidth - 1
 	c.petLayout.PlayWidth = safePlayWidth
 
+	// === ADVENTURE MODE RENDERING ===
+	// If adventure is active, render adventure play area instead of normal one
+	if c.pet.Adventure.Active {
+		highAirLine, lowAirLine, groundContent := c.renderAdventurePlayArea(safePlayWidth, petSprite, sprites)
+
+		c.petLayout.HighAirLine = currentLine
+		result.WriteString(zone.Mark("pet:air_high", highAirLine) + "\n")
+		currentLine++
+
+		c.petLayout.LowAirLine = currentLine
+		result.WriteString(zone.Mark("pet:air_low", lowAirLine) + "\n")
+		currentLine++
+
+		c.petLayout.GroundLine = currentLine
+		groundLine := zone.Mark("pet:ground", groundContent)
+		result.WriteString(groundLine + "\n")
+		currentLine++
+
+		// Divider before stats
+		result.WriteString(renderDivider())
+		currentLine++
+
+		// Stats line: hunger | happiness with visual bars
+		statusStyle := lipgloss.NewStyle()
+		if petFg != "" {
+			statusStyle = statusStyle.Foreground(lipgloss.Color(petFg))
+		}
+		hungerIcon := sprites.HungerIcon
+		happyIcon := sprites.HappyIcon
+		if c.pet.Happiness < 30 {
+			happyIcon = sprites.SadIcon
+		}
+		hungerBar := renderStatusBar(c.pet.Hunger, 5)
+		happyBar := renderStatusBar(c.pet.Happiness, 5)
+		hungerBarStyled := colorStatusBar(hungerBar, c.pet.Hunger)
+		happyBarStyled := colorStatusBar(happyBar, c.pet.Happiness)
+		statusLine := fmt.Sprintf("%s%s %s%s", hungerIcon, hungerBarStyled, happyIcon, happyBarStyled)
+		result.WriteString(statusStyle.Render(statusLine) + "\n")
+		currentLine++
+
+		c.petLayout.WidgetHeight = currentLine
+
+		for i := 0; i < petCfg.PaddingBot; i++ {
+			result.WriteString("\n")
+		}
+		if petCfg.DividerBottom != "" {
+			dividerStyle := lipgloss.NewStyle()
+			if dividerFg != "" {
+				dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
+			}
+			divWidth := runewidth.StringWidth(petCfg.DividerBottom)
+			if divWidth > 0 {
+				repeatCount := (width - 1) / divWidth
+				if repeatCount < 1 {
+					repeatCount = 1
+				}
+				result.WriteString(dividerStyle.Render(strings.Repeat(petCfg.DividerBottom, repeatCount)) + "\n")
+			}
+		}
+		for i := 0; i < petCfg.MarginBot; i++ {
+			result.WriteString("\n")
+		}
+		return result.String()
+	}
+
+	// === NORMAL PLAY AREA RENDERING ===
 	// Get raw positions
 	petX := c.pet.Pos.X
 	if petX < 0 {

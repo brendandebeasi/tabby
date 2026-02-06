@@ -157,10 +157,14 @@ type PetWidget struct {
 	ActionChance    int    `yaml:"action_chance"`    // % chance to do random action when idle (default: 15)
 	CanDie          bool   `yaml:"can_die"`          // If true, pet dies when starved; if false, just guilt trips
 	TouchButtons    bool   `yaml:"touch_buttons"`    // Show large touch-friendly action buttons
+	// Adventure mode settings
+	AdventureEnabled bool `yaml:"adventure_enabled"` // Enable random adventure events (default: true)
+	AdventureChance  int  `yaml:"adventure_chance"`  // % chance per idle tick to start adventure (default: 5)
 	// LLM settings for thoughts
-	LLMProvider string `yaml:"llm_provider"` // openai | anthropic | ollama (default: anthropic)
-	LLMModel    string `yaml:"llm_model"`    // Model name (default: claude-3-haiku-20240307)
-	LLMAPIKey   string `yaml:"llm_api_key"`  // API key (or use env: ANTHROPIC_API_KEY, OPENAI_API_KEY)
+	LLMProvider         string `yaml:"llm_provider"`          // openai | anthropic | ollama (default: anthropic)
+	LLMModel            string `yaml:"llm_model"`             // Model name (default: claude-3-haiku-20240307)
+	LLMAPIKey           string `yaml:"llm_api_key"`           // API key (or use env: ANTHROPIC_API_KEY, OPENAI_API_KEY)
+	ThoughtRefreshHours int    `yaml:"thought_refresh_hours"` // Hours between LLM thought generation (default: 12)
 	// Custom icons (override style preset)
 	Icons PetIcons `yaml:"icons"` // Custom icons for each element
 	// Styling (same as other widgets)
