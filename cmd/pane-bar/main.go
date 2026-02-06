@@ -28,6 +28,16 @@ type model struct {
 	windowIdx  int
 }
 
+// clickRegion tracks clickable areas for mouse handling
+type clickRegion struct {
+	startX int
+	endX   int
+	action string
+	paneID string
+}
+
+var clickRegions []clickRegion
+
 // ... (skipping some parts to find View)
 
 func (m model) getActiveFg() string {
