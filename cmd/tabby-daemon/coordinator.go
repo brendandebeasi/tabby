@@ -4364,6 +4364,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			// numbering that matches sidebar order regardless of tmux renumbering)
 			// Display is 0-indexed to match tmux window indices
 			displayName := win.Name
+			if win.Icon != "" {
+				displayName = win.Icon + " " + displayName
+			}
 			visualNum := c.windowVisualPos[win.ID]
 			baseContent := fmt.Sprintf("%d. %s", visualNum, displayName)
 
@@ -4902,6 +4905,9 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		// Build tab content with group prefix
 		// Display is 0-indexed to match tmux window indices
 		displayName := win.Name
+		if win.Icon != "" {
+			displayName = win.Icon + " " + displayName
+		}
 		visualNum := c.windowVisualPos[win.ID]
 		baseContent := fmt.Sprintf("%d. %s%s", visualNum, groupPrefix, displayName)
 
@@ -8213,6 +8219,34 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 	}
 	resetColorCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_color", win.Index)
 	args = append(args, "  Reset to Default", "d", resetColorCmd)
+
+	// Set Icon submenu
+	args = append(args, "-Set Icon", "", "")
+	iconOptions := []struct {
+		name string
+		icon string
+		key  string
+	}{
+		{"Terminal", "", "1"},
+		{"Code", "", "2"},
+		{"Folder", "", "3"},
+		{"Git", "", "4"},
+		{"Bug", "", "5"},
+		{"Test", "", "6"},
+		{"Database", "", "7"},
+		{"Globe", "", "8"},
+		{"Star", "★", "s"},
+		{"Heart", "❤", "h"},
+		{"Fire", "🔥", "f"},
+		{"Rocket", "🚀", "r"},
+		{"Lightning", "⚡", "l"},
+	}
+	for _, opt := range iconOptions {
+		setIconCmd := fmt.Sprintf("set-window-option -t :%d @tabby_icon '%s'", win.Index, opt.icon)
+		args = append(args, fmt.Sprintf("  %s %s", opt.icon, opt.name), opt.key, setIconCmd)
+	}
+	resetIconCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_icon", win.Index)
+	args = append(args, "  Remove Icon", "0", resetIconCmd)
 
 	// Separator
 	args = append(args, "", "", "")

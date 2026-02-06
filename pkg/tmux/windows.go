@@ -190,6 +190,7 @@ type Window struct {
 	NameLocked  bool   // Window name was explicitly set by user (set via @tabby_name_locked)
 	SyncWidth   bool   // Sync sidebar width with global setting (set via @tabby_sync_width, default true)
 	Pinned      bool   // Window is pinned to top of sidebar (set via @tabby_pinned option)
+	Icon        string // Custom icon/emoji for window (set via @tabby_icon option)
 	Panes       []Pane
 }
 
@@ -202,7 +203,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}\x1f#{@tabby_pinned}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}\x1f#{@tabby_pinned}\x1f#{@tabby_icon}")
 	cmd := exec.Command("tmux", args...)
 	out, err := cmd.Output()
 	if err != nil {
@@ -294,6 +295,11 @@ func ListWindows() ([]Window, error) {
 			tabbyPinned := strings.TrimSpace(parts[19])
 			pinned = tabbyPinned == "1" || tabbyPinned == "true"
 		}
+		// Icon from @tabby_icon option
+		icon := ""
+		if len(parts) >= 21 {
+			icon = strings.TrimSpace(parts[20])
+		}
 		// Session ID safety net: skip windows that belong to a different session.
 		// tmux list-windows -t $SESSION can transiently return wrong-session windows.
 		if sessionTarget != "" && len(parts) >= 19 {
@@ -319,6 +325,7 @@ func ListWindows() ([]Window, error) {
 			NameLocked:  nameLocked,
 			SyncWidth:   syncWidth,
 			Pinned:      pinned,
+			Icon:        icon,
 		})
 	}
 
