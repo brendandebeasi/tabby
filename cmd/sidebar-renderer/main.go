@@ -244,6 +244,23 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Send subscribe with initial size
 		m.sendSubscribe()
+
+		// Refresh tmux mouse state after reconnection
+		// This fixes clicks not working after daemon restart
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			// Toggle mouse mode to force tmux to re-sync with terminal
+			exec.Command("tmux", "set", "-g", "mouse", "off").Run()
+			exec.Command("tmux", "set", "-g", "mouse", "on").Run()
+			// Refresh all clients to ensure mouse tracking is active
+			if out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output(); err == nil {
+				for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+					if tty != "" {
+						exec.Command("tmux", "refresh-client", "-t", tty, "-S").Run()
+					}
+				}
+			}
+		}()
 		return m, nil
 
 	case disconnectedMsg:
