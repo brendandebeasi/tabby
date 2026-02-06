@@ -14,6 +14,92 @@ var (
 	ErrCannotDeleteGroup = errors.New("cannot delete this group")
 )
 
+// IconPreset defines icons for tree, disclosure, and indicators
+type IconPreset struct {
+	// Disclosure triangles (expand/collapse groups)
+	DisclosureExpanded  string
+	DisclosureCollapsed string
+	// Active indicator
+	ActiveIndicator string
+	// Tree connectors
+	TreeBranch         string
+	TreeBranchLast     string
+	TreeConnector      string
+	TreeConnectorPanes string
+	TreeContinue       string
+	// Indicator icons
+	ActivityIcon string
+	BellIcon     string
+	SilenceIcon  string
+	BusyIcon     string
+	InputIcon    string
+}
+
+// IconPresets maps style names to icon sets
+var IconPresets = map[string]IconPreset{
+	"emoji": {
+		DisclosureExpanded:  "v",
+		DisclosureCollapsed: ">",
+		ActiveIndicator:     ">>",
+		TreeBranch:          "",
+		TreeBranchLast:      "",
+		TreeConnector:       "",
+		TreeConnectorPanes:  "",
+		TreeContinue:        "",
+		ActivityIcon:        "!",
+		BellIcon:            "**",
+		SilenceIcon:         "**",
+		BusyIcon:            "**",
+		InputIcon:           "?",
+	},
+	"nerd": {
+		DisclosureExpanded:  "", // nf-fa-chevron_down
+		DisclosureCollapsed: "", // nf-fa-chevron_right
+		ActiveIndicator:     "", // nf-fa-caret_right
+		TreeBranch:          "", // nf-cod-indent (or use box drawing)
+		TreeBranchLast:      "", // nf-cod-indent
+		TreeConnector:       "",
+		TreeConnectorPanes:  "",
+		TreeContinue:        "",
+		ActivityIcon:        "", // nf-fa-circle
+		BellIcon:            "", // nf-fa-bell
+		SilenceIcon:         "", // nf-fa-bell_slash
+		BusyIcon:            "", // nf-fa-spinner (or use loading)
+		InputIcon:           "", // nf-fa-question_circle
+	},
+	"ascii": {
+		DisclosureExpanded:  "[-]",
+		DisclosureCollapsed: "[+]",
+		ActiveIndicator:     ">",
+		TreeBranch:          "+-",
+		TreeBranchLast:      "`-",
+		TreeConnector:       "-",
+		TreeConnectorPanes:  "+-",
+		TreeContinue:        "|",
+		ActivityIcon:        "*",
+		BellIcon:            "!",
+		SilenceIcon:         "-",
+		BusyIcon:            "*",
+		InputIcon:           "?",
+	},
+	"box": {
+		// Box drawing characters (default, works with any font)
+		DisclosureExpanded:  "v",
+		DisclosureCollapsed: ">",
+		ActiveIndicator:     ">>",
+		TreeBranch:          "",
+		TreeBranchLast:      "",
+		TreeConnector:       "",
+		TreeConnectorPanes:  "",
+		TreeContinue:        "",
+		ActivityIcon:        "!",
+		BellIcon:            "**",
+		SilenceIcon:         "**",
+		BusyIcon:            "**",
+		InputIcon:           "?",
+	},
+}
+
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -121,16 +207,19 @@ func DefaultGroup(name string) Group {
 }
 
 func applyDefaults(cfg *Config) {
+	// Apply icon style preset if set (before individual icon defaults)
+	applyIconStyleDefaults(cfg)
+
 	if cfg.Indicators.Activity.Icon == "" {
 		cfg.Indicators.Activity.Icon = "●"
 		cfg.Indicators.Activity.Color = "#f39c12"
 	}
 	if cfg.Indicators.Bell.Icon == "" {
-		cfg.Indicators.Bell.Icon = "🔔"
+		cfg.Indicators.Bell.Icon = "◆"
 		cfg.Indicators.Bell.Color = "#e74c3c"
 	}
 	if cfg.Indicators.Silence.Icon == "" {
-		cfg.Indicators.Silence.Icon = "🔇"
+		cfg.Indicators.Silence.Icon = "○"
 		cfg.Indicators.Silence.Color = "#95a5a6"
 	}
 	if cfg.Indicators.Last.Icon == "" {
@@ -158,5 +247,80 @@ func applyDefaults(cfg *Config) {
 	// Sidebar text defaults
 	if cfg.Sidebar.Colors.InactiveFg == "" {
 		cfg.Sidebar.Colors.InactiveFg = "#f2f2ee"
+	}
+}
+
+// applyIconStyleDefaults applies icon preset values based on IconStyle setting.
+// Only sets values that are empty (allows user overrides).
+func applyIconStyleDefaults(cfg *Config) {
+	style := cfg.Sidebar.IconStyle
+	if style == "" {
+		return // No global icon style set, use individual defaults
+	}
+
+	preset, ok := IconPresets[style]
+	if !ok {
+		return // Unknown style
+	}
+
+	// Apply disclosure icons
+	if cfg.Sidebar.Colors.DisclosureExpanded == "" && preset.DisclosureExpanded != "" {
+		cfg.Sidebar.Colors.DisclosureExpanded = preset.DisclosureExpanded
+	}
+	if cfg.Sidebar.Colors.DisclosureCollapsed == "" && preset.DisclosureCollapsed != "" {
+		cfg.Sidebar.Colors.DisclosureCollapsed = preset.DisclosureCollapsed
+	}
+
+	// Apply active indicator
+	if cfg.Sidebar.Colors.ActiveIndicator == "" && preset.ActiveIndicator != "" {
+		cfg.Sidebar.Colors.ActiveIndicator = preset.ActiveIndicator
+	}
+
+	// Apply tree icons
+	if cfg.Sidebar.Colors.TreeBranch == "" && preset.TreeBranch != "" {
+		cfg.Sidebar.Colors.TreeBranch = preset.TreeBranch
+	}
+	if cfg.Sidebar.Colors.TreeBranchLast == "" && preset.TreeBranchLast != "" {
+		cfg.Sidebar.Colors.TreeBranchLast = preset.TreeBranchLast
+	}
+	if cfg.Sidebar.Colors.TreeConnector == "" && preset.TreeConnector != "" {
+		cfg.Sidebar.Colors.TreeConnector = preset.TreeConnector
+	}
+	if cfg.Sidebar.Colors.TreeConnectorPanes == "" && preset.TreeConnectorPanes != "" {
+		cfg.Sidebar.Colors.TreeConnectorPanes = preset.TreeConnectorPanes
+	}
+	if cfg.Sidebar.Colors.TreeContinue == "" && preset.TreeContinue != "" {
+		cfg.Sidebar.Colors.TreeContinue = preset.TreeContinue
+	}
+
+	// Apply indicator icons
+	if cfg.Indicators.Activity.Icon == "" && preset.ActivityIcon != "" {
+		cfg.Indicators.Activity.Icon = preset.ActivityIcon
+	}
+	if cfg.Indicators.Bell.Icon == "" && preset.BellIcon != "" {
+		cfg.Indicators.Bell.Icon = preset.BellIcon
+	}
+	if cfg.Indicators.Silence.Icon == "" && preset.SilenceIcon != "" {
+		cfg.Indicators.Silence.Icon = preset.SilenceIcon
+	}
+	if cfg.Indicators.Busy.Icon == "" && preset.BusyIcon != "" {
+		cfg.Indicators.Busy.Icon = preset.BusyIcon
+	}
+	if cfg.Indicators.Input.Icon == "" && preset.InputIcon != "" {
+		cfg.Indicators.Input.Icon = preset.InputIcon
+	}
+
+	// Apply to widget styles if not already set
+	if cfg.Widgets.Pet.Style == "" {
+		cfg.Widgets.Pet.Style = style
+	}
+	if cfg.Widgets.Stats.Style == "" {
+		cfg.Widgets.Stats.Style = style
+	}
+	if cfg.Widgets.Session.Style == "" {
+		cfg.Widgets.Session.Style = style
+	}
+	if cfg.Widgets.Git.Style == "" {
+		cfg.Widgets.Git.Style = style
 	}
 }

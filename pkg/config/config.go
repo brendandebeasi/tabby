@@ -41,6 +41,7 @@ type Widgets struct {
 	Git     GitWidget     `yaml:"git"`
 	Session SessionWidget `yaml:"session"`
 	Stats   StatsWidget   `yaml:"stats"`
+	Claude  ClaudeWidget  `yaml:"claude"`
 }
 
 // StatsWidget shows system stats (CPU, memory, battery)
@@ -61,6 +62,31 @@ type StatsWidget struct {
 	CPUFg          string `yaml:"cpu_fg"`          // CPU text color
 	MemoryFg       string `yaml:"memory_fg"`       // Memory text color
 	BatteryFg      string `yaml:"battery_fg"`      // Battery text color
+	Divider        string `yaml:"divider"`         // Divider line above widget
+	DividerFg      string `yaml:"divider_fg"`      // Divider color
+	PaddingTop     int    `yaml:"padding_top"`     // Blank lines above content
+	PaddingBot     int    `yaml:"padding_bottom"`  // Blank lines below content
+	MarginTop      int    `yaml:"margin_top"`      // Lines above top divider
+	MarginBot      int    `yaml:"margin_bottom"`   // Lines below bottom divider
+}
+
+// ClaudeWidget shows Claude Code API usage stats
+type ClaudeWidget struct {
+	Enabled        bool   `yaml:"enabled"`
+	Style          string `yaml:"style"`           // nerd | emoji | ascii | minimal
+	ShowToday      bool   `yaml:"show_today"`      // Show today's cost (default: true)
+	ShowWeek       bool   `yaml:"show_week"`       // Show this week's cost
+	ShowMonth      bool   `yaml:"show_month"`      // Show this month's cost
+	ShowTotal      bool   `yaml:"show_total"`      // Show all-time cost
+	ShowMessages   bool   `yaml:"show_messages"`   // Show message count
+	DBPath         string `yaml:"db_path"`         // Custom path to Claude DB (default: ~/.claude/__store.db)
+	UpdateInterval int    `yaml:"update_interval"` // Seconds between updates (default: 30)
+	Position       string `yaml:"position"`        // top | bottom
+	Pin            bool   `yaml:"pin"`             // Pin to position
+	Priority       int    `yaml:"priority"`        // Order among widgets
+	Fg             string `yaml:"fg"`              // Text color
+	Bg             string `yaml:"bg"`              // Background color
+	CostFg         string `yaml:"cost_fg"`         // Cost value color
 	Divider        string `yaml:"divider"`         // Divider line above widget
 	DividerFg      string `yaml:"divider_fg"`      // Divider color
 	PaddingTop     int    `yaml:"padding_top"`     // Blank lines above content
@@ -255,6 +281,7 @@ type Sidebar struct {
 	PrefixMode      bool          `yaml:"prefix_mode"`     // Flat window list with group prefixes (SD| NAME) instead of hierarchy
 	Theme           string        `yaml:"theme"`           // Color theme: rose-pine-dawn, catppuccin-mocha, dracula, nord, etc.
 	ThemeMode       string        `yaml:"theme_mode"`      // Theme detection: "auto" (default), "dark", or "light" (deprecated, use theme)
+	IconStyle       string        `yaml:"icon_style"`      // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
 	Colors          SidebarColors `yaml:"colors"`          // Manual color overrides (applied on top of theme)
 	TouchButtons    TouchButtons  `yaml:"touch_buttons"`   // Touch mode button styling
 }
@@ -279,6 +306,7 @@ type SidebarColors struct {
 	HeaderFg            string `yaml:"header_fg"`            // Group header text (default: #000000)
 	ActiveFg            string `yaml:"active_fg"`            // Active tab text (default: #ffffff)
 	InactiveFg          string `yaml:"inactive_fg"`          // Inactive tab text (default: #f2f2ee)
+	PaneFg              string `yaml:"pane_fg"`              // Pane text in tree (default: same as inactive_fg)
 	DisclosureFg        string `yaml:"disclosure_fg"`        // Disclosure icon color (default: #000000)
 	DisclosureExpanded  string `yaml:"disclosure_expanded"`  // Expanded state icon (default: ⊟)
 	DisclosureCollapsed string `yaml:"disclosure_collapsed"` // Collapsed state icon (default: ⊞)

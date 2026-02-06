@@ -517,6 +517,14 @@ func (c *Coordinator) getInactiveTextColorWithFallback(configColor string) strin
 	return c.bgDetector.GetDefaultInactiveTextColor()
 }
 
+// getPaneFgWithFallback returns pane text color, falling back to inactive_fg
+func (c *Coordinator) getPaneFgWithFallback() string {
+	if c.config.Sidebar.Colors.PaneFg != "" {
+		return c.config.Sidebar.Colors.PaneFg
+	}
+	return c.getInactiveTextColorWithFallback(c.config.Sidebar.Colors.InactiveFg)
+}
+
 // getTreeFgWithFallback returns tree branch color from config, theme, or detector
 func (c *Coordinator) getTreeFgWithFallback(configColor string) string {
 	if configColor != "" {
@@ -731,18 +739,23 @@ func (c *Coordinator) loadCollapsedGroupsLocked() {
 	}
 
 	// Load per-group options (new format)
-	// Check all configured groups
+	// Build a set of all known group names to check
+	groupsToCheck := make(map[string]bool)
 	for _, group := range c.config.Groups {
-		optName := fmt.Sprintf("@tabby_grp_collapsed_%s", strings.ReplaceAll(group.Name, " ", "_"))
+		groupsToCheck[group.Name] = true
+	}
+	for _, gw := range c.grouped {
+		groupsToCheck[gw.Name] = true
+	}
+	groupsToCheck["Default"] = true
+
+	// Check all known groups for collapsed state
+	for groupName := range groupsToCheck {
+		optName := fmt.Sprintf("@tabby_grp_collapsed_%s", strings.ReplaceAll(groupName, " ", "_"))
 		out, err := exec.Command("tmux", "show-options", "-v", "-q", optName).Output()
 		if err == nil && strings.TrimSpace(string(out)) == "1" {
-			c.collapsedGroups[group.Name] = true
+			c.collapsedGroups[groupName] = true
 		}
-	}
-	// Also check "Default" group
-	out, err = exec.Command("tmux", "show-options", "-v", "-q", "@tabby_grp_collapsed_Default").Output()
-	if err == nil && strings.TrimSpace(string(out)) == "1" {
-		c.collapsedGroups["Default"] = true
 	}
 }
 
@@ -755,22 +768,33 @@ func (c *Coordinator) saveCollapsedGroups() {
 
 // saveCollapsedGroupsLocked saves collapsed state (caller must hold stateMu)
 func (c *Coordinator) saveCollapsedGroupsLocked() {
-	// Save per-group options for ALL configured groups
-	// This ensures expanded groups get their option unset
+	// Build a set of all known group names (from config + current grouped windows)
+	knownGroups := make(map[string]bool)
 	for _, group := range c.config.Groups {
-		optName := fmt.Sprintf("@tabby_grp_collapsed_%s", strings.ReplaceAll(group.Name, " ", "_"))
-		if c.collapsedGroups[group.Name] {
+		knownGroups[group.Name] = true
+	}
+	for _, gw := range c.grouped {
+		knownGroups[gw.Name] = true
+	}
+	knownGroups["Default"] = true
+
+	// Save collapsed state for ALL known groups
+	// This ensures we don't lose state for dynamically created groups
+	for groupName := range knownGroups {
+		optName := fmt.Sprintf("@tabby_grp_collapsed_%s", strings.ReplaceAll(groupName, " ", "_"))
+		if c.collapsedGroups[groupName] {
 			exec.Command("tmux", "set-option", optName, "1").Run()
 		} else {
 			exec.Command("tmux", "set-option", "-u", optName).Run()
 		}
 	}
-	// Also handle Default group
-	optName := "@tabby_grp_collapsed_Default"
-	if c.collapsedGroups["Default"] {
-		exec.Command("tmux", "set-option", optName, "1").Run()
-	} else {
-		exec.Command("tmux", "set-option", "-u", optName).Run()
+
+	// Also save any collapsed groups that aren't in knownGroups (edge case)
+	for groupName := range c.collapsedGroups {
+		if !knownGroups[groupName] {
+			optName := fmt.Sprintf("@tabby_grp_collapsed_%s", strings.ReplaceAll(groupName, " ", "_"))
+			exec.Command("tmux", "set-option", optName, "1").Run()
+		}
 	}
 }
 
@@ -1428,6 +1452,39 @@ func (c *Coordinator) applyThemeToTmux() {
 		exec.Command("tmux", "set-option", "-g", "message-style", style).Run()
 		exec.Command("tmux", "set-option", "-g", "message-command-style", style).Run()
 	}
+
+	// Apply inactive pane dimming if enabled
+	if c.config.PaneHeader.DimInactive {
+		dimOpacity := c.config.PaneHeader.DimOpacity
+		if dimOpacity <= 0 || dimOpacity > 1 {
+			dimOpacity = 0.5 // Default to 50% brightness
+		}
+		// Use theme's ActiveFg as base color for dimming
+		baseFg := c.theme.ActiveFg
+		if baseFg == "" {
+			baseFg = "#ffffff" // Default white
+		}
+		baseBg := c.theme.TerminalBg
+		if baseBg == "" {
+			baseBg = c.theme.SidebarBg
+		}
+
+		// Dim the foreground color for inactive panes
+		dimFg := dimColor(baseFg, dimOpacity)
+
+		inactiveStyle := fmt.Sprintf("fg=%s", dimFg)
+		if baseBg != "" {
+			inactiveStyle += fmt.Sprintf(",bg=%s", baseBg)
+		}
+		exec.Command("tmux", "set-option", "-g", "window-style", inactiveStyle).Run()
+
+		// Active pane gets full brightness
+		activeStyle := fmt.Sprintf("fg=%s", baseFg)
+		if baseBg != "" {
+			activeStyle += fmt.Sprintf(",bg=%s", baseBg)
+		}
+		exec.Command("tmux", "set-option", "-g", "window-active-style", activeStyle).Run()
+	}
 }
 
 // ApplyThemeToPane applies theme-specific styles (like background) to a tmux pane
@@ -1776,13 +1833,32 @@ func (c *Coordinator) UpdatePetState() bool {
 
 	if c.pet.HasTarget {
 		// Move pet toward target X
+		nextX := c.pet.Pos.X
 		if c.pet.Pos.X < c.pet.TargetPos.X {
-			c.pet.Pos.X++
+			nextX++
 			c.pet.Direction = 1
 		} else if c.pet.Pos.X > c.pet.TargetPos.X {
-			c.pet.Pos.X--
+			nextX--
 			c.pet.Direction = -1
 		}
+
+		// Check if next position has poop - if so, jump over it!
+		isPoopAhead := false
+		for _, poopX := range c.pet.PoopPositions {
+			if poopX == nextX || poopX == nextX+1 || poopX == nextX-1 {
+				isPoopAhead = true
+				break
+			}
+		}
+		if isPoopAhead && c.pet.Pos.Y == 0 {
+			// Jump over the poop!
+			c.pet.Pos.Y = 2
+			c.pet.State = "jumping"
+			c.pet.LastThought = randomThought("poop_jump")
+		}
+
+		c.pet.Pos.X = nextX
+
 		// Clamp after move
 		if c.pet.Pos.X > maxX {
 			c.pet.Pos.X = maxX
@@ -1853,6 +1929,12 @@ func (c *Coordinator) UpdatePetState() bool {
 			c.pet.State = "idle"
 			c.pet.LastThought = randomThought("idle")
 		}
+	} else if c.pet.State == "sleeping" {
+		// Wake up after longer duration (~5-10 seconds at 10fps = 50-100 frames)
+		if c.pet.AnimFrame%60 == 0 && rand.Intn(100) < 30 {
+			c.pet.State = "idle"
+			c.pet.LastThought = randomThought("wakeup")
+		}
 	}
 
 	// === FLOATING ITEMS ===
@@ -1873,19 +1955,39 @@ func (c *Coordinator) UpdatePetState() bool {
 	// === RANDOM BEHAVIORS (cat mood) ===
 
 	if c.pet.State == "idle" && !c.pet.HasTarget && c.pet.AnimFrame%10 == 0 {
-		// Configurable chance to do something every 10 frames (default: 15%)
-		actionChance := c.config.Widgets.Pet.ActionChance
-		if actionChance <= 0 {
-			actionChance = 15 // Default: less hyper than before
-		}
-		if rand.Intn(100) < actionChance {
-			action := rand.Intn(9)
+		// Time-based sleeping: cats sleep more at night (2am-6am has 80% sleep chance)
+		hour := now.Hour()
+		if hour >= 2 && hour < 6 && rand.Intn(100) < 80 {
+			c.pet.State = "sleeping"
+			c.pet.LastThought = randomThought("sleepy")
+		} else {
+			// Configurable chance to do something every 10 frames (default: 15%)
+			actionChance := c.config.Widgets.Pet.ActionChance
+			if actionChance <= 0 {
+				actionChance = 15 // Default: less hyper than before
+			}
+			if rand.Intn(100) < actionChance {
+				action := rand.Intn(9)
 			switch action {
 			case 0:
-				// Run across the screen
+				// Run across the screen (avoid poop as destination)
 				c.pet.State = "walking"
 				c.pet.Direction = []int{-1, 1}[rand.Intn(2)]
 				targetX := rand.Intn(maxX)
+				// Avoid selecting a position with poop as target
+				for attempts := 0; attempts < 5; attempts++ {
+					hasPoop := false
+					for _, poopX := range c.pet.PoopPositions {
+						if abs(targetX-poopX) <= 1 {
+							hasPoop = true
+							break
+						}
+					}
+					if !hasPoop {
+						break
+					}
+					targetX = rand.Intn(maxX) // Try another position
+				}
 				c.pet.TargetPos = pos2D{X: targetX, Y: 0}
 				c.pet.HasTarget = true
 				c.pet.LastThought = randomThought("walking")
@@ -1904,8 +2006,21 @@ func (c *Coordinator) UpdatePetState() bool {
 					c.pet.LastThought = "yarn calls to me."
 				}
 			case 3:
-				// Bat at yarn (toss it)
+				// Bat at yarn (toss it) - avoid poop positions
 				tossX := rand.Intn(maxX-2) + 2
+				for attempts := 0; attempts < 5; attempts++ {
+					hasPoop := false
+					for _, poopX := range c.pet.PoopPositions {
+						if abs(tossX-poopX) <= 1 {
+							hasPoop = true
+							break
+						}
+					}
+					if !hasPoop {
+						break
+					}
+					tossX = rand.Intn(maxX-2) + 2
+				}
 				c.pet.YarnPos = pos2D{X: tossX, Y: 2}
 				c.pet.YarnExpiresAt = now.Add(15 * time.Second)
 				c.pet.TargetPos = pos2D{X: tossX, Y: 0}
@@ -1924,10 +2039,13 @@ func (c *Coordinator) UpdatePetState() bool {
 				if dir == 0 {
 					dir = 1
 				}
-				// Gun to the left of pet (always)
-				gunX := c.pet.Pos.X - 1
+				// Gun appears in the direction the pet is facing (fixes #23: physics make sense now)
+				gunX := c.pet.Pos.X + dir
 				if gunX < 0 {
 					gunX = 0
+				}
+				if gunX > maxX {
+					gunX = maxX
 				}
 				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
 					Emoji:     "🔫",
@@ -1935,17 +2053,17 @@ func (c *Coordinator) UpdatePetState() bool {
 					Velocity:  pos2D{X: 0, Y: 0},
 					ExpiresAt: now.Add(1200 * time.Millisecond),
 				})
-				// BANG effect
+				// BANG effect next to gun
 				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
 					Emoji:     "💥",
-					Pos:       pos2D{X: c.pet.Pos.X + dir, Y: 0},
+					Pos:       pos2D{X: gunX + dir, Y: 0},
 					Velocity:  pos2D{X: 0, Y: 0},
 					ExpiresAt: now.Add(400 * time.Millisecond),
 				})
-				// Banana flies slower (velocity 1 instead of 2)
+				// Banana flies from gun position
 				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
 					Emoji:     "🍌",
-					Pos:       pos2D{X: c.pet.Pos.X + dir*2, Y: 1},
+					Pos:       pos2D{X: gunX + dir, Y: 1},
 					Velocity:  pos2D{X: dir, Y: 0},
 					ExpiresAt: now.Add(3 * time.Second),
 				})
@@ -2002,6 +2120,7 @@ func (c *Coordinator) UpdatePetState() bool {
 					}
 					c.pet.LastThought = randomThought("mouse_spot")
 				}
+			}
 			}
 		}
 	}
@@ -3033,6 +3152,12 @@ func (c *Coordinator) getBusyFrames() []string {
 	return []string{"◐", "◓", "◑", "◒"}
 }
 
+// getSlowSpinnerFrame returns a slowed-down spinner frame index
+// This makes each frame visible for 200ms instead of 100ms (fixes #5: animation skips frames)
+func (c *Coordinator) getSlowSpinnerFrame() int {
+	return c.spinnerFrame / 2
+}
+
 // getIndicatorIcon returns the icon for an indicator
 func (c *Coordinator) getIndicatorIcon(ind config.Indicator) string {
 	if ind.Icon != "" {
@@ -3532,7 +3657,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
 
 				busyFrames := c.getBusyFrames()
-				alertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
+				alertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
 			} else if ind.Input.Enabled && win.Input {
 				inputIcon := ind.Input.Icon
 				if inputIcon == "" {
@@ -3541,7 +3666,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Input.Color))
 
 				if len(ind.Input.Frames) > 0 {
-					alertIcon = alertStyle.Render(ind.Input.Frames[c.spinnerFrame%len(ind.Input.Frames)])
+					alertIcon = alertStyle.Render(ind.Input.Frames[c.getSlowSpinnerFrame()%len(ind.Input.Frames)])
 				} else {
 					alertIcon = alertStyle.Render(inputIcon)
 				}
@@ -3776,11 +3901,21 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if win.CustomColor != "" {
 					paneFg = "#ffffff"
 				} else {
-					paneFg = inactiveFg
+					paneFg = c.getPaneFgWithFallback()
+				}
+
+				// Apply dimming to inactive panes if enabled
+				dimmedPaneFg := paneFg
+				if c.config.PaneHeader.DimInactive {
+					dimOpacity := c.config.PaneHeader.DimOpacity
+					if dimOpacity <= 0 || dimOpacity > 1 {
+						dimOpacity = 0.5 // Default 50% brightness for inactive panes
+					}
+					dimmedPaneFg = dimColor(paneFg, dimOpacity)
 				}
 
 				paneStyle := lipgloss.NewStyle().
-					Foreground(lipgloss.Color(paneFg))
+					Foreground(lipgloss.Color(dimmedPaneFg))
 
 				activePaneStyle := paneStyle
 				if isActive {
@@ -3856,7 +3991,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					if pane.AIBusy && pInd.Busy.Enabled {
 						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
 						busyFrames := c.getBusyFrames()
-						paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
+						paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
 					} else if pane.AIInput && pInd.Input.Enabled {
 						inputIcon := pInd.Input.Icon
 						if inputIcon == "" {
@@ -3864,7 +3999,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						}
 						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Input.Color))
 						if len(pInd.Input.Frames) > 0 {
-							paneAlertIcon = alertStyle.Render(pInd.Input.Frames[c.spinnerFrame%len(pInd.Input.Frames)])
+							paneAlertIcon = alertStyle.Render(pInd.Input.Frames[c.getSlowSpinnerFrame()%len(pInd.Input.Frames)])
 						} else {
 							paneAlertIcon = alertStyle.Render(inputIcon)
 						}
@@ -3872,7 +4007,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						// Non-AI pane with foreground process
 						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
 						busyFrames := c.getBusyFrames()
-						paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
+						paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
 					}
 
 					// Leading character: alert icon or space
@@ -4084,7 +4219,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
 
 			busyFrames := c.getBusyFrames()
-			alertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
+			alertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
 		} else if ind.Input.Enabled && win.Input {
 			inputIcon := ind.Input.Icon
 			if inputIcon == "" {
@@ -4093,7 +4228,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Input.Color))
 
 			if len(ind.Input.Frames) > 0 {
-				alertIcon = alertStyle.Render(ind.Input.Frames[c.spinnerFrame%len(ind.Input.Frames)])
+				alertIcon = alertStyle.Render(ind.Input.Frames[c.getSlowSpinnerFrame()%len(ind.Input.Frames)])
 			} else {
 				alertIcon = alertStyle.Render(inputIcon)
 			}
@@ -4286,7 +4421,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				// When window has a custom color (usually dark background), use white text
 				paneFg = "#ffffff"
 			} else {
-				paneFg = inactiveFg
+				paneFg = c.getPaneFgWithFallback()
 			}
 
 			paneStyle := lipgloss.NewStyle().
@@ -4362,7 +4497,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				if pane.AIBusy && pInd.Busy.Enabled {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
 					busyFrames := c.getBusyFrames()
-					paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
+					paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
 				} else if pane.AIInput && pInd.Input.Enabled {
 					inputIcon := pInd.Input.Icon
 					if inputIcon == "" {
@@ -4370,14 +4505,14 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					}
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Input.Color))
 					if len(pInd.Input.Frames) > 0 {
-						paneAlertIcon = alertStyle.Render(pInd.Input.Frames[c.spinnerFrame%len(pInd.Input.Frames)])
+						paneAlertIcon = alertStyle.Render(pInd.Input.Frames[c.getSlowSpinnerFrame()%len(pInd.Input.Frames)])
 					} else {
 						paneAlertIcon = alertStyle.Render(inputIcon)
 					}
 				} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) {
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
 					busyFrames := c.getBusyFrames()
-					paneAlertIcon = alertStyle.Render(busyFrames[c.spinnerFrame%len(busyFrames)])
+					paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
 				}
 
 				paneLeadChar := " "
@@ -4521,6 +4656,20 @@ func (c *Coordinator) collectWidgetEntries(width int) []widgetEntry {
 			zone:     pos,
 			priority: c.config.Widgets.Session.Priority,
 			content:  constrainWidgetWidth(c.renderSessionWidget(width), width),
+		})
+	}
+
+	// Claude usage widget
+	if c.config.Widgets.Claude.Enabled {
+		pos := c.config.Widgets.Claude.Position
+		if pos == "" {
+			pos = "bottom"
+		}
+		entries = append(entries, widgetEntry{
+			name:     "claude",
+			zone:     pos,
+			priority: c.config.Widgets.Claude.Priority,
+			content:  constrainWidgetWidth(c.renderClaudeWidget(width), width),
 		})
 	}
 
@@ -4922,6 +5071,152 @@ func (c *Coordinator) renderSessionWidget(width int) string {
 	return result.String()
 }
 
+// renderClaudeWidget renders the Claude Code API usage widget
+func (c *Coordinator) renderClaudeWidget(width int) string {
+	claudeCfg := c.config.Widgets.Claude
+	if !claudeCfg.Enabled {
+		return ""
+	}
+
+	var result strings.Builder
+
+	// Margins and dividers
+	for i := 0; i < claudeCfg.MarginTop; i++ {
+		result.WriteString("\n")
+	}
+
+	divider := claudeCfg.Divider
+	if divider == "" {
+		divider = "-"
+	}
+	dividerFg := c.getInactiveTextColorWithFallback(claudeCfg.DividerFg)
+	dividerStyle := lipgloss.NewStyle()
+	if dividerFg != "" {
+		dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
+	}
+	dividerWidth := lipgloss.Width(divider)
+	if dividerWidth > 0 {
+		result.WriteString(dividerStyle.Render(strings.Repeat(divider, width/dividerWidth)) + "\n")
+	}
+
+	for i := 0; i < claudeCfg.PaddingTop; i++ {
+		result.WriteString("\n")
+	}
+
+	// Get Claude usage data
+	dbPath := claudeCfg.DBPath
+	if dbPath == "" {
+		homeDir, _ := os.UserHomeDir()
+		dbPath = filepath.Join(homeDir, ".claude", "__store.db")
+	}
+
+	todayCost, weekCost, monthCost, totalCost, msgCount := c.getClaudeUsageStats(dbPath)
+
+	// Style for labels and values
+	labelFg := c.getInactiveTextColorWithFallback(claudeCfg.Fg)
+	costFg := claudeCfg.CostFg
+	if costFg == "" {
+		costFg = "#6bcb77" // Green for money
+	}
+
+	labelStyle := lipgloss.NewStyle()
+	if labelFg != "" {
+		labelStyle = labelStyle.Foreground(lipgloss.Color(labelFg))
+	}
+	costStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(costFg))
+
+	// Icon based on style
+	style := claudeCfg.Style
+	if style == "" {
+		style = "nerd"
+	}
+	icon := ""
+	switch style {
+	case "nerd":
+		icon = " " // nf-md-robot (Claude)
+	case "emoji":
+		icon = "$ "
+	case "ascii":
+		icon = "[CC] "
+	}
+
+	// Header
+	result.WriteString(labelStyle.Render(icon+"Claude") + "\n")
+
+	// Show requested stats
+	showToday := claudeCfg.ShowToday
+	// Default to showing today if nothing specified
+	if !showToday && !claudeCfg.ShowWeek && !claudeCfg.ShowMonth && !claudeCfg.ShowTotal {
+		showToday = true
+	}
+
+	if showToday {
+		result.WriteString(labelStyle.Render("  Today: ") + costStyle.Render(fmt.Sprintf("$%.2f", todayCost)) + "\n")
+	}
+	if claudeCfg.ShowWeek {
+		result.WriteString(labelStyle.Render("  Week:  ") + costStyle.Render(fmt.Sprintf("$%.2f", weekCost)) + "\n")
+	}
+	if claudeCfg.ShowMonth {
+		result.WriteString(labelStyle.Render("  Month: ") + costStyle.Render(fmt.Sprintf("$%.2f", monthCost)) + "\n")
+	}
+	if claudeCfg.ShowTotal {
+		result.WriteString(labelStyle.Render("  Total: ") + costStyle.Render(fmt.Sprintf("$%.2f", totalCost)) + "\n")
+	}
+	if claudeCfg.ShowMessages {
+		result.WriteString(labelStyle.Render(fmt.Sprintf("  Msgs:  %d", msgCount)) + "\n")
+	}
+
+	for i := 0; i < claudeCfg.PaddingBot; i++ {
+		result.WriteString("\n")
+	}
+
+	for i := 0; i < claudeCfg.MarginBot; i++ {
+		result.WriteString("\n")
+	}
+
+	return result.String()
+}
+
+// getClaudeUsageStats queries the Claude Code SQLite database for usage stats
+// Uses sqlite3 command line tool to avoid adding a Go SQLite dependency
+func (c *Coordinator) getClaudeUsageStats(dbPath string) (today, week, month, total float64, msgCount int) {
+	// Check if database exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return 0, 0, 0, 0, 0
+	}
+
+	now := time.Now()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
+	weekStart := todayStart - int64((int(now.Weekday())+6)%7*86400) // Monday
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).Unix()
+
+	// Build a single query that returns all stats
+	query := fmt.Sprintf(`SELECT
+		COALESCE(SUM(CASE WHEN timestamp >= %d THEN cost_usd ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN timestamp >= %d THEN cost_usd ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN timestamp >= %d THEN cost_usd ELSE 0 END), 0),
+		COALESCE(SUM(cost_usd), 0),
+		COUNT(*)
+		FROM assistant_messages;`, todayStart, weekStart, monthStart)
+
+	out, err := exec.Command("sqlite3", "-separator", "|", dbPath, query).Output()
+	if err != nil {
+		return 0, 0, 0, 0, 0
+	}
+
+	// Parse result: "today|week|month|total|count"
+	parts := strings.Split(strings.TrimSpace(string(out)), "|")
+	if len(parts) >= 5 {
+		today, _ = strconv.ParseFloat(parts[0], 64)
+		week, _ = strconv.ParseFloat(parts[1], 64)
+		month, _ = strconv.ParseFloat(parts[2], 64)
+		total, _ = strconv.ParseFloat(parts[3], 64)
+		msgCount, _ = strconv.Atoi(parts[4])
+	}
+
+	return today, week, month, total, msgCount
+}
+
 // constrainWidgetWidth ensures all lines in widget content don't exceed maxWidth
 // This prevents widgets from overflowing the sidebar boundary
 func constrainWidgetWidth(content string, maxWidth int) string {
@@ -4960,6 +5255,14 @@ func constrainWidgetWidth(content string, maxWidth int) string {
 	return result.String()
 }
 
+// abs returns the absolute value of an integer
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // stripAnsi removes ANSI escape codes from a string for accurate width calculation
 func stripAnsi(s string) string {
 	// Simple regex to strip ANSI escape sequences
@@ -4994,6 +5297,42 @@ func placeSprite(sprites map[int]string, x int, sprite string, maxWidth int) int
 		sprites[clampedX] = sprite
 	}
 	return clampedX
+}
+
+// renderStatusBar creates a visual bar representation of a 0-100 value
+// Uses block characters: filled (▓) and empty (░)
+func renderStatusBar(value int, segments int) string {
+	if value < 0 {
+		value = 0
+	}
+	if value > 100 {
+		value = 100
+	}
+	filled := (value * segments) / 100
+	empty := segments - filled
+
+	bar := ""
+	for i := 0; i < filled; i++ {
+		bar += "▓"
+	}
+	for i := 0; i < empty; i++ {
+		bar += "░"
+	}
+	return bar
+}
+
+// colorStatusBar applies color to a status bar based on the value level
+// Red (<30), Yellow (30-60), Green (>60)
+func colorStatusBar(bar string, value int) string {
+	var color string
+	if value < 30 {
+		color = "#ff6b6b" // Red - critical
+	} else if value < 60 {
+		color = "#ffd93d" // Yellow - warning
+	} else {
+		color = "#6bcb77" // Green - good
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(bar)
 }
 
 // buildSpriteRow builds a row with sprites placed at their positions
@@ -5240,7 +5579,27 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		}
 		displayThought = visible
 	}
+	// Add "asking" request bubbles when needs are critical
+	var requestBubble string
+	if c.pet.IsDead {
+		requestBubble = "💀"
+	} else if len(c.pet.PoopPositions) > 0 {
+		requestBubble = "🧹?" // Asking for cleanup
+	} else if c.pet.Hunger < 20 {
+		requestBubble = "🍖?" // Asking for food (urgent)
+	} else if c.pet.Happiness < 20 {
+		requestBubble = "🧶?" // Asking for play (urgent)
+	} else if c.pet.Hunger < 40 {
+		requestBubble = "🍖" // Would like food
+	} else if c.pet.Happiness < 40 {
+		requestBubble = "🧶" // Would like play
+	}
+
 	thoughtLine := sprites.Thought + " " + displayThought
+	if requestBubble != "" {
+		// Show request bubble at the end of thought line
+		thoughtLine = requestBubble + " " + thoughtLine
+	}
 	result.WriteString(thoughtStyle.Render(thoughtLine) + "\n")
 	currentLine++
 
@@ -5362,8 +5721,10 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		placeSprite(groundSprites, poopX, sprites.Poop, safePlayWidth)
 	}
 
-	// Place mouse (if present, clamped to fit within width)
-	placeSprite(groundSprites, c.pet.MousePos.X, sprites.Mouse, safePlayWidth)
+	// Place mouse (only if present - MousePos.X >= 0 means mouse exists)
+	if c.pet.MousePos.X >= 0 {
+		placeSprite(groundSprites, c.pet.MousePos.X, sprites.Mouse, safePlayWidth)
+	}
 
 	// Place cat on top (overwrites anything at that position)
 	if petY == 0 {
@@ -5387,7 +5748,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	result.WriteString(renderDivider())
 	currentLine++
 
-	// Stats line: hunger | happiness | life
+	// Stats line: hunger | happiness with visual bars
 	statusStyle := lipgloss.NewStyle()
 	if petFg != "" {
 		statusStyle = statusStyle.Foreground(lipgloss.Color(petFg))
@@ -5397,10 +5758,16 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	if c.pet.Happiness < 30 {
 		happyIcon = sprites.SadIcon
 	}
-	lifeIcon := sprites.Life
-	// Calculate life based on hunger + happiness average
-	life := (c.pet.Hunger + c.pet.Happiness) / 2
-	statusLine := fmt.Sprintf("%s%d %s%d %s%d", hungerIcon, c.pet.Hunger, happyIcon, c.pet.Happiness, lifeIcon, life)
+
+	// Visual status bars (5 segments each)
+	hungerBar := renderStatusBar(c.pet.Hunger, 5)
+	happyBar := renderStatusBar(c.pet.Happiness, 5)
+
+	// Color bars based on level (red if critical, yellow if low, green if good)
+	hungerBarStyled := colorStatusBar(hungerBar, c.pet.Hunger)
+	happyBarStyled := colorStatusBar(happyBar, c.pet.Happiness)
+
+	statusLine := fmt.Sprintf("%s%s %s%s", hungerIcon, hungerBarStyled, happyIcon, happyBarStyled)
 	result.WriteString(statusStyle.Render(statusLine) + "\n")
 	currentLine++
 
@@ -5899,6 +6266,20 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		width := c.getClientWidth(clientID)
 		dropX := rand.Intn(width-4) + 2
+		// Avoid dropping food on poop
+		for attempts := 0; attempts < 5; attempts++ {
+			hasPoop := false
+			for _, poopX := range c.pet.PoopPositions {
+				if abs(dropX-poopX) <= 1 {
+					hasPoop = true
+					break
+				}
+			}
+			if !hasPoop {
+				break
+			}
+			dropX = rand.Intn(width-4) + 2
+		}
 		c.pet.FoodItem = pos2D{X: dropX, Y: 2} // Drop from high air
 		c.pet.LastThought = "food!"
 		c.savePetState()
@@ -5947,13 +6328,18 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return false // Pet action, no window refresh needed
 
 	case "pet_pet":
-		// Pet the pet - increase happiness
+		// Pet the pet - increase happiness (and wake up if sleeping)
 		c.stateMu.Lock()
+		wasSleeping := c.pet.State == "sleeping"
 		c.pet.Happiness = min(100, c.pet.Happiness+10)
 		c.pet.TotalPets++
 		c.pet.LastPet = time.Now()
 		c.pet.State = "happy"
-		c.pet.LastThought = randomThought("petting")
+		if wasSleeping {
+			c.pet.LastThought = randomThought("wakeup")
+		} else {
+			c.pet.LastThought = randomThought("petting")
+		}
 		c.savePetState()
 		c.stateMu.Unlock()
 		return false // Pet action, no window refresh needed
@@ -6154,13 +6540,17 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 		// Check if clicking on cat (only when cat is on ground, Y=0)
 		if c.pet.Pos.Y == 0 && clickX == c.pet.Pos.X {
-			// Pet the cat
+			// Pet the cat (wake up if sleeping)
+			wasSleeping := c.pet.State == "sleeping"
 			c.pet.Happiness = min(100, c.pet.Happiness+10)
 			c.pet.TotalPets++
 			c.pet.LastPet = time.Now()
 			c.pet.State = "happy"
-			thoughts := []string{"purrrr.", "yes, there.", "acceptable.", "more.", "don't stop."}
-			c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+			if wasSleeping {
+				c.pet.LastThought = randomThought("wakeup")
+			} else {
+				c.pet.LastThought = randomThought("petting")
+			}
 			c.savePetState()
 			c.stateMu.Unlock()
 			return false
@@ -7430,6 +7820,8 @@ var defaultPetThoughts = map[string][]string{
 	"mouse_chase": {"can't escape.", "almost...", "you're mine.", "gotcha soon.", "so close..."},
 	"mouse_catch": {"victory.", "natural order.", "delicious chaos.", "another conquest.", "the circle of life."},
 	"mouse_kill":  {"blender time.", "yeet into void.", "tiny skateboard accident.", "spontaneous combustion.", "piano from above.", "anvil delivery.", "surprise trapdoor.", "rocket malfunction."},
+	"poop_jump":   {"ew ew ew!", "not stepping in that.", "parkour!", "leap of faith.", "over the obstacle.", "nope.", "gross.", "hygiene first."},
+	"wakeup":      {"*yawn*", "good nap.", "what year is it?", "back online.", "rested.", "that was nice.", "5 more minutes...", "ok ok i'm up."},
 }
 
 // randomThought returns a random thought from the given category
@@ -7543,6 +7935,20 @@ func hexToRGB(hexColor string) (int, int, int) {
 	g, _ = strconv.ParseInt(hex[2:4], 16, 64)
 	b, _ = strconv.ParseInt(hex[4:6], 16, 64)
 	return int(r), int(g), int(b)
+}
+
+// dimColor reduces the brightness of a hex color by the given opacity (0.0-1.0)
+// Opacity of 1.0 = no change, 0.5 = half brightness
+func dimColor(hexColor string, opacity float64) string {
+	if hexColor == "" {
+		return hexColor
+	}
+	r, g, b := hexToRGB(hexColor)
+	// Dim by reducing RGB values toward 0
+	r = int(float64(r) * opacity)
+	g = int(float64(g) * opacity)
+	b = int(float64(b) * opacity)
+	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
 }
 
 // HeaderColors holds the fg/bg colors for a pane header border.

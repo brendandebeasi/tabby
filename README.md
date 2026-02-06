@@ -2,6 +2,18 @@
 
 A modern tab manager for tmux with grouping, a clickable vertical sidebar, and deep linking for notifications.
 
+## About This Project
+
+Tabby started as an opinionated solution to a personal problem: managing dozens of tmux windows across multiple projects without losing context. It grew into something others might find useful.
+
+**Design Philosophy:**
+- Customizable - support for Nerd Fonts, emoji, ASCII, and various terminal features
+- Modular - enable only the features you need (sidebar, pane headers, widgets, etc.)
+- Extensible - widget system for adding custom sidebar content (clock, git status, pet, stats, Claude usage)
+- Terminal-agnostic - works with most modern terminals (Ghostty, iTerm, Kitty, Alacritty, etc.)
+
+**Contributing:** PRs are welcome. This is actively developed but cannot promise support for all terminal emulators or use cases. If you find Tabby useful or have ideas, contributions are appreciated.
+
 ```
 +---------------------------+----------------------------------------+
 | Frontend                  |                                        |
