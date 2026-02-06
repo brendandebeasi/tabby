@@ -7749,6 +7749,22 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		catWidth = 1
 	}
 
+	// Check if clicking on sleeping cat (💤 at position 0 on ground)
+	// When sleeping, the cat is represented by 💤 in bottom left corner
+	if c.pet.State == "sleeping" && petY == 0 {
+		zzzWidth := runewidth.StringWidth("💤")
+		if zzzWidth < 1 {
+			zzzWidth = 2
+		}
+		if clickX >= 0 && clickX < zzzWidth {
+			coordinatorDebugLog.Printf("    -> Clicked on sleeping cat (💤)! Waking up.")
+			c.pet.State = "idle"
+			c.pet.LastThought = randomThought("wakeup")
+			c.savePetState()
+			return true
+		}
+	}
+
 	// Check if clicking on cat (account for sprite display width)
 	// Sprites like emojis display wider than their rune position
 	// Use clamped position to match what's rendered on screen
