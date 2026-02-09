@@ -1,0 +1,116 @@
+@import "xterm/css/xterm.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #f6f7f9;
+  color: #0f172a;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 16px;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.status.connected {
+  background: #bbf7d0;
+}
+
+.header input {
+  font-size: 14px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #cbd5f5;
+  width: 120px;
+}
+
+.header button {
+  font-size: 14px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #cbd5f5;
+  background: #ffffff;
+}
+
+.layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.terminal-shell {
+  flex: 1;
+  background: #0b1020;
+  padding: 8px;
+}
+
+.terminal-container,
+.sidebar-terminal {
+  width: 100%;
+  height: 100%;
+}
+
+.drawer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 280px;
+  background: #0b1020;
+  color: #e2e8f0;
+  transform: translateX(-100%);
+  transition: transform 0.2s ease;
+  z-index: 20;
+  border-right: 1px solid #1f2937;
+}
+
+.drawer.open {
+  transform: translateX(0);
+}
+
+.drawer-header {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #94a3b8;
+  border-bottom: 1px solid #1f2937;
+}
+
+.drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+  z-index: 10;
+}
+
+.drawer-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
