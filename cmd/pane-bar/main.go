@@ -28,6 +28,59 @@ type model struct {
 	windowIdx  int
 }
 
+type refreshMsg struct{}
+
+func (m model) Init() tea.Cmd {
+	return triggerRefresh()
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+	case refreshMsg:
+		windows, _ := tmux.ListWindowsWithPanes()
+		var activeWindow *tmux.Window
+		windowIdx := 0
+		for i := range windows {
+			if windows[i].Active {
+				activeWindow = &windows[i]
+				windowIdx = windows[i].Index
+				break
+			}
+		}
+		m.window = activeWindow
+		m.windowIdx = windowIdx
+	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			for _, region := range clickRegions {
+				if msg.X >= region.startX && msg.X < region.endX {
+					switch {
+					case strings.HasPrefix(region.action, "pane:"):
+						_ = exec.Command("tmux", "select-pane", "-t", region.paneID).Run()
+						return m, triggerRefresh()
+					case region.action == "split-v":
+						_ = exec.Command("tmux", "split-window", "-v").Run()
+						return m, delayedRefresh()
+					case region.action == "split-h":
+						_ = exec.Command("tmux", "split-window", "-h").Run()
+						return m, delayedRefresh()
+					case region.action == "close":
+						_ = exec.Command("tmux", "kill-pane").Run()
+						return m, delayedRefresh()
+					}
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
 // clickRegion tracks clickable areas for mouse handling
 type clickRegion struct {
 	startX int
