@@ -248,6 +248,13 @@ func applyDefaults(cfg *Config) {
 	if cfg.Sidebar.Colors.InactiveFg == "" {
 		cfg.Sidebar.Colors.InactiveFg = "#f2f2ee"
 	}
+
+	if cfg.Web.Host == "" {
+		cfg.Web.Host = "127.0.0.1"
+	}
+	if cfg.Web.Port == 0 {
+		cfg.Web.Port = 8080
+	}
 }
 
 // applyIconStyleDefaults applies icon preset values based on IconStyle setting.

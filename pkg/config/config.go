@@ -19,6 +19,7 @@ type Config struct {
 	Widgets       Widgets       `yaml:"widgets"`
 	BusyDetection BusyDetection `yaml:"busy_detection"`
 	TerminalTitle TerminalTitle `yaml:"terminal_title"`
+	Web           WebConfig     `yaml:"web"`
 }
 
 // BusyDetection configures which pane commands trigger the busy indicator.
@@ -33,6 +34,14 @@ type BusyDetection struct {
 type TerminalTitle struct {
 	Enabled bool   `yaml:"enabled"`
 	Format  string `yaml:"format"`
+}
+
+type WebConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	AuthUser string `yaml:"auth_user"`
+	AuthPass string `yaml:"auth_pass"`
 }
 
 type Widgets struct {
@@ -232,22 +241,22 @@ type PromptStyle struct {
 }
 
 type PaneHeader struct {
-	ActiveFg      string  `yaml:"active_fg"`       // Active pane header text (default: #ffffff)
-	ActiveBg      string  `yaml:"active_bg"`       // Active pane header bg fallback (default: #3498db)
-	InactiveFg    string  `yaml:"inactive_fg"`     // Inactive pane header text (default: #cccccc)
-	InactiveBg    string  `yaml:"inactive_bg"`     // Inactive pane header bg fallback (default: #333333)
-	CommandFg     string  `yaml:"command_fg"`      // Dimmed pane text color (default: #aaaaaa)
-	ButtonFg      string  `yaml:"button_fg"`       // Button text color for [|] [-] [x] (default: #888888)
-	DividerFg     string  `yaml:"divider_fg"`      // Divider "|" between panes (default: same as button_fg)
-	BorderFromTab bool    `yaml:"border_from_tab"` // Use tab's color for active pane border (default: false)
-	AutoBorder    bool    `yaml:"auto_border"`     // Auto-set pane border color from window's resolved color (default: false)
-	BorderLines   string  `yaml:"border_lines"`    // Border style: single, double, heavy, simple, number (default: single)
-	BorderFg        string  `yaml:"border_fg"`         // Border foreground color (default: #444444)
-	BorderBg        string  `yaml:"border_bg"`         // Border background color (default: "")
-	ActiveBorderFg  string  `yaml:"active_border_fg"`  // Active pane border fg (default: same as border_fg)
-	ActiveBorderBg  string  `yaml:"active_border_bg"`  // Active pane border bg (default: same as border_bg)
-	DimInactive   bool    `yaml:"dim_inactive"`    // Enable dimming of inactive panes (default: false)
-	DimOpacity    float64 `yaml:"dim_opacity"`     // Opacity for dimmed panes 0.0-1.0 (default: 0.7)
+	ActiveFg       string  `yaml:"active_fg"`        // Active pane header text (default: #ffffff)
+	ActiveBg       string  `yaml:"active_bg"`        // Active pane header bg fallback (default: #3498db)
+	InactiveFg     string  `yaml:"inactive_fg"`      // Inactive pane header text (default: #cccccc)
+	InactiveBg     string  `yaml:"inactive_bg"`      // Inactive pane header bg fallback (default: #333333)
+	CommandFg      string  `yaml:"command_fg"`       // Dimmed pane text color (default: #aaaaaa)
+	ButtonFg       string  `yaml:"button_fg"`        // Button text color for [|] [-] [x] (default: #888888)
+	DividerFg      string  `yaml:"divider_fg"`       // Divider "|" between panes (default: same as button_fg)
+	BorderFromTab  bool    `yaml:"border_from_tab"`  // Use tab's color for active pane border (default: false)
+	AutoBorder     bool    `yaml:"auto_border"`      // Auto-set pane border color from window's resolved color (default: false)
+	BorderLines    string  `yaml:"border_lines"`     // Border style: single, double, heavy, simple, number (default: single)
+	BorderFg       string  `yaml:"border_fg"`        // Border foreground color (default: #444444)
+	BorderBg       string  `yaml:"border_bg"`        // Border background color (default: "")
+	ActiveBorderFg string  `yaml:"active_border_fg"` // Active pane border fg (default: same as border_fg)
+	ActiveBorderBg string  `yaml:"active_border_bg"` // Active pane border bg (default: same as border_bg)
+	DimInactive    bool    `yaml:"dim_inactive"`     // Enable dimming of inactive panes (default: false)
+	DimOpacity     float64 `yaml:"dim_opacity"`      // Opacity for dimmed panes 0.0-1.0 (default: 0.7)
 	// Custom border settings - render our own border instead of tmux's
 	CustomBorder bool   `yaml:"custom_border"` // Enable custom border rendering (default: false)
 	HandleColor  string `yaml:"handle_color"`  // Drag handle color (default: #666666)
