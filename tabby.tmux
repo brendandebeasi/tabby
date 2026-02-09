@@ -15,6 +15,17 @@ if [ ! -f "$CURRENT_DIR/bin/render-status" ]; then
     "$CURRENT_DIR/scripts/install.sh" || true
 fi
 
+# Start local-only Tabby Web bridge if enabled
+WEB_ENABLED=$(grep -A6 "^web:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "enabled:" | awk '{print $2}' | tr -d '"' || echo "false")
+WEB_ENABLED=${WEB_ENABLED:-false}
+if [[ "$WEB_ENABLED" == "true" ]]; then
+    WEB_START_SCRIPT="$CURRENT_DIR/scripts/start_web_bridge.sh"
+    chmod +x "$WEB_START_SCRIPT"
+    run-shell "$WEB_START_SCRIPT"
+    tmux set-hook -g session-created "run-shell '$WEB_START_SCRIPT'"
+    tmux set-hook -g client-attached "run-shell '$WEB_START_SCRIPT'"
+fi
+
 # Auto-renumber windows when one is closed (keeps indices sequential)
 tmux set-option -g renumber-windows on
 

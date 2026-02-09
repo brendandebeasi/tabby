@@ -7,6 +7,13 @@ terminal_title:
   # Format: #{window_index}.#{pane_index} #{window_name} #{pane_current_command}
   format: "tmux #{window_index}.#{pane_index} #{window_name} #{pane_current_command}"
 
+web:
+  enabled: false
+  host: "127.0.0.1"
+  port: 8080
+  auth_user: ""
+  auth_pass: ""
+
 style:
   rounded: true
   separator_left: ""

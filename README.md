@@ -428,6 +428,17 @@ cd ~/.tmux/plugins/tabby
 
 Tabby Web runs a local-only bridge that exposes tmux + sidebar over WebSocket. The bridge only binds to loopback and requires user/password for access.
 
+### Enable in config (default disabled)
+Add this to `~/.tmux/plugins/tmux-tabs/config.yaml`:
+```yaml
+web:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8080
+  auth_user: "tabby"
+  auth_pass: "testpass"
+```
+
 ### Start the bridge
 ```bash
 # Start daemon for a session

@@ -2,9 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 )
 
@@ -55,9 +57,28 @@ func main() {
 		log.Fatalf("server failed to start: %v", err)
 	}
 
+	pidFile := webBridgePidPath(*sessionID)
+	if err := writePidFile(pidFile); err != nil {
+		log.Printf("failed to write pid file: %v", err)
+	} else {
+		defer os.Remove(pidFile)
+	}
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
 	server.Stop()
+}
+
+func webBridgePidPath(sessionID string) string {
+	if sessionID == "" {
+		sessionID = "default"
+	}
+	return filepath.Join("/tmp", fmt.Sprintf("tabby-web-bridge-%s.pid", sessionID))
+}
+
+func writePidFile(path string) error {
+	pid := os.Getpid()
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", pid)), 0644)
 }

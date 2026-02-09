@@ -18,6 +18,7 @@ go build -o bin/tabby-daemon ./cmd/tabby-daemon
 go build -o bin/sidebar-renderer ./cmd/sidebar-renderer
 go build -o bin/pane-header ./cmd/pane-header
 go build -o bin/tabbar ./cmd/tabbar
+go build -o bin/tabby-web-bridge ./cmd/tabby-web-bridge
 
 chmod +x bin/render-status
 chmod +x bin/render-tab
@@ -25,6 +26,7 @@ chmod +x bin/tabby-daemon
 chmod +x bin/sidebar-renderer
 chmod +x bin/pane-header
 chmod +x bin/tabbar
+chmod +x bin/tabby-web-bridge
 chmod +x scripts/toggle_sidebar.sh
 chmod +x scripts/ensure_pane_bar.sh
 chmod +x scripts/signal_pane_bar.sh
