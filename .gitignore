@@ -14,6 +14,7 @@ Thumbs.db
 # Test artifacts
 tests/screenshots/current/
 tests/screenshots/diff/
+tabby-web-*.png
 
 # Temp files
 *.tmp
@@ -25,3 +26,16 @@ tests/screenshots/diff/
 *.dll
 *.so
 *.dylib
+
+# Local binaries
+input-logger
+mousetest
+sidebar-renderer
+tabby-daemon
+tabby-web-bridge
+test-renderer
+pane-header
+
+# Web
+web/node_modules/
+web/dist/
