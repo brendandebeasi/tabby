@@ -11,8 +11,8 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TABBY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)"
+TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INDICATOR="$TABBY_DIR/scripts/set-tabby-indicator.sh"
 
 DRY_RUN=false
@@ -313,9 +313,11 @@ EVENT="${1:-}"
 INDICATOR="__INDICATOR__"
 case "$EVENT" in
     complete|permission|question|subagent_complete)
+        "$INDICATOR" busy 0
         "$INDICATOR" input 1
         ;;
     error)
+        "$INDICATOR" busy 0
         "$INDICATOR" bell 1
         ;;
 esac
@@ -324,13 +326,32 @@ HOOKEOF
     chmod +x "$wrapper"
     echo "  Created $wrapper"
 
-    # Check if opencode-notifier plugin is installed
-    if grep -q "opencode-notifier" "$config" 2>/dev/null; then
-        ok "  opencode-notifier plugin already in opencode.json"
-    else
-        warn "  opencode-notifier plugin not in opencode.json"
-        warn "  Add to plugin list: \"@mohak34/opencode-notifier@latest\""
-    fi
+    # Ensure opencode-notifier plugin is present in opencode.json
+    python3 -c "
+import json
+from pathlib import Path
+
+config_path = Path('$config')
+plugin_name = '@mohak34/opencode-notifier@latest'
+
+try:
+    cfg = json.loads(config_path.read_text())
+except Exception:
+    cfg = {}
+
+plugins = cfg.get('plugin', [])
+if not isinstance(plugins, list):
+    plugins = []
+
+if plugin_name not in plugins:
+    plugins.append(plugin_name)
+    cfg['plugin'] = plugins
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(cfg, indent=2) + '\n')
+    print('  Added opencode-notifier plugin to opencode.json')
+else:
+    print('  opencode-notifier plugin already in opencode.json')
+"
 
     # Create or update notifier config
     local notifier_config="$HOME/.config/opencode/opencode-notifier.json"
