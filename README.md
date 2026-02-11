@@ -226,7 +226,6 @@ This approach doesn't require SSH config changes and won't interfere with other 
 | Web token | `~/.local/state/tabby/web-token` | `TABBY_STATE_DIR` |
 | Runtime | `/tmp/tabby-*` | -- |
 
-Legacy paths (`~/.tmux/plugins/tmux-tabs/config.yaml`, `~/.config/tabby/{pet.json,web-token}`) are detected automatically with a deprecation notice.
 
 Edit `~/.config/tabby/config.yaml`:
 
