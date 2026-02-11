@@ -23,6 +23,51 @@ mkdir -p "$STATE_DIR" 2>/dev/null
 
 SESSION=$(tmux display-message -p '#{session_name}' 2>/dev/null)
 
+log_debug() {
+    echo "=== $(date) ===" >> /tmp/tabby-indicator-debug.log
+    echo "INDICATOR=$INDICATOR VALUE=$VALUE" >> /tmp/tabby-indicator-debug.log
+    echo "$1" >> /tmp/tabby-indicator-debug.log
+}
+
+window_exists() {
+    local win="$1"
+    [ -n "$win" ] || return 1
+    tmux list-windows -F '#{window_index}' 2>/dev/null | grep -qx "$win"
+}
+
+resolve_window_from_state() {
+    local win=""
+
+    if [ -n "$SESSION" ] && [ -f "$STATE_DIR/last-${SESSION}" ]; then
+        win=$(cat "$STATE_DIR/last-${SESSION}" 2>/dev/null || true)
+        if window_exists "$win"; then
+            echo "$win"
+            return 0
+        fi
+    fi
+
+    if [ -n "$SESSION" ]; then
+        local newest
+        newest=$(ls -t "$STATE_DIR"/busy-"${SESSION}"-* 2>/dev/null | head -n1 || true)
+        if [ -n "$newest" ]; then
+            win=${newest##*-}
+            if window_exists "$win"; then
+                echo "$win"
+                return 0
+            fi
+        fi
+    fi
+
+    # Last-resort: infer from current tmux busy flags when hooks race/out-of-pane.
+    win=$(tmux list-windows -F '#{window_index} #{@tabby_busy}' 2>/dev/null | awk '$2 != "" && $2 != "0" {print $1; exit}')
+    if window_exists "$win"; then
+        echo "$win"
+        return 0
+    fi
+
+    return 1
+}
+
 # Get the window for this Claude session
 # Strategy: Use TMUX_PANE if valid, otherwise try to find our parent's pane
 CLAUDE_WIN=""
@@ -62,18 +107,20 @@ if [ -z "$CLAUDE_WIN" ]; then
         CLAUDE_WIN=$(tmux display-message -p '#{window_index}' 2>/dev/null)
         USED_FALLBACK="active-window"
     else
-        # Cannot determine correct window — skip rather than target wrong one
-        echo "=== $(date) ===" >> /tmp/tabby-indicator-debug.log
-        echo "INDICATOR=$INDICATOR VALUE=$VALUE" >> /tmp/tabby-indicator-debug.log
-        echo "TMUX_PANE=$TMUX_PANE -> CLAUDE_WIN=(none, skipping)" >> /tmp/tabby-indicator-debug.log
-        exit 0
+        # Try robust state-based recovery for stop/question/done events.
+        CLAUDE_WIN=$(resolve_window_from_state || true)
+        if [ -n "$CLAUDE_WIN" ]; then
+            USED_FALLBACK="state-recovery"
+        else
+            # Cannot determine correct window — skip rather than target wrong one
+            log_debug "TMUX_PANE=$TMUX_PANE -> CLAUDE_WIN=(none, skipping)"
+            exit 0
+        fi
     fi
 fi
 
 # Debug logging
-echo "=== $(date) ===" >> /tmp/tabby-indicator-debug.log
-echo "INDICATOR=$INDICATOR VALUE=$VALUE" >> /tmp/tabby-indicator-debug.log
-echo "TMUX_PANE=$TMUX_PANE -> CLAUDE_WIN=$CLAUDE_WIN${USED_FALLBACK:+ (fallback: $USED_FALLBACK)}" >> /tmp/tabby-indicator-debug.log
+log_debug "TMUX_PANE=$TMUX_PANE -> CLAUDE_WIN=$CLAUDE_WIN${USED_FALLBACK:+ (fallback: $USED_FALLBACK)}"
 
 case "$INDICATOR" in
     busy)
@@ -81,13 +128,17 @@ case "$INDICATOR" in
             # Mark Claude's window as busy (derived from TMUX_PANE)
             if [ -n "$CLAUDE_WIN" ]; then
                 touch "$STATE_DIR/busy-${SESSION}-${CLAUDE_WIN}"
+                [ -n "$SESSION" ] && echo "$CLAUDE_WIN" > "$STATE_DIR/last-${SESSION}"
                 tmux set-option -t ":$CLAUDE_WIN" -w @tabby_busy 1 2>/dev/null
+                tmux set-option -t ":$CLAUDE_WIN" -wu @tabby_bell 2>/dev/null
                 echo "Set busy on window $CLAUDE_WIN" >> /tmp/tabby-indicator-debug.log
             fi
         else
             # Clear busy ONLY on this Claude's window (not other windows)
             if [ -n "$CLAUDE_WIN" ]; then
                 tmux set-option -t ":$CLAUDE_WIN" -wu @tabby_busy 2>/dev/null
+                rm -f "$STATE_DIR/busy-${SESSION}-${CLAUDE_WIN}" 2>/dev/null || true
+                [ -n "$SESSION" ] && echo "$CLAUDE_WIN" > "$STATE_DIR/last-${SESSION}"
                 echo "Cleared busy on window $CLAUDE_WIN" >> /tmp/tabby-indicator-debug.log
             fi
         fi
@@ -97,11 +148,11 @@ case "$INDICATOR" in
             # Set bell ONLY on this Claude's window and clean up its state file
             if [ -n "$CLAUDE_WIN" ]; then
                 STATE_FILE="$STATE_DIR/busy-${SESSION}-${CLAUDE_WIN}"
-                if [ -f "$STATE_FILE" ]; then
-                    tmux set-option -t ":$CLAUDE_WIN" -w @tabby_bell 1 2>/dev/null
-                    rm -f "$STATE_FILE"
-                    echo "Set bell on window $CLAUDE_WIN" >> /tmp/tabby-indicator-debug.log
-                fi
+                tmux set-option -t ":$CLAUDE_WIN" -wu @tabby_busy 2>/dev/null
+                tmux set-option -t ":$CLAUDE_WIN" -w @tabby_bell 1 2>/dev/null
+                rm -f "$STATE_FILE" 2>/dev/null || true
+                [ -n "$SESSION" ] && echo "$CLAUDE_WIN" > "$STATE_DIR/last-${SESSION}"
+                echo "Set bell on window $CLAUDE_WIN" >> /tmp/tabby-indicator-debug.log
             fi
         else
             # Clear bell on focused window (user is now interacting with it)
@@ -129,7 +180,9 @@ case "$INDICATOR" in
         if [ "$VALUE" = "1" ]; then
             # Set input needed indicator
             if [ -n "$CLAUDE_WIN" ]; then
+                tmux set-option -t ":$CLAUDE_WIN" -wu @tabby_busy 2>/dev/null
                 tmux set-option -t ":$CLAUDE_WIN" -w @tabby_input 1 2>/dev/null
+                [ -n "$SESSION" ] && echo "$CLAUDE_WIN" > "$STATE_DIR/last-${SESSION}"
                 echo "Set input on window $CLAUDE_WIN" >> /tmp/tabby-indicator-debug.log
             fi
         else
