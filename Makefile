@@ -78,38 +78,41 @@ compare-visual: build
 update-baseline: build
 	@$(E2E_DIR)/capture_visual.sh --update-baseline
 
+# Plugin install directory (override with: make install PLUGIN_DIR=~/custom/path)
+PLUGIN_DIR ?= $(HOME)/.tmux/plugins/tabby
+
 # Install to tmux plugins directory
 install: build
-	@echo "Installing to ~/.tmux/plugins/tmux-tabs/"
-	@mkdir -p ~/.tmux/plugins/tmux-tabs/bin
-	@mkdir -p ~/.tmux/plugins/tmux-tabs/scripts
+	@echo "Installing to $(PLUGIN_DIR)/"
+	@mkdir -p $(PLUGIN_DIR)/bin
+	@mkdir -p $(PLUGIN_DIR)/scripts
 	@mkdir -p ~/.config/tabby
-	@cp $(RENDER_STATUS) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(RENDER_TAB) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(TABBY_DAEMON) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(SIDEBAR_RENDERER) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(PANE_HEADER) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(TABBAR) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp scripts/*.sh ~/.tmux/plugins/tmux-tabs/scripts/
-	@cp tmux-tabs.tmux ~/.tmux/plugins/tmux-tabs/
+	@cp $(RENDER_STATUS) $(PLUGIN_DIR)/bin/
+	@cp $(RENDER_TAB) $(PLUGIN_DIR)/bin/
+	@cp $(TABBY_DAEMON) $(PLUGIN_DIR)/bin/
+	@cp $(SIDEBAR_RENDERER) $(PLUGIN_DIR)/bin/
+	@cp $(PANE_HEADER) $(PLUGIN_DIR)/bin/
+	@cp $(TABBAR) $(PLUGIN_DIR)/bin/
+	@cp scripts/*.sh $(PLUGIN_DIR)/scripts/
+	@cp tabby.tmux $(PLUGIN_DIR)/
 	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml
-	@chmod +x ~/.tmux/plugins/tmux-tabs/bin/*
-	@chmod +x ~/.tmux/plugins/tmux-tabs/scripts/*
-	@chmod +x ~/.tmux/plugins/tmux-tabs/tmux-tabs.tmux
+	@chmod +x $(PLUGIN_DIR)/bin/*
+	@chmod +x $(PLUGIN_DIR)/scripts/*
+	@chmod +x $(PLUGIN_DIR)/tabby.tmux
 	@echo "Installation complete. Reload tmux config with: tmux source ~/.tmux.conf"
 
 # Sync development to install location
 sync: build
-	@cp $(RENDER_STATUS) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(RENDER_TAB) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(TABBY_DAEMON) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(SIDEBAR_RENDERER) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(PANE_HEADER) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp $(TABBAR) ~/.tmux/plugins/tmux-tabs/bin/
-	@cp scripts/*.sh ~/.tmux/plugins/tmux-tabs/scripts/
-	@cp tmux-tabs.tmux ~/.tmux/plugins/tmux-tabs/
+	@cp $(RENDER_STATUS) $(PLUGIN_DIR)/bin/
+	@cp $(RENDER_TAB) $(PLUGIN_DIR)/bin/
+	@cp $(TABBY_DAEMON) $(PLUGIN_DIR)/bin/
+	@cp $(SIDEBAR_RENDERER) $(PLUGIN_DIR)/bin/
+	@cp $(PANE_HEADER) $(PLUGIN_DIR)/bin/
+	@cp $(TABBAR) $(PLUGIN_DIR)/bin/
+	@cp scripts/*.sh $(PLUGIN_DIR)/scripts/
+	@cp tabby.tmux $(PLUGIN_DIR)/
 	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml
-	@echo "Synced to ~/.tmux/plugins/tmux-tabs/ (config -> ~/.config/tabby/)"
+	@echo "Synced to $(PLUGIN_DIR)/ (config -> ~/.config/tabby/)"
 
 # Clean build artifacts
 clean:
@@ -128,7 +131,7 @@ dev: build
 
 # Show help
 help:
-	@echo "tmux-tabs Makefile targets:"
+	@echo "Tabby Makefile targets:"
 	@echo ""
 	@echo "  build          - Build all binaries"
 	@echo "  test           - Run all tests (unit + E2E)"
