@@ -89,9 +89,8 @@ go build -o bin/render-tab ./cmd/render-tab/
 ## Testing
 
 ```bash
-# Manual testing - enable the plugin
-tmux set-option -g @tmux_tabs_test 1
-tmux source ~/.tmux.conf
+# Manual testing - reload the plugin
+tmux run-shell ~/.tmux/plugins/tabby/tabby.tmux
 
 # Toggle sidebar
 # prefix + Tab
