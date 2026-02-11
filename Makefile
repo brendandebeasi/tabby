@@ -108,7 +108,7 @@ sync: build
 	@cp $(TABBAR) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp scripts/*.sh ~/.tmux/plugins/tmux-tabs/scripts/
 	@cp tmux-tabs.tmux ~/.tmux/plugins/tmux-tabs/
-	@cp config.yaml ~/.config/tabby/config.yaml
+	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml
 	@echo "Synced to ~/.tmux/plugins/tmux-tabs/ (config -> ~/.config/tabby/)"
 
 # Clean build artifacts

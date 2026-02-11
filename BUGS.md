@@ -167,7 +167,7 @@ The `&` backgrounds `tmux split-window`, not the sidebar. The PID saved is tmux'
 **Resolution**: Centralized in `pkg/paths/paths.go` with XDG-style layout:
 - Config: `~/.config/tabby/config.yaml` (env: `TABBY_CONFIG_DIR`)
 - State: `~/.local/state/tabby/` (env: `TABBY_STATE_DIR`)
-- Legacy paths fall back transparently with deprecation notice
+- No legacy fallback -- config reads exclusively from the XDG path
 
 ---
 
