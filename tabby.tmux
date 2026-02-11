@@ -389,9 +389,9 @@ tmux set-hook -g pane-exited "run-shell '$PRESERVE_RATIOS_SCRIPT'; run-shell '$C
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'"
 
-# Auto-start sidebar on new session creation
-# Use the daemon toggle script to ensure proper startup logic
-tmux set-hook -g session-created "run-shell '$CURRENT_DIR/scripts/toggle_sidebar.sh'"
+# Ensure sidebar/tabbar panes exist for newly created sessions/windows
+# (do not toggle global mode on session creation)
+tmux set-hook -g session-created "run-shell '$ENSURE_SIDEBAR_SCRIPT'"
 
 # Maintain sidebar width after terminal resize
 # (RESIZE_SIDEBAR_SCRIPT already defined above for window-unlinked hook)
@@ -449,3 +449,10 @@ tmux bind-key 7 select-window -t :=6
 tmux bind-key 8 select-window -t :=7
 tmux bind-key 9 select-window -t :=8
 tmux bind-key 0 select-window -t :=9
+
+# First-run bootstrap: if no mode has ever been set, default to enabled.
+INITIAL_MODE=$(tmux show-options -gqv @tmux-tabs-sidebar 2>/dev/null || echo "")
+if [ -z "$INITIAL_MODE" ]; then
+    tmux set-option -g @tmux-tabs-sidebar "enabled"
+    tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT"
+fi
