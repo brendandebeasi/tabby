@@ -35,6 +35,11 @@ instant refresh. It auto-detects which tmux window the tool is running in via
 | `bell 1`  | Task completed / exited    | Diamond   |
 | `bell 0`  | Acknowledged               | (clears)  |
 
+Common semantic states:
+- `working` => `busy 1`
+- `question` => `busy 0` then `input 1`
+- `done` => `busy 0` then `input 1` (or `bell 1` for completion alert)
+
 ### Event Mapping
 
 Every AI tool has slightly different event names, but they map to the same
@@ -279,9 +284,11 @@ small wrapper:
 EVENT="$1"
 case "$EVENT" in
     complete|permission|question)
+        /path/to/tabby/scripts/set-tabby-indicator.sh busy 0
         /path/to/tabby/scripts/set-tabby-indicator.sh input 1
         ;;
     error)
+        /path/to/tabby/scripts/set-tabby-indicator.sh busy 0
         /path/to/tabby/scripts/set-tabby-indicator.sh bell 1
         ;;
 esac
@@ -339,7 +346,7 @@ Then in the notifier config:
 ## Quick Setup
 
 Replace `/path/to/tabby` with your actual tabby installation path in all configs
-above. Typically `~/.tmux/plugins/tmux-tabs` or wherever you cloned it.
+above. Typically `~/.tmux/plugins/tabby` or wherever you cloned it.
 
 To verify the script works:
 
@@ -352,6 +359,14 @@ To verify the script works:
 ```
 
 Debug logs are written to `/tmp/tabby-indicator-debug.log`.
+
+Look for skipped updates with:
+
+```bash
+rg "CLAUDE_WIN=\(none, skipping\)" /tmp/tabby-indicator-debug.log
+```
+
+Recent versions include state-recovery fallback to reduce skipped `busy 0`/`input 1`/`bell 1` transitions.
 
 ---
 
