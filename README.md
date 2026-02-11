@@ -424,6 +424,44 @@ cd ~/.tmux/plugins/tabby
 ./tests/e2e/test_edge_cases.sh
 ```
 
+## Tabby Web (Local-Only)
+
+Tabby Web runs a local-only bridge that exposes tmux + sidebar over WebSocket. The bridge only binds to loopback and requires user/password for access.
+
+### Enable in config (default disabled)
+Add this to `~/.tmux/plugins/tmux-tabs/config.yaml`:
+```yaml
+web:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8080
+  auth_user: "tabby"
+  auth_pass: "testpass"
+```
+
+### Start the bridge
+```bash
+# Start daemon for a session
+go run ./cmd/tabby-daemon -session tabby-web-test
+
+# Start web bridge (loopback only) with auth
+go run ./cmd/tabby-web-bridge -session tabby-web-test -host 127.0.0.1 -port 8080 -auth-user tabby -auth-pass testpass
+```
+
+### Start the web client
+```bash
+cd web
+npm install
+npm run dev
+```
+
+### Connect in browser
+Open `http://127.0.0.1:5173/?token=<token>&user=<user>&pass=<pass>&pane=<pane_id>&ws=127.0.0.1:8080`
+
+- Token is stored at `~/.config/tabby/web-token`
+- Pane ID can be retrieved with `tmux list-panes -t tabby-web-test -F '#{pane_id}'`
+- The bridge rejects non-loopback requests
+
 ### Project Structure
 ```
 tabby/
