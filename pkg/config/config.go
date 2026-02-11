@@ -1,7 +1,7 @@
 package config
 
 import (
-	"github.com/b/tmux-tabs/pkg/paths"
+	"github.com/brendandebeasi/tabby/pkg/paths"
 )
 
 type Config struct {

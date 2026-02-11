@@ -163,7 +163,7 @@ fi
 echo ""
 echo "Test 10: Signal Sidebar Refresh"
 SESSION_ID=$(tmux display-message -p '#{session_id}')
-PID_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.pid"
+PID_FILE="/tmp/tabby-sidebar-${SESSION_ID}.pid"
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")
     if kill -0 "$PID" 2>/dev/null; then

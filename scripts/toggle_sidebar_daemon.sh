@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Toggle tmux-tabs sidebar with daemon-based rendering
+# Toggle tabby sidebar with daemon-based rendering
 # One daemon process + lightweight renderers in each window
 
 set -eu
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && cd .. >/dev/null 2>&1 && pwd)"
 SESSION_ID=$(tmux display-message -p '#{session_id}')
-SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
+SIDEBAR_STATE_FILE="/tmp/tabby-sidebar-${SESSION_ID}.state"
 DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
 
@@ -32,7 +32,7 @@ if [ ! -f "$DAEMON_BIN" ] || [ ! -f "$RENDERER_BIN" ]; then
 fi
 
 # Get current state from tmux option (most reliable) or state file
-CURRENT_STATE=$(tmux show-options -qv @tmux-tabs-sidebar 2>/dev/null || echo "")
+CURRENT_STATE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
 if [ -z "$CURRENT_STATE" ] && [ -f "$SIDEBAR_STATE_FILE" ]; then
     CURRENT_STATE=$(cat "$SIDEBAR_STATE_FILE" 2>/dev/null || echo "")
 fi
@@ -86,12 +86,12 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
     tmux set-hook -gu client-resized 2>/dev/null || true
 
     echo "disabled" > "$SIDEBAR_STATE_FILE"
-    tmux set-option @tmux-tabs-sidebar "disabled"
+    tmux set-option @tabby_sidebar "disabled"
     tmux set-option -g status on
 else
     # === ENABLE SIDEBARS ===
     echo "enabled" > "$SIDEBAR_STATE_FILE"
-    tmux set-option @tmux-tabs-sidebar "enabled"
+    tmux set-option @tabby_sidebar "enabled"
 
     # Close any existing sidebar/renderer panes first (gracefully with SIGTERM)
     while IFS= read -r line; do

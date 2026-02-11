@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/b/tmux-tabs/pkg/paths"
+	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/skip2/go-qrcode"
 )
 

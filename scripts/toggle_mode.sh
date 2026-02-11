@@ -4,7 +4,7 @@
 set -eu
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE_FILE="/tmp/tmux-tabs-mode.state"
+STATE_FILE="/tmp/tabby-mode.state"
 SESSION_ID=$(tmux display-message -p '#{session_id}')
 
 current_mode=$(cat "$STATE_FILE" 2>/dev/null || echo "horizontal")

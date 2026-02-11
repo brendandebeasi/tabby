@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/b/tmux-tabs/pkg/perf"
+	"github.com/brendandebeasi/tabby/pkg/perf"
 )
 
 // ansiEscapeRegex matches ANSI escape sequences including:

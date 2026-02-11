@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Restore sidebar/tabbar state when client attaches to session
-# Uses tmux user option @tmux-tabs-sidebar for persistence across reattach
+# Uses tmux user option @tabby_sidebar for persistence across reattach
 #
 # Architecture: 1 daemon per session + 1 renderer per window
 # This script ensures the daemon is running and renderers exist in all windows.
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 SESSION_ID=$(tmux display-message -p '#{session_id}')
-SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
+SIDEBAR_STATE_FILE="/tmp/tabby-sidebar-${SESSION_ID}.state"
 DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
 
 # Check tmux user option for persistent state (survives detach/reattach)
-MODE=$(tmux show-options -qv @tmux-tabs-sidebar 2>/dev/null || echo "")
+MODE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
 
 # Also check temp file as fallback
 if [ -z "$MODE" ] && [ -f "$SIDEBAR_STATE_FILE" ]; then

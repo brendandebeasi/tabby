@@ -17,9 +17,9 @@ import (
 
 	zone "github.com/lrstanley/bubblezone"
 
-	"github.com/b/tmux-tabs/pkg/daemon"
-	"github.com/b/tmux-tabs/pkg/perf"
-	"github.com/b/tmux-tabs/pkg/tmux"
+	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/perf"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 var crashLog *log.Logger

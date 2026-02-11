@@ -22,13 +22,13 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 
-	"github.com/b/tmux-tabs/pkg/colors"
-	"github.com/b/tmux-tabs/pkg/paths"
-	"github.com/b/tmux-tabs/pkg/config"
-	"github.com/b/tmux-tabs/pkg/daemon"
-	"github.com/b/tmux-tabs/pkg/grouping"
-	"github.com/b/tmux-tabs/pkg/perf"
-	"github.com/b/tmux-tabs/pkg/tmux"
+	"github.com/brendandebeasi/tabby/pkg/colors"
+	"github.com/brendandebeasi/tabby/pkg/paths"
+	"github.com/brendandebeasi/tabby/pkg/config"
+	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/grouping"
+	"github.com/brendandebeasi/tabby/pkg/perf"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // coordinatorDebugLog is the logger for coordinator debug output

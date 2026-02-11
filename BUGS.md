@@ -1,4 +1,4 @@
-# tmux-tabs Bug Analysis & E2E Test Plan
+# Tabby Bug Analysis & E2E Test Plan
 
 ## Critical Bugs
 
@@ -9,7 +9,7 @@
 **Problem**: 
 The PID file uses `$$` (shell process ID) which changes on every script invocation:
 ```bash
-SIDEBAR_PID_FILE="/tmp/tmux-tabs-sidebar-$$-${TMUX_PANE}.pid"
+SIDEBAR_PID_FILE="/tmp/tabby-sidebar-$$-${TMUX_PANE}.pid"
 ```
 
 **Impact**:
@@ -19,9 +19,9 @@ SIDEBAR_PID_FILE="/tmp/tmux-tabs-sidebar-$$-${TMUX_PANE}.pid"
 
 **Evidence**:
 ```
-/tmp/tmux-tabs-sidebar-56745-.pid
-/tmp/tmux-tabs-sidebar-57132-.pid
-/tmp/tmux-tabs-sidebar-59130-.pid
+/tmp/tabby-sidebar-56745-.pid
+/tmp/tabby-sidebar-57132-.pid
+/tmp/tabby-sidebar-59130-.pid
 ... (11+ orphaned files found)
 ```
 
@@ -29,7 +29,7 @@ SIDEBAR_PID_FILE="/tmp/tmux-tabs-sidebar-$$-${TMUX_PANE}.pid"
 ```bash
 SESSION_ID=$(tmux display-message -p '#{session_id}')
 WINDOW_ID=$(tmux display-message -p '#{window_id}')
-SIDEBAR_PID_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}-${WINDOW_ID}.pid"
+SIDEBAR_PID_FILE="/tmp/tabby-sidebar-${SESSION_ID}-${WINDOW_ID}.pid"
 ```
 
 ---
@@ -58,11 +58,11 @@ SIDEBAR_PANE=$(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" | grep
 
 ### BUG-003: Tmux Hooks Reference Invalid PID Files
 **Severity**: High
-**File**: `tmux-tabs.tmux`
+**File**: `tabby.tmux`
 
 **Problem**:
 ```bash
-tmux set-hook -g window-linked 'run-shell "[ -f /tmp/tmux-tabs-sidebar-$$-${TMUX_PANE}.pid ] && ..."'
+tmux set-hook -g window-linked 'run-shell "[ -f /tmp/tabby-sidebar-$$-${TMUX_PANE}.pid ] && ..."'
 ```
 The `$$` in hooks expands to tmux server's PID (or hook runner's PID), not the sidebar's PID file.
 
@@ -77,7 +77,7 @@ SESSION_ID=#{session_id}
 WINDOW_ID=#{window_id}
 
 # Option 2: Unix socket per session
-/tmp/tmux-tabs-${SESSION_ID}.sock
+/tmp/tabby-daemon-${SESSION_ID}.sock
 ```
 
 ---
@@ -178,7 +178,7 @@ The `&` backgrounds `tmux split-window`, not the sidebar. The PID saved is tmux'
 ```go
 cfg, err := config.LoadConfig(config.DefaultConfigPath())
 if err != nil {
-    fmt.Print("tmux-tabs: config error")
+    fmt.Print("tabby: config error")
     return
 }
 ```
@@ -360,13 +360,13 @@ hooks:
 ```bash
 # Using terminal-notifier or osascript
 terminal-notifier \
-  -title "tmux-tabs" \
+  -title "tabby" \
   -subtitle "Bell in SD|app" \
   -message "Session: main" \
   -open "tmux://select?session=\$0&window=@5"
 
 # Or AppleScript
-osascript -e 'display notification "Activity detected" with title "tmux-tabs"'
+osascript -e 'display notification "Activity detected" with title "tabby"'
 ```
 
 **Deeplink Strategy**:
@@ -375,7 +375,7 @@ Since Ghostty doesn't have URL scheme support yet (discussions #3021, #4379, #59
 
 1. **Tier 1: tmux command** (always works)
    ```bash
-   # Deeplink handler script: ~/.local/bin/tmux-tabs-open
+   # Deeplink handler script: ~/.local/bin/tabby-open
    tmux select-window -t "$SESSION:$WINDOW"
    tmux switch-client -t "$SESSION"
    ```
@@ -392,7 +392,7 @@ Since Ghostty doesn't have URL scheme support yet (discussions #3021, #4379, #59
    ```
 
 3. **Tier 3: Custom URL handler**
-   Register `tmux-tabs://` URL scheme on macOS:
+   Register `tabby://` URL scheme on macOS:
    ```xml
    <!-- Info.plist for helper app -->
    <key>CFBundleURLTypes</key>
@@ -400,7 +400,7 @@ Since Ghostty doesn't have URL scheme support yet (discussions #3021, #4379, #59
      <dict>
        <key>CFBundleURLSchemes</key>
        <array>
-         <string>tmux-tabs</string>
+         <string>tabby</string>
        </array>
      </dict>
    </array>
@@ -410,7 +410,7 @@ Since Ghostty doesn't have URL scheme support yet (discussions #3021, #4379, #59
 ```
 tmux hook fires
     ↓
-tmux-tabs receives signal/event
+tabby receives signal/event
     ↓
 Parse event type + window data
     ↓

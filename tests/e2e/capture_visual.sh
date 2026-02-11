@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Visual Capture Script for tmux-tabs
+# Visual Capture Script for tabby
 # Captures terminal output with ANSI codes for visual regression testing
 
 set -euo pipefail
@@ -10,7 +10,7 @@ tmux() { command tmux -L "$TABBY_TEST_SOCKET" -f /dev/null "$@"; }
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 SCREENSHOT_DIR="$PROJECT_ROOT/tests/screenshots"
-TEST_SESSION="tmux-tabs-visual-test"
+TEST_SESSION="tabby-visual-test"
 
 mkdir -p "$SCREENSHOT_DIR"/{baseline,current,diffs}
 
@@ -174,7 +174,7 @@ main() {
     done
     
     log_info "========================================"
-    log_info "tmux-tabs Visual Capture"
+    log_info "Tabby Visual Capture"
     log_info "========================================"
     
     # Build first

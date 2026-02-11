@@ -9,7 +9,7 @@ tmux set-window-option -t "$WINDOW_ID" @tabby_name_locked 1 2>/dev/null || true
 
 # Signal sidebar to refresh
 SESSION_ID=$(tmux display-message -p '#{session_id}')
-PID_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.pid"
+PID_FILE="/tmp/tabby-sidebar-${SESSION_ID}.pid"
 if [ -f "$PID_FILE" ]; then
     read -r PID < "$PID_FILE"
     kill -USR1 "$PID" 2>/dev/null || true

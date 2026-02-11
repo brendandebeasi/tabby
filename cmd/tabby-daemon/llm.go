@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/b/tmux-tabs/pkg/paths"
+	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/gollm/llm"
 )

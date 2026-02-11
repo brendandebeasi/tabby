@@ -5,7 +5,7 @@
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 
 # Check current mode - only run in horizontal mode
-MODE=$(tmux show-options -qv @tmux-tabs-sidebar 2>/dev/null || echo "")
+MODE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
 if [ "$MODE" = "enabled" ]; then
     # Vertical sidebar mode - no pane bar needed
     exit 0

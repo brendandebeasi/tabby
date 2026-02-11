@@ -5,7 +5,7 @@ set -eu
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 SESSION_ID=$(tmux display-message -p '#{session_id}')
-SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
+SIDEBAR_STATE_FILE="/tmp/tabby-sidebar-${SESSION_ID}.state"
 TABBAR_HEIGHT=2  # 2 lines: 1 for tabs, 1 for panes (shown when >1 pane)
 
 # Get current window to return to (before any pane changes)
@@ -22,7 +22,7 @@ done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null 
 
 # Mark sidebar as disabled
 echo "horizontal" > "$SIDEBAR_STATE_FILE"
-tmux set-option @tmux-tabs-sidebar "horizontal"
+tmux set-option @tabby_sidebar "horizontal"
 
 # Disable tmux's built-in status bar (we're using our own pane)
 tmux set-option -g status off

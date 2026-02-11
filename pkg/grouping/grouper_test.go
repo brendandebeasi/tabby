@@ -3,8 +3,8 @@ package grouping
 import (
 	"testing"
 
-	"github.com/b/tmux-tabs/pkg/config"
-	"github.com/b/tmux-tabs/pkg/tmux"
+	"github.com/brendandebeasi/tabby/pkg/config"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 func TestGroupWindows(t *testing.T) {

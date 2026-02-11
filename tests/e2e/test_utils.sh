@@ -45,8 +45,8 @@ cleanup_test_session() {
     local session_name="${1:-test-session}"
     tmux kill-session -t "$session_name" 2>/dev/null || true
     tmux kill-server 2>/dev/null || true
-    pkill -f "tmux-tabs/bin/sidebar-renderer" 2>/dev/null || true
-    rm -f /tmp/tmux-tabs-sidebar-*.state 2>/dev/null || true
+    pkill -f "tabby/bin/sidebar-renderer" 2>/dev/null || true
+    rm -f /tmp/tabby-sidebar-*.state 2>/dev/null || true
 }
 
 create_test_windows() {

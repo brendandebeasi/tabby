@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Toggle tmux-tabs sidebar using daemon-renderer architecture
+# Toggle tabby sidebar using daemon-renderer architecture
 
 set -eu
 

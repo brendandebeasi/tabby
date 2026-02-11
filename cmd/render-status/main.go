@@ -6,10 +6,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/b/tmux-tabs/pkg/colors"
-	"github.com/b/tmux-tabs/pkg/config"
-	"github.com/b/tmux-tabs/pkg/grouping"
-	"github.com/b/tmux-tabs/pkg/tmux"
+	"github.com/brendandebeasi/tabby/pkg/colors"
+	"github.com/brendandebeasi/tabby/pkg/config"
+	"github.com/brendandebeasi/tabby/pkg/grouping"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 func getTerminalWidth() int {
@@ -85,13 +85,13 @@ func buildIndicators(win tmux.Window, cfg *config.Config) string {
 func main() {
 	cfg, err := config.LoadConfig(config.DefaultConfigPath())
 	if err != nil {
-		fmt.Print("tmux-tabs: config error")
+		fmt.Print("tabby: config error")
 		return
 	}
 
 	windows, err := tmux.ListWindows()
 	if err != nil {
-		fmt.Print("tmux-tabs: not in tmux")
+		fmt.Print("tabby: not in tmux")
 		return
 	}
 

@@ -13,10 +13,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
-	"github.com/b/tmux-tabs/pkg/colors"
-	"github.com/b/tmux-tabs/pkg/config"
-	"github.com/b/tmux-tabs/pkg/grouping"
-	"github.com/b/tmux-tabs/pkg/tmux"
+	"github.com/brendandebeasi/tabby/pkg/colors"
+	"github.com/brendandebeasi/tabby/pkg/config"
+	"github.com/brendandebeasi/tabby/pkg/grouping"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 type model struct {

@@ -20,7 +20,7 @@ if [ -f "$DEBOUNCE_FILE" ]; then
     fi
 fi
 perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null > "$DEBOUNCE_FILE" || date +%s000 > "$DEBOUNCE_FILE"
-SIDEBAR_STATE_FILE="/tmp/tmux-tabs-sidebar-${SESSION_ID}.state"
+SIDEBAR_STATE_FILE="/tmp/tabby-sidebar-${SESSION_ID}.state"
 DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
 
@@ -40,7 +40,7 @@ DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
 RENDERER_BIN="$CURRENT_DIR/bin/sidebar-renderer"
 
 # Get mode from tmux option or state file
-MODE=$(tmux show-options -qv @tmux-tabs-sidebar 2>/dev/null || echo "")
+MODE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
 if [ -z "$MODE" ] && [ -f "$SIDEBAR_STATE_FILE" ]; then
     MODE=$(cat "$SIDEBAR_STATE_FILE" 2>/dev/null || echo "")
 fi

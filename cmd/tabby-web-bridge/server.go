@@ -13,7 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/b/tmux-tabs/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 const (

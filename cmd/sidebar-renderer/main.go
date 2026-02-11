@@ -25,7 +25,7 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 
-	"github.com/b/tmux-tabs/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 var (
