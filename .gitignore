@@ -39,3 +39,21 @@ pane-header
 # Web
 web/node_modules/
 web/dist/
+web/tsconfig.tsbuildinfo
+
+# Local agent/tooling state
+.omc/
+.claude/
+.sisyphus/
+.archive/
+
+# Local scratch and logs
+tmux-*.log
+*.hup
+log.txt
+Untitled
+todos.md
+
+# Runtime-generated helper scripts
+scripts/apply_new_window_group.sh
+scripts/new_window_with_group.sh
