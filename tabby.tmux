@@ -4,9 +4,10 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Check if test mode is enabled (gated feature)
-TEST_MODE=$(tmux show-option -gqv "@tmux_tabs_test")
-if [ "$TEST_MODE" != "1" ]; then
+# Optional kill-switch for troubleshooting.
+# Tabby is enabled by default unless explicitly disabled.
+TABBY_ENABLED=$(tmux show-option -gqv "@tabby_enabled")
+if [ "$TABBY_ENABLED" = "0" ]; then
     exit 0
 fi
 
