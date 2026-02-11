@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/b/tmux-tabs/pkg/config"
+	"github.com/brendandebeasi/tabby/pkg/config"
 )
 
 func main() {

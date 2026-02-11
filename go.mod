@@ -1,4 +1,4 @@
-module github.com/b/tmux-tabs
+module github.com/brendandebeasi/tabby
 
 go 1.24.0
 

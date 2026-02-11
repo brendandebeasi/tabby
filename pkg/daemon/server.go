@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/b/tmux-tabs/pkg/perf"
+	"github.com/brendandebeasi/tabby/pkg/perf"
 )
 
 // ClientInfo tracks per-client state for renderers

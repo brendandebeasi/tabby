@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/b/tmux-tabs/pkg/tmux"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 func main() {

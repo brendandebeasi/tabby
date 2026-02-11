@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/b/tmux-tabs/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 // TestStripAnsi verifies ANSI escape code stripping
