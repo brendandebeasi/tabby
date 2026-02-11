@@ -3661,7 +3661,10 @@ func (c *Coordinator) isTouchMode(width int) bool {
 	if c.config.Sidebar.TouchMode {
 		return true
 	}
-	if os.Getenv("TABBY_TOUCH") == "1" || width < 40 {
+	if os.Getenv("TABBY_TOUCH") == "1" {
+		return true
+	}
+	if os.Getenv("TABBY_TOUCH") == "auto" && width < 40 {
 		return true
 	}
 	return false

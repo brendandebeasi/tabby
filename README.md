@@ -68,7 +68,6 @@ terminal-notifier -title "Build Done" -message "Click to return" \
 Add to your `~/.tmux.conf`:
 ```bash
 set -g @plugin 'brendandebeasi/tabby'
-set -g @tmux_tabs_test 1  # Currently gated - required for activation
 ```
 
 Then reload tmux and install:
@@ -87,7 +86,6 @@ cd ~/.tmux/plugins/tabby
 Add to your `~/.tmux.conf`:
 ```bash
 run-shell ~/.tmux/plugins/tabby/tabby.tmux
-set -g @tmux_tabs_test 1  # Currently gated - required for activation
 ```
 
 ## Usage
@@ -656,7 +654,7 @@ To avoid duplicate notifications (your custom hook + Claude's default), add to `
 ## Troubleshooting
 
 ### Tabs not appearing
-- Ensure `@tmux_tabs_test` is set to `1` in your tmux config
+- Ensure Tabby is not explicitly disabled: `tmux show -gv @tabby_enabled` (should not be `0`)
 - Run `tmux source ~/.tmux.conf` to reload
 - Check if binaries exist: `ls ~/.tmux/plugins/tabby/bin/`
 

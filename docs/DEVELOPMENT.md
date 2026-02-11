@@ -9,9 +9,9 @@
 ## Tests
 
 ```bash
-# Enable plugin in tmux
+# Reload plugin in tmux
 
-tmux set-option -g @tmux_tabs_test 1
+tmux run-shell ~/.tmux/plugins/tabby/tabby.tmux
 
 # Unit tests
 

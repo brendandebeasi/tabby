@@ -75,7 +75,7 @@ sidebar:
   close_button: false
   sort_by: "group"  # "group" or "index"
   debug: true  # Enable debug logging to /tmp/tabby-debug.log
-  touch_mode: false  # Auto-detects small screens (width < 40) or set TABBY_TOUCH=1
+  touch_mode: false  # Force touch mode on when true. For auto mode, set TABBY_TOUCH=auto.
   line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
   # Theme presets: rose-pine-dawn, rose-pine, rose-pine-moon, catppuccin-mocha,
   #   catppuccin-latte, dracula, nord, solarized-dark, solarized-light,
