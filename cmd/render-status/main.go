@@ -85,13 +85,13 @@ func buildIndicators(win tmux.Window, cfg *config.Config) string {
 func main() {
 	cfg, err := config.LoadConfig(config.DefaultConfigPath())
 	if err != nil {
-		fmt.Print("tmux-tabs: config error")
+		fmt.Print("tabby: config error")
 		return
 	}
 
 	windows, err := tmux.ListWindows()
 	if err != nil {
-		fmt.Print("tmux-tabs: not in tmux")
+		fmt.Print("tabby: not in tmux")
 		return
 	}
 

@@ -21,7 +21,7 @@ for win in $(tmux list-windows -F "#I:#W"); do
     idx=$(echo "$win" | cut -d: -f1)
     name=$(echo "$win" | cut -d: -f2-)
     echo -n "   Window $idx ($name): "
-    /Users/b/git/tmux-tabs/bin/render-tab normal "$idx" "$name" ""
+    $SCRIPT_DIR/../bin/render-tab normal "$idx" "$name" ""
 done
 echo ""
 

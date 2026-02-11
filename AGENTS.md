@@ -38,7 +38,7 @@ tabby/
 Windows are grouped by name patterns (regex). Each group has a theme (colors, icon). Windows display in **strict index order** (0, 1, 2...) with group headers appearing inline when the group changes.
 
 ### State Management
-- State stored in tmux option `@tmux-tabs-sidebar` and file `/tmp/tmux-tabs-sidebar-${SESSION_ID}.state`
+- State stored in tmux option `@tabby_sidebar` and file `/tmp/tabby-sidebar-${SESSION_ID}.state`
 - The tmux option is the source of truth for toggle behavior
 
 ## Building
@@ -83,7 +83,7 @@ go build -o bin/render-tab ./cmd/render-tab/
 ### Shell script conventions
 - Use `set -eu` for error handling
 - Get session ID: `SESSION_ID=$(tmux display-message -p '#{session_id}')`
-- State file: `/tmp/tmux-tabs-sidebar-${SESSION_ID}.state`
+- State file: `/tmp/tabby-sidebar-${SESSION_ID}.state`
 - Use process substitution `< <(cmd)` instead of `cmd | while` to avoid subshell issues
 
 ## Testing
@@ -96,12 +96,12 @@ tmux run-shell ~/.tmux/plugins/tabby/tabby.tmux
 # prefix + Tab
 
 # Check sidebar state
-tmux show-options -v @tmux-tabs-sidebar
+tmux show-options -v @tabby_sidebar
 ```
 
 ## Common Issues
 
-1. **Sidebar disappears**: Check state with `tmux show-options -v @tmux-tabs-sidebar`
+1. **Sidebar disappears**: Check state with `tmux show-options -v @tabby_sidebar`
 2. **Click targets wrong**: Ensure `buildWindowRefs()` matches `View()` display order
 3. **Windows out of order**: Check sorting in both `View()` and `buildWindowRefs()`
 4. **ANSI codes visible**: Use `lipgloss.Width()` for ANSI-aware string measurement

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="/Users/b/git/tmux-tabs"
+PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 echo "Testing for tab confusion issues..."
 echo ""

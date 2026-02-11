@@ -8,7 +8,7 @@ tmux() { command tmux -L "$TABBY_TEST_SOCKET" -f /dev/null "$@"; }
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 SCREENSHOT_DIR="$PROJECT_ROOT/tests/screenshots"
-TEST_SESSION="tmux-tabs-visual-test"
+TEST_SESSION="tabby-visual-test"
 
 # Colors
 GREEN='\033[0;32m'
@@ -103,7 +103,7 @@ cat > "$SCREENSHOT_DIR/index.html" << 'EOF'
 <!DOCTYPE html>
 <html>
 <head>
-    <title>tmux-tabs Visual Test Results</title>
+    <title>Tabby Visual Test Results</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -151,7 +151,7 @@ cat > "$SCREENSHOT_DIR/index.html" << 'EOF'
     </style>
 </head>
 <body>
-    <h1>tmux-tabs Visual Test Results</h1>
+    <h1>Tabby Visual Test Results</h1>
     <p>Generated: $(date)</p>
     
     <h2>Test Screenshots</h2>

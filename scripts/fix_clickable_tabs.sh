@@ -2,7 +2,7 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Fixing tmux-tabs clickable functionality..."
+echo "Fixing tabby clickable functionality..."
 
 tmux set-option -g mouse on
 tmux set-option -g status on

@@ -260,7 +260,7 @@ tmux set-window-option -t :1 -u @tabby_group
 
 ### 5.1 Sidebar Mode (Vertical)
 
-**State**: `@tmux-tabs-sidebar = "enabled"`
+**State**: `@tabby_sidebar = "enabled"`
 
 **Characteristics**:
 - Left-side pane in each window running `sidebar` binary
@@ -270,7 +270,7 @@ tmux set-window-option -t :1 -u @tabby_group
 
 ### 5.2 Horizontal Mode
 
-**State**: `@tmux-tabs-sidebar = "horizontal"`
+**State**: `@tabby_sidebar = "horizontal"`
 
 **Characteristics**:
 - Top pane running `tabbar` binary
@@ -279,7 +279,7 @@ tmux set-window-option -t :1 -u @tabby_group
 
 ### 5.3 Disabled Mode
 
-**State**: `@tmux-tabs-sidebar = "disabled"` or empty
+**State**: `@tabby_sidebar = "disabled"` or empty
 
 **Characteristics**:
 - No sidebar/tabbar panes
@@ -445,7 +445,7 @@ log_pass() { echo "[PASS] $1"; ((PASS++)); }
 log_fail() { echo "[FAIL] $1"; ((FAIL++)); }
 
 # Setup: Ensure sidebar mode enabled
-tmux set-option @tmux-tabs-sidebar "enabled"
+tmux set-option @tabby_sidebar "enabled"
 
 # Test 1: Window Creation
 echo "Test 1: Window Creation"
@@ -576,7 +576,7 @@ tmux hook fires (after-select-window, pane-exited, etc.)
 Shell script runs (on_window_select.sh, cleanup_orphan_sidebar.sh)
     |
     v
-Script reads PID file (/tmp/tmux-tabs-sidebar-$SESSION.pid)
+Script reads PID file (/tmp/tabby-sidebar-$SESSION.pid)
     |
     v
 SIGUSR1 sent to sidebar process

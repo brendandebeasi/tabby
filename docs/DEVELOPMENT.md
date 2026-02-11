@@ -19,8 +19,8 @@ go test ./pkg/...
 
 # Integration tests (Docker)
 
-docker build -t tmux-tabs-test -f tests/Dockerfile .
-docker run tmux-tabs-test /plugin/tests/integration/tmux_test.sh
+docker build -t tabby-test -f tests/Dockerfile .
+docker run tabby-test /plugin/tests/integration/tmux_test.sh
 
 # Visual capture tests
 

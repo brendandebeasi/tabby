@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tmux-tabs plugin entry point
+# Tabby plugin entry point
 # Fixes: BUG-003 (hook signal targeting)
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -256,7 +256,7 @@ if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
     tmux set-option -gu status-format 2>/dev/null || true
 
     # Only enable status bar if sidebar mode is NOT active
-    SIDEBAR_STATE=$(tmux show-options -qv @tmux-tabs-sidebar 2>/dev/null || echo "")
+    SIDEBAR_STATE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
     if [ "$SIDEBAR_STATE" != "enabled" ]; then
         tmux set-option -g status on
     fi
@@ -455,8 +455,8 @@ tmux bind-key 9 select-window -t :=8
 tmux bind-key 0 select-window -t :=9
 
 # First-run bootstrap: if no mode has ever been set, default to enabled.
-INITIAL_MODE=$(tmux show-options -gqv @tmux-tabs-sidebar 2>/dev/null || echo "")
+INITIAL_MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
 if [ -z "$INITIAL_MODE" ]; then
-    tmux set-option -g @tmux-tabs-sidebar "enabled"
+    tmux set-option -g @tabby_sidebar "enabled"
     tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT"
 fi

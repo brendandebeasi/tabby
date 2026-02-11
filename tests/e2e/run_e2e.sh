@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# E2E Test Runner for tmux-tabs
+# E2E Test Runner for tabby
 # Usage: ./tests/e2e/run_e2e.sh [test_name]
 
 set -euo pipefail
@@ -19,7 +19,7 @@ tmux() { command tmux "$@"; }
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
-TEST_SESSION="tmux-tabs-e2e-test"
+TEST_SESSION="tabby-e2e-test"
 SCREENSHOT_DIR="$PROJECT_ROOT/tests/screenshots"
 RESULTS_FILE="$SCRIPT_DIR/results.log"
 
@@ -63,7 +63,7 @@ setup_test_session() {
     # Select first window
     tmux select-window -t "$TEST_SESSION:0"
     
-    # Enable tmux-tabs test mode
+    # Enable tabby test mode
     tmux set-option -g @tmux_tabs_test 1
     
     log_info "Test session created with $(tmux list-windows -t $TEST_SESSION | wc -l | tr -d ' ') windows"
@@ -75,10 +75,10 @@ cleanup_test_session() {
     tmux kill-server 2>/dev/null || true
     
     # Clean up any orphaned sidebar processes
-    pkill -f "tmux-tabs/bin/sidebar-renderer" 2>/dev/null || true
+    pkill -f "tabby/bin/sidebar-renderer" 2>/dev/null || true
     
     # Clean up PID files
-    rm -f /tmp/tmux-tabs-sidebar-*.pid 2>/dev/null || true
+    rm -f /tmp/tabby-sidebar-*.pid 2>/dev/null || true
     rm -rf "$TABBY_TMUX_WRAPPER_DIR" 2>/dev/null || true
 }
 
@@ -313,7 +313,7 @@ test_multiple_sessions_independent() {
     ((TESTS_RUN++))
     log_info "E2E-011: Testing multiple sessions don't interfere"
     
-    local session2="tmux-tabs-e2e-test-2"
+    local session2="tabby-e2e-test-2"
     
     # Create second session
     tmux new-session -d -s "$session2" -n "other-session-window"
@@ -362,7 +362,7 @@ test_grouping_by_prefix() {
 
 run_all_tests() {
     log_info "========================================"
-    log_info "tmux-tabs E2E Test Suite"
+    log_info "Tabby E2E Test Suite"
     log_info "========================================"
     
     # Build binaries first

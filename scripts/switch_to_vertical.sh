@@ -12,7 +12,7 @@ while IFS= read -r line; do
 done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep "^tabbar|" || true)
 
 # Force vertical state if currently not enabled.
-CURRENT_STATE=$(tmux show-options -qv @tmux-tabs-sidebar 2>/dev/null || echo "")
+CURRENT_STATE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
 if [ "$CURRENT_STATE" != "enabled" ]; then
     exec "$CURRENT_DIR/scripts/toggle_sidebar.sh"
 fi
