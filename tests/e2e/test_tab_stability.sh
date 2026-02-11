@@ -1,27 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/test_utils.sh"
 
 test_rapid_window_switching() {
-    local initial_count=$(tmux list-windows | wc -l | tr -d ' ')
+    local test_name="rapid-switch"
+    setup_test_session "$test_name"
+    create_test_windows 5 "$test_name"
+
+    local initial_count
+    initial_count=$(tmux list-windows -t "$test_name" | wc -l | tr -d ' ')
     
     for i in {0..20}; do
         local target=$((i % initial_count))
-        tmux select-window -t "$target"
+        tmux select-window -t "$test_name:$target"
         sleep 0.05
     done
     
     sleep 0.5
-    local final_count=$(tmux list-windows | wc -l | tr -d ' ')
+    local final_count
+    final_count=$(tmux list-windows -t "$test_name" | wc -l | tr -d ' ')
     
     if [ "$initial_count" -eq "$final_count" ]; then
         log_pass "Rapid switching: All windows survived ($final_count windows)"
     else
         log_fail "Rapid switching: Lost windows! Initial: $initial_count, Final: $final_count"
-        tmux list-windows
+        tmux list-windows -t "$test_name"
     fi
+
+    cleanup_test_session "$test_name"
 }
 
 test_window_index_consistency() {
@@ -64,7 +72,7 @@ test_sidebar_status_sync() {
     
     local tmux_windows=$(tmux list-windows -t "$test_name" -F "#{window_index}:#{window_name}" | sort)
     local status_output=$(tmux switch-client -t "$test_name" 2>/dev/null; "$PROJECT_ROOT/bin/render-status")
-    local sidebar_pane=$(tmux list-panes -s -t "$test_name" -F "#{pane_current_command}|#{pane_id}" | grep "^sidebar|" | cut -d'|' -f2)
+    local sidebar_pane=$(tmux list-panes -s -t "$test_name" -F "#{pane_current_command}|#{pane_id}" | grep -E "^(sidebar|sidebar-renderer)\|" | cut -d'|' -f2)
     local sidebar_content=$(tmux capture-pane -t "$sidebar_pane" -p | grep -E "^\s*\[[0-9]+\]" | sed 's/^[[:space:]]*//')
     
     local all_match=true
@@ -109,7 +117,7 @@ test_kill_window_updates() {
         log_pass "Kill window: Status bar updated correctly"
     fi
     
-    local sidebar_pane=$(tmux list-panes -s -t "$test_name" -F "#{pane_current_command}|#{pane_id}" | grep "^sidebar|" | cut -d'|' -f2)
+    local sidebar_pane=$(tmux list-panes -s -t "$test_name" -F "#{pane_current_command}|#{pane_id}" | grep -E "^(sidebar|sidebar-renderer)\|" | cut -d'|' -f2)
     if [ -n "$sidebar_pane" ]; then
         local sidebar_content=$(tmux capture-pane -t "$sidebar_pane" -p)
         if echo "$sidebar_content" | grep -q "to-be-killed"; then

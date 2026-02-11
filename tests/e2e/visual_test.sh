@@ -2,8 +2,11 @@
 
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TABBY_TEST_SOCKET="${TABBY_TEST_SOCKET:-tabby-tests-visual}"
+tmux() { command tmux -L "$TABBY_TEST_SOCKET" -f /dev/null "$@"; }
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 SCREENSHOT_DIR="$PROJECT_ROOT/tests/screenshots"
 TEST_SESSION="tmux-tabs-visual-test"
 

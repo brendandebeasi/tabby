@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TABBY_TEST_SOCKET="${TABBY_TEST_SOCKET:-tabby-tests-visual}"
+tmux() { command tmux -L "$TABBY_TEST_SOCKET" -f /dev/null "$@"; }
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 echo "=========================================="
 echo "Comprehensive Visual Test Suite"
@@ -12,11 +15,11 @@ setup_test_env() {
     echo "Building binaries..."
     cd "$PROJECT_ROOT"
     go build -o bin/render-status cmd/render-status/main.go
-    go build -o bin/sidebar cmd/sidebar/main.go
+    go build -o bin/sidebar-renderer cmd/sidebar-renderer/main.go
     echo "✓ Binaries built"
     
     echo "Reloading tmux configuration..."
-    tmux run-shell "$PROJECT_ROOT/tmux-tabs.tmux"
+    tmux run-shell "$PROJECT_ROOT/tabby.tmux"
     echo "✓ Configuration reloaded"
 }
 
@@ -78,7 +81,7 @@ test_vertical_sidebar() {
     "$PROJECT_ROOT/scripts/toggle_sidebar.sh"
     sleep 1
     
-    SIDEBAR_PANE=$(tmux list-panes -F "#{pane_current_command}|#{pane_id}" | grep "^sidebar|" | cut -d'|' -f2)
+    SIDEBAR_PANE=$(tmux list-panes -F "#{pane_current_command}|#{pane_id}" | grep -E "^(sidebar|sidebar-renderer)\|" | cut -d'|' -f2)
     
     if [ -n "$SIDEBAR_PANE" ]; then
         echo "✓ Sidebar opened (pane: $SIDEBAR_PANE)"
@@ -134,7 +137,7 @@ test_vertical_sidebar() {
         "$PROJECT_ROOT/scripts/toggle_sidebar.sh"
         sleep 0.5
         
-        if ! tmux list-panes -F "#{pane_current_command}" | grep -q "^sidebar$"; then
+        if ! tmux list-panes -F "#{pane_current_command}" | grep -Eq "^(sidebar|sidebar-renderer)$"; then
             echo "✓ Sidebar closed successfully"
         else
             echo "✗ Sidebar still open"

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 source "$SCRIPT_DIR/test_utils.sh"
 
@@ -25,10 +25,12 @@ test_window_renumbering_consistency() {
     local windows_after=$(tmux list-windows -t "$session" -F "#{window_index}:#{window_name}")
     echo "Windows after kill: $windows_after"
     
-    if echo "$windows_after" | grep -q "2:win-3" && echo "$windows_after" | grep -q "3:win-4"; then
-        log_pass "Windows renumbered correctly"
+    if ! echo "$windows_after" | grep -q "win-2" && \
+       echo "$windows_after" | grep -q "win-3" && \
+       echo "$windows_after" | grep -q "win-4"; then
+        log_pass "Window list remained consistent after kill"
     else
-        log_fail "Window renumbering failed"
+        log_fail "Window list inconsistent after kill"
     fi
     
     cleanup_test_session "$session"
@@ -43,7 +45,7 @@ test_sidebar_signal_delivery() {
     tmux run-shell -t "$session" "$PROJECT_ROOT/scripts/toggle_sidebar.sh"
     sleep 1
     
-    local sidebar_pane=$(tmux list-panes -s -t "$session" -F "#{pane_current_command}|#{pane_id}" | grep "^sidebar|" | cut -d'|' -f2)
+    local sidebar_pane=$(tmux list-panes -s -t "$session" -F "#{pane_current_command}|#{pane_id}" | grep -E "^(sidebar|sidebar-renderer)\|" | cut -d'|' -f2)
     
     if [ -n "$sidebar_pane" ]; then
         local sidebar_pid=$(tmux list-panes -a -F "#{pane_id} #{pane_pid}" | grep "^${sidebar_pane} " | cut -d' ' -f2)

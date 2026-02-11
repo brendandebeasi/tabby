@@ -4,8 +4,11 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TABBY_TEST_SOCKET="${TABBY_TEST_SOCKET:-tabby-tests-visual}"
+tmux() { command tmux -L "$TABBY_TEST_SOCKET" -f /dev/null "$@"; }
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 SCREENSHOT_DIR="$PROJECT_ROOT/tests/screenshots"
 TEST_SESSION="tmux-tabs-visual-test"
 
@@ -82,7 +85,7 @@ capture_sidebar_open() {
     
     # Find sidebar pane
     local sidebar_pane
-    sidebar_pane=$(tmux list-panes -s -t "$TEST_SESSION" -F "#{pane_current_command}|#{pane_id}" | grep "^sidebar|" | cut -d'|' -f2 | head -1)
+    sidebar_pane=$(tmux list-panes -s -t "$TEST_SESSION" -F "#{pane_current_command}|#{pane_id}" | grep -E "^(sidebar|sidebar-renderer)\|" | cut -d'|' -f2 | head -1)
     
     if [ -n "$sidebar_pane" ]; then
         # Capture sidebar pane content
@@ -177,7 +180,7 @@ main() {
     # Build first
     log_info "Building binaries..."
     (cd "$PROJECT_ROOT" && go build -o bin/render-status cmd/render-status/main.go) || exit 1
-    (cd "$PROJECT_ROOT" && go build -o bin/sidebar cmd/sidebar/main.go) || exit 1
+    (cd "$PROJECT_ROOT" && go build -o bin/sidebar-renderer cmd/sidebar-renderer/main.go) || exit 1
     
     setup_visual_session
     
