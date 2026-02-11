@@ -1,8 +1,7 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
+	"github.com/b/tmux-tabs/pkg/paths"
 )
 
 type Config struct {
@@ -389,9 +388,5 @@ type Indicator struct {
 }
 
 func DefaultConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "config.yaml"
-	}
-	return filepath.Join(home, ".tmux/plugins/tmux-tabs/config.yaml")
+	return paths.ConfigPath()
 }

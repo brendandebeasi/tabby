@@ -11,15 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/b/tmux-tabs/pkg/paths"
 	"github.com/skip2/go-qrcode"
 )
 
 func DefaultTokenPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".config", "tabby", "web-token"), nil
+	return paths.StatePath("web-token"), nil
 }
 
 func LoadOrGenerateToken(path string) (string, error) {

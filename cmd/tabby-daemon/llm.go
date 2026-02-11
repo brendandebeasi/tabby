@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/b/tmux-tabs/pkg/paths"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/gollm/llm"
 )
@@ -100,8 +100,7 @@ func initLLM(provider, model, apiKey string) error {
 	llmClient = client
 
 	// Set up thought buffer persistence path
-	homeDir, _ := os.UserHomeDir()
-	thoughtBufferPath = filepath.Join(homeDir, ".config", "tabby", "thought_buffer.txt")
+	thoughtBufferPath = paths.StatePath("thought_buffer.txt")
 
 	// Load existing thoughts from disk
 	loadThoughtBuffer()
@@ -147,9 +146,8 @@ func saveThoughtBuffer() {
 		return
 	}
 
-	// Ensure directory exists
-	dir := filepath.Dir(thoughtBufferPath)
-	os.MkdirAll(dir, 0755)
+	// Ensure state directory exists
+	paths.EnsureStateDir()
 
 	thoughtBufferMutex.Lock()
 	thoughts := make([]string, len(thoughtBuffer))

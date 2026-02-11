@@ -14,7 +14,7 @@ func main() {
 	host := flag.String("host", "127.0.0.1", "HTTP server host (loopback only)")
 	port := flag.Int("port", 8080, "HTTP server port")
 	sessionID := flag.String("session", "", "tmux session ID")
-	tokenFile := flag.String("token-file", "", "token file path (default: ~/.config/tabby/web-token)")
+	tokenFile := flag.String("token-file", "", "token file path (default: ~/.local/state/tabby/web-token)")
 	regenerateToken := flag.Bool("regenerate-token", false, "regenerate auth token on startup")
 	authUser := flag.String("auth-user", "", "required username for web access")
 	authPass := flag.String("auth-pass", "", "required password for web access")

@@ -83,6 +83,7 @@ install: build
 	@echo "Installing to ~/.tmux/plugins/tmux-tabs/"
 	@mkdir -p ~/.tmux/plugins/tmux-tabs/bin
 	@mkdir -p ~/.tmux/plugins/tmux-tabs/scripts
+	@mkdir -p ~/.config/tabby
 	@cp $(RENDER_STATUS) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp $(RENDER_TAB) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp $(TABBY_DAEMON) ~/.tmux/plugins/tmux-tabs/bin/
@@ -91,7 +92,7 @@ install: build
 	@cp $(TABBAR) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp scripts/*.sh ~/.tmux/plugins/tmux-tabs/scripts/
 	@cp tmux-tabs.tmux ~/.tmux/plugins/tmux-tabs/
-	@cp config.yaml ~/.tmux/plugins/tmux-tabs/
+	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml
 	@chmod +x ~/.tmux/plugins/tmux-tabs/bin/*
 	@chmod +x ~/.tmux/plugins/tmux-tabs/scripts/*
 	@chmod +x ~/.tmux/plugins/tmux-tabs/tmux-tabs.tmux
@@ -107,8 +108,8 @@ sync: build
 	@cp $(TABBAR) ~/.tmux/plugins/tmux-tabs/bin/
 	@cp scripts/*.sh ~/.tmux/plugins/tmux-tabs/scripts/
 	@cp tmux-tabs.tmux ~/.tmux/plugins/tmux-tabs/
-	@cp config.yaml ~/.tmux/plugins/tmux-tabs/
-	@echo "Synced to ~/.tmux/plugins/tmux-tabs/"
+	@cp config.yaml ~/.config/tabby/config.yaml
+	@echo "Synced to ~/.tmux/plugins/tmux-tabs/ (config -> ~/.config/tabby/)"
 
 # Clean build artifacts
 clean:
@@ -135,7 +136,7 @@ help:
 	@echo "  test-e2e       - Run E2E integration tests"
 	@echo "  capture-visual - Capture visual screenshots"
 	@echo "  update-baseline- Update baseline screenshots"
-	@echo "  install        - Install to ~/.tmux/plugins/tmux-tabs/"
+	@echo "  install        - Install binaries + config (~/.config/tabby/config.yaml)"
 	@echo "  sync           - Sync dev changes to install location"
 	@echo "  clean          - Remove build artifacts"
 	@echo "  deps           - Download Go dependencies"
