@@ -3,7 +3,8 @@ set -eu
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && cd .. >/dev/null 2>&1 && pwd)"
 SESSION_ID=$(tmux display-message -p '#{session_id}')
-CONFIG_FILE="$CURRENT_DIR/config.yaml"
+source "$(dirname "${BASH_SOURCE[0]}")/_config_path.sh"
+CONFIG_FILE="$TABBY_CONFIG_FILE"
 
 WEB_ENABLED=$(grep -A6 "^web:" "$CONFIG_FILE" 2>/dev/null | grep "enabled:" | awk '{print $2}' | tr -d '"' || echo "false")
 WEB_ENABLED=${WEB_ENABLED:-false}

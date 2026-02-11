@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,20 @@ import (
 	"github.com/b/tmux-tabs/pkg/grouping"
 	"github.com/b/tmux-tabs/pkg/tmux"
 )
+
+// pluginDir returns the plugin root by resolving the running binary's location.
+// e.g. /path/to/plugin/bin/tabbar -> /path/to/plugin
+func pluginDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "."
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "."
+	}
+	return filepath.Dir(filepath.Dir(exe)) // bin/tabbar -> bin -> plugin root
+}
 
 type model struct {
 	windows   []tmux.Window
@@ -50,14 +65,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "n":
 			_ = exec.Command("tmux", "new-window").Run()
 			// Add tabbar to the new window and focus main pane
-			_ = exec.Command("bash", "-c", `
-				PLUGIN_DIR="${HOME}/.tmux/plugins/tmux-tabs"
+			_ = exec.Command("bash", "-c", fmt.Sprintf(`
+				PLUGIN_DIR="%s"
 				tmux split-window -v -b -l 2 "exec \"${PLUGIN_DIR}/bin/tabbar\""
 				main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':tabbar$' | head -1 | cut -d: -f1)
 				if [ -n "$main_pane" ]; then
 					tmux select-pane -t "$main_pane"
 				fi
-			`).Run()
+			`, pluginDir())).Run()
 			return m, triggerRefresh()
 		case "d", "x":
 			// Delete current window
@@ -100,14 +115,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.isNewTabButtonAt(msg.X) {
 						_ = exec.Command("tmux", "new-window").Run()
 						// Add tabbar to the new window and focus main pane
-						_ = exec.Command("bash", "-c", `
-							PLUGIN_DIR="${HOME}/.tmux/plugins/tmux-tabs"
+						_ = exec.Command("bash", "-c", fmt.Sprintf(`
+							PLUGIN_DIR="%s"
 							tmux split-window -v -b -l 2 "exec \"${PLUGIN_DIR}/bin/tabbar\""
 							main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':tabbar$' | head -1 | cut -d: -f1)
 							if [ -n "$main_pane" ]; then
 								tmux select-pane -t "$main_pane"
 							fi
-						`).Run()
+						`, pluginDir())).Run()
 						return m, triggerRefresh()
 					}
 				}

@@ -487,7 +487,7 @@ tabby/
 │   ├── toggle_sidebar.sh
 │   └── ensure_sidebar.sh
 ├── tests/              # Test suites
-├── config.yaml         # User configuration
+├── config.yaml         # Default configuration template
 └── tabby.tmux          # Plugin entry point
 ```
 
