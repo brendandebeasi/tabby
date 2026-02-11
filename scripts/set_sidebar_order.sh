@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
-CONFIG_FILE="$HOME/.tmux/plugins/tmux-tabs/config.yaml"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=_config_path.sh
+source "$SCRIPT_DIR/_config_path.sh"
+CONFIG_FILE="$TABBY_CONFIG_FILE"
 ORDER="${1:-index}"
 
 if [ "$ORDER" = "index" ]; then

@@ -23,6 +23,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/b/tmux-tabs/pkg/colors"
+	"github.com/b/tmux-tabs/pkg/paths"
 	"github.com/b/tmux-tabs/pkg/config"
 	"github.com/b/tmux-tabs/pkg/daemon"
 	"github.com/b/tmux-tabs/pkg/grouping"
@@ -1029,10 +1030,8 @@ func (c *Coordinator) saveCollapsedGroupsLocked() {
 
 // petStatePath returns the path to the shared pet state file
 func petStatePath() string {
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".config", "tabby")
-	os.MkdirAll(dir, 0755)
-	return filepath.Join(dir, "pet.json")
+	paths.EnsureStateDir()
+	return paths.StatePath("pet.json")
 }
 
 // loadPetState loads the pet state from the shared file
@@ -1208,6 +1207,18 @@ func (c *Coordinator) processAIToolStates() {
 				c.aiBellUntil[idx] = now + 30
 				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "@tabby_bell", "1").Run()
 				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "@tabby_input", "").Run()
+			}
+			// Clear stale hook indicators on windows with no AI tools.
+			// Handles cases where the daemon wasn't tracking the AI tool
+			// (e.g., daemon restart, race between hook and exit) but hooks
+			// left indicators set.
+			if win.Busy {
+				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "-u", "@tabby_busy").Run()
+				win.Busy = false
+			}
+			if win.Input {
+				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "-u", "@tabby_input").Run()
+				win.Input = false
 			}
 			continue
 		}

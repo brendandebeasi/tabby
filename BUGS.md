@@ -161,18 +161,13 @@ The `&` backgrounds `tmux split-window`, not the sidebar. The PID saved is tmux'
 
 ## Medium Bugs
 
-### BUG-007: Config Path Hardcoded
+### BUG-007: Config Path Hardcoded -- RESOLVED
 **File**: `pkg/config/config.go`
 
-**Problem**:
-```go
-return filepath.Join(home, ".tmux/plugins/tmux-tabs/config.yaml")
-```
-
-No support for:
-- `$XDG_CONFIG_HOME`
-- Development paths
-- Custom config locations
+**Resolution**: Centralized in `pkg/paths/paths.go` with XDG-style layout:
+- Config: `~/.config/tabby/config.yaml` (env: `TABBY_CONFIG_DIR`)
+- State: `~/.local/state/tabby/` (env: `TABBY_STATE_DIR`)
+- Legacy paths fall back transparently with deprecation notice
 
 ---
 

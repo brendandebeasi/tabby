@@ -216,7 +216,19 @@ This approach doesn't require SSH config changes and won't interfere with other 
 
 ## Configuration
 
-Edit `~/.tmux/plugins/tabby/config.yaml`:
+### File Locations
+
+| Category | Path | Env Override |
+|----------|------|-------------|
+| Config | `~/.config/tabby/config.yaml` | `TABBY_CONFIG_DIR` |
+| Pet state | `~/.local/state/tabby/pet.json` | `TABBY_STATE_DIR` |
+| Thought cache | `~/.local/state/tabby/thought_buffer.txt` | `TABBY_STATE_DIR` |
+| Web token | `~/.local/state/tabby/web-token` | `TABBY_STATE_DIR` |
+| Runtime | `/tmp/tabby-*` | -- |
+
+Legacy paths (`~/.tmux/plugins/tmux-tabs/config.yaml`, `~/.config/tabby/{pet.json,web-token}`) are detected automatically with a deprecation notice.
+
+Edit `~/.config/tabby/config.yaml`:
 
 ```yaml
 # Tab bar position: top, bottom, or off
@@ -427,7 +439,7 @@ cd ~/.tmux/plugins/tabby
 Tabby Web runs a local-only bridge that exposes tmux + sidebar over WebSocket. The bridge only binds to loopback and requires user/password for access.
 
 ### Enable in config (default disabled)
-Add this to `~/.tmux/plugins/tmux-tabs/config.yaml`:
+Add this to `~/.config/tabby/config.yaml`:
 ```yaml
 web:
   enabled: true
@@ -456,7 +468,7 @@ npm run dev
 ### Connect in browser
 Open `http://127.0.0.1:5173/?token=<token>&user=<user>&pass=<pass>&pane=<pane_id>&ws=127.0.0.1:8080`
 
-- Token is stored at `~/.config/tabby/web-token`
+- Token is stored at `~/.local/state/tabby/web-token`
 - Pane ID can be retrieved with `tmux list-panes -t tabby-web-test -F '#{pane_id}'`
 - The bridge rejects non-loopback requests
 
