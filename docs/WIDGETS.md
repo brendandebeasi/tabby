@@ -103,7 +103,7 @@ type Widgets struct {
 }
 ```
 
-3. Add tick message if needed in `cmd/sidebar/main.go`:
+3. Add tick message if needed in `cmd/sidebar-renderer/main.go`:
 ```go
 type myWidgetTickMsg struct{}
 

@@ -679,13 +679,13 @@ Collapsed state is stored in `@tabby_collapsed` window option and persists acros
 ## Appendix: Common Issues
 
 ### Sidebar Not Refreshing
-- Check PID file exists: `ls /tmp/tmux-tabs-sidebar-*.pid`
-- Verify process running: `ps aux | grep sidebar`
-- Manually signal: `kill -USR1 $(cat /tmp/tmux-tabs-sidebar-*.pid)`
+- Check PID file exists: `ls /tmp/tabby-daemon-*.pid`
+- Verify process running: `ps aux | grep tabby-daemon`
+- Manually signal: `kill -USR1 $(cat /tmp/tabby-daemon-*.pid)`
 
 ### Duplicate Groups Showing
-- Kill all sidebars: `pkill -f bin/sidebar`
-- Rebuild binary: `go build -o bin/sidebar ./cmd/sidebar/`
+- Kill daemon/renderers: `pkill -f tabby-daemon && pkill -f sidebar-renderer`
+- Rebuild binaries: `./scripts/install.sh`
 - Toggle sidebar off/on: `prefix + Tab` twice
 
 ### Window Not Closing After Last Pane

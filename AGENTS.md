@@ -11,7 +11,8 @@ tabby/
 ├── cmd/                    # Go binaries
 │   ├── render-status/      # Renders individual tabs for horizontal status bar
 │   ├── render-tab/         # Tab rendering helper
-│   ├── sidebar/            # BubbleTea TUI app for vertical sidebar
+│   ├── sidebar-renderer/   # BubbleTea renderer app for vertical sidebar panes
+│   ├── tabby-daemon/       # Central daemon coordinating state + render payloads
 │   └── tabbar/             # Horizontal tabbar TUI (alternative to status bar)
 ├── pkg/                    # Shared Go packages
 │   ├── config/             # YAML config loading (config.yaml)
@@ -44,7 +45,8 @@ Windows are grouped by name patterns (regex). Each group has a theme (colors, ic
 
 ```bash
 # Build all binaries
-go build -o bin/sidebar ./cmd/sidebar/
+go build -o bin/sidebar-renderer ./cmd/sidebar-renderer/
+go build -o bin/tabby-daemon ./cmd/tabby-daemon/
 go build -o bin/tabbar ./cmd/tabbar/
 go build -o bin/render-status ./cmd/render-status/
 go build -o bin/render-tab ./cmd/render-tab/
@@ -57,7 +59,8 @@ go build -o bin/render-tab ./cmd/render-tab/
 
 | File | Purpose |
 |------|---------|
-| `cmd/sidebar/main.go` | Main sidebar TUI - handles View(), Update(), mouse/keyboard |
+| `cmd/sidebar-renderer/main.go` | Sidebar renderer TUI - handles View(), Update(), mouse/keyboard |
+| `cmd/tabby-daemon/coordinator.go` | Central state coordinator and render logic |
 | `pkg/grouping/grouper.go` | Groups windows by pattern, provides color utilities |
 | `pkg/tmux/tmux.go` | Wraps tmux commands to list windows/panes |
 | `scripts/toggle_sidebar.sh` | Toggles sidebar on/off using state |
@@ -67,7 +70,7 @@ go build -o bin/render-tab ./cmd/render-tab/
 ## Common Patterns
 
 ### Adding a new feature to sidebar
-1. Update `model` struct in `cmd/sidebar/main.go` if new state needed
+1. Update `rendererModel` in `cmd/sidebar-renderer/main.go` if new state needed
 2. Handle in `Update()` for keyboard/mouse events
 3. Render in `View()` using lipgloss styles
 4. Update `buildWindowRefs()` if display layout changes (for click targets)
