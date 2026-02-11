@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
-CONFIG_FILE="$CURRENT_DIR/config.yaml"
+source "$(dirname "${BASH_SOURCE[0]}")/_config_path.sh"
+CONFIG_FILE="$TABBY_CONFIG_FILE"
 
 SD_BG=$(grep -A4 'name: "StudioDome"' "$CONFIG_FILE" | grep 'bg:' | awk '{print $2}' | tr -d '"' || echo "#e74c3c")
 SD_FG=$(grep -A4 'name: "StudioDome"' "$CONFIG_FILE" | grep 'fg:' | awk '{print $2}' | tr -d '"' || echo "#ffffff")

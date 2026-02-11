@@ -17,7 +17,8 @@ TMUX_CMD="/opt/homebrew/bin/tmux"
 
 # Find config file
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/../config.yaml"
+source "$SCRIPT_DIR/_config_path.sh"
+CONFIG_FILE="$TABBY_CONFIG_FILE"
 
 # Read terminal app from config
 TERMINAL_APP=$(grep "^terminal_app:" "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' || echo "")

@@ -4,6 +4,10 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Resolve config path via XDG helper (never read $CURRENT_DIR/config.yaml directly)
+source "$CURRENT_DIR/scripts/_config_path.sh"
+CONFIG_FILE="$TABBY_CONFIG_FILE"
+
 # Optional kill-switch for troubleshooting.
 # Tabby is enabled by default unless explicitly disabled.
 TABBY_ENABLED=$(tmux show-option -gqv "@tabby_enabled")
@@ -17,7 +21,7 @@ if [ ! -f "$CURRENT_DIR/bin/render-status" ]; then
 fi
 
 # Start local-only Tabby Web bridge if enabled
-WEB_ENABLED=$(grep -A6 "^web:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "enabled:" | awk '{print $2}' | tr -d '"' || echo "false")
+WEB_ENABLED=$(grep -A6 "^web:" "$CONFIG_FILE" 2>/dev/null | grep "enabled:" | awk '{print $2}' | tr -d '"' || echo "false")
 WEB_ENABLED=${WEB_ENABLED:-false}
 if [[ "$WEB_ENABLED" == "true" ]]; then
     WEB_START_SCRIPT="$CURRENT_DIR/scripts/start_web_bridge.sh"
@@ -66,11 +70,11 @@ tmux set-option -g automatic-rename-format '#{pane_current_command}'
 
 # Read pane header colors from config (with defaults)
 # Use exact match with leading spaces to avoid substring matches
-PANE_ACTIVE_FG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  active_fg:" | awk '{print $2}' | tr -d '"' || echo "")
-PANE_ACTIVE_BG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  active_bg:" | awk '{print $2}' | tr -d '"' || echo "")
-PANE_INACTIVE_FG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  inactive_fg:" | awk '{print $2}' | tr -d '"' || echo "")
-PANE_INACTIVE_BG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  inactive_bg:" | awk '{print $2}' | tr -d '"' || echo "")
-PANE_COMMAND_FG=$(grep -A10 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  command_fg:" | awk '{print $2}' | tr -d '"' || echo "")
+PANE_ACTIVE_FG=$(grep -A10 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "^  active_fg:" | awk '{print $2}' | tr -d '"' || echo "")
+PANE_ACTIVE_BG=$(grep -A10 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "^  active_bg:" | awk '{print $2}' | tr -d '"' || echo "")
+PANE_INACTIVE_FG=$(grep -A10 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "^  inactive_fg:" | awk '{print $2}' | tr -d '"' || echo "")
+PANE_INACTIVE_BG=$(grep -A10 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "^  inactive_bg:" | awk '{print $2}' | tr -d '"' || echo "")
+PANE_COMMAND_FG=$(grep -A10 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "^  command_fg:" | awk '{print $2}' | tr -d '"' || echo "")
 
 # Apply defaults if not set
 PANE_ACTIVE_FG=${PANE_ACTIVE_FG:-#ffffff}
@@ -87,16 +91,16 @@ tmux set-option -g @tabby_pane_inactive_bg_default "$PANE_INACTIVE_BG"
 tmux set-option -g @tabby_pane_command_fg "$PANE_COMMAND_FG"
 
 # Read border_from_tab option (use tab color for active pane border)
-BORDER_FROM_TAB=$(grep -A15 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "border_from_tab:" | awk '{print $2}' || echo "false")
+BORDER_FROM_TAB=$(grep -A15 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "border_from_tab:" | awk '{print $2}' || echo "false")
 BORDER_FROM_TAB=${BORDER_FROM_TAB:-false}
 tmux set-option -g @tabby_border_from_tab "$BORDER_FROM_TAB"
 
 # Read custom_border option - when enabled, we render our own border and hide tmux borders
-CUSTOM_BORDER=$(grep -A20 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "custom_border:" | awk '{print $2}' || echo "false")
+CUSTOM_BORDER=$(grep -A20 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "custom_border:" | awk '{print $2}' || echo "false")
 CUSTOM_BORDER=${CUSTOM_BORDER:-false}
 
 # Read terminal_bg for hiding borders (user's terminal background color)
-TERMINAL_BG=$(grep -A20 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "terminal_bg:" | awk '{print $2}' | tr -d '"' || echo "#000000")
+TERMINAL_BG=$(grep -A20 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "terminal_bg:" | awk '{print $2}' | tr -d '"' || echo "#000000")
 TERMINAL_BG=${TERMINAL_BG:-#000000}
 
 # Read border line style: single, double, heavy, simple, number
@@ -107,18 +111,18 @@ if [[ "$CUSTOM_BORDER" == "true" ]]; then
     tmux set-option -g pane-border-style "fg=$TERMINAL_BG,bg=$TERMINAL_BG"
     tmux set-option -g pane-active-border-style "fg=$TERMINAL_BG,bg=$TERMINAL_BG"
 else
-    BORDER_LINES=$(grep -A15 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "border_lines:" | awk '{print $2}' || echo "single")
+    BORDER_LINES=$(grep -A15 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "border_lines:" | awk '{print $2}' || echo "single")
     BORDER_LINES=${BORDER_LINES:-single}
 fi
 
 # Read border foreground color
-BORDER_FG=$(grep -A15 "^pane_header:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "border_fg:" | awk '{print $2}' | tr -d '"' || echo "#444444")
+BORDER_FG=$(grep -A15 "^pane_header:" "$CONFIG_FILE" 2>/dev/null | grep "border_fg:" | awk '{print $2}' | tr -d '"' || echo "#444444")
 BORDER_FG=${BORDER_FG:-#444444}
 
 # Read prompt style colors from config (with defaults)
-PROMPT_FG=$(grep -A5 "^prompt:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  fg:" | awk '{print $2}' | tr -d '"' || echo "")
-PROMPT_BG=$(grep -A5 "^prompt:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  bg:" | awk '{print $2}' | tr -d '"' || echo "")
-PROMPT_BOLD=$(grep -A5 "^prompt:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "^  bold:" | awk '{print $2}' || echo "")
+PROMPT_FG=$(grep -A5 "^prompt:" "$CONFIG_FILE" 2>/dev/null | grep "^  fg:" | awk '{print $2}' | tr -d '"' || echo "")
+PROMPT_BG=$(grep -A5 "^prompt:" "$CONFIG_FILE" 2>/dev/null | grep "^  bg:" | awk '{print $2}' | tr -d '"' || echo "")
+PROMPT_BOLD=$(grep -A5 "^prompt:" "$CONFIG_FILE" 2>/dev/null | grep "^  bold:" | awk '{print $2}' || echo "")
 
 # Apply defaults if not set - black text on light gray background for legibility
 PROMPT_FG=${PROMPT_FG:-#000000}
@@ -135,7 +139,7 @@ fi
 tmux set-option -g message-style "$PROMPT_STYLE"
 
 # Check if overlay pane headers are enabled (replaces native pane-border-status)
-PANE_HEADERS=$(grep -A20 "^sidebar:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "pane_headers:" | awk '{print $2}' || echo "false")
+PANE_HEADERS=$(grep -A20 "^sidebar:" "$CONFIG_FILE" 2>/dev/null | grep "pane_headers:" | awk '{print $2}' || echo "false")
 PANE_HEADERS=${PANE_HEADERS:-false}
 
 if [[ "$PANE_HEADERS" == "true" ]]; then
@@ -231,8 +235,8 @@ tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M 
 
 # Terminal title configuration
 # Read from config.yaml or use defaults
-TITLE_ENABLED=$(grep -A2 "^terminal_title:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "enabled:" | awk '{print $2}' || echo "true")
-TITLE_FORMAT=$(grep -A2 "^terminal_title:" "$CURRENT_DIR/config.yaml" 2>/dev/null | grep "format:" | sed 's/.*format: *"\([^"]*\)".*/\1/' || echo "tmux #{window_index}.#{pane_index} #{window_name} #{pane_current_command}")
+TITLE_ENABLED=$(grep -A2 "^terminal_title:" "$CONFIG_FILE" 2>/dev/null | grep "enabled:" | awk '{print $2}' || echo "true")
+TITLE_FORMAT=$(grep -A2 "^terminal_title:" "$CONFIG_FILE" 2>/dev/null | grep "format:" | sed 's/.*format: *"\([^"]*\)".*/\1/' || echo "tmux #{window_index}.#{pane_index} #{window_name} #{pane_current_command}")
 
 if [[ "$TITLE_ENABLED" != "false" ]]; then
     tmux set-option -g set-titles on
@@ -240,7 +244,7 @@ if [[ "$TITLE_ENABLED" != "false" ]]; then
 fi
 
 # Read configuration
-POSITION=$(grep "^position:" "$CURRENT_DIR/config.yaml" 2>/dev/null | awk '{print $2}' || echo "top")
+POSITION=$(grep "^position:" "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' || echo "top")
 POSITION=${POSITION:-top}
 
 # Configure horizontal status bar
@@ -405,7 +409,7 @@ tmux unbind-key -T prefix w 2>/dev/null || true
 tmux unbind-key -T prefix s 2>/dev/null || true
 
 # Configure sidebar toggle keybinding
-TOGGLE_KEY=$(grep "toggle_sidebar:" "$CURRENT_DIR/config.yaml" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "prefix + Tab")
+TOGGLE_KEY=$(grep "toggle_sidebar:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "prefix + Tab")
 KEY=${TOGGLE_KEY##*+ }
 if [ -z "$KEY" ]; then KEY="Tab"; fi
 
