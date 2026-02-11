@@ -4,6 +4,9 @@
 
 set -e
 
+TABBY_TEST_SOCKET="${TABBY_TEST_SOCKET:-tabby-tests-ui}"
+tmux() { command tmux -L "$TABBY_TEST_SOCKET" -f /dev/null "$@"; }
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

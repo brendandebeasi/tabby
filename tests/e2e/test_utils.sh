@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TABBY_TEST_SOCKET="${TABBY_TEST_SOCKET:-tabby-tests}"
+
+if [ -z "${TABBY_TMUX_WRAPPED:-}" ]; then
+    TABBY_TMUX_REAL="$(command -v tmux)"
+    TABBY_TMUX_WRAPPER_DIR="$(mktemp -d /tmp/tabby-tests-tmux.XXXXXX)"
+    cat > "$TABBY_TMUX_WRAPPER_DIR/tmux" <<EOF
+#!/usr/bin/env bash
+exec "$TABBY_TMUX_REAL" -L "$TABBY_TEST_SOCKET" -f /dev/null "\$@"
+EOF
+    chmod +x "$TABBY_TMUX_WRAPPER_DIR/tmux"
+    export PATH="$TABBY_TMUX_WRAPPER_DIR:$PATH"
+    export TABBY_TMUX_WRAPPED=1
+fi
+
+tmux() { command tmux "$@"; }
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -27,7 +44,8 @@ setup_test_session() {
 cleanup_test_session() {
     local session_name="${1:-test-session}"
     tmux kill-session -t "$session_name" 2>/dev/null || true
-    pkill -f "tmux-tabs/bin/sidebar" 2>/dev/null || true
+    tmux kill-server 2>/dev/null || true
+    pkill -f "tmux-tabs/bin/sidebar-renderer" 2>/dev/null || true
     rm -f /tmp/tmux-tabs-sidebar-*.state 2>/dev/null || true
 }
 
@@ -52,5 +70,5 @@ get_active_window() {
 
 sidebar_exists() {
     local session_name="${1:-test-session}"
-    tmux list-panes -s -t "$session_name" -F "#{pane_current_command}" 2>/dev/null | grep -q "^sidebar$"
+    tmux list-panes -s -t "$session_name" -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -Eq '(^|\|).*(sidebar|sidebar-renderer)'
 }

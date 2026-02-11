@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
+TABBY_TEST_SOCKET="${TABBY_TEST_SOCKET:-tabby-tests-visual}"
+tmux() { command tmux -L "$TABBY_TEST_SOCKET" -f /dev/null "$@"; }
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+
 SCREENSHOT_DIR="tests/screenshots"
 mkdir -p "$SCREENSHOT_DIR"/{baseline,current,diffs}
 
@@ -14,9 +20,9 @@ tmux select-window -t visual:0
 
 tmux set-option -g @tmux_tabs_test 1
 
-tmux run-shell ~/.tmux/plugins/tmux-tabs/tmux-tabs.tmux
+tmux run-shell "$PROJECT_ROOT/tabby.tmux"
 
-tmux run-shell -b "$HOME/.tmux/plugins/tmux-tabs/bin/render-status > $SCREENSHOT_DIR/current/horizontal-3-groups.txt"
+tmux run-shell -b "$PROJECT_ROOT/bin/render-status > $SCREENSHOT_DIR/current/horizontal-3-groups.txt"
 
 sleep 1
 
@@ -25,10 +31,10 @@ if command -v ansi2html >/dev/null 2>&1; then
 fi
 
 echo "=== Capturing: Sidebar Open ==="
-tmux run-shell "$HOME/.tmux/plugins/tmux-tabs/scripts/toggle_sidebar.sh"
+tmux run-shell "$PROJECT_ROOT/scripts/toggle_sidebar.sh"
 sleep 1
 
-SIDEBAR_PANE=$(tmux list-panes -t visual -F "#{pane_id}|#{pane_start_command}" | awk -F'|' '$2 ~ /tmux-tabs\/bin\/sidebar/ {print $1}')
+SIDEBAR_PANE=$(tmux list-panes -t visual -F "#{pane_id}|#{pane_current_command}" | awk -F'|' '$2 ~ /^(sidebar|sidebar-renderer)$/ {print $1}')
 	if [ -n "$SIDEBAR_PANE" ]; then
 		# Capture the sidebar pane content
 		tmux capture-pane -t "$SIDEBAR_PANE" -e -p > "$SCREENSHOT_DIR/current/sidebar-open.txt"
