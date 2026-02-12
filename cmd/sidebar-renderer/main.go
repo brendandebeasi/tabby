@@ -408,6 +408,12 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Type: "key",
 				Key:  "r",
 			})
+		case "m":
+			// Open marker picker
+			m.sendInput(&daemon.InputPayload{
+				Type: "key",
+				Key:  "m",
+			})
 		}
 		return m, nil
 

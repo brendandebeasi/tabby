@@ -9066,6 +9066,21 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			c.syncWindowIndices()
 			c.stateMu.Unlock()
 		}
+	case "m":
+		// Open marker picker for active window
+		c.stateMu.RLock()
+		activeWindowIndex := -1
+		for i := range c.windows {
+			if c.windows[i].Active {
+				activeWindowIndex = c.windows[i].Index
+				break
+			}
+		}
+		c.stateMu.RUnlock()
+
+		if activeWindowIndex >= 0 {
+			c.openMarkerPicker(clientID, "window", strconv.Itoa(activeWindowIndex), "Set Marker")
+		}
 	}
 }
 
