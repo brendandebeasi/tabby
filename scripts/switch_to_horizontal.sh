@@ -18,7 +18,7 @@ tmux move-window -r 2>/dev/null || true
 while IFS= read -r line; do
     pane_id=$(echo "$line" | cut -d'|' -f2)
     tmux kill-pane -t "$pane_id" 2>/dev/null || true
-done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep "^sidebar|" || true)
+done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep "^sidebar" || true)
 
 # Mark sidebar as disabled
 echo "horizontal" > "$SIDEBAR_STATE_FILE"

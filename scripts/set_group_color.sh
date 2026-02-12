@@ -24,6 +24,6 @@ fi
 rm -f /tmp/tabby-error.log
 
 # Signal all sidebars to reload config
-for pid in $(tmux list-panes -a -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
+for pid in $(tmux list-panes -a -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar' | cut -d'|' -f2); do
     kill -USR1 "$pid" 2>/dev/null
 done

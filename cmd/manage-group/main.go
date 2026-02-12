@@ -9,7 +9,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: manage-group [add|delete|rename|set-color] <args>")
+		fmt.Fprintln(os.Stderr, "Usage: manage-group [add|delete|rename|set-color|set-marker] <args>")
 		os.Exit(1)
 	}
 
@@ -66,6 +66,19 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Set color for group %s: %s\n", name, color)
+
+	case "set-marker":
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "Usage: manage-group set-marker <name> <marker>")
+			os.Exit(1)
+		}
+		name := os.Args[2]
+		marker := os.Args[3]
+		if err := setGroupMarker(configPath, name, marker); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Set marker for group %s: %s\n", name, marker)
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown action: %s\n", action)
@@ -138,6 +151,21 @@ func setGroupColor(configPath, name, color string) error {
 	group.Theme.Bg = color
 	group.Theme.ActiveBg = darkenColor(color)
 
+	return config.SaveConfig(configPath, cfg)
+}
+
+func setGroupMarker(configPath, name, marker string) error {
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		return err
+	}
+
+	group := config.FindGroup(cfg, name)
+	if group == nil {
+		return config.ErrGroupNotFound
+	}
+
+	group.Theme.Icon = marker
 	return config.SaveConfig(configPath, cfg)
 }
 

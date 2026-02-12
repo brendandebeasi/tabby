@@ -98,7 +98,7 @@ echo ""
 echo "Test 6: Pane Close"
 PANES_BEFORE=$(tmux list-panes -t :test-renamed -F '#{pane_id}' | grep -cv '^$' || echo 0)
 # Get a non-sidebar pane to kill
-PANE_TO_KILL=$(tmux list-panes -t :test-renamed -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
+PANE_TO_KILL=$(tmux list-panes -t :test-renamed -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar' | head -1 | cut -d: -f1)
 if [ -n "$PANE_TO_KILL" ]; then
     tmux kill-pane -t "$PANE_TO_KILL"
     sleep 0.2
@@ -190,7 +190,7 @@ if [ "$ORPHAN_EXISTS" -gt 0 ]; then
 
     if [ "$NON_SIDEBAR" -gt 0 ]; then
         # Kill all non-sidebar panes
-        for pane in $(tmux list-panes -t :test-orphan -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | cut -d: -f1); do
+        for pane in $(tmux list-panes -t :test-orphan -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar' | cut -d: -f1); do
             tmux kill-pane -t "$pane" 2>/dev/null || true
         done
         sleep 0.5

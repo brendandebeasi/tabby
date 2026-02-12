@@ -629,10 +629,10 @@ The daemon sets `pane-border-style` per-pane using `tmux set-option -p -t <pane_
 
 | Click Target | Menu Type | Actions |
 |--------------|-----------|---------|
-| Window name | Window Menu | Rename, Kill, Move to Group, New Window |
+| Window name | Window Menu | Rename, Kill, Move to Group, Set Marker, New Window |
 | Window indicator (left edge) | Indicator Menu | Toggle indicators (busy, input, etc.) |
 | Pane entry | Pane Menu | Select, Split, Break to Window, Kill |
-| Group header | Group Menu | Collapse/Expand, New Window in Group |
+| Group header | Group Menu | Collapse/Expand, New Window in Group, Set Marker |
 | Sidebar header area | Settings Menu | Toggle options, Resize sidebar |
 
 ### 9.2 Triggers
@@ -644,7 +644,21 @@ The daemon sets `pane-border-style` per-pane using `tmux set-option -p -t <pane_
 
 Menus are displayed using `tmux display-menu` at the click position. The daemon calculates menu position based on pane coordinates and mouse position.
 
-### 9.4 Troubleshooting
+### 9.4 Marker Picker
+
+**Trigger paths:**
+- Window menu -> Set Marker -> Search...
+- Group menu -> Set Marker -> Search...
+- Sidebar key `m` (active window)
+
+**Expected behavior:**
+1. Opens in-app marker picker overlay (not tmux prompt fallback)
+2. Shows full emoji catalog from vendored `github.com/kenshaw/emoji`
+3. Supports fuzzy search over symbol + name + keywords
+4. Enter applies marker, Esc cancels
+5. Applies `@tabby_icon` for windows or persists group icon in config for groups
+
+### 9.5 Troubleshooting
 
 If context menus don't appear:
 1. Check that `MouseDown3Pane` is unbound: `tmux show-keys | grep MouseDown3`

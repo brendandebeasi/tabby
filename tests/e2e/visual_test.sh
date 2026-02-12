@@ -29,7 +29,7 @@ tmux kill-session -t "$TEST_SESSION" 2>/dev/null || true
 # Create test session with various window configurations
 log_info "Creating test session..."
 tmux new-session -d -s "$TEST_SESSION" -n 'SD|frontend' -c "$HOME"
-tmux set-option -t "$TEST_SESSION" @tmux_tabs_test 1
+tmux set-option -t "$TEST_SESSION" @tabby_test 1
 
 # Create various windows
 tmux new-window -t "$TEST_SESSION" -n 'SD|backend'

@@ -121,6 +121,8 @@ Tabby follows standard tmux keybindings. All standard tmux shortcuts work as exp
 | `prefix + H` | Switch to horizontal mode |
 | `Ctrl + <` or `Alt + <` | Collapse/expand sidebar |
 
+When the sidebar is focused, press `m` to open the marker picker for the active window.
+
 ### Mouse Support (Vertical Sidebar)
 
 - **Left click**: Switch to window/pane
@@ -132,6 +134,7 @@ Tabby follows standard tmux keybindings. All standard tmux shortcuts work as exp
   - Unlock Name (restore automatic naming)
   - Collapse/Expand Panes
   - Move to Group
+  - Set Marker (searchable emoji picker)
   - Set Tab Color (including transparent)
   - Split Horizontal/Vertical
   - Open in Finder
@@ -148,6 +151,7 @@ Tabby follows standard tmux keybindings. All standard tmux shortcuts work as exp
   - Collapse/Expand group
   - Rename group
   - Change group color
+  - Set Marker (searchable emoji picker)
   - Set working directory
   - Delete group
   - Close all windows in group

@@ -64,6 +64,9 @@ github.com/gorilla/websocket
 # github.com/invopop/jsonschema v0.13.0
 ## explicit; go 1.18
 github.com/invopop/jsonschema
+# github.com/kenshaw/emoji v0.3.4
+## explicit; go 1.22
+github.com/kenshaw/emoji
 # github.com/leodido/go-urn v1.4.0
 ## explicit; go 1.18
 github.com/leodido/go-urn

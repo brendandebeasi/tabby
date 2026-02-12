@@ -13,6 +13,8 @@ TABBY_DAEMON=bin/tabby-daemon
 SIDEBAR_RENDERER=bin/sidebar-renderer
 PANE_HEADER=bin/pane-header
 TABBAR=bin/tabbar
+MANAGE_GROUP=bin/manage-group
+WEB_BRIDGE=bin/tabby-web-bridge
 
 # Directories
 BIN_DIR=bin
@@ -24,7 +26,7 @@ SCREENSHOT_DIR=$(TEST_DIR)/screenshots
 all: build
 
 # Build all binaries
-build: $(RENDER_STATUS) $(RENDER_TAB) $(TABBY_DAEMON) $(SIDEBAR_RENDERER) $(PANE_HEADER) $(TABBAR)
+build: $(RENDER_STATUS) $(RENDER_TAB) $(TABBY_DAEMON) $(SIDEBAR_RENDERER) $(PANE_HEADER) $(TABBAR) $(MANAGE_GROUP) $(WEB_BRIDGE)
 
 $(RENDER_STATUS): cmd/render-status/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
@@ -49,6 +51,14 @@ $(PANE_HEADER): cmd/pane-header/main.go pkg/**/*.go
 $(TABBAR): cmd/tabbar/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -o $@ ./cmd/tabbar
+
+$(MANAGE_GROUP): cmd/manage-group/main.go pkg/**/*.go
+	@mkdir -p $(BIN_DIR)
+	$(GOBUILD) -o $@ ./cmd/manage-group
+
+$(WEB_BRIDGE): cmd/tabby-web-bridge/*.go pkg/**/*.go
+	@mkdir -p $(BIN_DIR)
+	$(GOBUILD) -o $@ ./cmd/tabby-web-bridge
 
 # Download dependencies
 deps:
@@ -93,6 +103,8 @@ install: build
 	@cp $(SIDEBAR_RENDERER) $(PLUGIN_DIR)/bin/
 	@cp $(PANE_HEADER) $(PLUGIN_DIR)/bin/
 	@cp $(TABBAR) $(PLUGIN_DIR)/bin/
+	@cp $(MANAGE_GROUP) $(PLUGIN_DIR)/bin/
+	@cp $(WEB_BRIDGE) $(PLUGIN_DIR)/bin/
 	@cp scripts/*.sh $(PLUGIN_DIR)/scripts/
 	@cp tabby.tmux $(PLUGIN_DIR)/
 	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml
@@ -109,6 +121,8 @@ sync: build
 	@cp $(SIDEBAR_RENDERER) $(PLUGIN_DIR)/bin/
 	@cp $(PANE_HEADER) $(PLUGIN_DIR)/bin/
 	@cp $(TABBAR) $(PLUGIN_DIR)/bin/
+	@cp $(MANAGE_GROUP) $(PLUGIN_DIR)/bin/
+	@cp $(WEB_BRIDGE) $(PLUGIN_DIR)/bin/
 	@cp scripts/*.sh $(PLUGIN_DIR)/scripts/
 	@cp tabby.tmux $(PLUGIN_DIR)/
 	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml

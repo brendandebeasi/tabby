@@ -16,7 +16,8 @@ const (
 	MsgResize         MessageType = "resize"
 	MsgViewportUpdate MessageType = "viewport_update"
 	MsgMenu           MessageType = "menu"        // Daemon -> Renderer: show context menu
-	MsgMenuSelect     MessageType = "menu_select"  // Renderer -> Daemon: menu item selected
+	MsgMenuSelect     MessageType = "menu_select" // Renderer -> Daemon: menu item selected
+	MsgMarkerPicker   MessageType = "marker_picker"
 	MsgPing           MessageType = "ping"
 	MsgPong           MessageType = "pong"
 )
@@ -73,8 +74,13 @@ type InputPayload struct {
 	ResolvedAction string `json:"resolved_action,omitempty"` // "select_window", "select_pane", "toggle_group", "button"
 	ResolvedTarget string `json:"resolved_target,omitempty"` // window index, pane ID, group name, or button action
 	// Context menu control
-	IsSimulatedRightClick bool `json:"is_simulated_right_click,omitempty"` // True if right-click came from long-press or double-tap
-	IsTouchMode           bool `json:"is_touch_mode,omitempty"`            // True if renderer is in touch mode
+	IsSimulatedRightClick bool   `json:"is_simulated_right_click,omitempty"` // True if right-click came from long-press or double-tap
+	IsTouchMode           bool   `json:"is_touch_mode,omitempty"`            // True if renderer is in touch mode
+	PickerAction          string `json:"picker_action,omitempty"`
+	PickerScope           string `json:"picker_scope,omitempty"`
+	PickerTarget          string `json:"picker_target,omitempty"`
+	PickerValue           string `json:"picker_value,omitempty"`
+	PickerQuery           string `json:"picker_query,omitempty"`
 }
 
 // ResizePayload contains terminal dimensions and capabilities
@@ -151,6 +157,19 @@ type MenuPayload struct {
 // MenuSelectPayload contains the user's menu selection
 type MenuSelectPayload struct {
 	Index int `json:"index"` // Selected item index (-1 for cancel)
+}
+
+type MarkerOptionPayload struct {
+	Symbol   string `json:"symbol"`
+	Name     string `json:"name"`
+	Keywords string `json:"keywords,omitempty"`
+}
+
+type MarkerPickerPayload struct {
+	Title   string                `json:"title"`
+	Scope   string                `json:"scope"`
+	Target  string                `json:"target"`
+	Options []MarkerOptionPayload `json:"options"`
 }
 
 // SocketPath returns the daemon socket path for a session

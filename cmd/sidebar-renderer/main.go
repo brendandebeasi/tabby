@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"regexp"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,7 +94,7 @@ func recoverAndLog(context string) {
 
 // Long-press detection thresholds
 const (
-	longPressThreshold = 350 * time.Millisecond  // Faster for better responsiveness
+	longPressThreshold = 350 * time.Millisecond // Faster for better responsiveness
 	doubleTapThreshold = 600 * time.Millisecond // Increased for mobile
 	doubleTapDistance  = 10                     // max pixels between taps (increased for mobile/touch)
 	movementThreshold  = 25                     // pixels - very lenient for mobile finger drift
@@ -146,6 +147,18 @@ type rendererModel struct {
 
 	// Sidebar pane ID for focus management (context menu keyboard input)
 	sidebarPaneID string
+
+	pickerShowing      bool
+	pickerTitle        string
+	pickerScope        string
+	pickerTarget       string
+	pickerOptions      []daemon.MarkerOptionPayload
+	pickerFiltered     []int
+	pickerQuery        string
+	pickerCursor       int
+	pickerScroll       int
+	pickerMouseDown    bool
+	pickerInputFocused bool
 }
 
 // Message types
@@ -162,6 +175,10 @@ type renderMsg struct {
 
 type menuMsg struct {
 	payload *daemon.MenuPayload
+}
+
+type markerPickerMsg struct {
+	payload *daemon.MarkerPickerPayload
 }
 
 type tickMsg time.Time
@@ -280,6 +297,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case menuMsg:
+		m.pickerShowing = false
 		m.menuShowing = true
 		m.menuTitle = msg.payload.Title
 		m.menuItems = msg.payload.Items
@@ -287,6 +305,22 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.menuHighlight = -1
 		m.menuDragActive = true // Assume right button still held for drag-to-select
 		// Focus the sidebar pane so keyboard shortcuts reach the renderer
+		m.menuFocusSidebar()
+		return m, nil
+
+	case markerPickerMsg:
+		m.menuShowing = false
+		m.pickerShowing = true
+		m.pickerTitle = msg.payload.Title
+		m.pickerScope = msg.payload.Scope
+		m.pickerTarget = msg.payload.Target
+		m.pickerOptions = append([]daemon.MarkerOptionPayload(nil), msg.payload.Options...)
+		m.pickerQuery = ""
+		m.pickerCursor = 0
+		m.pickerScroll = 0
+		m.pickerMouseDown = false
+		m.pickerInputFocused = true
+		m.pickerApplyFilter()
 		m.menuFocusSidebar()
 		return m, nil
 
@@ -337,6 +371,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case tea.KeyMsg:
+		if m.pickerShowing {
+			return m.handlePickerKey(msg)
+		}
 		// Menu mode: intercept all keys
 		if m.menuShowing {
 			return m.handleMenuKey(msg)
@@ -371,6 +408,12 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Type: "key",
 				Key:  "r",
 			})
+		case "m":
+			// Open marker picker
+			m.sendInput(&daemon.InputPayload{
+				Type: "key",
+				Key:  "m",
+			})
 		}
 		return m, nil
 
@@ -392,8 +435,8 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if inputLog != nil && isInputLogEnabled() {
 				inputLog.Printf("LONGPRESS_TRIGGERED -> right-click at (%d,%d)", m.mouseDownPos.X, m.mouseDownPos.Y)
 			}
-			m.longPressActive = false  // Prevent release from triggering click
-			m.skipNextRelease = true   // Skip the release event
+			m.longPressActive = false // Prevent release from triggering click
+			m.skipNextRelease = true  // Skip the release event
 			// Treat as right-click (simulated)
 			return m.processMouseClick(m.mouseDownPos.X, m.mouseDownPos.Y, tea.MouseButtonRight, true)
 		}
@@ -423,6 +466,10 @@ func abs(x int) int {
 func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if !m.connected {
 		return m, nil
+	}
+
+	if m.pickerShowing {
+		return m.handlePickerMouse(msg)
 	}
 
 	// Menu mode: intercept all mouse events
@@ -473,7 +520,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if *debugMode {
 				debugLog.Printf("  Shift/Ctrl+click detected (Shift=%v Ctrl=%v), treating as right-click", msg.Shift, msg.Ctrl)
 			}
-			m.skipNextRelease = true    // Skip release to prevent false drag detection
+			m.skipNextRelease = true      // Skip release to prevent false drag detection
 			m.mouseDownTime = time.Time{} // Clear stale timestamp
 			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
 		}
@@ -1062,6 +1109,11 @@ func (m rendererModel) renderMenuLines() []string {
 
 		label := item.Label
 		key := item.Key
+		if item.Header {
+			trimmed := strings.TrimLeft(label, " ")
+			indent := len(label) - len(trimmed)
+			label = strings.Repeat(" ", indent) + "> " + strings.TrimSpace(trimmed)
+		}
 
 		// Build inner text content (plain, no ANSI)
 		var inner string
@@ -1100,6 +1152,369 @@ func (m rendererModel) renderMenuLines() []string {
 	// Bottom border
 	bottomBorder := borderStyle.Render("└" + strings.Repeat("─", w-2) + "┘")
 	lines = append(lines, bottomBorder)
+
+	return lines
+}
+
+type pickerMatch struct {
+	optionIdx int
+	score     int
+}
+
+func normalizePickerText(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, "_", " ")
+	s = strings.ReplaceAll(s, "-", " ")
+	return s
+}
+
+func fuzzyScore(query, candidate string) int {
+	q := normalizePickerText(query)
+	c := normalizePickerText(candidate)
+	if q == "" {
+		return 1
+	}
+	if strings.Contains(c, q) {
+		return 1000 - len(c)
+	}
+	qr := []rune(q)
+	cr := []rune(c)
+	qi := 0
+	score := 0
+	streak := 0
+	for i, r := range cr {
+		if qi >= len(qr) {
+			break
+		}
+		if r == qr[qi] {
+			qi++
+			streak++
+			score += 10 + (streak * 4)
+			if i == 0 || cr[i-1] == ' ' {
+				score += 8
+			}
+		} else {
+			streak = 0
+		}
+	}
+	if qi != len(qr) {
+		return -1
+	}
+	return score - len(cr)
+}
+
+func (m *rendererModel) pickerApplyFilter() {
+	matches := make([]pickerMatch, 0, len(m.pickerOptions))
+	for i, opt := range m.pickerOptions {
+		candidate := strings.TrimSpace(opt.Symbol + " " + opt.Name + " " + opt.Keywords)
+		score := fuzzyScore(m.pickerQuery, candidate)
+		if score >= 0 {
+			matches = append(matches, pickerMatch{optionIdx: i, score: score})
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score == matches[j].score {
+			li := strings.ToLower(m.pickerOptions[matches[i].optionIdx].Name)
+			lj := strings.ToLower(m.pickerOptions[matches[j].optionIdx].Name)
+			return li < lj
+		}
+		return matches[i].score > matches[j].score
+	})
+	m.pickerFiltered = make([]int, 0, len(matches))
+	for _, match := range matches {
+		m.pickerFiltered = append(m.pickerFiltered, match.optionIdx)
+	}
+	if len(m.pickerFiltered) == 0 {
+		m.pickerCursor = -1
+		m.pickerScroll = 0
+		return
+	}
+	if m.pickerCursor < 0 {
+		m.pickerCursor = 0
+	}
+	if m.pickerCursor >= len(m.pickerFiltered) {
+		m.pickerCursor = len(m.pickerFiltered) - 1
+	}
+}
+
+func (m *rendererModel) pickerDismiss(sendCancel bool) {
+	if sendCancel {
+		m.sendInput(&daemon.InputPayload{Type: "marker_picker", PickerAction: "cancel"})
+	}
+	m.pickerShowing = false
+	m.pickerMouseDown = false
+	m.pickerQuery = ""
+	m.pickerFiltered = nil
+	m.menuRestoreFocus()
+}
+
+func (m *rendererModel) pickerSelectCurrent() {
+	if m.pickerCursor < 0 || m.pickerCursor >= len(m.pickerFiltered) {
+		return
+	}
+	opt := m.pickerOptions[m.pickerFiltered[m.pickerCursor]]
+	m.sendInput(&daemon.InputPayload{
+		Type:         "marker_picker",
+		PickerAction: "apply",
+		PickerScope:  m.pickerScope,
+		PickerTarget: m.pickerTarget,
+		PickerValue:  opt.Symbol,
+		PickerQuery:  m.pickerQuery,
+	})
+	m.pickerDismiss(false)
+}
+
+func (m *rendererModel) pickerVisibleRows() int {
+	_, _, _, modalH := m.pickerModalLayout()
+	h := modalH - 8
+	if h < 2 {
+		h = 2
+	}
+	return h
+}
+
+func (m *rendererModel) pickerEnsureCursorVisible() {
+	rows := m.pickerVisibleRows()
+	if m.pickerCursor < m.pickerScroll {
+		m.pickerScroll = m.pickerCursor
+	}
+	if m.pickerCursor >= m.pickerScroll+rows {
+		m.pickerScroll = m.pickerCursor - rows + 1
+	}
+	maxScroll := len(m.pickerFiltered) - rows
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.pickerScroll > maxScroll {
+		m.pickerScroll = maxScroll
+	}
+	if m.pickerScroll < 0 {
+		m.pickerScroll = 0
+	}
+}
+
+func (m rendererModel) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "escape", "q":
+		m.pickerDismiss(true)
+		return m, nil
+	case "enter":
+		m.pickerSelectCurrent()
+		return m, nil
+	case "up", "k":
+		if len(m.pickerFiltered) > 0 && m.pickerCursor > 0 {
+			m.pickerCursor--
+			m.pickerEnsureCursorVisible()
+		}
+		return m, nil
+	case "down", "j":
+		if len(m.pickerFiltered) > 0 && m.pickerCursor < len(m.pickerFiltered)-1 {
+			m.pickerCursor++
+			m.pickerEnsureCursorVisible()
+		}
+		return m, nil
+	case "ctrl+u":
+		m.pickerQuery = ""
+		m.pickerApplyFilter()
+		return m, nil
+	case "backspace", "ctrl+h":
+		if m.pickerQuery != "" {
+			r := []rune(m.pickerQuery)
+			if len(r) > 0 {
+				m.pickerQuery = string(r[:len(r)-1])
+				m.pickerApplyFilter()
+			}
+		}
+		return m, nil
+	}
+
+	if msg.String() == "space" {
+		m.pickerQuery += " "
+		m.pickerApplyFilter()
+		return m, nil
+	}
+
+	if len(msg.Runes) > 0 {
+		for _, r := range msg.Runes {
+			if r >= 32 && r != 127 {
+				m.pickerQuery += string(r)
+			}
+		}
+		m.pickerApplyFilter()
+	}
+
+	return m, nil
+}
+
+func (m rendererModel) pickerModalLayout() (startX, startY, modalW, modalH int) {
+	modalW = m.width - 6
+	if modalW > 72 {
+		modalW = 72
+	}
+	if modalW < 26 {
+		modalW = m.width
+	}
+	modalH = m.height - 4
+	if modalH > 20 {
+		modalH = 20
+	}
+	if modalH < 10 {
+		modalH = m.height
+	}
+	startX = (m.width - modalW) / 2
+	startY = (m.height - modalH) / 2
+	if startX < 0 {
+		startX = 0
+	}
+	if startY < 0 {
+		startY = 0
+	}
+	return
+}
+
+func (m rendererModel) pickerIndexAt(screenX, screenY int) int {
+	startX, startY, modalW, modalH := m.pickerModalLayout()
+	if screenX < startX || screenX >= startX+modalW || screenY < startY || screenY >= startY+modalH {
+		return -2
+	}
+	listTop := startY + 5
+	rows := m.pickerVisibleRows()
+	if screenY < listTop || screenY >= listTop+rows {
+		return -1
+	}
+	rel := screenY - listTop
+	idx := m.pickerScroll + rel
+	if idx < 0 || idx >= len(m.pickerFiltered) {
+		return -1
+	}
+	return idx
+}
+
+func (m rendererModel) handlePickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Button == tea.MouseButtonWheelUp {
+		if m.pickerScroll > 0 {
+			m.pickerScroll--
+		}
+		return m, nil
+	}
+	if msg.Button == tea.MouseButtonWheelDown {
+		rows := m.pickerVisibleRows()
+		max := len(m.pickerFiltered) - rows
+		if max < 0 {
+			max = 0
+		}
+		if m.pickerScroll < max {
+			m.pickerScroll++
+		}
+		return m, nil
+	}
+
+	idx := m.pickerIndexAt(msg.X, msg.Y)
+	switch msg.Action {
+	case tea.MouseActionMotion:
+		if idx >= 0 {
+			m.pickerCursor = idx
+		}
+	case tea.MouseActionPress:
+		if idx == -2 {
+			m.pickerDismiss(true)
+			return m, nil
+		}
+		if idx >= 0 {
+			m.pickerCursor = idx
+			m.pickerMouseDown = true
+		}
+	case tea.MouseActionRelease:
+		if m.pickerMouseDown && idx >= 0 && idx == m.pickerCursor {
+			m.pickerSelectCurrent()
+			m.pickerMouseDown = false
+			return m, nil
+		}
+		m.pickerMouseDown = false
+	}
+	return m, nil
+}
+
+func (m rendererModel) renderPickerModal() []string {
+	_, _, modalW, _ := m.pickerModalLayout()
+	innerW := modalW - 4
+	if innerW < 8 {
+		innerW = 8
+	}
+
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000"))
+	lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#000000"))
+	emptyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Italic(true)
+	highlightStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2563eb")).Bold(true)
+
+	lines := make([]string, 0, 24)
+	title := truncateToWidth(m.pickerTitle, innerW)
+	titlePad := innerW - runewidth.StringWidth(title)
+	if titlePad < 0 {
+		titlePad = 0
+	}
+	lines = append(lines, borderStyle.Render("┌"+strings.Repeat("─", modalW-2)+"┐"))
+	lines = append(lines, borderStyle.Render("│ ")+titleStyle.Render(title)+strings.Repeat(" ", titlePad)+borderStyle.Render(" │"))
+
+	qPrefix := "Search: "
+	queryMax := innerW - runewidth.StringWidth(qPrefix)
+	queryText := truncateToWidth(m.pickerQuery, queryMax)
+	queryLine := qPrefix + queryText
+	queryPad := innerW - runewidth.StringWidth(queryLine)
+	if queryPad < 0 {
+		queryPad = 0
+	}
+	lines = append(lines, borderStyle.Render("│ ")+lineStyle.Render(queryLine)+strings.Repeat(" ", queryPad)+borderStyle.Render(" │"))
+
+	meta := fmt.Sprintf("Results: %d", len(m.pickerFiltered))
+	meta = truncateToWidth(meta, innerW)
+	metaPad := innerW - runewidth.StringWidth(meta)
+	if metaPad < 0 {
+		metaPad = 0
+	}
+	lines = append(lines, borderStyle.Render("│ ")+lineStyle.Render(meta)+strings.Repeat(" ", metaPad)+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("├"+strings.Repeat("─", modalW-2)+"┤"))
+
+	rows := m.pickerVisibleRows()
+	m.pickerEnsureCursorVisible()
+	for i := 0; i < rows; i++ {
+		idx := m.pickerScroll + i
+		content := ""
+		styleForRow := lineStyle
+		if idx >= 0 && idx < len(m.pickerFiltered) {
+			opt := m.pickerOptions[m.pickerFiltered[idx]]
+			if opt.Symbol == "" {
+				content = opt.Name
+			} else {
+				content = fmt.Sprintf("%s  %s", opt.Symbol, opt.Name)
+			}
+		} else if len(m.pickerFiltered) == 0 && i == 0 {
+			content = "No matching markers"
+			styleForRow = emptyStyle
+		}
+		content = truncateToWidth(content, innerW)
+		pad := innerW - runewidth.StringWidth(content)
+		if pad < 0 {
+			pad = 0
+		}
+		text := content + strings.Repeat(" ", pad)
+		if idx == m.pickerCursor {
+			lines = append(lines, borderStyle.Render("│ ")+highlightStyle.Render(text)+borderStyle.Render(" │"))
+		} else {
+			lines = append(lines, borderStyle.Render("│ ")+styleForRow.Render(text)+borderStyle.Render(" │"))
+		}
+	}
+
+	lines = append(lines, borderStyle.Render("├"+strings.Repeat("─", modalW-2)+"┤"))
+	help := "Enter: apply  Esc: cancel  Up/Down: select  Fuzzy search"
+	help = truncateToWidth(help, innerW)
+	helpPad := innerW - runewidth.StringWidth(help)
+	if helpPad < 0 {
+		helpPad = 0
+	}
+	lines = append(lines, borderStyle.Render("│ ")+lineStyle.Render(help)+strings.Repeat(" ", helpPad)+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("└"+strings.Repeat("─", modalW-2)+"┘"))
 
 	return lines
 }
@@ -1207,6 +1622,24 @@ func (m rendererModel) View() string {
 		}
 	}
 
+	if m.pickerShowing {
+		startX, startY, modalW, _ := m.pickerModalLayout()
+		pickerLines := m.renderPickerModal()
+		for i, pl := range pickerLines {
+			row := startY + i
+			if row < 0 || row >= len(visible) {
+				continue
+			}
+			left := strings.Repeat(" ", startX)
+			rightWidth := m.width - startX - modalW
+			if rightWidth < 0 {
+				rightWidth = 0
+			}
+			right := strings.Repeat(" ", rightWidth)
+			visible[row] = left + pl + right
+		}
+	}
+
 	return strings.Join(visible, "\n")
 }
 
@@ -1249,6 +1682,16 @@ func (m *rendererModel) receiveLoop() {
 				if json.Unmarshal(payloadBytes, &payload) == nil {
 					if globalProgram != nil {
 						globalProgram.Send(menuMsg{payload: &payload})
+					}
+				}
+			}
+		case daemon.MsgMarkerPicker:
+			if msg.Payload != nil {
+				payloadBytes, _ := json.Marshal(msg.Payload)
+				var payload daemon.MarkerPickerPayload
+				if json.Unmarshal(payloadBytes, &payload) == nil {
+					if globalProgram != nil {
+						globalProgram.Send(markerPickerMsg{payload: &payload})
 					}
 				}
 			}
