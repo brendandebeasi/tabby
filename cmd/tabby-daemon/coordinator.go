@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	kemoji "github.com/kenshaw/emoji"
 	zone "github.com/lrstanley/bubblezone"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
@@ -7970,29 +7971,34 @@ var (
 
 func markerOptions() []daemon.MarkerOptionPayload {
 	markerOptionsOnce.Do(func() {
-		markerOptionsCache = []daemon.MarkerOptionPayload{
-			{Symbol: "🚀", Name: "Rocket", Keywords: "launch deploy ship"},
-			{Symbol: "⚡", Name: "Lightning", Keywords: "fast speed power"},
-			{Symbol: "🔥", Name: "Fire", Keywords: "hot burn urgent"},
-			{Symbol: "🐞", Name: "Bug", Keywords: "bugfix issue"},
-			{Symbol: "✅", Name: "Check", Keywords: "done complete"},
-			{Symbol: "🧪", Name: "Test", Keywords: "qa test spec"},
-			{Symbol: "📦", Name: "Package", Keywords: "build release artifact"},
-			{Symbol: "🛠", Name: "Tools", Keywords: "tooling maintenance"},
-			{Symbol: "📁", Name: "Folder", Keywords: "files project"},
-			{Symbol: "🌐", Name: "Globe", Keywords: "web network"},
-			{Symbol: "🗄", Name: "Database", Keywords: "db sql data"},
-			{Symbol: "🔒", Name: "Lock", Keywords: "security auth"},
-			{Symbol: "🔍", Name: "Find", Keywords: "search find discover"},
-			{Symbol: "🎯", Name: "Target", Keywords: "focus goal"},
-			{Symbol: "⭐", Name: "Star", Keywords: "favorite important"},
-			{Symbol: "❤", Name: "Heart", Keywords: "love personal"},
-			{Symbol: "🧠", Name: "Brain", Keywords: "ai thinking"},
-			{Symbol: "📈", Name: "Chart", Keywords: "metrics analytics"},
-			{Symbol: "📝", Name: "Notes", Keywords: "docs writing"},
-			{Symbol: "🧹", Name: "Cleanup", Keywords: "clean refactor"},
-			{Symbol: "", Name: "No Marker", Keywords: "clear remove none"},
+		catalog := kemoji.Gemoji()
+		seen := make(map[string]struct{}, len(catalog))
+		options := make([]daemon.MarkerOptionPayload, 0, len(catalog))
+		for _, e := range catalog {
+			symbol := strings.TrimSpace(e.Emoji)
+			if symbol == "" {
+				continue
+			}
+			name := strings.TrimSpace(e.Description)
+			if name == "" && len(e.Aliases) > 0 {
+				name = strings.ReplaceAll(strings.TrimSpace(e.Aliases[0]), "_", " ")
+			}
+			keywords := strings.Join(append(append([]string{}, e.Aliases...), e.Tags...), " ")
+			if name == "" && strings.TrimSpace(keywords) == "" {
+				continue
+			}
+			key := symbol + "|" + name
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			options = append(options, daemon.MarkerOptionPayload{
+				Symbol:   symbol,
+				Name:     name,
+				Keywords: keywords,
+			})
 		}
+		markerOptionsCache = options
 	})
 	return markerOptionsCache
 }

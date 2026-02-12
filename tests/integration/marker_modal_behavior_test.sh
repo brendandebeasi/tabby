@@ -6,14 +6,14 @@ echo "=== Integration Test: Marker Modal Wiring ==="
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1 && pwd -P)"
 COORDINATOR="$PROJECT_ROOT/cmd/tabby-daemon/coordinator.go"
 
-if grep -q 'show_marker_results.sh' "$COORDINATOR"; then
-    echo "✓ Marker search menu has tmux fallback command"
+if grep -q 'tabby-marker-picker:' "$COORDINATOR" || grep -q 'show_marker_results.sh' "$COORDINATOR"; then
+    echo "✓ Marker search menu has marker picker command wiring"
 else
-    echo "✗ Missing marker search fallback command wiring in coordinator"
+    echo "✗ Missing marker picker command wiring in coordinator"
     exit 1
 fi
 
-if grep -q 'markerSearchCommandPattern' "$COORDINATOR" && grep -q 'openMarkerPicker(clientID, scope, target, title)' "$COORDINATOR"; then
+if grep -q 'strings.HasPrefix(item.Command, "tabby-marker-picker:")' "$COORDINATOR" && grep -q 'c.openMarkerPicker(clientID, parts\[1\], string(targetBytes), title)' "$COORDINATOR"; then
     echo "✓ Overlay menu selection upgrades to in-app marker picker"
 else
     echo "✗ Missing in-app marker picker interception for menu selection"
