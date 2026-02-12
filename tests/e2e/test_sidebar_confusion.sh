@@ -10,7 +10,7 @@ echo "Opening sidebar..."
 "$PROJECT_ROOT/scripts/toggle_sidebar.sh"
 sleep 1
 
-SIDEBAR_PANE=$(tmux list-panes -F "#{pane_current_command}|#{pane_id}" | grep "^sidebar|" | cut -d'|' -f2)
+SIDEBAR_PANE=$(tmux list-panes -F "#{pane_current_command}|#{pane_id}" | grep "^sidebar" | cut -d'|' -f2)
 
 if [ -z "$SIDEBAR_PANE" ]; then
     echo "ERROR: Could not find sidebar pane"

@@ -401,12 +401,9 @@ tmux set-hook -g session-created "run-shell '$ENSURE_SIDEBAR_SCRIPT'"
 # (RESIZE_SIDEBAR_SCRIPT already defined above for window-unlinked hook)
 tmux set-hook -g client-resized "run-shell '$RESIZE_SIDEBAR_SCRIPT'"
 
-# Override tmux's native window/session chooser to prevent conflicts with sidebar
-# prefix + w normally shows choose-tree -Zw (window list)
-# prefix + s normally shows choose-tree -Zs (session list)
-# These conflict with tabby's sidebar, so we unbind them
-tmux unbind-key -T prefix w 2>/dev/null || true
-tmux unbind-key -T prefix s 2>/dev/null || true
+# Keep tmux native chooser shortcuts available
+tmux bind-key w choose-tree -Zw
+tmux bind-key s choose-tree -Zs
 
 # Configure sidebar toggle keybinding
 TOGGLE_KEY=$(grep "toggle_sidebar:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "prefix + Tab")
@@ -438,7 +435,8 @@ tmux bind-key x run-shell "$KILL_PANE_SCRIPT"
 #   prefix + % = split vertical (enhanced with current path)
 #   prefix + x = kill pane (enhanced with ratio preservation)
 #   prefix + d = detach (tmux default)
-#   prefix + w = window list (tmux default - NOT overridden)
+#   prefix + w = window list (choose-tree)
+#   prefix + s = session list (choose-tree)
 #   prefix + , = rename window (enhanced with name locking)
 #   prefix + q = display panes (tmux default)
 
@@ -453,6 +451,23 @@ tmux bind-key 7 select-window -t :=6
 tmux bind-key 8 select-window -t :=7
 tmux bind-key 9 select-window -t :=8
 tmux bind-key 0 select-window -t :=9
+
+# Legacy Alt-key shortcuts kept for fast navigation
+tmux bind-key -n M-h previous-window
+tmux bind-key -n M-l next-window
+tmux bind-key -n M-n run-shell "$NEW_WINDOW_SCRIPT"
+tmux bind-key -n M-x run-shell "$KILL_PANE_SCRIPT"
+tmux bind-key -n M-q display-panes
+tmux bind-key -n M-1 select-window -t :=0
+tmux bind-key -n M-2 select-window -t :=1
+tmux bind-key -n M-3 select-window -t :=2
+tmux bind-key -n M-4 select-window -t :=3
+tmux bind-key -n M-5 select-window -t :=4
+tmux bind-key -n M-6 select-window -t :=5
+tmux bind-key -n M-7 select-window -t :=6
+tmux bind-key -n M-8 select-window -t :=7
+tmux bind-key -n M-9 select-window -t :=8
+tmux bind-key -n M-0 select-window -t :=9
 
 # First-run bootstrap: if no mode has ever been set, default to enabled.
 INITIAL_MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")

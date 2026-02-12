@@ -17,7 +17,7 @@ if [ "$PANE_BAR_EXISTS" -gt 0 ]; then
 fi
 
 # Check if there are any real panes (not sidebar/tabbar/pane-bar)
-PANE_COUNT=$(tmux list-panes -F '#{pane_current_command}' 2>/dev/null | grep -cvE '^(sidebar|tabbar|pane-bar)$' || true)
+PANE_COUNT=$(tmux list-panes -F '#{pane_current_command}' 2>/dev/null | grep -cvE '^(sidebar|sidebar-rendere|tabbar|pane-bar)$' || true)
 if [ "$PANE_COUNT" -eq 0 ]; then
     exit 0
 fi

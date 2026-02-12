@@ -38,7 +38,7 @@ setup_test_session() {
     tmux new-session -d -s "$session_name" -n "default"
     tmux set-option -t "$session_name" allow-rename off
     tmux set-option -t "$session_name" automatic-rename off
-    tmux set-option -g @tmux_tabs_test 1
+    tmux set-option -g @tabby_test 1
 }
 
 cleanup_test_session() {

@@ -12,7 +12,7 @@ if [ "$MODE" = "enabled" ]; then
 fi
 
 # Count panes in active window (excluding sidebar/tabbar)
-PANE_COUNT=$(tmux list-panes -F "#{pane_current_command}" 2>/dev/null | grep -cvE "^(sidebar|tabbar)$" || echo "0")
+PANE_COUNT=$(tmux list-panes -F "#{pane_current_command}" 2>/dev/null | grep -cvE "^(sidebar|sidebar-rendere|tabbar)$" || echo "0")
 
 if [ "$PANE_COUNT" -gt 1 ]; then
     # Multiple panes - show 2 status lines

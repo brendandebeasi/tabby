@@ -18,7 +18,7 @@ tmux new-window -t visual -n "GP|tool"
 tmux new-window -t visual -n "notes"
 tmux select-window -t visual:0
 
-tmux set-option -g @tmux_tabs_test 1
+tmux set-option -g @tabby_test 1
 
 tmux run-shell "$PROJECT_ROOT/tabby.tmux"
 

@@ -17,11 +17,11 @@ import (
 
 // ClientInfo tracks per-client state for renderers
 type ClientInfo struct {
-	Conn           net.Conn
-	Width          int
-	Height         int
-	ViewportOffset int
-	ColorProfile   string // "Ascii", "ANSI", "ANSI256", "TrueColor"
+	Conn            net.Conn
+	Width           int
+	Height          int
+	ViewportOffset  int
+	ColorProfile    string // "Ascii", "ANSI", "ANSI256", "TrueColor"
 	lastContentHash uint32 // hash of last sent content to deduplicate renders
 }
 
@@ -498,6 +498,24 @@ func (s *Server) SendMenuToClient(clientID string, menu *MenuPayload) {
 		Type:     MsgMenu,
 		ClientID: clientID,
 		Payload:  menu,
+	}
+	s.sendMessage(conn, msg)
+}
+
+func (s *Server) SendMarkerPickerToClient(clientID string, picker *MarkerPickerPayload) {
+	s.clientsMu.RLock()
+	client, ok := s.clients[clientID]
+	if !ok {
+		s.clientsMu.RUnlock()
+		return
+	}
+	conn := client.Conn
+	s.clientsMu.RUnlock()
+
+	msg := Message{
+		Type:     MsgMarkerPicker,
+		ClientID: clientID,
+		Payload:  picker,
 	}
 	s.sendMessage(conn, msg)
 }

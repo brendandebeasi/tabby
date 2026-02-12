@@ -33,7 +33,7 @@ tmux rename-window -t "$TEST_SESSION":0 "SD|app"
 tmux new-window -t "$TEST_SESSION" -n "GP|tool"
 tmux new-window -t "$TEST_SESSION" -n "notes"
 
-tmux set-option -g @tmux_tabs_test 1
+tmux set-option -g @tabby_test 1
 sleep 1
 
 # Smoke-test render binary execution without requiring an attached client.

@@ -28,7 +28,7 @@ setup_visual_session() {
     tmux new-session -d -s "$TEST_SESSION" -n "SD|app"
     tmux set-option -t "$TEST_SESSION" allow-rename off
     tmux set-option -t "$TEST_SESSION" automatic-rename off
-    tmux set-option -g @tmux_tabs_test 1
+    tmux set-option -g @tabby_test 1
     
     tmux new-window -t "$TEST_SESSION" -n "SD|debug"
     tmux new-window -t "$TEST_SESSION" -n "GP|MSG|chat"

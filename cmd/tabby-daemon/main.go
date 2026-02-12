@@ -959,6 +959,9 @@ func main() {
 	coordinator.OnSendMenu = func(clientID string, menu *daemon.MenuPayload) {
 		server.SendMenuToClient(clientID, menu)
 	}
+	coordinator.OnSendMarkerPicker = func(clientID string, picker *daemon.MarkerPickerPayload) {
+		server.SendMarkerPickerToClient(clientID, picker)
+	}
 
 	// Start server
 	if err := server.Start(); err != nil {
@@ -997,11 +1000,11 @@ func main() {
 	go func() {
 		defer recoverAndLog("refresh-loop")
 
-		refreshTicker := time.NewTicker(5 * time.Second)         // Window list poll (fallback, less frequent now)
-		windowCheckTicker := time.NewTicker(2 * time.Second)     // Spawn/cleanup poll (fallback)
+		refreshTicker := time.NewTicker(5 * time.Second)          // Window list poll (fallback, less frequent now)
+		windowCheckTicker := time.NewTicker(2 * time.Second)      // Spawn/cleanup poll (fallback)
 		animationTicker := time.NewTicker(100 * time.Millisecond) // Combined spinner + pet animation (was two separate tickers)
-		gitTicker := time.NewTicker(5 * time.Second)             // Git status
-		watchdogTicker := time.NewTicker(5 * time.Second)        // Watchdog: check renderer health
+		gitTicker := time.NewTicker(5 * time.Second)              // Git status
+		watchdogTicker := time.NewTicker(5 * time.Second)         // Watchdog: check renderer health
 		defer refreshTicker.Stop()
 		defer windowCheckTicker.Stop()
 		defer animationTicker.Stop()

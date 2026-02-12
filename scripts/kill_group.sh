@@ -30,12 +30,12 @@ done
 tmux select-window -t :0 2>/dev/null || true
 
 # Focus main pane
-main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar$' | head -1 | cut -d: -f1)
+main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar' | head -1 | cut -d: -f1)
 [ -n "$main_pane" ] && tmux select-pane -t "$main_pane"
 
 # Refresh sidebars
 sleep 0.1
-for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar|' | cut -d'|' -f2); do
+for pid in $(tmux list-panes -s -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar' | cut -d'|' -f2); do
     kill -USR1 "$pid" 2>/dev/null || true
 done
 

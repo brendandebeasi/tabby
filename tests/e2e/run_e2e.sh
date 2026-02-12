@@ -64,7 +64,7 @@ setup_test_session() {
     tmux select-window -t "$TEST_SESSION:0"
     
     # Enable tabby test mode
-    tmux set-option -g @tmux_tabs_test 1
+    tmux set-option -g @tabby_test 1
     
     log_info "Test session created with $(tmux list-windows -t $TEST_SESSION | wc -l | tr -d ' ') windows"
 }
@@ -182,7 +182,7 @@ test_sidebar_toggle_open() {
     # Ensure no sidebar exists
     if sidebar_exists; then
         tmux list-panes -s -t "$TEST_SESSION" -F "#{pane_current_command}|#{pane_id}" | \
-            grep "^sidebar|" | cut -d'|' -f2 | \
+            grep "^sidebar" | cut -d'|' -f2 | \
             xargs -I{} tmux kill-pane -t {} 2>/dev/null || true
         sleep 0.3
     fi

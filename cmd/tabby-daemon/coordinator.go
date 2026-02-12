@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,10 +24,10 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/brendandebeasi/tabby/pkg/colors"
-	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/config"
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/grouping"
+	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/perf"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
@@ -196,9 +197,10 @@ type Coordinator struct {
 	aiBellUntil        map[int]int64     // window index → unix timestamp when bell expires (window-level)
 
 	// Context menu state (for in-renderer menus)
-	OnSendMenu     func(clientID string, menu *daemon.MenuPayload)
-	pendingMenus   map[string][]menuItemDef
-	pendingMenusMu sync.Mutex
+	OnSendMenu         func(clientID string, menu *daemon.MenuPayload)
+	OnSendMarkerPicker func(clientID string, picker *daemon.MarkerPickerPayload)
+	pendingMenus       map[string][]menuItemDef
+	pendingMenusMu     sync.Mutex
 
 	// Background theme detector (deprecated, kept for fallback)
 	bgDetector *colors.BackgroundDetector
@@ -380,17 +382,17 @@ type adventureState struct {
 }
 
 type wildlifeEncounter struct {
-	Type       string
-	Emoji      string
-	X          int // Position in scene
-	Y          int // 0=ground, 1=low air, 2=high air
-	Speed      int
+	Type        string
+	Emoji       string
+	X           int // Position in scene
+	Y           int // 0=ground, 1=low air, 2=high air
+	Speed       int
 	CatchChance int
-	Spotted    bool
-	Stalking   bool
-	Pounced    bool
-	Caught     bool
-	Escaped    bool
+	Spotted     bool
+	Stalking    bool
+	Pounced     bool
+	Caught      bool
+	Escaped     bool
 }
 
 type biomeData struct {
@@ -2242,170 +2244,170 @@ func (c *Coordinator) UpdatePetState() bool {
 			}
 			if rand.Intn(100) < actionChance {
 				action := rand.Intn(10)
-			switch action {
-			case 0:
-				// Run across the screen (avoid poop as destination)
-				c.pet.State = "walking"
-				c.pet.Direction = []int{-1, 1}[rand.Intn(2)]
-				targetX := rand.Intn(maxX)
-				// Avoid selecting a position with poop as target
-				for attempts := 0; attempts < 5; attempts++ {
-					hasPoop := false
-					for _, poopX := range c.pet.PoopPositions {
-						if abs(targetX-poopX) <= 1 {
-							hasPoop = true
+				switch action {
+				case 0:
+					// Run across the screen (avoid poop as destination)
+					c.pet.State = "walking"
+					c.pet.Direction = []int{-1, 1}[rand.Intn(2)]
+					targetX := rand.Intn(maxX)
+					// Avoid selecting a position with poop as target
+					for attempts := 0; attempts < 5; attempts++ {
+						hasPoop := false
+						for _, poopX := range c.pet.PoopPositions {
+							if abs(targetX-poopX) <= 1 {
+								hasPoop = true
+								break
+							}
+						}
+						if !hasPoop {
 							break
 						}
+						targetX = rand.Intn(maxX) // Try another position
 					}
-					if !hasPoop {
-						break
+					c.pet.TargetPos = pos2D{X: targetX, Y: 0}
+					c.pet.HasTarget = true
+					c.pet.LastThought = randomThought("walking")
+				case 1:
+					// Jump in place
+					c.pet.State = "jumping"
+					c.pet.Pos.Y = 2
+					c.pet.LastThought = randomThought("jumping")
+				case 2:
+					// Chase the yarn
+					if c.pet.YarnPos.X >= 0 {
+						c.pet.TargetPos = pos2D{X: c.pet.YarnPos.X, Y: 0}
+						c.pet.HasTarget = true
+						c.pet.ActionPending = "play"
+						c.pet.State = "walking"
+						c.pet.LastThought = "yarn calls to me."
 					}
-					targetX = rand.Intn(maxX) // Try another position
-				}
-				c.pet.TargetPos = pos2D{X: targetX, Y: 0}
-				c.pet.HasTarget = true
-				c.pet.LastThought = randomThought("walking")
-			case 1:
-				// Jump in place
-				c.pet.State = "jumping"
-				c.pet.Pos.Y = 2
-				c.pet.LastThought = randomThought("jumping")
-			case 2:
-				// Chase the yarn
-				if c.pet.YarnPos.X >= 0 {
-					c.pet.TargetPos = pos2D{X: c.pet.YarnPos.X, Y: 0}
+				case 3:
+					// Bat at yarn (toss it) - avoid poop positions
+					tossX := rand.Intn(maxX-2) + 2
+					for attempts := 0; attempts < 5; attempts++ {
+						hasPoop := false
+						for _, poopX := range c.pet.PoopPositions {
+							if abs(tossX-poopX) <= 1 {
+								hasPoop = true
+								break
+							}
+						}
+						if !hasPoop {
+							break
+						}
+						tossX = rand.Intn(maxX-2) + 2
+					}
+					c.pet.YarnPos = pos2D{X: tossX, Y: 2}
+					c.pet.YarnExpiresAt = now.Add(15 * time.Second)
+					c.pet.YarnPushCount = 0
+					c.pet.TargetPos = pos2D{X: tossX, Y: 0}
 					c.pet.HasTarget = true
 					c.pet.ActionPending = "play"
 					c.pet.State = "walking"
-					c.pet.LastThought = "yarn calls to me."
-				}
-			case 3:
-				// Bat at yarn (toss it) - avoid poop positions
-				tossX := rand.Intn(maxX-2) + 2
-				for attempts := 0; attempts < 5; attempts++ {
-					hasPoop := false
-					for _, poopX := range c.pet.PoopPositions {
-						if abs(tossX-poopX) <= 1 {
-							hasPoop = true
-							break
+					c.pet.LastThought = "chaos time."
+				case 4:
+					// Just be happy
+					c.pet.State = "happy"
+					c.pet.LastThought = randomThought("happy")
+				case 5:
+					// SHOOT A BANANA!
+					c.pet.State = "shooting"
+					dir := c.pet.Direction
+					if dir == 0 {
+						dir = 1
+					}
+					// Gun appears in the direction the pet is facing (fixes #23: physics make sense now)
+					gunX := c.pet.Pos.X + dir
+					if gunX < 0 {
+						gunX = 0
+					}
+					if gunX > maxX {
+						gunX = maxX
+					}
+					c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+						Emoji:     "🔫",
+						Pos:       pos2D{X: gunX, Y: 0},
+						Velocity:  pos2D{X: 0, Y: 0},
+						ExpiresAt: now.Add(1200 * time.Millisecond),
+					})
+					// BANG effect next to gun
+					c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+						Emoji:     "💥",
+						Pos:       pos2D{X: gunX + dir, Y: 0},
+						Velocity:  pos2D{X: 0, Y: 0},
+						ExpiresAt: now.Add(400 * time.Millisecond),
+					})
+					// Banana flies from gun position
+					c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+						Emoji:     "🍌",
+						Pos:       pos2D{X: gunX + dir, Y: 1},
+						Velocity:  pos2D{X: dir, Y: 0},
+						ExpiresAt: now.Add(3 * time.Second),
+					})
+					thoughts := []string{"pew pew.", "banana had it coming.", "nothing personal.", "the family sends regards."}
+					c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+				case 6:
+					// Toss random emoji with context-aware thoughts
+					shinyThings := []struct {
+						emoji    string
+						thoughts []string
+					}{
+						{"⭐", []string{"a star!", "make a wish.", "star light, star bright."}},
+						{"💫", []string{"dizzy.", "sparkly.", "ooh cosmic."}},
+						{"✨", []string{"sparkles!", "so shiny.", "glitter everywhere."}},
+						{"🎾", []string{"ball!", "must chase.", "tennis anyone?"}},
+						{"🏀", []string{"bouncy.", "slam dunk.", "ball is life."}},
+						{"🎈", []string{"balloon!", "pop it?", "don't let it fly away."}},
+						{"🦋", []string{"butterfly!", "must catch.", "so graceful."}},
+						{"🐟", []string{"fish!", "dinner?", "swimming in air."}},
+						{"🍎", []string{"apple!", "healthy snack.", "one a day."}},
+						{"🧀", []string{"cheese!", "yes please.", "gouda choice."}},
+					}
+					choice := shinyThings[rand.Intn(len(shinyThings))]
+					startX := rand.Intn(maxX-2) + 2
+					dir := []int{-1, 1}[rand.Intn(2)]
+					c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+						Emoji:     choice.emoji,
+						Pos:       pos2D{X: startX, Y: 2},
+						Velocity:  pos2D{X: dir, Y: 0},
+						ExpiresAt: now.Add(3 * time.Second),
+					})
+					c.pet.LastThought = choice.thoughts[rand.Intn(len(choice.thoughts))]
+				case 7:
+					// Menacing stare
+					emojis := []string{"👁️", "🔪", "💀", "🎯"}
+					emoji := emojis[rand.Intn(len(emojis))]
+					c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+						Emoji:     emoji,
+						Pos:       pos2D{X: c.pet.Pos.X, Y: 2},
+						Velocity:  pos2D{X: 0, Y: 0},
+						ExpiresAt: now.Add(2 * time.Second),
+					})
+					thoughts := []string{"watching.", "always watching.", "i see you.", "the family knows."}
+					c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
+				case 8:
+					// Spawn a mouse! (if not already present)
+					if c.pet.MousePos.X < 0 {
+						// Mouse appears at edge of screen
+						c.pet.MouseDirection = []int{-1, 1}[rand.Intn(2)]
+						if c.pet.MouseDirection == 1 {
+							c.pet.MousePos = pos2D{X: 0, Y: 0}
+						} else {
+							c.pet.MousePos = pos2D{X: maxX, Y: 0}
 						}
+						c.pet.LastThought = randomThought("mouse_spot")
 					}
-					if !hasPoop {
-						break
+				case 9:
+					// Start an adventure! (if enabled and happy enough)
+					adventureEnabled := c.config.Widgets.Pet.AdventureEnabled
+					// Default to enabled if not explicitly set
+					if !adventureEnabled && c.config.Widgets.Pet.AdventureChance == 0 {
+						adventureEnabled = true
 					}
-					tossX = rand.Intn(maxX-2) + 2
-				}
-				c.pet.YarnPos = pos2D{X: tossX, Y: 2}
-				c.pet.YarnExpiresAt = now.Add(15 * time.Second)
-				c.pet.YarnPushCount = 0
-				c.pet.TargetPos = pos2D{X: tossX, Y: 0}
-				c.pet.HasTarget = true
-				c.pet.ActionPending = "play"
-				c.pet.State = "walking"
-				c.pet.LastThought = "chaos time."
-			case 4:
-				// Just be happy
-				c.pet.State = "happy"
-				c.pet.LastThought = randomThought("happy")
-			case 5:
-				// SHOOT A BANANA!
-				c.pet.State = "shooting"
-				dir := c.pet.Direction
-				if dir == 0 {
-					dir = 1
-				}
-				// Gun appears in the direction the pet is facing (fixes #23: physics make sense now)
-				gunX := c.pet.Pos.X + dir
-				if gunX < 0 {
-					gunX = 0
-				}
-				if gunX > maxX {
-					gunX = maxX
-				}
-				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
-					Emoji:     "🔫",
-					Pos:       pos2D{X: gunX, Y: 0},
-					Velocity:  pos2D{X: 0, Y: 0},
-					ExpiresAt: now.Add(1200 * time.Millisecond),
-				})
-				// BANG effect next to gun
-				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
-					Emoji:     "💥",
-					Pos:       pos2D{X: gunX + dir, Y: 0},
-					Velocity:  pos2D{X: 0, Y: 0},
-					ExpiresAt: now.Add(400 * time.Millisecond),
-				})
-				// Banana flies from gun position
-				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
-					Emoji:     "🍌",
-					Pos:       pos2D{X: gunX + dir, Y: 1},
-					Velocity:  pos2D{X: dir, Y: 0},
-					ExpiresAt: now.Add(3 * time.Second),
-				})
-				thoughts := []string{"pew pew.", "banana had it coming.", "nothing personal.", "the family sends regards."}
-				c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
-			case 6:
-				// Toss random emoji with context-aware thoughts
-				shinyThings := []struct {
-					emoji    string
-					thoughts []string
-				}{
-					{"⭐", []string{"a star!", "make a wish.", "star light, star bright."}},
-					{"💫", []string{"dizzy.", "sparkly.", "ooh cosmic."}},
-					{"✨", []string{"sparkles!", "so shiny.", "glitter everywhere."}},
-					{"🎾", []string{"ball!", "must chase.", "tennis anyone?"}},
-					{"🏀", []string{"bouncy.", "slam dunk.", "ball is life."}},
-					{"🎈", []string{"balloon!", "pop it?", "don't let it fly away."}},
-					{"🦋", []string{"butterfly!", "must catch.", "so graceful."}},
-					{"🐟", []string{"fish!", "dinner?", "swimming in air."}},
-					{"🍎", []string{"apple!", "healthy snack.", "one a day."}},
-					{"🧀", []string{"cheese!", "yes please.", "gouda choice."}},
-				}
-				choice := shinyThings[rand.Intn(len(shinyThings))]
-				startX := rand.Intn(maxX-2) + 2
-				dir := []int{-1, 1}[rand.Intn(2)]
-				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
-					Emoji:     choice.emoji,
-					Pos:       pos2D{X: startX, Y: 2},
-					Velocity:  pos2D{X: dir, Y: 0},
-					ExpiresAt: now.Add(3 * time.Second),
-				})
-				c.pet.LastThought = choice.thoughts[rand.Intn(len(choice.thoughts))]
-			case 7:
-				// Menacing stare
-				emojis := []string{"👁️", "🔪", "💀", "🎯"}
-				emoji := emojis[rand.Intn(len(emojis))]
-				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
-					Emoji:     emoji,
-					Pos:       pos2D{X: c.pet.Pos.X, Y: 2},
-					Velocity:  pos2D{X: 0, Y: 0},
-					ExpiresAt: now.Add(2 * time.Second),
-				})
-				thoughts := []string{"watching.", "always watching.", "i see you.", "the family knows."}
-				c.pet.LastThought = thoughts[rand.Intn(len(thoughts))]
-			case 8:
-				// Spawn a mouse! (if not already present)
-				if c.pet.MousePos.X < 0 {
-					// Mouse appears at edge of screen
-					c.pet.MouseDirection = []int{-1, 1}[rand.Intn(2)]
-					if c.pet.MouseDirection == 1 {
-						c.pet.MousePos = pos2D{X: 0, Y: 0}
-					} else {
-						c.pet.MousePos = pos2D{X: maxX, Y: 0}
+					if adventureEnabled && c.pet.Happiness >= 50 && !c.pet.Adventure.Active {
+						c.startAdventure(maxX)
 					}
-					c.pet.LastThought = randomThought("mouse_spot")
 				}
-			case 9:
-				// Start an adventure! (if enabled and happy enough)
-				adventureEnabled := c.config.Widgets.Pet.AdventureEnabled
-				// Default to enabled if not explicitly set
-				if !adventureEnabled && c.config.Widgets.Pet.AdventureChance == 0 {
-					adventureEnabled = true
-				}
-				if adventureEnabled && c.pet.Happiness >= 50 && !c.pet.Adventure.Active {
-					c.startAdventure(maxX)
-				}
-			}
 			}
 		}
 	}
@@ -3035,7 +3037,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 			c.lastWidthSync = time.Now()
 			targetWidth := c.globalWidth
 			untrackLock("widthSyncMu")
-		c.widthSyncMu.Unlock()
+			c.widthSyncMu.Unlock()
 
 			if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
 				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -3053,7 +3055,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 			c.lastWidthSync = time.Now()
 			targetWidth := c.globalWidth
 			untrackLock("widthSyncMu")
-		c.widthSyncMu.Unlock()
+			c.widthSyncMu.Unlock()
 
 			if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
 				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -3071,7 +3073,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 			c.globalWidth = currentWidth
 			c.lastWidthSync = time.Now()
 			untrackLock("widthSyncMu")
-		c.widthSyncMu.Unlock()
+			c.widthSyncMu.Unlock()
 
 			exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", currentWidth)).Run()
 			syncOtherSidebarWidths(currentWidth, clientID)
@@ -6982,8 +6984,17 @@ func (c *Coordinator) HandleInput(clientID string, input *daemon.InputPayload) b
 	case "menu_select":
 		c.HandleMenuSelect(clientID, input.MouseX) // MouseX repurposed as menu item index
 		return true
+	case "marker_picker":
+		return c.handleMarkerPickerInput(input)
 	}
 	return false
+}
+
+func (c *Coordinator) handleMarkerPickerInput(input *daemon.InputPayload) bool {
+	if input.PickerAction != "apply" {
+		return false
+	}
+	return c.applyMarkerSelection(input.PickerScope, input.PickerTarget, input.PickerValue)
 }
 
 // handleSemanticAction processes pre-resolved semantic actions from renderers
@@ -7952,6 +7963,40 @@ type menuItemDef struct {
 	Header    bool
 }
 
+var (
+	markerOptionsOnce  sync.Once
+	markerOptionsCache []daemon.MarkerOptionPayload
+)
+
+func markerOptions() []daemon.MarkerOptionPayload {
+	markerOptionsOnce.Do(func() {
+		markerOptionsCache = []daemon.MarkerOptionPayload{
+			{Symbol: "🚀", Name: "Rocket", Keywords: "launch deploy ship"},
+			{Symbol: "⚡", Name: "Lightning", Keywords: "fast speed power"},
+			{Symbol: "🔥", Name: "Fire", Keywords: "hot burn urgent"},
+			{Symbol: "🐞", Name: "Bug", Keywords: "bugfix issue"},
+			{Symbol: "✅", Name: "Check", Keywords: "done complete"},
+			{Symbol: "🧪", Name: "Test", Keywords: "qa test spec"},
+			{Symbol: "📦", Name: "Package", Keywords: "build release artifact"},
+			{Symbol: "🛠", Name: "Tools", Keywords: "tooling maintenance"},
+			{Symbol: "📁", Name: "Folder", Keywords: "files project"},
+			{Symbol: "🌐", Name: "Globe", Keywords: "web network"},
+			{Symbol: "🗄", Name: "Database", Keywords: "db sql data"},
+			{Symbol: "🔒", Name: "Lock", Keywords: "security auth"},
+			{Symbol: "🔍", Name: "Find", Keywords: "search find discover"},
+			{Symbol: "🎯", Name: "Target", Keywords: "focus goal"},
+			{Symbol: "⭐", Name: "Star", Keywords: "favorite important"},
+			{Symbol: "❤", Name: "Heart", Keywords: "love personal"},
+			{Symbol: "🧠", Name: "Brain", Keywords: "ai thinking"},
+			{Symbol: "📈", Name: "Chart", Keywords: "metrics analytics"},
+			{Symbol: "📝", Name: "Notes", Keywords: "docs writing"},
+			{Symbol: "🧹", Name: "Cleanup", Keywords: "clean refactor"},
+			{Symbol: "", Name: "No Marker", Keywords: "clear remove none"},
+		}
+	})
+	return markerOptionsCache
+}
+
 // parseTmuxMenuArgs extracts menu title and items from tmux display-menu arguments
 func parseTmuxMenuArgs(args []string) (string, []menuItemDef) {
 	var title string
@@ -7987,9 +8032,11 @@ parseItems:
 
 		if label == "" && key == "" && cmd == "" {
 			items = append(items, menuItemDef{Separator: true})
-		} else if strings.HasPrefix(label, "-") {
+		} else if strings.HasPrefix(strings.TrimLeft(label, " "), "-") {
+			trimmed := strings.TrimLeft(label, " ")
+			indent := len(label) - len(trimmed)
 			items = append(items, menuItemDef{
-				Label:  strings.TrimPrefix(label, "-"),
+				Label:  strings.Repeat(" ", indent) + strings.TrimPrefix(trimmed, "-"),
 				Header: true,
 			})
 		} else {
@@ -8061,6 +8108,21 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 		return
 	}
 
+	if strings.HasPrefix(item.Command, "tabby-marker-picker:") {
+		parts := strings.SplitN(item.Command, ":", 3)
+		if len(parts) == 3 {
+			targetBytes, err := base64.StdEncoding.DecodeString(parts[2])
+			if err == nil {
+				title := "Set Marker"
+				if parts[1] == "group" {
+					title = "Set Group Marker"
+				}
+				c.openMarkerPicker(clientID, parts[1], string(targetBytes), title)
+			}
+		}
+		return
+	}
+
 	// Execute the tmux command via temp file (handles complex quoting correctly)
 	executeTmuxCommand(item.Command)
 }
@@ -8077,6 +8139,75 @@ func executeTmuxCommand(cmd string) {
 	f.WriteString(cmd + "\n")
 	f.Close()
 	exec.Command("tmux", "source-file", f.Name()).Run()
+}
+
+func (c *Coordinator) openMarkerPicker(clientID, scope, target, title string) {
+	if c.OnSendMarkerPicker == nil {
+		return
+	}
+	options := markerOptions()
+	if len(options) == 0 {
+		return
+	}
+	c.OnSendMarkerPicker(clientID, &daemon.MarkerPickerPayload{
+		Title:   title,
+		Scope:   scope,
+		Target:  target,
+		Options: options,
+	})
+}
+
+func (c *Coordinator) applyMarkerSelection(scope, target, markerValue string) bool {
+	value := strings.TrimSpace(markerValue)
+
+	if scope == "window" {
+		if strings.TrimSpace(target) == "" {
+			return false
+		}
+		windowTarget := ":" + target
+		if c.sessionID != "" {
+			windowTarget = c.sessionID + ":" + target
+		}
+		if value == "" {
+			exec.Command("tmux", "set-window-option", "-t", windowTarget, "-u", "@tabby_icon").Run()
+		} else {
+			exec.Command("tmux", "set-window-option", "-t", windowTarget, "@tabby_icon", value).Run()
+		}
+		return true
+	}
+
+	if scope == "group" {
+		return c.setGroupMarkerExact(target, value)
+	}
+
+	return false
+}
+
+func (c *Coordinator) setGroupMarkerExact(groupName, marker string) bool {
+	groupName = strings.TrimSpace(groupName)
+	if groupName == "" {
+		return false
+	}
+
+	configPath := config.DefaultConfigPath()
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		return false
+	}
+	group := config.FindGroup(cfg, groupName)
+	if group == nil {
+		return false
+	}
+	group.Theme.Icon = marker
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		return false
+	}
+
+	c.stateMu.Lock()
+	c.config = cfg
+	c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
+	c.stateMu.Unlock()
+	return true
 }
 
 // handleRightClick shows appropriate context menu based on what was clicked
@@ -8258,6 +8389,11 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 	for _, opt := range iconOptions {
 		setIconCmd := fmt.Sprintf("set-window-option -t :%d @tabby_icon '%s'", win.Index, opt.icon)
 		args = append(args, fmt.Sprintf("  %s %s", opt.icon, opt.name), opt.key, setIconCmd)
+	}
+	if !strings.HasPrefix(clientID, "header:") {
+		target := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(win.Index)))
+		searchCmd := fmt.Sprintf("tabby-marker-picker:window:%s", target)
+		args = append(args, "  Search...", "", searchCmd)
 	}
 	resetIconCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_icon", win.Index)
 	args = append(args, "  Remove Icon", "0", resetIconCmd)
@@ -8559,8 +8695,86 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		args = append(args, "New Window", "n", newWindowCmd)
 	}
 
-	// Note: Collapse/Expand is done by clicking on the group header (left click)
-	// No need for context menu option since it would bypass in-memory state
+	toggleGroupScript := c.getScriptPath("toggle_group_collapse.sh")
+	if toggleGroupScript != "" {
+		args = append(args, "", "", "")
+		if c.collapsedGroups[group.Name] {
+			expandCmd := fmt.Sprintf("run-shell '%s \"%s\" expand'", toggleGroupScript, group.Name)
+			args = append(args, "Expand Group", "e", expandCmd)
+		} else {
+			collapseCmd := fmt.Sprintf("run-shell '%s \"%s\" collapse'", toggleGroupScript, group.Name)
+			args = append(args, "Collapse Group", "c", collapseCmd)
+		}
+	}
+
+	renameScript := c.getScriptPath("rename_group.sh")
+	colorScript := c.getScriptPath("set_group_color.sh")
+	workingDirScript := c.getScriptPath("set_group_working_dir.sh")
+	deleteScript := c.getScriptPath("delete_group.sh")
+	if group.Name != "Default" && renameScript != "" && colorScript != "" && workingDirScript != "" && deleteScript != "" {
+		args = append(args, "", "", "")
+		args = append(args, "-Edit Group", "", "")
+
+		renameCmd := fmt.Sprintf(
+			"command-prompt -I '%s' -p 'New name:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
+			group.Name,
+			renameScript,
+			group.Name,
+		)
+		args = append(args, "  Rename", "r", renameCmd)
+
+		args = append(args, "  -Change Color", "", "")
+		colorOptions := []struct {
+			name string
+			hex  string
+			key  string
+		}{
+			{"Red", "#e74c3c", "r"},
+			{"Orange", "#e67e22", "o"},
+			{"Yellow", "#f1c40f", "y"},
+			{"Green", "#27ae60", "g"},
+			{"Blue", "#3498db", "b"},
+			{"Purple", "#9b59b6", "p"},
+			{"Pink", "#e91e63", "i"},
+			{"Cyan", "#00bcd4", "c"},
+			{"Gray", "#7f8c8d", "a"},
+			{"Transparent", "transparent", "t"},
+		}
+		for _, color := range colorOptions {
+			setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" %s'", colorScript, group.Name, color.hex)
+			args = append(args, fmt.Sprintf("    %s", color.name), color.key, setColorCmd)
+		}
+
+		args = append(args, "  -Set Marker", "", "")
+		if !strings.HasPrefix(clientID, "header:") {
+			groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
+			searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
+			args = append(args, "    Search...", "", searchCmd)
+		}
+
+		currentWorkingDir := workingDir
+		if currentWorkingDir == "" {
+			currentWorkingDir = "~"
+		}
+
+		setWorkingDirCmd := fmt.Sprintf(
+			"command-prompt -I '%s' -p 'Working directory:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
+			currentWorkingDir,
+			workingDirScript,
+			group.Name,
+		)
+		args = append(args, "  Set Working Directory", "w", setWorkingDirCmd)
+
+		args = append(args, "", "", "")
+
+		deleteCmd := fmt.Sprintf(
+			"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s \\\"%s\\\"'\"",
+			group.Name,
+			deleteScript,
+			group.Name,
+		)
+		args = append(args, "  Delete Group", "d", deleteCmd)
+	}
 
 	// Close all windows in group (only if group has windows)
 	if len(group.Windows) > 0 {
@@ -8577,7 +8791,7 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		// Use confirm-before for safety
 		confirmCmd := fmt.Sprintf(`confirm-before -p "Close all %d windows in %s? (y/n)" "%s"`,
 			len(group.Windows), group.Name, killAllCmd)
-		args = append(args, fmt.Sprintf("Close All (%d)", len(group.Windows)), "X", confirmCmd)
+		args = append(args, "Close All Windows", "x", confirmCmd)
 	}
 
 	c.executeOrSendMenu(clientID, args, pos)
@@ -8741,6 +8955,14 @@ func (c *Coordinator) getToggleScript() string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(exe), "..", "scripts", "toggle_sidebar_daemon.sh")
+}
+
+func (c *Coordinator) getScriptPath(name string) string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(exe), "..", "scripts", name)
 }
 
 // showSidebarSettingsMenu displays a context menu for sidebar settings
