@@ -46,6 +46,12 @@ if [ -z "$MODE" ] && [ -f "$SIDEBAR_STATE_FILE" ]; then
 fi
 
 if [ "$MODE" = "enabled" ]; then
+	tmux set-option -g status off
+
+	while IFS= read -r pane_id; do
+		[ -n "$pane_id" ] && tmux kill-pane -t "$pane_id" 2>/dev/null || true
+	done < <(tmux list-panes -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep "^tabbar|" | cut -d'|' -f2 || true)
+
     # Check if CURRENT window has a sidebar-renderer (daemon-based)
     # Check both current command and start command (for reliability during startup)
     HAS_SIDEBAR=$(tmux list-panes -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -qE "(sidebar-renderer|sidebar)" && echo "yes" || echo "no")

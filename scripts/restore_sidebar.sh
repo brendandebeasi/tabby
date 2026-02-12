@@ -34,6 +34,12 @@ DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
 RENDERER_BIN="$CURRENT_DIR/bin/sidebar-renderer"
 
 if [ "$MODE" = "enabled" ]; then
+	tmux set-option -g status off
+
+	while IFS= read -r pane_id; do
+		[ -n "$pane_id" ] && tmux kill-pane -t "$pane_id" 2>/dev/null || true
+	done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep "^tabbar|" | cut -d'|' -f2 || true)
+
     # Vertical sidebar mode using daemon architecture
     # Ensure daemon is running - it handles all renderer spawning/cleanup
 

@@ -353,6 +353,8 @@ TRACK_WINDOW_HISTORY_SCRIPT="$CURRENT_DIR/scripts/track_window_history.sh"
 chmod +x "$TRACK_WINDOW_HISTORY_SCRIPT"
 SELECT_PREVIOUS_WINDOW_SCRIPT="$CURRENT_DIR/scripts/select_previous_window.sh"
 chmod +x "$SELECT_PREVIOUS_WINDOW_SCRIPT"
+EXIT_IF_NO_MAIN_WINDOWS_SCRIPT="$CURRENT_DIR/scripts/exit_if_no_main_windows.sh"
+chmod +x "$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT"
 # Define resize script early so it can be used in window-unlinked hook
 RESIZE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/resize_sidebar.sh"
 chmod +x "$RESIZE_SIDEBAR_SCRIPT"
@@ -364,7 +366,7 @@ chmod +x "$SAVE_LAYOUT_SCRIPT"
 # These hooks trigger both sidebar and status bar refresh
 tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 # On window close: select previous from history, preserve sidebar width, then refresh
-tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT'; run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
+tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT'; run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
 tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'"
 # Combined script to reduce latency + track window history
 ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
@@ -396,7 +398,7 @@ chmod +x "$CLEANUP_SCRIPT"
 PRESERVE_RATIOS_SCRIPT="$CURRENT_DIR/scripts/preserve_pane_ratios.sh"
 chmod +x "$PRESERVE_RATIOS_SCRIPT"
 # When a pane exits: preserve ratios, cleanup orphans, refresh sidebar and pane bar
-tmux set-hook -g pane-exited "run-shell '$PRESERVE_RATIOS_SCRIPT'; run-shell '$CLEANUP_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'"
+tmux set-hook -g pane-exited "run-shell '$PRESERVE_RATIOS_SCRIPT'; run-shell '$CLEANUP_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'; run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
 
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'"
