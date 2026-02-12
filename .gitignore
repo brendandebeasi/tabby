@@ -46,6 +46,7 @@ web/tsconfig.tsbuildinfo
 .claude/
 .sisyphus/
 .archive/
+.entire/
 
 # Local scratch and logs
 tmux-*.log

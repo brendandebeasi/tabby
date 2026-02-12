@@ -81,6 +81,8 @@ go test ./cmd/tabby-daemon
 - Full group header row is context-only (right-click menu), not left-click toggle.
 - Pane header buttons are handled via direct mouse pass-through to `pane-header` (`send-keys -M`), not focus replay.
 - Window/group marker search opens an in-app picker modal (Bubble Tea overlay) with fuzzy matching.
+- Window close flow restores focus using tracked window history (`track_window_history.sh` + `select_previous_window.sh`).
+- Pane layout/ratio continuity is maintained via `save_pane_layout.sh` and `preserve_pane_ratios.sh` hooks.
 
 ## Notes
 
