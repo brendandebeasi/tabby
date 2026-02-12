@@ -367,6 +367,7 @@ chmod +x "$SAVE_LAYOUT_SCRIPT"
 tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 # On window close: select previous from history, preserve sidebar width, then refresh
 tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT'; run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
+tmux set-hook -g after-kill-window "run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
 tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'"
 # Combined script to reduce latency + track window history
 ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
