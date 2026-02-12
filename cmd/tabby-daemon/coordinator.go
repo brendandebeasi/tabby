@@ -8829,9 +8829,15 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	logEvent("NEW_WINDOW_START client=%s", clientID)
 	c.stateMu.RLock()
 
-	// Find the current window's group from clientID (e.g., "@12" -> window @12)
+	windowID := clientID
+	if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+		activeWindowID := strings.TrimSpace(string(out))
+		if activeWindowID != "" {
+			windowID = activeWindowID
+		}
+	}
+
 	var currentGroup string
-	windowID := clientID // clientID is the window ID like "@12"
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
 			if win.ID == windowID {
