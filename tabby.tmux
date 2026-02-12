@@ -247,6 +247,12 @@ fi
 POSITION=$(grep "^position:" "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' || echo "top")
 POSITION=${POSITION:-top}
 
+# First-run bootstrap: if no mode has ever been set, default to enabled.
+INITIAL_MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
+if [ -z "$INITIAL_MODE" ]; then
+    tmux set-option -g @tabby_sidebar "enabled"
+fi
+
 # Configure horizontal status bar
 if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
     # Clear any existing status-format settings that would override window-status
@@ -259,6 +265,8 @@ if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
     SIDEBAR_STATE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
     if [ "$SIDEBAR_STATE" != "enabled" ]; then
         tmux set-option -g status on
+    else
+        tmux set-option -g status off
     fi
     tmux set-option -g status-position "$POSITION"
     tmux set-option -g status-interval 1
@@ -469,9 +477,7 @@ tmux bind-key -n M-8 select-window -t :=7
 tmux bind-key -n M-9 select-window -t :=8
 tmux bind-key -n M-0 select-window -t :=9
 
-# First-run bootstrap: if no mode has ever been set, default to enabled.
-INITIAL_MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
+# Ensure sidebar panes exist in default vertical mode on first load.
 if [ -z "$INITIAL_MODE" ]; then
-    tmux set-option -g @tabby_sidebar "enabled"
     tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT"
 fi

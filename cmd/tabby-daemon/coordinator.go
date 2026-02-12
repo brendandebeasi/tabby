@@ -3457,6 +3457,26 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	winVisualNum := c.windowVisualPos[foundWindow.ID]
 	labelText := fmt.Sprintf("%d.%d %s", winVisualNum, foundPane.Index, label)
 
+	groupIcon := ""
+	for _, group := range c.grouped {
+		for _, groupWindow := range group.Windows {
+			if groupWindow.ID == foundWindow.ID {
+				groupIcon = strings.TrimSpace(group.Theme.Icon)
+				break
+			}
+		}
+		if groupIcon != "" {
+			break
+		}
+	}
+	windowIcon := strings.TrimSpace(foundWindow.Icon)
+	if groupIcon != "" {
+		labelText = groupIcon + " " + labelText
+	}
+	if windowIcon != "" {
+		labelText = windowIcon + " " + labelText
+	}
+
 	// Add current path if available
 	if foundPane.CurrentPath != "" {
 		// Available width for the label
