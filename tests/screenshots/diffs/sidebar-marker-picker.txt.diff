@@ -1,0 +1,7 @@
+--- tests/screenshots/baseline/sidebar-marker-picker.txt	2026-02-12 12:53:25
++++ tests/screenshots/current/sidebar-marker-picker.txt	2026-02-12 15:24:26
+@@ -43,3 +43,4 @@
+ 
+ 
+ 
++
