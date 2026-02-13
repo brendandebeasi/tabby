@@ -433,6 +433,10 @@ tmux bind-key "$KEY" run-shell "$CURRENT_DIR/scripts/toggle_sidebar.sh"
 
 normalize_global_key() {
 	local key="$1"
+	if [[ "$key" == cmd+shift+* ]]; then
+		echo "M-S-${key#cmd+shift+}"
+		return
+	fi
 	if [[ "$key" == cmd+* ]]; then
 		echo "M-${key#cmd+}"
 		return

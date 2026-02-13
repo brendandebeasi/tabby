@@ -55,11 +55,11 @@ bindings:
   next_tab: "prefix + n"
   prev_tab: "prefix + p"
 
-  next_window_global: "cmd+]"
-  prev_window_global: "cmd+["
+  next_window_global: "cmd+shift+]"
+  prev_window_global: "cmd+shift+["
 
-  new_window_global: "cmd+n"
-  kill_window_global: "cmd+w"
+  new_window_global: "cmd+shift+n"
+  kill_window_global: "cmd+shift+w"
   new_window: "prefix + c"
   kill_pane: "prefix + x"
   split_horizontal: "prefix + \""
