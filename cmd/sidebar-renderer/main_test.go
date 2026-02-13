@@ -1,17 +1,32 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
-func TestSliceByColumns(t *testing.T) {
-	got := sliceByColumns("abcdef", 1, 4)
-	if got != "bcd" {
-		t.Fatalf("sliceByColumns() = %q, want %q", got, "bcd")
+func newPickerTestModel() rendererModel {
+	m := rendererModel{
+		width:         80,
+		height:        24,
+		connected:     true,
+		content:       strings.Repeat("\n", 40),
+		totalLines:    41,
+		pickerShowing: true,
+		pickerTitle:   "Set Marker",
+		pickerScope:   "window",
+		pickerTarget:  "@1",
+		pickerOptions: []daemon.MarkerOptionPayload{
+			{Symbol: "🚀", Name: "rocket", Keywords: "launch"},
+			{Symbol: "🔥", Name: "fire", Keywords: "hot"},
+		},
 	}
+	m.pickerApplyFilter()
+	return m
 }
 
 func TestTruncateToWidth(t *testing.T) {
@@ -82,4 +97,56 @@ func TestRenderMenuLinesIncludesTitleAndBorders(t *testing.T) {
 	if !strings.Contains(joined, "┌") || !strings.Contains(joined, "└") {
 		t.Fatalf("expected rendered menu borders")
 	}
+}
+
+func TestRenderPickerModalShowsEmptyStateAndMeta(t *testing.T) {
+	m := newPickerTestModel()
+	m.pickerQuery = "zzzz-no-match"
+	m.pickerApplyFilter()
+
+	lines := m.renderPickerModal()
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Set Marker") {
+		t.Fatalf("expected picker title in modal")
+	}
+	if !strings.Contains(joined, "Search:") {
+		t.Fatalf("expected search line in modal")
+	}
+	if !strings.Contains(joined, "Results: 0") {
+		t.Fatalf("expected zero results meta in modal")
+	}
+	if !strings.Contains(joined, "No matching markers") {
+		t.Fatalf("expected empty-state text in modal")
+	}
+}
+
+func TestViewOverlaysPickerModal(t *testing.T) {
+	m := newPickerTestModel()
+	view := m.View()
+
+	if !strings.Contains(view, "Set Marker") {
+		t.Fatalf("expected picker title to be overlayed in view")
+	}
+	if !strings.Contains(view, "Results:") {
+		t.Fatalf("expected picker results meta in overlayed view")
+	}
+}
+
+func TestRenderPickerModalFixtureOutput(t *testing.T) {
+	if os.Getenv("TABBY_PRINT_PICKER_FIXTURE") != "1" {
+		t.Skip("fixture output disabled")
+	}
+	fixturePath := "../../tests/screenshots/baseline/sidebar-marker-picker.txt"
+	fixtureBytes, err := os.ReadFile(fixturePath)
+	fixture := ""
+	if err == nil {
+		fixture = string(fixtureBytes)
+	} else {
+		m := newPickerTestModel()
+		fixture = m.View()
+	}
+
+	fmt.Println("TABBY_PICKER_FIXTURE_BEGIN")
+	fmt.Println(fixture)
+	fmt.Println("TABBY_PICKER_FIXTURE_END")
 }

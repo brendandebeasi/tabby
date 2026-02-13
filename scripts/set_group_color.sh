@@ -13,9 +13,11 @@ fi
 # Get the script directory and plugin root
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
+source "$SCRIPT_DIR/_config_path.sh"
+TABBY_CONFIG_DIR="$(dirname "$TABBY_CONFIG_FILE")"
 
 # Set the group color using manage-group CLI
-if ! "$PLUGIN_DIR/bin/manage-group" set-color "$NAME" "$COLOR" 2>/tmp/tabby-error.log; then
+if ! TABBY_CONFIG_DIR="$TABBY_CONFIG_DIR" "$PLUGIN_DIR/bin/manage-group" set-color "$NAME" "$COLOR" 2>/tmp/tabby-error.log; then
     ERROR=$(cat /tmp/tabby-error.log)
     tmux display-message "Error: $ERROR"
     rm -f /tmp/tabby-error.log
@@ -23,7 +25,16 @@ if ! "$PLUGIN_DIR/bin/manage-group" set-color "$NAME" "$COLOR" 2>/tmp/tabby-erro
 fi
 rm -f /tmp/tabby-error.log
 
-# Signal all sidebars to reload config
-for pid in $(tmux list-panes -a -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar' | cut -d'|' -f2); do
-    kill -USR1 "$pid" 2>/dev/null
-done
+DAEMON_PID=$(tmux show-option -gqv @tabby_daemon_pid 2>/dev/null || true)
+if [ -z "$DAEMON_PID" ]; then
+    SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || true)
+    PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
+    if [ -f "$PID_FILE" ]; then
+        DAEMON_PID=$(cat "$PID_FILE" 2>/dev/null || true)
+        [ -n "$DAEMON_PID" ] && tmux set-option -g @tabby_daemon_pid "$DAEMON_PID" 2>/dev/null || true
+    fi
+fi
+
+if [ -n "$DAEMON_PID" ]; then
+    kill -USR1 "$DAEMON_PID" 2>/dev/null || true
+fi

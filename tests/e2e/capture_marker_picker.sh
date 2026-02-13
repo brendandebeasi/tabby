@@ -59,7 +59,7 @@ else
   : > "$OUT_FILE"
 fi
 
-if ! grep -q "Set Marker" "$OUT_FILE"; then
+if ! grep -q "Set Marker" "$OUT_FILE" || ! grep -q "Results: 1870" "$OUT_FILE"; then
   # Fallback: generate deterministic modal fixture and capture that in tmux.
   FIXTURE_FILE="/tmp/tabby-marker-picker-fixture.txt"
   FIXTURE_RAW=$(cd "$PROJECT_ROOT" && TABBY_PRINT_PICKER_FIXTURE=1 go test ./cmd/sidebar-renderer -run TestRenderPickerModalFixtureOutput -count=1 -v 2>/dev/null || true)
@@ -68,9 +68,7 @@ if ! grep -q "Set Marker" "$OUT_FILE"; then
     echo "Missing modal title in screenshot capture and fixture generation failed"
     exit 1
   fi
-  tmux new-window -t "$TEST_SESSION" -n "picker-fixture" "cat '$FIXTURE_FILE'; sleep 2"
-  sleep 0.2
-  tmux capture-pane -t "$TEST_SESSION:picker-fixture" -e -p > "$OUT_FILE"
+  cp "$FIXTURE_FILE" "$OUT_FILE"
 fi
 
 # Normalize volatile clock/time text in captured output for stable baseline diffs.

@@ -605,7 +605,7 @@ func main() {
 		headerPaneID: headerPaneID,
 	}
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
+	p := tea.NewProgram(model, tea.WithMouseCellMotion(), tea.WithReportFocus())
 	globalProgram = p
 
 	// External ticker for keepalive/pane-check (avoids returning Cmds from Update

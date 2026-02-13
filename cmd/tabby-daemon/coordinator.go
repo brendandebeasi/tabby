@@ -1057,6 +1057,10 @@ func (c *Coordinator) RefreshWindows() {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 
+	if cfg, err := config.LoadConfig(config.DefaultConfigPath()); err == nil {
+		c.config = cfg
+	}
+
 	// Note: collapsed groups state is managed in-memory and synced to tmux options
 	// We don't reload here to avoid race conditions with toggle_group action
 
@@ -8303,6 +8307,11 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 		"-T", fmt.Sprintf("Window %d: %s", win.Index, win.Name),
 	}, pos.args()...)
 
+	windowTarget := fmt.Sprintf(":%d", win.Index)
+	if c.sessionID != "" {
+		windowTarget = fmt.Sprintf("%s:%d", c.sessionID, win.Index)
+	}
+
 	// Rename option - locks the name so syncWindowNames won't overwrite it
 	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d @tabby_name_locked 1\"", win.Name, win.Index, win.Index)
 	args = append(args, "Rename", "r", renameCmd)
@@ -8385,10 +8394,10 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 		{"Transparent", "transparent", "t"},
 	}
 	for _, color := range colorOptions {
-		setColorCmd := fmt.Sprintf("set-window-option -t :%d @tabby_color '%s'", win.Index, color.hex)
+		setColorCmd := fmt.Sprintf("set-window-option -t %s @tabby_color '%s'", windowTarget, color.hex)
 		args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
 	}
-	resetColorCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_color", win.Index)
+	resetColorCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_color", windowTarget)
 	args = append(args, "  Reset to Default", "d", resetColorCmd)
 
 	// Set Icon submenu
@@ -8767,7 +8776,7 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 			{"Transparent", "transparent", "t"},
 		}
 		for _, color := range colorOptions {
-			setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" %s'", colorScript, group.Name, color.hex)
+			setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", colorScript, group.Name, color.hex)
 			args = append(args, fmt.Sprintf("    %s", color.name), color.key, setColorCmd)
 		}
 

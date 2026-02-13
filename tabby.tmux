@@ -167,6 +167,14 @@ tmux set-option -g window-active-style "default"
 # Unbind right-click on pane so it passes through to apps with mouse capture
 # (sidebar-renderer / pane-header use BubbleTea mouse mode and handle right-click internally)
 tmux unbind-key -T root MouseDown3Pane 2>/dev/null || true
+tmux bind-key -T root MouseDown3Pane send-keys -M -t =
+
+# Ensure drag gestures on utility panes are always forwarded (no copy-mode intercept).
+tmux unbind-key -T root MouseDrag1Pane 2>/dev/null || true
+tmux bind-key -T root MouseDrag1Pane \
+    if-shell -F -t = "#{||:#{m:*sidebar-render*,#{pane_current_command}},#{m:*pane-header*,#{pane_current_command}}}" \
+        "send-keys -M -t =" \
+        "if-shell -F -t = \"#{pane_in_mode}\" \"send-keys -M -t =\" \"copy-mode -M -t =\""
 
 # Handle clicks on pane-header panes specially to allow buttons to work regardless of focus
 # Architecture: Only intercept pane-header clicks. Let sidebar and normal panes use default tmux behavior.
@@ -200,9 +208,9 @@ chmod +x "$CLICK_HANDLER_SCRIPT"
 # 3. If Normal: select-pane (Instant focus) AND signal daemon immediately
 tmux bind-key -T root MouseDown1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
-        "send-keys -M" \
+        "send-keys -M -t =" \
         "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
-            \"send-keys -M\" \
+            \"send-keys -M -t =\" \
             \"select-pane -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 
 # Enable focus events

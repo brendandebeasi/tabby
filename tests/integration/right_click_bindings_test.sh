@@ -35,4 +35,13 @@ else
     exit 1
 fi
 
+DRAG_BINDING="$(tmux list-keys -T root 2>/dev/null | grep 'MouseDrag1Pane' | head -n 1 || true)"
+if echo "$DRAG_BINDING" | grep -q 'send-keys -M -t ='; then
+    echo "✓ MouseDrag1Pane routes drag to clicked pane"
+else
+    echo "✗ MouseDrag1Pane missing clicked-pane target"
+    echo "  Binding: $DRAG_BINDING"
+    exit 1
+fi
+
 echo "=== Right-click context routing test passed ==="

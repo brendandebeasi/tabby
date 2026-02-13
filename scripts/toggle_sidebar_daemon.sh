@@ -9,6 +9,45 @@ SESSION_ID=$(tmux display-message -p '#{session_id}')
 SIDEBAR_STATE_FILE="/tmp/tabby-sidebar-${SESSION_ID}.state"
 DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
+DAEMON_EVENTS_LOG="/tmp/tabby-daemon-${SESSION_ID}-events.log"
+
+restart_daemon_if_unresponsive() {
+    if [ ! -f "$DAEMON_PID_FILE" ] || [ ! -S "$DAEMON_SOCK" ]; then
+        return
+    fi
+
+    DAEMON_PID=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
+    if [ -z "$DAEMON_PID" ] || ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+        rm -f "$DAEMON_PID_FILE" "$DAEMON_SOCK"
+        return
+    fi
+
+    if [ ! -f "$DAEMON_EVENTS_LOG" ]; then
+        return
+    fi
+
+    LAST_SIZE=$(stat -f %z "$DAEMON_EVENTS_LOG" 2>/dev/null || echo "")
+    if [ -z "$LAST_SIZE" ]; then
+        return
+    fi
+
+    kill -USR1 "$DAEMON_PID" 2>/dev/null || true
+    NEW_SIZE=""
+    for _ in $(seq 1 10); do
+        sleep 0.1
+        NEW_SIZE=$(stat -f %z "$DAEMON_EVENTS_LOG" 2>/dev/null || echo "")
+        if [ -n "$NEW_SIZE" ] && [ "$NEW_SIZE" -gt "$LAST_SIZE" ]; then
+            return
+        fi
+    done
+
+    if [ -n "$NEW_SIZE" ] && [ "$NEW_SIZE" = "$LAST_SIZE" ]; then
+        tmux display-message -d 3000 "Tabby: daemon unresponsive, restarting" 2>/dev/null || true
+        printf "[event] %s RESTART_REQUEST reason=unresponsive source=toggle\n" "$(date '+%Y/%m/%d %H:%M:%S')" >> "$DAEMON_EVENTS_LOG" 2>/dev/null || true
+        kill "$DAEMON_PID" 2>/dev/null || true
+        rm -f "$DAEMON_PID_FILE" "$DAEMON_SOCK"
+    fi
+}
 
 # Get saved sidebar width or default
 SIDEBAR_WIDTH=$(tmux show-option -gqv @tabby_sidebar_width)
@@ -35,6 +74,10 @@ fi
 CURRENT_STATE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
 if [ -z "$CURRENT_STATE" ] && [ -f "$SIDEBAR_STATE_FILE" ]; then
     CURRENT_STATE=$(cat "$SIDEBAR_STATE_FILE" 2>/dev/null || echo "")
+fi
+
+if [ "$CURRENT_STATE" = "enabled" ]; then
+    restart_daemon_if_unresponsive
 fi
 
 if [ "$CURRENT_STATE" = "enabled" ]; then

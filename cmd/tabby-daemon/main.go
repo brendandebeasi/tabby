@@ -419,6 +419,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 						hParts := strings.SplitN(hLine, "\x1f", 3)
 						if len(hParts) >= 1 {
 							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
+							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
 						}
 					}
 				}

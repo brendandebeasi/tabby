@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -295,6 +294,14 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
 			return connectCmd()()
 		})
+
+	case tea.BlurMsg:
+		if m.menuShowing {
+			m.menuDismiss()
+			m.menuShowing = false
+			m.menuDragActive = false
+		}
+		return m, nil
 
 	case menuMsg:
 		m.pickerShowing = false
@@ -607,7 +614,6 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				debugLog.Printf("  Drag detected: from (%d,%d) to (%d,%d), dx=%d dy=%d",
 					m.mouseDownPos.X, m.mouseDownPos.Y, msg.X, msg.Y, dx, dy)
 			}
-			m.dragCopyToClipboard(msg.X, msg.Y)
 			return m, nil
 		}
 
@@ -724,113 +730,6 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSim
 
 	m.sendInput(input)
 	return m, nil
-}
-
-// --- Drag-to-Copy ---
-
-// dragCopyToClipboard extracts text from a drag selection and copies to clipboard
-func (m *rendererModel) dragCopyToClipboard(releaseX, releaseY int) {
-	if m.content == "" {
-		return
-	}
-
-	lines := strings.Split(m.content, "\n")
-
-	// Convert screen Y to content line index
-	startY := m.mouseDownPos.Y + m.scrollY
-	endY := releaseY + m.scrollY
-	startX := m.mouseDownPos.X
-	endX := releaseX
-
-	// Normalize direction (allow upward drags)
-	if startY > endY || (startY == endY && startX > endX) {
-		startY, endY = endY, startY
-		startX, endX = endX, startX
-	}
-
-	// Clamp to content bounds
-	if startY < 0 {
-		startY = 0
-	}
-	if endY >= len(lines) {
-		endY = len(lines) - 1
-	}
-	if startY > endY {
-		return
-	}
-
-	var selected []string
-	for i := startY; i <= endY; i++ {
-		plain := stripAnsi(lines[i])
-		plain = strings.TrimRight(plain, " ") // remove padding whitespace
-
-		if startY == endY {
-			// Single line: extract column range
-			selected = append(selected, sliceByColumns(plain, startX, endX+1))
-		} else if i == startY {
-			// First line: from startX to end
-			selected = append(selected, sliceByColumns(plain, startX, runewidth.StringWidth(plain)))
-		} else if i == endY {
-			// Last line: from beginning to endX
-			selected = append(selected, sliceByColumns(plain, 0, endX+1))
-		} else {
-			// Middle lines: full line
-			selected = append(selected, plain)
-		}
-	}
-
-	text := strings.Join(selected, "\n")
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-
-	// Copy to tmux paste buffer (prefix+] to paste)
-	exec.Command("tmux", "set-buffer", "--", text).Run()
-
-	// Copy to system clipboard via OSC 52 written directly to the
-	// tmux client TTY. tmux set-buffer -w doesn't reliably send OSC 52
-	// through mosh, but writing directly to the client TTY works.
-	encoded := base64.StdEncoding.EncodeToString([]byte(text))
-	osc52 := fmt.Sprintf("\x1b]52;c;%s\x07", encoded)
-	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output()
-	if err == nil {
-		for _, ttyPath := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			ttyPath = strings.TrimSpace(ttyPath)
-			if ttyPath == "" {
-				continue
-			}
-			if f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0); err == nil {
-				f.WriteString(osc52)
-				f.Close()
-			}
-		}
-	}
-
-	lineCount := strings.Count(text, "\n") + 1
-	exec.Command("tmux", "display-message", "-d", "1500",
-		fmt.Sprintf("Copied %d lines", lineCount)).Run()
-
-	if *debugMode {
-		debugLog.Printf("Drag copy: %d chars from lines %d-%d", len(text), startY, endY)
-	}
-}
-
-// sliceByColumns extracts text from column startCol to endCol (exclusive)
-func sliceByColumns(s string, startCol, endCol int) string {
-	var result strings.Builder
-	col := 0
-	for _, r := range s {
-		w := runewidth.RuneWidth(r)
-		if col+w > startCol && col < endCol {
-			result.WriteRune(r)
-		}
-		col += w
-		if col >= endCol {
-			break
-		}
-	}
-	return result.String()
 }
 
 // --- Context Menu Handling ---
@@ -1848,7 +1747,7 @@ func main() {
 		sidebarPaneID: sidebarPane,
 	}
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	globalProgram = p
 
 	// Handle signals for graceful shutdown
