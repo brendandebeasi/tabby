@@ -174,7 +174,7 @@ tmux unbind-key -T root MouseDrag1Pane 2>/dev/null || true
 tmux bind-key -T root MouseDrag1Pane \
     if-shell -F -t = "#{||:#{m:*sidebar-render*,#{pane_current_command}},#{m:*pane-header*,#{pane_current_command}}}" \
         "send-keys -M -t =" \
-        "if-shell -F -t = \"#{pane_in_mode}\" \"send-keys -M -t =\" \"copy-mode -M -t =\""
+        "send-keys -M -t ="
 
 # Handle clicks on pane-header panes specially to allow buttons to work regardless of focus
 # Architecture: Only intercept pane-header clicks. Let sidebar and normal panes use default tmux behavior.
@@ -431,6 +431,48 @@ if [ -z "$KEY" ]; then KEY="Tab"; fi
 
 tmux bind-key "$KEY" run-shell "$CURRENT_DIR/scripts/toggle_sidebar.sh"
 
+normalize_global_key() {
+	local key="$1"
+	if [[ "$key" == cmd+* ]]; then
+		echo "M-${key#cmd+}"
+		return
+	fi
+	echo "$key"
+}
+
+bind_from_config() {
+	local binding="$1"
+	local command="$2"
+	local key
+	if [ -z "$binding" ]; then
+		return
+	fi
+	if [[ "$binding" == prefix* ]]; then
+		key=${binding##*+ }
+		[ -n "$key" ] && tmux bind-key "$key" "$command"
+		return
+	fi
+	key=$(normalize_global_key "$binding")
+	[ -n "$key" ] && tmux bind-key -n "$key" "$command"
+}
+
+NEXT_WINDOW_BINDING=$(grep "next_window_global:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
+PREV_WINDOW_BINDING=$(grep "prev_window_global:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
+if [ -z "$NEXT_WINDOW_BINDING" ]; then
+	NEXT_WINDOW_BINDING=$(grep "next_window:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
+fi
+if [ -z "$PREV_WINDOW_BINDING" ]; then
+	PREV_WINDOW_BINDING=$(grep "prev_window:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
+fi
+
+NEW_WINDOW_BINDING=$(grep "new_window_global:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
+KILL_WINDOW_BINDING=$(grep "kill_window_global:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
+
+bind_from_config "$NEXT_WINDOW_BINDING" "next-window"
+bind_from_config "$PREV_WINDOW_BINDING" "previous-window"
+bind_from_config "$NEW_WINDOW_BINDING" "run-shell '$NEW_WINDOW_SCRIPT'"
+bind_from_config "$KILL_WINDOW_BINDING" "kill-window"
+
 # Optional: Also bind to a prefix-less key for quick access
 # tmux bind-key -n M-Tab run-shell "$CURRENT_DIR/scripts/toggle_sidebar.sh"
 
@@ -459,17 +501,17 @@ tmux bind-key x run-shell "$KILL_PANE_SCRIPT"
 #   prefix + , = rename window (enhanced with name locking)
 #   prefix + q = display panes (tmux default)
 
-# Direct window access with prefix + number (standard tmux)
-tmux bind-key 1 select-window -t :=0
-tmux bind-key 2 select-window -t :=1
-tmux bind-key 3 select-window -t :=2
-tmux bind-key 4 select-window -t :=3
-tmux bind-key 5 select-window -t :=4
-tmux bind-key 6 select-window -t :=5
-tmux bind-key 7 select-window -t :=6
-tmux bind-key 8 select-window -t :=7
-tmux bind-key 9 select-window -t :=8
-tmux bind-key 0 select-window -t :=9
+# Direct window access with prefix + number (match tmux window indexes)
+tmux bind-key 0 select-window -t :=0
+tmux bind-key 1 select-window -t :=1
+tmux bind-key 2 select-window -t :=2
+tmux bind-key 3 select-window -t :=3
+tmux bind-key 4 select-window -t :=4
+tmux bind-key 5 select-window -t :=5
+tmux bind-key 6 select-window -t :=6
+tmux bind-key 7 select-window -t :=7
+tmux bind-key 8 select-window -t :=8
+tmux bind-key 9 select-window -t :=9
 
 # Legacy Alt-key shortcuts kept for fast navigation
 tmux bind-key -n M-h previous-window
@@ -477,16 +519,16 @@ tmux bind-key -n M-l next-window
 tmux bind-key -n M-n run-shell "$NEW_WINDOW_SCRIPT"
 tmux bind-key -n M-x run-shell "$KILL_PANE_SCRIPT"
 tmux bind-key -n M-q display-panes
-tmux bind-key -n M-1 select-window -t :=0
-tmux bind-key -n M-2 select-window -t :=1
-tmux bind-key -n M-3 select-window -t :=2
-tmux bind-key -n M-4 select-window -t :=3
-tmux bind-key -n M-5 select-window -t :=4
-tmux bind-key -n M-6 select-window -t :=5
-tmux bind-key -n M-7 select-window -t :=6
-tmux bind-key -n M-8 select-window -t :=7
-tmux bind-key -n M-9 select-window -t :=8
-tmux bind-key -n M-0 select-window -t :=9
+tmux bind-key -n M-0 select-window -t :=0
+tmux bind-key -n M-1 select-window -t :=1
+tmux bind-key -n M-2 select-window -t :=2
+tmux bind-key -n M-3 select-window -t :=3
+tmux bind-key -n M-4 select-window -t :=4
+tmux bind-key -n M-5 select-window -t :=5
+tmux bind-key -n M-6 select-window -t :=6
+tmux bind-key -n M-7 select-window -t :=7
+tmux bind-key -n M-8 select-window -t :=8
+tmux bind-key -n M-9 select-window -t :=9
 
 # Ensure sidebar panes exist in default vertical mode on first load.
 if [ -z "$INITIAL_MODE" ]; then

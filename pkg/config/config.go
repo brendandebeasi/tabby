@@ -368,6 +368,17 @@ type Bindings struct {
 	ToggleSidebar string `yaml:"toggle_sidebar"`
 	NextTab       string `yaml:"next_tab"`
 	PrevTab       string `yaml:"prev_tab"`
+
+	NextWindow string `yaml:"next_window"`
+	PrevWindow string `yaml:"prev_window"`
+
+	NewWindow  string `yaml:"new_window"`
+	KillWindow string `yaml:"kill_window"`
+
+	NewWindowGlobal  string `yaml:"new_window_global"`
+	KillWindowGlobal string `yaml:"kill_window_global"`
+	NextWindowGlobal string `yaml:"next_window_global"`
+	PrevWindowGlobal string `yaml:"prev_window_global"`
 }
 
 type Indicators struct {

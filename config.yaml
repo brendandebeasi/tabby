@@ -54,6 +54,12 @@ bindings:
   toggle_sidebar: "prefix + Tab"
   next_tab: "prefix + n"
   prev_tab: "prefix + p"
+
+  next_window_global: "cmd+]"
+  prev_window_global: "cmd+["
+
+  new_window_global: "cmd+n"
+  kill_window_global: "cmd+w"
   new_window: "prefix + c"
   kill_pane: "prefix + x"
   split_horizontal: "prefix + \""
