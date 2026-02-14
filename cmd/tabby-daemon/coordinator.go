@@ -9008,38 +9008,43 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	markerScript := c.getScriptPath("set_group_marker.sh")
 	workingDirScript := c.getScriptPath("set_group_working_dir.sh")
 	deleteScript := c.getScriptPath("delete_group.sh")
-	if group.Name != "Default" && renameScript != "" && colorScript != "" && workingDirScript != "" && deleteScript != "" {
-		args = append(args, "", "", "")
-		args = append(args, "-Edit Group", "", "")
-
-		renameCmd := fmt.Sprintf(
-			"command-prompt -I '%s' -p 'New name:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
-			group.Name,
-			renameScript,
-			group.Name,
-		)
-		args = append(args, "  Rename", "r", renameCmd)
-
-		args = append(args, "  -Change Color", "", "")
-		colorOptions := []struct {
-			name string
-			hex  string
-			key  string
-		}{
-			{"Red", "#e74c3c", "r"},
-			{"Orange", "#e67e22", "o"},
-			{"Yellow", "#f1c40f", "y"},
-			{"Green", "#27ae60", "g"},
-			{"Blue", "#3498db", "b"},
-			{"Purple", "#9b59b6", "p"},
-			{"Pink", "#e91e63", "i"},
-			{"Cyan", "#00bcd4", "c"},
-			{"Gray", "#7f8c8d", "a"},
-			{"Transparent", "transparent", "t"},
+	if group.Name != "Default" {
+		if renameScript != "" || colorScript != "" || markerScript != "" || workingDirScript != "" || deleteScript != "" {
+			args = append(args, "", "", "")
+			args = append(args, "-Edit Group", "", "")
 		}
-		for _, color := range colorOptions {
-			setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", colorScript, group.Name, color.hex)
-			args = append(args, fmt.Sprintf("    %s", color.name), color.key, setColorCmd)
+		if renameScript != "" {
+			renameCmd := fmt.Sprintf(
+				"command-prompt -I '%s' -p 'New name:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
+				group.Name,
+				renameScript,
+				group.Name,
+			)
+			args = append(args, "  Rename", "r", renameCmd)
+		}
+
+		if colorScript != "" {
+			args = append(args, "  -Change Color", "", "")
+			colorOptions := []struct {
+				name string
+				hex  string
+				key  string
+			}{
+				{"Red", "#e74c3c", "r"},
+				{"Orange", "#e67e22", "o"},
+				{"Yellow", "#f1c40f", "y"},
+				{"Green", "#27ae60", "g"},
+				{"Blue", "#3498db", "b"},
+				{"Purple", "#9b59b6", "p"},
+				{"Pink", "#e91e63", "i"},
+				{"Cyan", "#00bcd4", "c"},
+				{"Gray", "#7f8c8d", "a"},
+				{"Transparent", "transparent", "t"},
+			}
+			for _, color := range colorOptions {
+				setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", colorScript, group.Name, color.hex)
+				args = append(args, fmt.Sprintf("    %s", color.name), color.key, setColorCmd)
+			}
 		}
 
 		if markerScript != "" {
@@ -9059,28 +9064,31 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 			}
 		}
 
-		currentWorkingDir := workingDir
-		if currentWorkingDir == "" {
-			currentWorkingDir = "~"
+		if workingDirScript != "" {
+			currentWorkingDir := workingDir
+			if currentWorkingDir == "" {
+				currentWorkingDir = "~"
+			}
+
+			setWorkingDirCmd := fmt.Sprintf(
+				"command-prompt -I '%s' -p 'Working directory:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
+				currentWorkingDir,
+				workingDirScript,
+				group.Name,
+			)
+			args = append(args, "  Set Working Directory", "w", setWorkingDirCmd)
 		}
 
-		setWorkingDirCmd := fmt.Sprintf(
-			"command-prompt -I '%s' -p 'Working directory:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
-			currentWorkingDir,
-			workingDirScript,
-			group.Name,
-		)
-		args = append(args, "  Set Working Directory", "w", setWorkingDirCmd)
-
-		args = append(args, "", "", "")
-
-		deleteCmd := fmt.Sprintf(
-			"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s \\\"%s\\\"'\"",
-			group.Name,
-			deleteScript,
-			group.Name,
-		)
-		args = append(args, "  Delete Group", "d", deleteCmd)
+		if deleteScript != "" {
+			args = append(args, "", "", "")
+			deleteCmd := fmt.Sprintf(
+				"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s \\\"%s\\\"'\"",
+				group.Name,
+				deleteScript,
+				group.Name,
+			)
+			args = append(args, "  Delete Group", "d", deleteCmd)
+		}
 	}
 
 	// Close all windows in group (only if group has windows)
