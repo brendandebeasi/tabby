@@ -9005,6 +9005,7 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 
 	renameScript := c.getScriptPath("rename_group.sh")
 	colorScript := c.getScriptPath("set_group_color.sh")
+	markerScript := c.getScriptPath("set_group_marker.sh")
 	workingDirScript := c.getScriptPath("set_group_working_dir.sh")
 	deleteScript := c.getScriptPath("delete_group.sh")
 	if group.Name != "Default" && renameScript != "" && colorScript != "" && workingDirScript != "" && deleteScript != "" {
@@ -9041,11 +9042,21 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 			args = append(args, fmt.Sprintf("    %s", color.name), color.key, setColorCmd)
 		}
 
-		args = append(args, "  -Set Marker", "", "")
-		if !strings.HasPrefix(clientID, "header:") {
-			groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
-			searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
-			args = append(args, "    Search...", "", searchCmd)
+		if markerScript != "" {
+			args = append(args, "  -Set Icon", "", "")
+			currentIcon := strings.TrimSpace(group.Theme.Icon)
+			promptIcon := fmt.Sprintf(
+				"command-prompt -I '%s' -p 'Icon:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
+				strings.ReplaceAll(currentIcon, "'", ""),
+				markerScript,
+				group.Name,
+			)
+			args = append(args, "    Prompt...", "i", promptIcon)
+			if c.OnSendMenu != nil && !strings.HasPrefix(clientID, "header:") {
+				groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
+				searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
+				args = append(args, "    Search...", "", searchCmd)
+			}
 		}
 
 		currentWorkingDir := workingDir
