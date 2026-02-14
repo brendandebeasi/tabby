@@ -30,7 +30,7 @@ groups:
     theme:
       bg: "#b4637a"           # Rose Pine Dawn rose
       active_bg: "#9d4e6a"    # Darker rose
-      icon: ""
+      icon: "🎬"
       active_indicator_bg: "#d7827e"  # Rose Pine Dawn love
 
   - name: "Gunpowder"
@@ -39,7 +39,7 @@ groups:
     theme:
       bg: "#907aa9"           # Rose Pine Dawn iris
       active_bg: "#7a6593"    # Darker iris
-      icon: ""
+      icon: "💥"
       active_indicator_bg: "#d7827e"  # Rose Pine Dawn love
 
   - name: "Default"
@@ -47,7 +47,7 @@ groups:
     theme:
       bg: "#56949f"           # Rose Pine Dawn foam (teal)
       active_bg: "#286983"    # Rose Pine Dawn pine
-      icon: ""
+      icon: "•"
       active_indicator_bg: "#d7827e"  # Rose Pine Dawn love
 
 bindings:
