@@ -35,6 +35,14 @@ else
     exit 1
 fi
 
+if echo "$LEFT_CLICK_BINDING" | grep -q 'pane_click_handler.sh'; then
+    echo "✓ Pane header clicks use pane_click_handler.sh for button actions"
+else
+    echo "✗ Pane header click handler missing (pane header buttons may not work)"
+    echo "  Binding: $LEFT_CLICK_BINDING"
+    exit 1
+fi
+
 DRAG_BINDING="$(tmux list-keys -T root 2>/dev/null | grep 'MouseDrag1Pane' | head -n 1 || true)"
 if echo "$DRAG_BINDING" | grep -q 'send-keys -M -t ='; then
     echo "✓ MouseDrag1Pane routes drag to clicked pane"

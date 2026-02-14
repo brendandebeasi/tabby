@@ -27,7 +27,8 @@ for idx in $(echo "$windows_to_kill" | tr ' ' '\n' | sort -rn); do
 done
 
 # Switch to a remaining window
-tmux select-window -t :0 2>/dev/null || true
+first_idx=$(tmux list-windows -F '#{window_index}' 2>/dev/null | sort -n | awk 'NR==1{print; exit}')
+[ -n "$first_idx" ] && tmux select-window -t ":$first_idx" 2>/dev/null || true
 
 # Focus main pane
 main_pane=$(tmux list-panes -F '#{pane_id}:#{pane_current_command}' | grep -v ':sidebar' | head -1 | cut -d: -f1)

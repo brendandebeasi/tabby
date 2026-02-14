@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -352,9 +353,9 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			if isSystem {
 				// Track which content panes already have a header process running
 				if strings.Contains(curCmd, "pane-header") || strings.Contains(startCmd, "pane-header") {
-					matches := paneTargetRegex.FindStringSubmatch(startCmd)
-					if len(matches) >= 2 {
-						panesWithHeader[matches[1]] = true
+					target := paneTargetFromStartCmd(startCmd)
+					if target != "" {
+						panesWithHeader[target] = true
 					}
 				}
 				continue
@@ -431,7 +432,20 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 }
 
 // paneTargetRegex extracts the -pane argument from a pane-header start command
-var paneTargetRegex = regexp.MustCompile(`-pane\s+'([^']+)'`)
+var paneTargetRegex = regexp.MustCompile(`-pane\s+(?:'([^']+)'|"([^"]+)"|([^\s]+))`)
+
+func paneTargetFromStartCmd(startCmd string) string {
+	matches := paneTargetRegex.FindStringSubmatch(startCmd)
+	if len(matches) < 2 {
+		return ""
+	}
+	for i := 1; i < len(matches); i++ {
+		if matches[i] != "" {
+			return matches[i]
+		}
+	}
+	return ""
+}
 
 // cleanupOrphanedHeaders removes header panes that are disabled or orphaned
 // (target pane no longer exists).
@@ -520,15 +534,26 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		if len(parts) >= 6 {
 			winID = parts[5]
 		}
-		matches := paneTargetRegex.FindStringSubmatch(startCmd)
-		target := ""
-		if len(matches) >= 2 {
-			target = matches[1]
-		}
+		target := paneTargetFromStartCmd(startCmd)
 		headers = append(headers, headerInfo{
 			paneID: parts[0], windowID: winID,
 			target: target, width: w, height: h,
 		})
+	}
+
+	keepHeader := make(map[string]bool)
+	byTarget := make(map[string][]string)
+	for _, hdr := range headers {
+		if hdr.target == "" {
+			continue
+		}
+		byTarget[hdr.target] = append(byTarget[hdr.target], hdr.paneID)
+	}
+	for _, paneIDs := range byTarget {
+		sort.Strings(paneIDs)
+		if len(paneIDs) > 0 {
+			keepHeader[paneIDs[0]] = true
+		}
 	}
 
 	// Process headers: kill disabled, orphaned, or mismatched dimensions
@@ -537,6 +562,13 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		// Kill if headers disabled globally
 		if !headersEnabled {
 			logEvent("CLEANUP_HEADER pane=%s reason=disabled", hdr.paneID)
+			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			killed = true
+			continue
+		}
+
+		if hdr.target != "" && !keepHeader[hdr.paneID] {
+			logEvent("CLEANUP_HEADER pane=%s target=%s reason=duplicate_target", hdr.paneID, hdr.target)
 			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue

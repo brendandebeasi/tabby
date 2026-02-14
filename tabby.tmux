@@ -33,6 +33,11 @@ fi
 
 # Auto-renumber windows when one is closed (keeps indices sequential)
 tmux set-option -g renumber-windows on
+TABBY_BASE_INDEX=$(tmux show-option -gqv "@tabby_base_index")
+if [ "$TABBY_BASE_INDEX" = "1" ] || [ "$TABBY_BASE_INDEX" = "true" ]; then
+    tmux set-option -g base-index 1
+    tmux set-window-option -g pane-base-index 1
+fi
 
 # Bell monitoring for notifications (activity is too noisy - triggers on any output)
 tmux set-option -g monitor-activity off
@@ -172,9 +177,11 @@ tmux bind-key -T root MouseDown3Pane send-keys -M -t =
 # Ensure drag gestures on utility panes are always forwarded (no copy-mode intercept).
 tmux unbind-key -T root MouseDrag1Pane 2>/dev/null || true
 tmux bind-key -T root MouseDrag1Pane \
-    if-shell -F -t = "#{||:#{m:*sidebar-render*,#{pane_current_command}},#{m:*pane-header*,#{pane_current_command}}}" \
-        "send-keys -M -t =" \
-        "send-keys -M -t ="
+	if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
+		"send-keys -M -t =" \
+		"if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
+			\"send-keys -M -t =\" \
+			\"if-shell -F -t = \\\"#{||:#{pane_in_mode},#{mouse_any_flag}}\\\" \\\"send-keys -M -t =\\\" \\\"copy-mode -M -t =\\\"\""
 
 # Handle clicks on pane-header panes specially to allow buttons to work regardless of focus
 # Architecture: Only intercept pane-header clicks. Let sidebar and normal panes use default tmux behavior.
@@ -210,7 +217,7 @@ tmux bind-key -T root MouseDown1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M -t =" \
         "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
-            \"send-keys -M -t =\" \
+		    \"run-shell -b '$CLICK_HANDLER_SCRIPT \\\"#{pane_id}\\\" \\\"#{mouse_x}\\\" \\\"#{mouse_y}\\\"'\" \
             \"select-pane -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 
 # Enable focus events
@@ -380,7 +387,7 @@ tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$
 # Combined script to reduce latency + track window history
 ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
 chmod +x "$ON_WINDOW_SELECT_SCRIPT"
-tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-shell '$TRACK_WINDOW_HISTORY_SCRIPT'"
+tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-shell '$TRACK_WINDOW_HISTORY_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'"
 # Lock window name on manual rename via prefix+, keybinding
 # NOTE: We intentionally do NOT use after-rename-window hook because the daemon's
 # own rename-window calls would trigger it, locking the daemon out of future updates.
@@ -506,16 +513,16 @@ tmux bind-key x run-shell "$KILL_PANE_SCRIPT"
 #   prefix + q = display panes (tmux default)
 
 # Direct window access with prefix + number (match tmux window indexes)
-tmux bind-key 0 select-window -t :=0
-tmux bind-key 1 select-window -t :=1
-tmux bind-key 2 select-window -t :=2
-tmux bind-key 3 select-window -t :=3
-tmux bind-key 4 select-window -t :=4
-tmux bind-key 5 select-window -t :=5
-tmux bind-key 6 select-window -t :=6
-tmux bind-key 7 select-window -t :=7
-tmux bind-key 8 select-window -t :=8
-tmux bind-key 9 select-window -t :=9
+tmux bind-key 0 select-window -t :0
+tmux bind-key 1 select-window -t :1
+tmux bind-key 2 select-window -t :2
+tmux bind-key 3 select-window -t :3
+tmux bind-key 4 select-window -t :4
+tmux bind-key 5 select-window -t :5
+tmux bind-key 6 select-window -t :6
+tmux bind-key 7 select-window -t :7
+tmux bind-key 8 select-window -t :8
+tmux bind-key 9 select-window -t :9
 
 # Legacy Alt-key shortcuts kept for fast navigation
 tmux bind-key -n M-h previous-window
@@ -523,16 +530,24 @@ tmux bind-key -n M-l next-window
 tmux bind-key -n M-n run-shell "$NEW_WINDOW_SCRIPT"
 tmux bind-key -n M-x run-shell "$KILL_PANE_SCRIPT"
 tmux bind-key -n M-q display-panes
-tmux bind-key -n M-0 select-window -t :=0
-tmux bind-key -n M-1 select-window -t :=1
-tmux bind-key -n M-2 select-window -t :=2
-tmux bind-key -n M-3 select-window -t :=3
-tmux bind-key -n M-4 select-window -t :=4
-tmux bind-key -n M-5 select-window -t :=5
-tmux bind-key -n M-6 select-window -t :=6
-tmux bind-key -n M-7 select-window -t :=7
-tmux bind-key -n M-8 select-window -t :=8
-tmux bind-key -n M-9 select-window -t :=9
+tmux bind-key -n M-0 select-window -t :0
+tmux bind-key -n M-1 select-window -t :1
+tmux bind-key -n M-2 select-window -t :2
+tmux bind-key -n M-3 select-window -t :3
+tmux bind-key -n M-4 select-window -t :4
+tmux bind-key -n M-5 select-window -t :5
+tmux bind-key -n M-6 select-window -t :6
+tmux bind-key -n M-7 select-window -t :7
+tmux bind-key -n M-8 select-window -t :8
+tmux bind-key -n M-9 select-window -t :9
+
+# Some terminals send Alt/Meta + Shift + digit as punctuation (e.g. !, @, #, $).
+# Bind those too so Cmd+Shift+N -> Meta+<punct> mappings still switch windows.
+tmux bind-key -n M-! select-window -t :1
+tmux bind-key -n M-@ select-window -t :2
+tmux bind-key -n M-# select-window -t :3
+tmux bind-key -n M-$ select-window -t :4
+tmux bind-key -n M-% select-window -t :5
 
 # Ensure sidebar panes exist in default vertical mode on first load.
 if [ -z "$INITIAL_MODE" ]; then

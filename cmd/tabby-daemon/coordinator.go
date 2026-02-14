@@ -181,6 +181,7 @@ type Coordinator struct {
 
 	// Session info
 	sessionID string
+	baseIndex int
 
 	// Pending group for next new window (for optimistic UI)
 	pendingNewWindowGroup string
@@ -383,17 +384,20 @@ type adventureState struct {
 }
 
 type wildlifeEncounter struct {
-	Type        string
-	Emoji       string
-	X           int // Position in scene
-	Y           int // 0=ground, 1=low air, 2=high air
-	Speed       int
-	CatchChance int
-	Spotted     bool
-	Stalking    bool
-	Pounced     bool
-	Caught      bool
-	Escaped     bool
+	Type         string
+	Emoji        string
+	X            int // Position in scene
+	Y            int // 0=ground, 1=low air, 2=high air
+	Speed        int
+	CatchChance  int
+	Spotted      bool
+	Stalking     bool
+	Pounced      bool
+	PounceFrames int
+	WillCatch    bool
+	Caught       bool
+	Escaped      bool
+	Approach     int
 }
 
 type biomeData struct {
@@ -534,6 +538,7 @@ type petSprites struct {
 	Eating, Sleeping, Happy, Hungry string
 	Dead                            string
 	Yarn, Food, Poop, Mouse         string
+	Blood                           string
 	Thought, Heart, Life            string
 	HungerIcon, HappyIcon, SadIcon  string
 	Ground                          string
@@ -545,6 +550,7 @@ var petSpritesByStyle = map[string]petSprites{
 		Eating: "🐱", Sleeping: "😺", Happy: "😻", Hungry: "😿",
 		Dead: "💀",
 		Yarn: "🧶", Food: "🍖", Poop: "💩", Mouse: "🐭",
+		Blood:   "🩸",
 		Thought: "💭", Heart: "❤", Life: "💗",
 		HungerIcon: "🍖", HappyIcon: "😸", SadIcon: "😿",
 		Ground: "·",
@@ -554,6 +560,7 @@ var petSpritesByStyle = map[string]petSprites{
 		Eating: "󰄛", Sleeping: "󰄛", Happy: "󰄛", Hungry: "󰄛",
 		Dead: "",
 		Yarn: "", Food: "", Poop: "", Mouse: "",
+		Blood:   "",
 		Thought: "", Heart: "", Life: "",
 		HungerIcon: "", HappyIcon: "", SadIcon: "",
 		Ground: "·",
@@ -563,6 +570,7 @@ var petSpritesByStyle = map[string]petSprites{
 		Eating: "=^.^=", Sleeping: "=-.~=", Happy: "=^.^=", Hungry: "=;.;=",
 		Dead: "x_x",
 		Yarn: "@", Food: "o", Poop: ".", Mouse: "<:3",
+		Blood:   "x",
 		Thought: ">", Heart: "<3", Life: "*",
 		HungerIcon: "o", HappyIcon: ":)", SadIcon: ":(",
 		Ground: ".",
@@ -609,8 +617,17 @@ func NewCoordinator(sessionID string) *Coordinator {
 		theme = &t
 	}
 
+	baseIndex := 0
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_base_index").Output(); err == nil {
+		val := strings.TrimSpace(string(out))
+		if val == "1" || strings.EqualFold(val, "true") {
+			baseIndex = 1
+		}
+	}
+
 	c := &Coordinator{
 		sessionID:          sessionID,
+		baseIndex:          baseIndex,
 		config:             cfg,
 		bgDetector:         bgDetector,
 		theme:              theme,
@@ -1524,7 +1541,7 @@ func (pt *processTree) treeCPU(pid int) float64 {
 // window index when groups reorder windows.
 func (c *Coordinator) computeVisualPositions() {
 	pos := make(map[string]int)
-	n := 0
+	n := c.baseIndex
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
 			pos[win.ID] = n
@@ -2757,6 +2774,60 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 		return
 	}
 
+	if w.Pounced {
+		if w.PounceFrames > 0 {
+			adv.CatX = w.X
+			c.pet.State = "jumping"
+			c.pet.Pos.Y = w.Y
+			w.PounceFrames--
+			return
+		}
+
+		if w.WillCatch {
+			w.Caught = true
+			adv.TotalCatches++
+			c.pet.Happiness = min(100, c.pet.Happiness+10)
+			c.pet.Hunger = min(100, c.pet.Hunger+20)
+			thought := c.getAdventureThought(w.Type, "catch")
+			if thought == "" {
+				thought = fmt.Sprintf("caught a %s!", w.Type)
+			}
+			c.pet.LastThought = thought
+			c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+				Emoji:     "🏆",
+				Pos:       pos2D{X: adv.CatX, Y: 2},
+				Velocity:  pos2D{X: 0, Y: 0},
+				ExpiresAt: now.Add(2 * time.Second),
+			})
+			c.spawnAdventureCatchFX(now, adv.CatX, w.Y)
+			if c.config.Widgets.Pet.AdventureBlood {
+				blood := "🩸"
+				if c.config.Widgets.Pet.Icons.Blood != "" {
+					blood = c.config.Widgets.Pet.Icons.Blood
+				}
+				if blood != "" {
+					c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+						Emoji:     blood,
+						Pos:       pos2D{X: adv.CatX, Y: 0},
+						Velocity:  pos2D{X: 0, Y: 0},
+						ExpiresAt: now.Add(1200 * time.Millisecond),
+					})
+				}
+			}
+		} else {
+			w.Escaped = true
+			thought := c.getAdventureThought(w.Type, "escape")
+			if thought == "" {
+				thought = fmt.Sprintf("the %s got away!", w.Type)
+			}
+			c.pet.LastThought = thought
+		}
+
+		c.pet.Pos.Y = 0
+		c.pet.State = "idle"
+		return
+	}
+
 	// Phase 1: Spotting (wildlife enters view)
 	if !w.Spotted {
 		if c.pet.AnimFrame%3 == 0 {
@@ -2767,10 +2838,27 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 			w.Spotted = true
 			c.pet.State = "idle" // Cat freezes
 			c.pet.LastThought = fmt.Sprintf("a %s!", w.Type)
+			vibe := c.getAdventureVibe()
+			switch vibe {
+			case "subtle", "noir":
+				w.Approach = 0
+			case "anime":
+				w.Approach = []int{2, 1, 2}[rand.Intn(3)]
+			case "pixel":
+				w.Approach = []int{1, 0, 1}[rand.Intn(3)]
+			default:
+				w.Approach = rand.Intn(3)
+			}
+			if w.Speed >= 3 && w.Approach < 1 {
+				w.Approach = 1
+			}
+			if w.Speed >= 3 && w.Type == "bird" {
+				w.Approach = 2
+			}
 			// Add "!" floating item above cat's actual position
 			c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
 				Emoji:     "❗",
-				Pos:       pos2D{X: c.pet.Pos.X, Y: 2},
+				Pos:       pos2D{X: adv.CatX, Y: 2},
 				Velocity:  pos2D{X: 0, Y: 0},
 				ExpiresAt: now.Add(1500 * time.Millisecond),
 			})
@@ -2786,18 +2874,42 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 	}
 
 	if w.Stalking && !w.Pounced {
-		// Cat creeps closer (slower than normal walking)
-		if c.pet.AnimFrame%5 == 0 {
-			if adv.CatX < w.X-2 {
+		stepEvery := 5
+		stopDist := 2
+		pounceDist := 3
+		if w.Approach == 1 {
+			stepEvery = 3
+			stopDist = 1
+			pounceDist = 2
+		} else if w.Approach == 2 {
+			stepEvery = 2
+			stopDist = 0
+			pounceDist = 1
+		}
+		if c.pet.AnimFrame%stepEvery == 0 {
+			if adv.CatX < w.X-stopDist {
 				adv.CatX++
 			}
 		}
 
-		// Wildlife might move
-		if c.pet.AnimFrame%7 == 0 {
-			w.X += rand.Intn(3) - 1 // Random movement
+		moveEvery := 7
+		if w.Speed >= 3 {
+			moveEvery = 3
+		} else if w.Speed == 2 {
+			moveEvery = 5
+		}
+		if c.pet.AnimFrame%moveEvery == 0 {
+			if adv.CatX <= w.X {
+				w.X++
+			} else {
+				w.X--
+			}
+			w.X += rand.Intn(3) - 1
 			if w.X < 3 {
 				w.X = 3
+			}
+			if w.X > maxX+5 {
+				w.X = maxX + 5
 			}
 		}
 
@@ -2806,44 +2918,79 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 		if dist < 0 {
 			dist = -dist
 		}
-		if dist <= 3 {
-			// Pounce!
+		if dist <= pounceDist {
 			w.Pounced = true
+			w.PounceFrames = 4
+			w.WillCatch = rand.Intn(100) < w.CatchChance
+			adv.CatX = w.X
 			c.pet.State = "jumping"
-			// Cat jumps to wildlife's Y level for the pounce
 			c.pet.Pos.Y = w.Y
-
-			// Roll for catch
-			if rand.Intn(100) < w.CatchChance {
-				w.Caught = true
-				adv.TotalCatches++
-				c.pet.Happiness = min(100, c.pet.Happiness+10)
-				c.pet.Hunger = min(100, c.pet.Hunger+20) // Eating prey fills hunger
-				thought := c.getAdventureThought(w.Type, "catch")
-				if thought == "" {
-					thought = fmt.Sprintf("caught a %s!", w.Type)
-				}
-				c.pet.LastThought = thought
-				// Trophy emoji at pet's actual position
-				c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
-					Emoji:     "🏆",
-					Pos:       pos2D{X: c.pet.Pos.X, Y: 2},
-					Velocity:  pos2D{X: 0, Y: 0},
-					ExpiresAt: now.Add(2 * time.Second),
-				})
-			} else {
-				w.Escaped = true
-				thought := c.getAdventureThought(w.Type, "escape")
-				if thought == "" {
-					thought = fmt.Sprintf("the %s got away!", w.Type)
-				}
-				c.pet.LastThought = thought
-			}
-			// Cat lands back on ground after pounce
-			c.pet.Pos.Y = 0
-			c.pet.State = "idle"
+			return
 		}
 	}
+}
+
+func (c *Coordinator) getAdventureVibe() string {
+	v := strings.ToLower(strings.TrimSpace(c.config.Widgets.Pet.AdventureVibe))
+	if v == "" {
+		return "ridiculous"
+	}
+	return v
+}
+
+func (c *Coordinator) spawnAdventureCatchFX(now time.Time, contactX int, preyY int) {
+	vibe := c.getAdventureVibe()
+	add := func(emoji string, x, y int, vx, vy int, d time.Duration) {
+		if emoji == "" {
+			return
+		}
+		c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+			Emoji:     emoji,
+			Pos:       pos2D{X: x, Y: y},
+			Velocity:  pos2D{X: vx, Y: vy},
+			ExpiresAt: now.Add(d),
+		})
+	}
+
+	confetti := []string{"🎉", "✨", "💥", "⭐"}
+	comic := []string{"💥", "⚡", "✨"}
+	pixel := []string{"*", "+", "x"}
+
+	switch vibe {
+	case "subtle":
+		return
+	case "noir":
+		add("✦", contactX, 2, 0, 0, 1200*time.Millisecond)
+		add("·", contactX-1, 1, -1, 0, 900*time.Millisecond)
+		add("·", contactX+1, 1, 1, 0, 900*time.Millisecond)
+	case "pixel":
+		for i := 0; i < 3; i++ {
+			em := pixel[rand.Intn(len(pixel))]
+			dx := []int{-1, 0, 1}[rand.Intn(3)]
+			dy := []int{0, 1, 2}[rand.Intn(3)]
+			add(em, contactX+dx, dy, dx, 0, 900*time.Millisecond)
+		}
+	case "anime":
+		for i := 0; i < 4; i++ {
+			em := comic[rand.Intn(len(comic))]
+			dx := []int{-1, 1}[rand.Intn(2)]
+			dy := []int{0, 1, 2}[rand.Intn(3)]
+			add(em, contactX, dy, dx, 0, 700*time.Millisecond)
+		}
+		add("‼", contactX, 2, 0, 0, 600*time.Millisecond)
+	default:
+		for i := 0; i < 5; i++ {
+			em := confetti[rand.Intn(len(confetti))]
+			dx := []int{-2, -1, 0, 1, 2}[rand.Intn(5)]
+			dy := []int{0, 1, 2}[rand.Intn(3)]
+			vx := []int{-1, 0, 1}[rand.Intn(3)]
+			add(em, contactX+dx, dy, vx, 0, 1200*time.Millisecond)
+		}
+		add("😹", contactX-1, 2, -1, 0, 900*time.Millisecond)
+		add("🍖", contactX+1, 1, 1, 0, 900*time.Millisecond)
+	}
+
+	_ = preyY
 }
 
 // getAdventureThought returns a random thought for the given wildlife and phase
@@ -2896,21 +3043,8 @@ func (c *Coordinator) renderAdventurePlayArea(safePlayWidth int, petSprite strin
 		}
 	}
 
-	// Place cat at its adventure position
-	catX := adv.CatX
-	if catX >= 0 && catX < safePlayWidth {
-		// Cat is on ground or in air based on pet.Pos.Y
-		if c.pet.Pos.Y >= 2 {
-			highAirSprites[catX] = petSprite
-		} else if c.pet.Pos.Y == 1 {
-			lowAirSprites[catX] = petSprite
-		} else {
-			groundSprites[catX] = petSprite
-		}
-	}
-
 	// Place wildlife if present
-	if adv.Wildlife != nil && !adv.Wildlife.Escaped {
+	if adv.Wildlife != nil && !adv.Wildlife.Escaped && !adv.Wildlife.Caught {
 		w := adv.Wildlife
 		wx := w.X
 		if wx >= 0 && wx < safePlayWidth {
@@ -2922,6 +3056,17 @@ func (c *Coordinator) renderAdventurePlayArea(safePlayWidth int, petSprite strin
 			default:
 				groundSprites[wx] = w.Emoji
 			}
+		}
+	}
+
+	catX := adv.CatX
+	if catX >= 0 && catX < safePlayWidth {
+		if c.pet.Pos.Y >= 2 {
+			highAirSprites[catX] = petSprite
+		} else if c.pet.Pos.Y == 1 {
+			lowAirSprites[catX] = petSprite
+		} else {
+			groundSprites[catX] = petSprite
 		}
 	}
 
@@ -4220,11 +4365,22 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			s.WriteString(c.renderTouchButton(width, headerLabel, theme.Bg, headerOpts) + "\n")
 			currentLine += 3 // Touch button is 3 lines tall
 		} else {
-			lineStyle := lipgloss.NewStyle().Background(lipgloss.Color(theme.Bg)).Width(width)
+			bg := theme.Bg
+			if strings.EqualFold(bg, "transparent") {
+				bg = ""
+			}
+			lineStyle := lipgloss.NewStyle().Background(lipgloss.Color(bg)).Width(width)
 			// Large mode: single line with collapse icon
 			if hasWindows {
+				prefix := collapseStyle.Render(collapseIcon + " ")
+				prefixW := runewidth.StringWidth(stripAnsi(prefix))
+				restW := width - prefixW
+				if restW < 1 {
+					restW = 1
+				}
+
 				// Truncate header text to fit width (accounting for collapse icon)
-				headerMaxWidth := width - 2
+				headerMaxWidth := restW
 				if lipgloss.Width(headerText) > headerMaxWidth {
 					truncated := ""
 					for _, r := range headerText {
@@ -4235,12 +4391,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					}
 					headerText = truncated + "~"
 				}
-				headerContent := collapseStyle.Render(collapseIcon+" ") + headerStyle.Render(headerText)
-				renderedHeader := lineStyle.Render(headerContent)
-				if theme.Bg != "" {
-					renderedHeader = c.applyBackgroundFill(renderedHeader, theme.Bg, width)
+				rest := headerStyle.Render(headerText)
+				if bg != "" {
+					rest = c.applyBackgroundFill(rest, bg, restW)
+				} else {
+					rest = lipgloss.NewStyle().Width(restW).Render(rest)
 				}
-				s.WriteString(renderedHeader + "\n")
+				s.WriteString(prefix + rest + "\n")
 			} else {
 				// No windows - just show header without collapse icon
 				if lipgloss.Width(headerText) > width-2 {
@@ -4255,8 +4412,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 				headerContent := headerStyle.Render("  " + headerText)
 				renderedHeader := lineStyle.Render(headerContent)
-				if theme.Bg != "" {
-					renderedHeader = c.applyBackgroundFill(renderedHeader, theme.Bg, width)
+				if bg != "" {
+					renderedHeader = c.applyBackgroundFill(renderedHeader, bg, width)
 				}
 				s.WriteString(renderedHeader + "\n")
 			}
@@ -6118,6 +6275,9 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	if icons.Ground != "" {
 		sprites.Ground = icons.Ground
 	}
+	if icons.Blood != "" {
+		sprites.Blood = icons.Blood
+	}
 
 	petSprite := sprites.Idle
 	switch c.pet.State {
@@ -6586,29 +6746,46 @@ func (c *Coordinator) renderDebugBar(width int) []string {
 func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) bool {
 	layout := c.petLayout
 
+	if clickX < 0 {
+		return false
+	}
+
+	clientWidth := c.getClientWidth(clientID)
+	safeWidth := clientWidth - 1
+	if safeWidth < 5 {
+		safeWidth = 5
+	}
+	lines := c.renderDebugBar(safeWidth)
+	if len(lines) < 2 {
+		return false
+	}
+	line1 := lines[0]
+	line2 := lines[1]
+
+	findTokenBounds := func(line, token string) (int, int, bool) {
+		idx := strings.Index(line, token)
+		if idx < 0 {
+			return 0, 0, false
+		}
+		start := runewidth.StringWidth(line[:idx])
+		end := start + runewidth.StringWidth(token)
+		return start, end, true
+	}
+	clickedToken := func(line, token string) bool {
+		start, end, ok := findTokenBounds(line, token)
+		return ok && clickX >= start && clickX < end
+	}
+
 	// Determine which debug line was clicked
 	if clickY == layout.DebugLine1 {
-		// Line 1: DBG <state> H:<hunger> F:<food> [adv][slp][die][poo][mse][yrn]
-		// Button positions (approximate, 5 chars each with brackets)
-		// Find the button clicked based on X position
-		// Format: "DBG idle H:75 F:50 [adv][slp][die][poo][mse][yrn]"
-		// Positions:              ~19   ~24  ~29  ~34  ~39  ~44
-
-		// Get client width for accurate position calculation
-		clientWidth := c.getClientWidth(clientID)
-		_ = clientWidth // May use for dynamic positioning later
-
-		// Simple position-based detection
-		// [adv] starts around position 19
-		if clickX >= 19 && clickX < 24 {
-			// [adv] - Start adventure
+		if clickedToken(line1, "[adv]") {
 			coordinatorDebugLog.Printf("Debug bar: [adv] clicked, starting adventure")
 			c.stateMu.Lock()
-			c.startAdventure(clientWidth - 1)
+			c.startAdventure(safeWidth)
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 24 && clickX < 29 {
-			// [slp] - Toggle sleep
+		}
+		if clickedToken(line1, "[slp]") {
 			coordinatorDebugLog.Printf("Debug bar: [slp] clicked, toggling sleep")
 			c.stateMu.Lock()
 			if c.pet.State == "sleeping" {
@@ -6621,8 +6798,8 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.savePetState()
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 29 && clickX < 34 {
-			// [die] - Toggle death
+		}
+		if clickedToken(line1, "[die]") {
 			coordinatorDebugLog.Printf("Debug bar: [die] clicked, toggling death")
 			c.stateMu.Lock()
 			if c.pet.IsDead {
@@ -6640,33 +6817,43 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.savePetState()
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 34 && clickX < 39 {
-			// [poo] - Spawn poop
+		}
+		if clickedToken(line1, "[poo]") {
 			coordinatorDebugLog.Printf("Debug bar: [poo] clicked, spawning poop")
 			c.stateMu.Lock()
-			poopX := rand.Intn(c.getClientWidth(clientID) - 2)
+			w := c.getClientWidth(clientID)
+			if w < 3 {
+				w = 3
+			}
+			poopX := rand.Intn(w - 2)
 			c.pet.PoopPositions = append(c.pet.PoopPositions, poopX)
 			c.pet.LastThought = randomThought("poop")
 			c.savePetState()
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 39 && clickX < 44 {
-			// [mse] - Spawn mouse
+		}
+		if clickedToken(line1, "[mse]") {
 			coordinatorDebugLog.Printf("Debug bar: [mse] clicked, spawning mouse")
 			c.stateMu.Lock()
-			clientWidth := c.getClientWidth(clientID)
-			c.pet.MousePos = pos2D{X: rand.Intn(clientWidth - 2), Y: 0}
+			w := c.getClientWidth(clientID)
+			if w < 3 {
+				w = 3
+			}
+			c.pet.MousePos = pos2D{X: rand.Intn(w - 2), Y: 0}
 			c.pet.MouseAppearsAt = time.Time{} // Clear timer
 			c.pet.LastThought = randomThought("mouse_spot")
 			c.savePetState()
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 44 {
-			// [yrn] - Spawn yarn
+		}
+		if clickedToken(line1, "[yrn]") {
 			coordinatorDebugLog.Printf("Debug bar: [yrn] clicked, spawning yarn")
 			c.stateMu.Lock()
-			clientWidth := c.getClientWidth(clientID)
-			c.pet.YarnPos = pos2D{X: rand.Intn(clientWidth - 2), Y: 0}
+			w := c.getClientWidth(clientID)
+			if w < 3 {
+				w = 3
+			}
+			c.pet.YarnPos = pos2D{X: rand.Intn(w - 2), Y: 0}
 			c.pet.YarnExpiresAt = time.Now().Add(30 * time.Second)
 			c.pet.YarnPushCount = 0
 			c.pet.LastThought = randomThought("yarn")
@@ -6674,11 +6861,22 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.stateMu.Unlock()
 			return true
 		}
-	} else if clickY == layout.DebugLine2 {
-		// Line 2: trg:<category> [<<][>>] [H+][H-][F+][F-]
-		// Positions: trg:idle  ~10  ~14  ~19 ~23  ~28 ~32
-		if clickX >= 0 && clickX < 10 {
-			// trg:X - Trigger thought from current category
+		return false
+	}
+
+	if clickY == layout.DebugLine2 {
+		firstTokenStart := -1
+		for _, tok := range []string{"[<<]", "[>>]", "[H+]", "[H-]", "[F+]", "[F-]"} {
+			if s, _, ok := findTokenBounds(line2, tok); ok {
+				if firstTokenStart == -1 || s < firstTokenStart {
+					firstTokenStart = s
+				}
+			}
+		}
+		if firstTokenStart == -1 {
+			firstTokenStart = runewidth.StringWidth(line2)
+		}
+		if clickX >= 0 && clickX < firstTokenStart {
 			coordinatorDebugLog.Printf("Debug bar: trg clicked, triggering thought")
 			c.stateMu.Lock()
 			category := "idle"
@@ -6689,8 +6887,8 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.savePetState()
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 10 && clickX < 14 {
-			// [<<] - Previous thought category
+		}
+		if clickedToken(line2, "[<<]") {
 			coordinatorDebugLog.Printf("Debug bar: [<<] clicked, previous category")
 			c.stateMu.Lock()
 			c.pet.DebugThoughtIdx--
@@ -6699,8 +6897,8 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			}
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 14 && clickX < 18 {
-			// [>>] - Next thought category
+		}
+		if clickedToken(line2, "[>>]") {
 			coordinatorDebugLog.Printf("Debug bar: [>>] clicked, next category")
 			c.stateMu.Lock()
 			c.pet.DebugThoughtIdx++
@@ -6709,8 +6907,8 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			}
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 19 && clickX < 23 {
-			// [H+] - Increase happiness
+		}
+		if clickedToken(line2, "[H+]") {
 			coordinatorDebugLog.Printf("Debug bar: [H+] clicked")
 			c.stateMu.Lock()
 			c.pet.Happiness += 10
@@ -6720,8 +6918,8 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.savePetState()
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 23 && clickX < 27 {
-			// [H-] - Decrease happiness
+		}
+		if clickedToken(line2, "[H-]") {
 			coordinatorDebugLog.Printf("Debug bar: [H-] clicked")
 			c.stateMu.Lock()
 			c.pet.Happiness -= 10
@@ -6731,8 +6929,8 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.savePetState()
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 27 && clickX < 31 {
-			// [F+] - Increase hunger (food level)
+		}
+		if clickedToken(line2, "[F+]") {
 			coordinatorDebugLog.Printf("Debug bar: [F+] clicked")
 			c.stateMu.Lock()
 			c.pet.Hunger += 10
@@ -6742,8 +6940,8 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.savePetState()
 			c.stateMu.Unlock()
 			return true
-		} else if clickX >= 31 {
-			// [F-] - Decrease hunger (food level)
+		}
+		if clickedToken(line2, "[F-]") {
 			coordinatorDebugLog.Printf("Debug bar: [F-] clicked")
 			c.stateMu.Lock()
 			c.pet.Hunger -= 10
@@ -6754,6 +6952,7 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.stateMu.Unlock()
 			return true
 		}
+		return false
 	}
 
 	return false
@@ -7123,15 +7322,15 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		windowIDOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{window_id}").Output()
 		windowID := strings.TrimSpace(string(windowIDOut))
 
+		desiredExpandHeight := 0
 		if isCollapsed {
-			// Expand: restore previous height
 			prevHeightOut, _ := exec.Command("tmux", "show-options", "-pqv", "-t", paneID, "@tabby_pane_prev_height").Output()
 			prevHeight := strings.TrimSpace(string(prevHeightOut))
 			if prevHeight != "" && prevHeight != "0" {
-				exec.Command("tmux", "resize-pane", "-t", paneID, "-y", prevHeight).Run()
+				if n, err := strconv.Atoi(prevHeight); err == nil && n > 0 {
+					desiredExpandHeight = n
+				}
 			}
-			exec.Command("tmux", "set-option", "-p", "-t", paneID, "-u", "@tabby_pane_collapsed").Run()
-			exec.Command("tmux", "set-option", "-p", "-t", paneID, "-u", "@tabby_pane_prev_height").Run()
 		} else {
 			// Collapse: save height and minimize content pane to 1 line
 			heightOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{pane_height}").Output()
@@ -7145,11 +7344,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 
 		// Fix layout after collapse/expand - ensure headers stay at correct height
-		// and other content panes get the freed/taken space
+		// and other content panes get the freed/taken space.
 		if windowID != "" {
 			listOut, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}:#{pane_current_command}:#{pane_height}").Output()
 			var headerPanes []string
 			var otherContentPanes []string
+			paneHeights := make(map[string]int)
 			for _, line := range strings.Split(string(listOut), "\n") {
 				parts := strings.SplitN(strings.TrimSpace(line), ":", 3)
 				if len(parts) < 2 {
@@ -7157,6 +7357,11 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				}
 				pid := parts[0]
 				cmd := parts[1]
+				if len(parts) >= 3 {
+					if h, err := strconv.Atoi(strings.TrimSpace(parts[2])); err == nil {
+						paneHeights[pid] = h
+					}
+				}
 				if isAuxiliaryPaneCommand(cmd) {
 					headerPanes = append(headerPanes, pid)
 				} else if pid != paneID {
@@ -7181,6 +7386,62 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 								exec.Command("tmux", "resize-pane", "-t", contentID, "-y", fmt.Sprintf("%d", perPane)).Run()
 							}
 						}
+					}
+				}
+			}
+
+			if isCollapsed && desiredExpandHeight > 0 {
+				winHeightOut, _ := exec.Command("tmux", "display-message", "-t", windowID, "-p", "#{window_height}").Output()
+				totalHeight, _ := strconv.Atoi(strings.TrimSpace(string(winHeightOut)))
+				if totalHeight > 0 {
+					minPaneHeight := 1
+					maxTarget := totalHeight - (len(headerPanes) * headerHeight) - (len(otherContentPanes) * minPaneHeight)
+					if maxTarget < 1 {
+						maxTarget = 1
+					}
+					targetHeight := desiredExpandHeight
+					if targetHeight > maxTarget {
+						targetHeight = maxTarget
+					}
+
+					currentTargetHeight := paneHeights[paneID]
+					if currentTargetHeight <= 0 {
+						heightOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{pane_height}").Output()
+						currentTargetHeight, _ = strconv.Atoi(strings.TrimSpace(string(heightOut)))
+					}
+					need := targetHeight - currentTargetHeight
+					if need > 0 && len(otherContentPanes) > 0 {
+						sorted := make([]string, 0, len(otherContentPanes))
+						sorted = append(sorted, otherContentPanes...)
+						sort.Slice(sorted, func(i, j int) bool {
+							return paneHeights[sorted[i]] > paneHeights[sorted[j]]
+						})
+						remaining := need
+						for _, otherID := range sorted {
+							if remaining <= 0 {
+								break
+							}
+							h := paneHeights[otherID]
+							if h <= 1 {
+								continue
+							}
+							shrinkBy := h - 1
+							if shrinkBy > remaining {
+								shrinkBy = remaining
+							}
+							newH := h - shrinkBy
+							exec.Command("tmux", "resize-pane", "-t", otherID, "-y", fmt.Sprintf("%d", newH)).Run()
+							paneHeights[otherID] = newH
+							remaining -= shrinkBy
+						}
+					}
+
+					exec.Command("tmux", "resize-pane", "-t", paneID, "-y", fmt.Sprintf("%d", targetHeight)).Run()
+					heightOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{pane_height}").Output()
+					newHeight, _ := strconv.Atoi(strings.TrimSpace(string(heightOut)))
+					if newHeight > collapsedHeight {
+						exec.Command("tmux", "set-option", "-p", "-t", paneID, "-u", "@tabby_pane_collapsed").Run()
+						exec.Command("tmux", "set-option", "-p", "-t", paneID, "-u", "@tabby_pane_prev_height").Run()
 					}
 				}
 			}

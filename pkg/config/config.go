@@ -167,8 +167,10 @@ type PetWidget struct {
 	TouchButtons    bool   `yaml:"touch_buttons"`    // Show large touch-friendly action buttons
 	DebugBar        bool   `yaml:"debug_bar"`        // Show debug controls below pet widget (default: false)
 	// Adventure mode settings
-	AdventureEnabled bool `yaml:"adventure_enabled"` // Enable random adventure events (default: true)
-	AdventureChance  int  `yaml:"adventure_chance"`  // % chance per idle tick to start adventure (default: 5)
+	AdventureEnabled bool   `yaml:"adventure_enabled"` // Enable random adventure events (default: true)
+	AdventureChance  int    `yaml:"adventure_chance"`  // % chance per idle tick to start adventure (default: 5)
+	AdventureBlood   bool   `yaml:"adventure_blood"`
+	AdventureVibe    string `yaml:"adventure_vibe"`
 	// LLM settings for thoughts
 	LLMProvider         string `yaml:"llm_provider"`          // openai | anthropic | ollama (default: anthropic)
 	LLMModel            string `yaml:"llm_model"`             // Model name (default: claude-3-haiku-20240307)
@@ -212,6 +214,7 @@ type PetIcons struct {
 	HappyIcon  string `yaml:"happy_icon"`  // Happiness stat icon (when happy)
 	SadIcon    string `yaml:"sad_icon"`    // Happiness stat icon (when sad)
 	Ground     string `yaml:"ground"`      // Ground character
+	Blood      string `yaml:"blood"`
 }
 
 type ClockWidget struct {
