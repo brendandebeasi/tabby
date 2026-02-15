@@ -2657,11 +2657,13 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 
 	switch adv.Phase {
 	case advPhaseDeparting:
-		// Cat walks off screen to the right
 		if c.pet.AnimFrame%3 == 0 {
 			adv.CatX++
+			if adv.CatX > maxX {
+				adv.CatX = maxX
+			}
 		}
-		if elapsed >= adv.PhaseDuration || adv.CatX > maxX+5 {
+		if elapsed >= adv.PhaseDuration {
 			// Transition to exploring
 			adv.Phase = advPhaseExploring
 			adv.PhaseStart = now
@@ -2721,7 +2723,7 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 			adv.Phase = advPhaseArriving
 			adv.PhaseStart = now
 			adv.PhaseDuration = time.Duration(1+rand.Intn(2)) * time.Second
-			adv.CatX = maxX + 3 // Cat re-enters from right
+			adv.CatX = maxX
 		}
 
 	case advPhaseArriving:
@@ -2756,7 +2758,7 @@ func (c *Coordinator) spawnWildlife(maxX int) {
 	adv.Wildlife = &wildlifeEncounter{
 		Type:        wildlifeType,
 		Emoji:       data.Emoji,
-		X:           maxX + 5, // Appears from right
+		X:           maxX,
 		Y:           data.YLevel,
 		Speed:       data.Speed,
 		CatchChance: data.CatchChance,
@@ -2777,6 +2779,12 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 	if w.Pounced {
 		if w.PounceFrames > 0 {
 			adv.CatX = w.X
+			if adv.CatX < 0 {
+				adv.CatX = 0
+			}
+			if adv.CatX > maxX {
+				adv.CatX = maxX
+			}
 			c.pet.State = "jumping"
 			c.pet.Pos.Y = w.Y
 			w.PounceFrames--
@@ -2909,7 +2917,7 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 				w.X = 3
 			}
 			if w.X > maxX+5 {
-				w.X = maxX + 5
+				w.X = maxX
 			}
 		}
 
@@ -2923,6 +2931,12 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 			w.PounceFrames = 4
 			w.WillCatch = rand.Intn(100) < w.CatchChance
 			adv.CatX = w.X
+			if adv.CatX < 0 {
+				adv.CatX = 0
+			}
+			if adv.CatX > maxX {
+				adv.CatX = maxX
+			}
 			c.pet.State = "jumping"
 			c.pet.Pos.Y = w.Y
 			return
