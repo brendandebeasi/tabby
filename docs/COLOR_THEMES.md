@@ -2,6 +2,21 @@
 
 This guide explains how to configure colors for window groups in tabby.
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [How Auto-Derivation Works](#how-auto-derivation-works)
+- [Advanced Configuration](#advanced-configuration)
+- [Terminal Background Detection](#terminal-background-detection)
+- [Color Selection Tips](#color-selection-tips)
+- [Accessibility](#accessibility)
+- [Troubleshooting](#troubleshooting)
+- [Examples](#examples)
+- [Color Reference](#color-reference)
+- [Technical Details](#technical-details)
+- [Migration from Old Config](#migration-from-old-config)
+- [Further Reading](#further-reading)
+
 ## Quick Start
 
 ### Minimal Configuration (Recommended)

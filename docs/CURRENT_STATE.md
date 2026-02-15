@@ -2,6 +2,15 @@
 
 Canonical reference for how Tabby works today. Use this file as the source of truth when docs disagree.
 
+## Table of Contents
+
+- [Runtime Architecture](#runtime-architecture)
+- [Build + Freshness Workflow](#build--freshness-workflow)
+- [Dev Reload](#dev-reload)
+- [Canonical Test Commands](#canonical-test-commands)
+- [Sidebar Interaction Rules](#sidebar-interaction-rules)
+- [Compatibility Notes](#compatibility-notes)
+
 ## Runtime Architecture
 
 - `tabby-daemon` is the long-running per-session coordinator.
@@ -75,7 +84,7 @@ go test ./cmd/tabby-daemon
 ./tests/e2e/run_e2e.sh split_spawns_pane_header
 ```
 
-## Current Interaction Rules
+## Sidebar Interaction Rules
 
 - Group collapse/expand toggles only from the disclosure icon hit area.
 - Full group header row is context-only (right-click menu), not left-click toggle.
@@ -84,7 +93,7 @@ go test ./cmd/tabby-daemon
 - Window close flow restores focus using tracked window history (`track_window_history.sh` + `select_previous_window.sh`).
 - Pane layout/ratio continuity is maintained via `save_pane_layout.sh` and `preserve_pane_ratios.sh` hooks.
 
-## Notes
+## Compatibility Notes
 
 - Use this file as the canonical reference for current runtime and workflow behavior.
 - Lipgloss v2 remains pre-release; stay on Lipgloss v1 for runtime stability unless migration is explicitly requested.

@@ -661,7 +661,7 @@ Menus are displayed using `tmux display-menu` at the click position. The daemon 
 ### 9.5 Troubleshooting
 
 If context menus don't appear:
-1. Check that `MouseDown3Pane` is unbound: `tmux show-keys | grep MouseDown3`
+1. Check that root mouse binding routes right-click to clicked pane: `tmux list-keys -T root | grep MouseDown3Pane` (should include `send-keys -M -t =`)
 2. Enable daemon debug mode: `TABBY_DEBUG=1` and check logs
 3. Verify sidebar-renderer is receiving mouse events
 

@@ -1,5 +1,16 @@
 # Tabby Bug Analysis & E2E Test Plan
 
+This file is a historical analysis archive from earlier iterations. Some entries
+describe superseded architecture and are kept for context.
+
+## Table of Contents
+
+- [Critical Bugs](#critical-bugs)
+- [Medium Bugs](#medium-bugs)
+- [E2E Test Plan](#e2e-test-plan)
+- [New Feature Requirements](#new-feature-requirements)
+- [E2E Test Cases (Extended)](#e2e-test-cases-extended)
+
 ## Critical Bugs
 
 ### BUG-001: Toggle Sidebar PID File Race Condition
@@ -84,7 +95,7 @@ WINDOW_ID=#{window_id}
 
 ### BUG-004: Sidebar Click Y-Coordinate Off-by-One
 **Severity**: High
-**File**: `cmd/sidebar/main.go`
+**File**: `cmd/sidebar-renderer/main.go`
 
 **Problem**:
 `getWindowAtY()` and `View()` have mismatched line counting:
@@ -117,7 +128,7 @@ for _, group := range m.grouped {
 
 ### BUG-005: Cursor vs Window Index Confusion
 **Severity**: High
-**File**: `cmd/sidebar/main.go`
+**File**: `cmd/sidebar-renderer/main.go`
 
 **Problem**:
 ```go

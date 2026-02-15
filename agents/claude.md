@@ -1,5 +1,9 @@
 # Claude Dev Notes
 
+## Table of Contents
+
+- [Dev Reload Workflow (Opt-in)](#dev-reload-workflow-opt-in)
+
 ## Dev Reload Workflow (Opt-in)
 
 - Enable: `tmux set-option -g @tabby_dev_reload_enabled 1`

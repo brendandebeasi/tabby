@@ -2,6 +2,24 @@
 
 A modern tab manager for tmux with grouping, a clickable vertical sidebar, and deep linking for notifications.
 
+## Table of Contents
+
+- [About This Project](#about-this-project)
+- [Key Features](#key-features)
+- [All Features](#all-features)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Tab Grouping](#tab-grouping)
+- [Tab Overflow](#tab-overflow)
+- [Development](#development)
+- [Tabby Web (Local-Only)](#tabby-web-local-only)
+- [macOS Notifications with Deep Links](#macos-notifications-with-deep-links)
+- [Known Limitations](#known-limitations)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## About This Project
 
 Tabby started as an opinionated solution to a personal problem: managing dozens of tmux windows across multiple projects without losing context. It grew into something others might find useful.
@@ -55,7 +73,7 @@ terminal-notifier -title "Build Done" -message "Click to return" \
 - **Horizontal tab bar** - alternative mode with overflow scrolling
 - **Automatic window naming** - shows running command, locks on manual rename
 - **Activity indicators** - bell, activity, silence, busy, and input alerts
-- **Mouse support** - click, right-click menus, middle-click close, double-click to collapse
+- **Mouse support** - click, right-click menus, middle-click close
 - **Custom tab colors** - per-window color overrides, including transparent mode
 - **Pane management** - rename panes with title locking
 - **Group management** - create, rename, color, collapse, and set working directories
@@ -126,7 +144,6 @@ When the sidebar is focused, press `m` to open the marker picker for the active 
 ### Mouse Support (Vertical Sidebar)
 
 - **Left click**: Switch to window/pane
-- **Double-click**: Collapse/expand sidebar
 - **Click right edge**: Click the divider to collapse sidebar
 - **Middle click**: Close window (with confirmation)
 - **Right click on window**: Context menu with options:
@@ -177,7 +194,6 @@ Toggle the sidebar off and on (`prefix + Tab` twice) after changing these option
 
 The sidebar can be collapsed to maximize screen space:
 
-- **Double-click** anywhere on the sidebar to toggle collapse/expand
 - **Click the right edge** (divider area) to collapse
 - **Keyboard**: `Ctrl+<` or `Alt+<` to toggle
 - **Collapsed state**: Shows `>` down the entire height - click anywhere to expand
@@ -479,12 +495,15 @@ Open `http://127.0.0.1:5173/?token=<token>&user=<user>&pass=<pass>&pane=<pane_id
 ```
 tabby/
 ├── cmd/
-│   ├── render-status/   # Horizontal tab rendering
-│   ├── sidebar/         # Vertical sidebar app
-│   └── tabbar/          # Horizontal tabbar TUI
+│   ├── tabby-daemon/    # Session coordinator + render payloads
+│   ├── sidebar-renderer/ # Per-window sidebar TUI client
+│   ├── pane-header/     # Per-pane header TUI client
+│   ├── tabbar/          # Horizontal tabbar TUI
+│   └── render-status/   # Native tmux status rendering helpers
 ├── pkg/
 │   ├── config/         # Configuration loading
 │   ├── grouping/       # Tab grouping logic
+│   ├── paths/          # XDG config/state paths
 │   └── tmux/           # Tmux integration
 ├── scripts/
 │   ├── install.sh      # Build and install

@@ -1,5 +1,12 @@
 # Debugging
 
+## Table of Contents
+
+- [Runtime Freshness Check](#runtime-freshness-check)
+- [Input Logging](#input-logging)
+- [Other Log Files](#other-log-files)
+- [Debug Mode](#debug-mode)
+
 ## Runtime Freshness Check
 
 Before deep debugging, confirm the session is running the latest daemon build:

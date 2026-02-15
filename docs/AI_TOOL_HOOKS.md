@@ -9,6 +9,14 @@ Tabby detects AI coding tool states two ways:
 
 This guide covers option 2: configuring each tool's hook system.
 
+## Table of Contents
+
+- [How It Works](#how-it-works)
+- [Tool Configurations](#tool-configurations)
+- [Quick Setup](#quick-setup)
+- [Passive Detection (No Hooks Needed)](#passive-detection-no-hooks-needed)
+- [Comparison](#comparison)
+
 ---
 
 ## How It Works

@@ -2,6 +2,12 @@
 
 This directory is organized by intent. If you only read one file first, read `docs/CURRENT_STATE.md`.
 
+## Table of Contents
+
+- [Start Here](#start-here)
+- [Troubleshooting & Verification](#troubleshooting--verification)
+- [UX / Feature References](#ux--feature-references)
+
 ## Start Here
 
 - `docs/CURRENT_STATE.md`  

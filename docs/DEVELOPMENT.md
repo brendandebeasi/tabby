@@ -1,5 +1,22 @@
 # Development
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Build](#build)
+- [Runtime Freshness](#runtime-freshness)
+- [Tests](#tests)
+
+Use this document for day-to-day development commands. For canonical runtime behavior,
+see `docs/CURRENT_STATE.md`.
+
+## Quick Start
+
+```bash
+./scripts/install.sh
+./scripts/dev-status.sh
+```
+
 ## Build
 
 ```bash
@@ -38,4 +55,11 @@ docker run tabby-test /plugin/tests/integration/tmux_test.sh
 
 ./tests/integration/marker_modal_behavior_test.sh
 ./tests/integration/marker_search_test.sh
+
+# Right-click and input routing checks
+./tests/integration/right_click_bindings_test.sh
+
+# E2E harness
+./tests/e2e/run_e2e.sh stale_renderer_recovery
+./tests/e2e/run_e2e.sh window_close_removes
 ```

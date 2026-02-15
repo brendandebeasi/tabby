@@ -1,5 +1,13 @@
 # Configuration
 
+## Table of Contents
+
+- [Example Config](#example-config)
+- [Sidebar Position and Mode](#sidebar-position-and-mode)
+- [Tips](#tips)
+
+## Example Config
+
 `config.yaml` fields:
 
 ```yaml
@@ -87,7 +95,7 @@ After changing position or mode, toggle the sidebar off and on to apply:
 # prefix + Tab (twice) to toggle off then on
 ```
 
-## Notes
+## Tips
 
 - `position`: `top`, `bottom`, `left`, or `right`.
 - `height`: lines (horizontal) or columns (vertical).

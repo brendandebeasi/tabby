@@ -2,6 +2,12 @@
 
 Widgets are optional components that can be added to the sidebar to display additional information.
 
+## Table of Contents
+
+- [Available Widgets](#available-widgets)
+- [Creating Custom Widgets](#creating-custom-widgets)
+- [Widget Ideas](#widget-ideas)
+
 ## Available Widgets
 
 ### Clock Widget
