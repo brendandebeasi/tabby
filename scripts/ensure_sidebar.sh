@@ -89,6 +89,8 @@ if [ "$MODE" = "enabled" ]; then
         fi
     fi
 elif [ "$MODE" = "horizontal" ]; then
+    tmux set-option -g status off
+
     # Check if CURRENT window has a tabbar
     TABBAR_COUNT=$(tmux list-panes -F "#{pane_current_command}" 2>/dev/null | grep -c "^tabbar$" || echo "0")
 

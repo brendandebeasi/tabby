@@ -533,6 +533,13 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.Button == tea.MouseButtonLeft {
+			if !m.isTouchMode {
+				m.mouseDownTime = time.Now()
+				m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
+				m.longPressActive = false
+				return m, nil
+			}
+
 			// Check for double-click (second press within threshold)
 			timeSinceLastClick := time.Since(m.lastTapTime)
 			clickDx := abs(msg.X - m.lastTapPos.X)
@@ -588,6 +595,20 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.longPressActive = false
 			m.mouseDownTime = time.Time{}
 			return m, nil
+		}
+
+		if !m.isTouchMode {
+			elapsed := time.Since(m.mouseDownTime)
+			m.mouseDownTime = time.Time{}
+
+			dx := abs(msg.X - m.mouseDownPos.X)
+			dy := abs(msg.Y - m.mouseDownPos.Y)
+			isDrag := elapsed > 0 && (dx > 5 || dy > 2)
+			if isDrag || elapsed <= 0 {
+				return m, nil
+			}
+
+			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
 		}
 
 		wasLongPressActive := m.longPressActive

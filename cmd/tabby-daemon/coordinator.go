@@ -3982,6 +3982,22 @@ func (c *Coordinator) getSlowSpinnerFrame() int {
 	return c.spinnerFrame / 2
 }
 
+func (c *Coordinator) getAnimatedActiveIndicator(fallback string) string {
+	frames := c.config.Sidebar.Colors.ActiveIndicatorFrames
+	if len(frames) == 0 {
+		return fallback
+	}
+	frame := frames[c.getSlowSpinnerFrame()%len(frames)]
+	if frame == "" {
+		return " "
+	}
+	return frame
+}
+
+func (c *Coordinator) HasActiveIndicatorAnimation() bool {
+	return len(c.config.Sidebar.Colors.ActiveIndicatorFrames) > 1
+}
+
 // getIndicatorIcon returns the icon for an indicator
 func (c *Coordinator) getIndicatorIcon(ind config.Indicator) string {
 	if ind.Icon != "" {
@@ -4369,17 +4385,15 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			if strings.EqualFold(bg, "transparent") {
 				bg = ""
 			}
-			lineStyle := lipgloss.NewStyle().Background(lipgloss.Color(bg)).Width(width)
-			// Large mode: single line with collapse icon
 			if hasWindows {
-				prefix := collapseStyle.Render(collapseIcon + " ")
+				prefix := collapseStyle.Render(collapseIcon)
 				prefixW := runewidth.StringWidth(stripAnsi(prefix))
 				restW := width - prefixW
 				if restW < 1 {
 					restW = 1
 				}
 
-				// Truncate header text to fit width (accounting for collapse icon)
+				// Truncate header text to fit width (accounting for tree branch + collapse icon)
 				headerMaxWidth := restW
 				if lipgloss.Width(headerText) > headerMaxWidth {
 					truncated := ""
@@ -4399,21 +4413,27 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 				s.WriteString(prefix + rest + "\n")
 			} else {
-				// No windows - just show header without collapse icon
-				if lipgloss.Width(headerText) > width-2 {
+				// No windows - show header with group tree branch but no collapse icon
+				prefix := " "
+				prefixW := runewidth.StringWidth(stripAnsi(prefix))
+				restW := width - prefixW
+				if restW < 1 {
+					restW = 1
+				}
+				if lipgloss.Width(headerText) > restW {
 					truncated := ""
 					for _, r := range headerText {
-						if lipgloss.Width(truncated+string(r)) > width-3 {
+						if lipgloss.Width(truncated+string(r)) > restW-1 {
 							break
 						}
 						truncated += string(r)
 					}
 					headerText = truncated + "~"
 				}
-				headerContent := headerStyle.Render("  " + headerText)
-				renderedHeader := lineStyle.Render(headerContent)
+				headerContent := headerStyle.Render(headerText)
+				renderedHeader := prefix + headerContent
 				if bg != "" {
-					renderedHeader = c.applyBackgroundFill(renderedHeader, bg, width)
+					renderedHeader = prefix + c.applyBackgroundFill(headerContent, bg, restW)
 				}
 				s.WriteString(renderedHeader + "\n")
 			}
@@ -4522,7 +4542,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 			}
 
-			// Render indicator at far left
 			var indicatorPart string
 			if alertIcon != "" {
 				indicatorPart = alertIcon
@@ -4662,13 +4681,20 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						indicatorBg = activeIndBgConfig
 					}
 					if activeIndFgConfig == "" || activeIndFgConfig == "auto" {
-						indicatorFg = indicatorBg
+						if indicatorBg == "" || strings.EqualFold(indicatorBg, "transparent") {
+							indicatorFg = fgColor
+						} else {
+							indicatorFg = indicatorBg
+						}
 					} else {
 						indicatorFg = activeIndFgConfig
 					}
 
-					activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Background(lipgloss.Color(indicatorBg)).Bold(true)
-					prefix = indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(activeIndicator)
+					activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Bold(true)
+					if indicatorBg != "" && !strings.EqualFold(indicatorBg, "transparent") {
+						activeIndStyle = activeIndStyle.Background(lipgloss.Color(indicatorBg))
+					}
+					prefix = indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(c.getAnimatedActiveIndicator(activeIndicator))
 					content = contentText
 				} else {
 					prefix = indicatorPart + treeStyle.Render(treeBranch)
@@ -4833,7 +4859,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
 					}
 
-					// Leading character: alert icon or space
 					paneLeadChar := " "
 					if paneAlertIcon != "" {
 						paneLeadChar = paneAlertIcon
@@ -4861,12 +4886,19 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 							paneIndicatorBg = activeIndBgConfig
 						}
 						if activeIndFgConfig == "" || activeIndFgConfig == "auto" {
-							paneIndicatorFg = paneIndicatorBg
+							if paneIndicatorBg == "" || strings.EqualFold(paneIndicatorBg, "transparent") {
+								paneIndicatorFg = c.getTextColorWithFallback("")
+							} else {
+								paneIndicatorFg = paneIndicatorBg
+							}
 						} else {
 							paneIndicatorFg = activeIndFgConfig
 						}
 						paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
-						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar) + paneIndStyle.Render(paneActiveIndicator)
+						if paneIndicatorBg != "" && !strings.EqualFold(paneIndicatorBg, "transparent") {
+							paneIndStyle = paneIndStyle.Background(lipgloss.Color(paneIndicatorBg))
+						}
+						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar) + paneIndStyle.Render(c.getAnimatedActiveIndicator(paneActiveIndicator))
 						paneContent = activePaneStyle.Render(paneText)
 					} else {
 						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar)
@@ -4927,7 +4959,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 		}
 
-		// Padding after group (before next group) - always add blank line
 		if !isLastGroup {
 			s.WriteString("\n")
 			currentLine++
@@ -5193,13 +5224,17 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					indicatorBg = activeIndBgConf
 				}
 				if activeIndFgConf == "" || activeIndFgConf == "auto" {
-					indicatorFg = indicatorBg
+					if indicatorBg == "" || strings.EqualFold(indicatorBg, "transparent") {
+						indicatorFg = fgColor
+					} else {
+						indicatorFg = indicatorBg
+					}
 				} else {
 					indicatorFg = activeIndFgConf
 				}
 
 				activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Bold(true)
-				lineContent = indicatorPart + " " + activeIndStyle.Render(activeIndicator) + style.Render(contentText)
+				lineContent = indicatorPart + " " + activeIndStyle.Render(c.getAnimatedActiveIndicator(activeIndicator)) + style.Render(contentText)
 			} else {
 				lineContent = indicatorPart + "  " + style.Render(contentText)
 			}
@@ -5359,13 +5394,17 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 						paneIndicatorBg = activeIndBgConf
 					}
 					if activeIndFgConf == "" || activeIndFgConf == "auto" {
-						paneIndicatorFg = paneIndicatorBg
+						if paneIndicatorBg == "" || strings.EqualFold(paneIndicatorBg, "transparent") {
+							paneIndicatorFg = c.getTextColorWithFallback("")
+						} else {
+							paneIndicatorFg = paneIndicatorBg
+						}
 					} else {
 						paneIndicatorFg = activeIndFgConf
 					}
 					paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
 					fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-					lineContent := paneLeadChar + "  " + treeStyle.Render(paneBranchChar+treeConnectorChar) + paneIndStyle.Render(paneActiveIndicator) + fullWidthPaneStyle.Render(paneText)
+					lineContent := paneLeadChar + "  " + treeStyle.Render(paneBranchChar+treeConnectorChar) + paneIndStyle.Render(c.getAnimatedActiveIndicator(paneActiveIndicator)) + fullWidthPaneStyle.Render(paneText)
 					renderedPane := paneLineStyle.Render(lineContent)
 					if paneLineBg != "" {
 						renderedPane = c.applyBackgroundFill(renderedPane, paneLineBg, width)
@@ -9047,8 +9086,34 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 			}
 		}
 
+		canShowMarkerPicker := c.OnSendMenu != nil && !strings.HasPrefix(clientID, "header:")
+		if markerScript != "" || canShowMarkerPicker {
+			args = append(args, "  -Set Marker", "", "")
+		}
 		if markerScript != "" {
-			args = append(args, "  -Set Icon", "", "")
+			iconOptions := []struct {
+				name string
+				icon string
+				key  string
+			}{
+				{"Terminal", "", "1"},
+				{"Code", "", "2"},
+				{"Folder", "", "3"},
+				{"Git", "", "4"},
+				{"Bug", "", "5"},
+				{"Test", "", "6"},
+				{"Database", "", "7"},
+				{"Globe", "", "8"},
+				{"Star", "★", "s"},
+				{"Heart", "❤", "h"},
+				{"Fire", "🔥", "f"},
+				{"Rocket", "🚀", ""},
+				{"Lightning", "⚡", "l"},
+			}
+			for _, opt := range iconOptions {
+				setIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", markerScript, group.Name, opt.icon)
+				args = append(args, fmt.Sprintf("    %s %s", opt.icon, opt.name), opt.key, setIconCmd)
+			}
 			currentIcon := strings.TrimSpace(group.Theme.Icon)
 			promptIcon := fmt.Sprintf(
 				"command-prompt -I '%s' -p 'Icon:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
@@ -9057,11 +9122,15 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 				group.Name,
 			)
 			args = append(args, "    Prompt...", "i", promptIcon)
-			if c.OnSendMenu != nil && !strings.HasPrefix(clientID, "header:") {
-				groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
-				searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
-				args = append(args, "    Search...", "", searchCmd)
+			if currentIcon != "" {
+				removeIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"\\\"'", markerScript, group.Name)
+				args = append(args, "    Remove Icon", "0", removeIconCmd)
 			}
+		}
+		if canShowMarkerPicker {
+			groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
+			searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
+			args = append(args, "    Search...", "", searchCmd)
 		}
 
 		if workingDirScript != "" {

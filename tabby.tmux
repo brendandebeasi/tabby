@@ -276,9 +276,10 @@ if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
     done
     tmux set-option -gu status-format 2>/dev/null || true
 
-    # Only enable status bar if sidebar mode is NOT active
+    # Only enable tmux status bar in disabled mode.
+    # In enabled/horizontal modes, Tabby owns the UI surface.
     SIDEBAR_STATE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
-    if [ "$SIDEBAR_STATE" != "enabled" ]; then
+    if [ "$SIDEBAR_STATE" = "disabled" ]; then
         tmux set-option -g status on
     else
         tmux set-option -g status off

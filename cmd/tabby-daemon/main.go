@@ -1166,7 +1166,8 @@ func main() {
 				// Only render if something visual actually changed (dirty flag pattern)
 				spinnerVisible := coordinator.IncrementSpinner()
 				petChanged := coordinator.UpdatePetState()
-				if spinnerVisible || petChanged {
+				indicatorAnimated := coordinator.HasActiveIndicatorAnimation()
+				if spinnerVisible || petChanged || indicatorAnimated {
 					perf.Log("animationTick (render)")
 					// Only render active window during animation ticks (hidden windows don't need updates)
 					server.RenderActiveWindowOnly(activeWindowID)

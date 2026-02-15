@@ -318,24 +318,25 @@ type TouchButtons struct {
 }
 
 type SidebarColors struct {
-	Bg                  string `yaml:"bg"`                   // Sidebar background color (default: #1a1a2e)
-	HeaderFg            string `yaml:"header_fg"`            // Group header text (default: #000000)
-	ActiveFg            string `yaml:"active_fg"`            // Active tab text (default: #ffffff)
-	InactiveFg          string `yaml:"inactive_fg"`          // Inactive tab text (default: #f2f2ee)
-	PaneFg              string `yaml:"pane_fg"`              // Pane text in tree (default: same as inactive_fg)
-	DisclosureFg        string `yaml:"disclosure_fg"`        // Disclosure icon color (default: #000000)
-	DisclosureExpanded  string `yaml:"disclosure_expanded"`  // Expanded state icon (default: ⊟)
-	DisclosureCollapsed string `yaml:"disclosure_collapsed"` // Collapsed state icon (default: ⊞)
-	ActiveIndicator     string `yaml:"active_indicator"`     // Active window/pane icon (default: ●)
-	ActiveIndicatorFg   string `yaml:"active_indicator_fg"`  // Active indicator foreground (default: auto)
-	ActiveIndicatorBg   string `yaml:"active_indicator_bg"`  // Active indicator background (default: empty)
-	TreeFg              string `yaml:"tree_fg"`              // Tree branch color (default: #666666)
-	TreeBg              string `yaml:"tree_bg"`              // Tree branch background (default: transparent)
-	TreeBranch          string `yaml:"tree_branch"`          // Branch connector: ├─ (default: ├─)
-	TreeBranchLast      string `yaml:"tree_branch_last"`     // Last branch: └─ (default: └─)
-	TreeConnector       string `yaml:"tree_connector"`       // Horizontal connector (default: ─)
-	TreeConnectorPanes  string `yaml:"tree_connector_panes"` // Connector when has panes (default: ┬)
-	TreeContinue        string `yaml:"tree_continue"`        // Vertical continuation (default: │)
+	Bg                    string   `yaml:"bg"`                   // Sidebar background color (default: #1a1a2e)
+	HeaderFg              string   `yaml:"header_fg"`            // Group header text (default: #000000)
+	ActiveFg              string   `yaml:"active_fg"`            // Active tab text (default: #ffffff)
+	InactiveFg            string   `yaml:"inactive_fg"`          // Inactive tab text (default: #f2f2ee)
+	PaneFg                string   `yaml:"pane_fg"`              // Pane text in tree (default: same as inactive_fg)
+	DisclosureFg          string   `yaml:"disclosure_fg"`        // Disclosure icon color (default: #000000)
+	DisclosureExpanded    string   `yaml:"disclosure_expanded"`  // Expanded state icon (default: ⊟)
+	DisclosureCollapsed   string   `yaml:"disclosure_collapsed"` // Collapsed state icon (default: ⊞)
+	ActiveIndicator       string   `yaml:"active_indicator"`     // Active window/pane icon (default: ●)
+	ActiveIndicatorFrames []string `yaml:"active_indicator_frames"`
+	ActiveIndicatorFg     string   `yaml:"active_indicator_fg"`  // Active indicator foreground (default: auto)
+	ActiveIndicatorBg     string   `yaml:"active_indicator_bg"`  // Active indicator background (default: empty)
+	TreeFg                string   `yaml:"tree_fg"`              // Tree branch color (default: #666666)
+	TreeBg                string   `yaml:"tree_bg"`              // Tree branch background (default: transparent)
+	TreeBranch            string   `yaml:"tree_branch"`          // Branch connector: ├─ (default: ├─)
+	TreeBranchLast        string   `yaml:"tree_branch_last"`     // Last branch: └─ (default: └─)
+	TreeConnector         string   `yaml:"tree_connector"`       // Horizontal connector (default: ─)
+	TreeConnectorPanes    string   `yaml:"tree_connector_panes"` // Connector when has panes (default: ┬)
+	TreeContinue          string   `yaml:"tree_continue"`        // Vertical continuation (default: │)
 }
 
 type Style struct {

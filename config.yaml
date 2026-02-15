@@ -92,9 +92,9 @@ sidebar:
     pane_fg: "#f5f5f5"              # Pane text (almost white)
     disclosure_expanded: "⊟"        # Expanded state icon (boxed minus)
     disclosure_collapsed: "⊞"       # Collapsed state icon (boxed plus)
-    active_indicator: "█"           # Active window/pane indicator character (solid block)
-    active_indicator_fg: "auto"     # Foreground: "auto" = same as bg (solid color)
-    active_indicator_bg: "auto"     # Background: "auto" = group's active_indicator_bg color
+    active_indicator_frames: ["▶", "▶", "▶", "▶", "▶", " "]
+    active_indicator_fg: "#000000"
+    active_indicator_bg: "transparent"
     tree_branch: "├─"               # Branch connector
     tree_branch_last: "└─"          # Last branch connector
     tree_connector: "─"             # Horizontal connector

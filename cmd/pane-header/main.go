@@ -35,6 +35,13 @@ var (
 var debugLog *log.Logger
 var crashLog *log.Logger
 
+const (
+	longPressThreshold = 350 * time.Millisecond
+	doubleTapThreshold = 600 * time.Millisecond
+	doubleTapDistance  = 10
+	movementThreshold  = 25
+)
+
 func initCrashLog() {
 	crashLogPath := fmt.Sprintf("/tmp/pane-header-%s-crash.log", *paneID)
 	f, err := os.OpenFile(crashLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
@@ -77,8 +84,12 @@ type rendererModel struct {
 	// The header pane's own tmux pane ID (for menu positioning)
 	headerPaneID string
 
-	mouseDownPos  struct{ X, Y int }
-	mouseDownTime time.Time
+	mouseDownPos    struct{ X, Y int }
+	mouseDownTime   time.Time
+	longPressActive bool
+	skipNextRelease bool
+	lastTapTime     time.Time
+	lastTapPos      struct{ X, Y int }
 
 	// Message sending (thread-safe)
 	sendMu sync.Mutex
@@ -97,6 +108,11 @@ type renderMsg struct {
 }
 
 type tickMsg time.Time
+
+type longPressMsg struct {
+	X int
+	Y int
+}
 
 // Init implements tea.Model
 func (m rendererModel) Init() tea.Cmd {
@@ -208,6 +224,19 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 
+	case longPressMsg:
+		if m.longPressActive {
+			dx := absInt(msg.X - m.mouseDownPos.X)
+			dy := absInt(msg.Y - m.mouseDownPos.Y)
+			if dx <= movementThreshold && dy <= movementThreshold {
+				m.longPressActive = false
+				m.skipNextRelease = true
+				m.mouseDownTime = time.Time{}
+				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
+			}
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -269,7 +298,7 @@ func (m rendererModel) handleFocusGain() (tea.Model, tea.Cmd) {
 	debugLog.Printf("handleFocusGain: simulating click at X=%d Y=%d", x, y)
 
 	// Process this as a left click at the stored position
-	return m.processMouseClick(x, y, tea.MouseButtonLeft)
+	return m.processMouseClick(x, y, tea.MouseButtonLeft, false)
 }
 
 // handleMouse processes mouse events
@@ -296,22 +325,65 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 			button = tea.MouseButtonRight
 		}
-		if button != tea.MouseButtonLeft {
-			return m.processMouseClick(msg.X, msg.Y, button)
+		if button == tea.MouseButtonLeft {
+			timeSinceLastClick := time.Since(m.lastTapTime)
+			clickDx := absInt(msg.X - m.lastTapPos.X)
+			clickDy := absInt(msg.Y - m.lastTapPos.Y)
+			if timeSinceLastClick < doubleTapThreshold && clickDx <= doubleTapDistance && clickDy <= doubleTapDistance {
+				m.lastTapTime = time.Time{}
+				m.skipNextRelease = true
+				m.longPressActive = false
+				m.mouseDownTime = time.Time{}
+				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
+			}
+
+			m.longPressActive = true
+			return m, tea.Tick(longPressThreshold, func(t time.Time) tea.Msg {
+				return longPressMsg{X: msg.X, Y: msg.Y}
+			})
 		}
-		return m, nil
+
+		m.skipNextRelease = true
+		m.longPressActive = false
+		m.mouseDownTime = time.Time{}
+		return m.processMouseClick(msg.X, msg.Y, button, false)
 
 	case tea.MouseActionRelease:
+		if m.skipNextRelease {
+			m.skipNextRelease = false
+			m.longPressActive = false
+			m.mouseDownTime = time.Time{}
+			return m, nil
+		}
+
+		wasLongPressActive := m.longPressActive
+		m.longPressActive = false
 		elapsed := time.Since(m.mouseDownTime)
 		dx := msg.X - m.mouseDownPos.X
 		dy := msg.Y - m.mouseDownPos.Y
+		m.mouseDownTime = time.Time{}
 
-		if absInt(dx) <= 2 && absInt(dy) <= 1 && elapsed < 300*time.Millisecond {
-			return m.processMouseClick(m.mouseDownPos.X, m.mouseDownPos.Y, tea.MouseButtonLeft)
+		if elapsed > 0 && (absInt(dx) > 5 || absInt(dy) > 2) {
+			return m, nil
+		}
+
+		m.lastTapTime = time.Now()
+		m.lastTapPos = struct{ X, Y int }{msg.X, msg.Y}
+
+		if wasLongPressActive && elapsed < longPressThreshold {
+			return m.processMouseClick(m.mouseDownPos.X, m.mouseDownPos.Y, tea.MouseButtonLeft, false)
 		}
 		return m, nil
 
 	case tea.MouseActionMotion:
+		if m.longPressActive {
+			dx := absInt(msg.X - m.mouseDownPos.X)
+			dy := absInt(msg.Y - m.mouseDownPos.Y)
+			if dx > movementThreshold || dy > movementThreshold {
+				m.longPressActive = false
+				m.mouseDownTime = time.Time{}
+			}
+		}
 		return m, nil
 	}
 
@@ -326,7 +398,7 @@ func absInt(x int) int {
 }
 
 // processMouseClick handles the actual click processing
-func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.Model, tea.Cmd) {
+func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSimulated bool) (tea.Model, tea.Cmd) {
 	var resolvedAction, resolvedTarget string
 
 	// For single-line header, Y should always be 0 (no scrolling)
@@ -381,17 +453,18 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton) (tea.
 	}
 
 	input := &daemon.InputPayload{
-		SequenceNum:    m.sequenceNum,
-		Type:           "action",
-		MouseX:         x,
-		MouseY:         y,
-		Button:         buttonStr,
-		Action:         "press",
-		ViewportOffset: 0, // No scrolling for single-line header
-		ResolvedAction: resolvedAction,
-		ResolvedTarget: resolvedTarget,
-		PaneID:         paneIDStr,
-		SourcePaneID:   m.headerPaneID,
+		SequenceNum:           m.sequenceNum,
+		Type:                  "action",
+		MouseX:                x,
+		MouseY:                y,
+		Button:                buttonStr,
+		Action:                "press",
+		ViewportOffset:        0, // No scrolling for single-line header
+		ResolvedAction:        resolvedAction,
+		ResolvedTarget:        resolvedTarget,
+		PaneID:                paneIDStr,
+		SourcePaneID:          m.headerPaneID,
+		IsSimulatedRightClick: isSimulated,
 	}
 
 	m.sendInput(input)
