@@ -419,6 +419,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 					if strings.Contains(hLine, "pane-header") {
 						hParts := strings.SplitN(hLine, "\x1f", 3)
 						if len(hParts) >= 1 {
+							exec.Command("tmux", "resize-pane", "-t", hParts[0], "-y", "1").Run()
 							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
 							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
 						}
@@ -1002,6 +1003,7 @@ func main() {
 	}
 	debugLog.Printf("Server listening on %s", server.GetSocketPath())
 	logEvent("DAEMON_START session=%s pid=%d", *sessionID, os.Getpid())
+	resetTerminalModes(*sessionID)
 
 	// Start deadlock watchdog
 	StartDeadlockWatchdog()

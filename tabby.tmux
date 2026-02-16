@@ -56,11 +56,32 @@ tmux bind-key '%' split-window -h -c "#{pane_current_path}"
 NEW_WINDOW_SCRIPT="$CURRENT_DIR/scripts/new_window_with_group.sh"
 cat > "$NEW_WINDOW_SCRIPT" << 'SCRIPT_EOF'
 #!/usr/bin/env bash
-# Capture current window's group and create new window
-CURRENT_GROUP=$(tmux show-window-options -v @tabby_group 2>/dev/null || echo "")
-CURRENT_PATH=$(tmux display-message -p "#{pane_current_path}")
-tmux set-option -g @tabby_new_window_group "$CURRENT_GROUP"
-tmux new-window -c "$CURRENT_PATH"
+set -eu
+
+SAVED_GROUP=$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
+SAVED_PATH=$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
+
+if [ -z "$SAVED_GROUP" ]; then
+    SAVED_GROUP=$(tmux show-window-options -v @tabby_group 2>/dev/null || echo "")
+fi
+
+if [ -z "$SAVED_PATH" ]; then
+    SAVED_PATH=$(tmux display-message -p "#{pane_current_path}")
+fi
+
+NEW_WINDOW_ID=$(tmux new-window -P -F "#{window_id}" -c "$SAVED_PATH" 2>/dev/null || true)
+NEW_WINDOW_ID=$(printf "%s" "$NEW_WINDOW_ID" | tr -d '\r\n')
+
+if [ -n "$NEW_WINDOW_ID" ] && [ -n "$SAVED_GROUP" ] && [ "$SAVED_GROUP" != "Default" ]; then
+    tmux set-window-option -t "$NEW_WINDOW_ID" @tabby_group "$SAVED_GROUP" 2>/dev/null || true
+fi
+
+if [ -n "$NEW_WINDOW_ID" ]; then
+    tmux select-window -t "$NEW_WINDOW_ID" 2>/dev/null || true
+fi
+
+tmux set-option -gu @tabby_new_window_group 2>/dev/null || true
+tmux set-option -gu @tabby_new_window_path 2>/dev/null || true
 SCRIPT_EOF
 chmod +x "$NEW_WINDOW_SCRIPT"
 
@@ -176,12 +197,7 @@ tmux bind-key -T root MouseDown3Pane send-keys -M -t =
 
 # Ensure drag gestures on utility panes are always forwarded (no copy-mode intercept).
 tmux unbind-key -T root MouseDrag1Pane 2>/dev/null || true
-tmux bind-key -T root MouseDrag1Pane \
-	if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
-		"send-keys -M -t =" \
-		"if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
-			\"send-keys -M -t =\" \
-			\"if-shell -F -t = \\\"#{||:#{pane_in_mode},#{mouse_any_flag}}\\\" \\\"send-keys -M -t =\\\" \\\"copy-mode -M -t =\\\"\""
+tmux bind-key -T root MouseDrag1Pane send-keys -M -t =
 
 # Handle clicks on pane-header panes specially to allow buttons to work regardless of focus
 # Architecture: Only intercept pane-header clicks. Let sidebar and normal panes use default tmux behavior.
@@ -218,7 +234,7 @@ tmux bind-key -T root MouseDown1Pane \
         "send-keys -M -t =" \
         "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
 		    \"run-shell -b '$CLICK_HANDLER_SCRIPT \\\"#{pane_id}\\\" \\\"#{mouse_x}\\\" \\\"#{mouse_y}\\\"'\" \
-            \"select-pane -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
+            \"select-pane -t = ; send-keys -M -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 
 # Enable focus events
 tmux set-option -g focus-events on
@@ -384,7 +400,7 @@ tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$
 # On window close: select previous from history, preserve sidebar width, then refresh
 tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT'; run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
 tmux set-hook -g after-kill-window "run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
-tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'"
+tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'"
 # Combined script to reduce latency + track window history
 ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
 chmod +x "$ON_WINDOW_SELECT_SCRIPT"
@@ -415,14 +431,14 @@ chmod +x "$CLEANUP_SCRIPT"
 PRESERVE_RATIOS_SCRIPT="$CURRENT_DIR/scripts/preserve_pane_ratios.sh"
 chmod +x "$PRESERVE_RATIOS_SCRIPT"
 # When a pane exits: preserve ratios, cleanup orphans, refresh sidebar and pane bar
-tmux set-hook -g pane-exited "run-shell '$PRESERVE_RATIOS_SCRIPT'; run-shell '$CLEANUP_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'; run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
+tmux set-hook -g pane-exited "run-shell '$PRESERVE_RATIOS_SCRIPT'; run-shell '$CLEANUP_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'; run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
 
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'"
 
 # Ensure sidebar/tabbar panes exist for newly created sessions/windows
 # (do not toggle global mode on session creation)
-tmux set-hook -g session-created "run-shell '$ENSURE_SIDEBAR_SCRIPT'"
+tmux set-hook -g session-created "run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'"
 
 # Maintain sidebar width after terminal resize
 # (RESIZE_SIDEBAR_SCRIPT already defined above for window-unlinked hook)
@@ -552,5 +568,5 @@ tmux bind-key -n M-% select-window -t :5
 
 # Ensure sidebar panes exist in default vertical mode on first load.
 if [ -z "$INITIAL_MODE" ]; then
-    tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT"
+    tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\""
 fi

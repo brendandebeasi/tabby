@@ -5,10 +5,21 @@
 # Architecture: 1 daemon per session + 1 renderer per window
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
-SESSION_ID=$(tmux display-message -p '#{session_id}')
+SESSION_ID="${1:-}"
+WINDOW_ID="${2:-}"
+
+if [ -z "$SESSION_ID" ]; then
+    SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
+fi
+if [ -z "$WINDOW_ID" ]; then
+    WINDOW_ID=$(tmux display-message -p '#{window_id}' 2>/dev/null || echo "")
+fi
+if [ -z "$WINDOW_ID" ] && [ -n "$SESSION_ID" ]; then
+    WINDOW_ID=$(tmux list-windows -t "$SESSION_ID" -F "#{window_id}" 2>/dev/null | head -1)
+fi
 
 # Debounce - skip if called within 100ms to prevent flicker
-DEBOUNCE_FILE="/tmp/tabby-ensure-debounce-${SESSION_ID:-default}.ts"
+DEBOUNCE_FILE="/tmp/tabby-ensure-debounce-${SESSION_ID:-default}-${WINDOW_ID:-current}.ts"
 DEBOUNCE_MS=100
 
 if [ -f "$DEBOUNCE_FILE" ]; then
@@ -50,11 +61,11 @@ if [ "$MODE" = "enabled" ]; then
 
 	while IFS= read -r pane_id; do
 		[ -n "$pane_id" ] && tmux kill-pane -t "$pane_id" 2>/dev/null || true
-	done < <(tmux list-panes -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep "^tabbar|" | cut -d'|' -f2 || true)
+    done < <(tmux list-panes -t "${WINDOW_ID:-}" -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep "^tabbar|" | cut -d'|' -f2 || true)
 
     # Check if CURRENT window has a sidebar-renderer (daemon-based)
     # Check both current command and start command (for reliability during startup)
-    HAS_SIDEBAR=$(tmux list-panes -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -qE "(sidebar-renderer|sidebar)" && echo "yes" || echo "no")
+    HAS_SIDEBAR=$(tmux list-panes -t "${WINDOW_ID:-}" -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -qE "(sidebar-renderer|sidebar)" && echo "yes" || echo "no")
 
     if [ "$HAS_SIDEBAR" = "no" ]; then
         # Verify daemon is running - it handles spawning renderers
@@ -92,10 +103,10 @@ elif [ "$MODE" = "horizontal" ]; then
     tmux set-option -g status off
 
     # Check if CURRENT window has a tabbar
-    TABBAR_COUNT=$(tmux list-panes -F "#{pane_current_command}" 2>/dev/null | grep -c "^tabbar$" || echo "0")
+    TABBAR_COUNT=$(tmux list-panes -t "${WINDOW_ID:-}" -F "#{pane_current_command}" 2>/dev/null | grep -c "^tabbar$" || echo "0")
 
     if [ "$TABBAR_COUNT" -eq 0 ]; then
-        FIRST_PANE=$(tmux list-panes -F "#{pane_id}" 2>/dev/null | head -1)
+        FIRST_PANE=$(tmux list-panes -t "${WINDOW_ID:-}" -F "#{pane_id}" 2>/dev/null | head -1)
         if [ -n "$FIRST_PANE" ]; then
             tmux split-window -t "$FIRST_PANE" -v -b -l "$TABBAR_HEIGHT" "exec \"$CURRENT_DIR/bin/tabbar\"" || true
             tmux select-pane -t "{bottom}" 2>/dev/null || true

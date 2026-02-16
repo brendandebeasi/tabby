@@ -7739,25 +7739,23 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return false
 
 	case "header_split_v":
-		// [|] button: split horizontally (side-by-side panes, vertical divider)
 		// Get the pane's current path first, then use it for the split
 		pathOut, _ := exec.Command("tmux", "display-message", "-t", input.ResolvedTarget, "-p", "#{pane_current_path}").Output()
 		panePath := strings.TrimSpace(string(pathOut))
 		if panePath == "" {
 			panePath = "~"
 		}
-		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath).Run()
+		exec.Command("tmux", "split-window", "-v", "-t", input.ResolvedTarget, "-c", panePath).Run()
 		return true
 
 	case "header_split_h":
-		// [-] button: split vertically (stacked panes, horizontal divider)
 		// Get the pane's current path first, then use it for the split
 		pathOut2, _ := exec.Command("tmux", "display-message", "-t", input.ResolvedTarget, "-p", "#{pane_current_path}").Output()
 		panePath2 := strings.TrimSpace(string(pathOut2))
 		if panePath2 == "" {
 			panePath2 = "~"
 		}
-		exec.Command("tmux", "split-window", "-v", "-t", input.ResolvedTarget, "-c", panePath2).Run()
+		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath2).Run()
 		return true
 
 	case "header_close":
@@ -9024,24 +9022,36 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		}
 	}
 
-	dirArg := "'#{pane_current_path}'"
+	newWindowPath := "#{pane_current_path}"
 	if workingDir != "" {
-		dirArg = fmt.Sprintf("'%s'", workingDir)
+		newWindowPath = workingDir
 	}
-	coordinatorDebugLog.Printf("showGroupContextMenu: final dirArg=%s", dirArg)
+	coordinatorDebugLog.Printf("showGroupContextMenu: final path=%s", newWindowPath)
 
-	if group.Name != "Default" {
-		// Set pending group for optimistic UI - if the new window appears
-		// before tmux sets the option, we'll assign it ourselves
-		c.pendingNewWindowGroup = group.Name
-		c.pendingNewWindowTime = time.Now()
-
-		// Create window and set group option
-		newWindowCmd := fmt.Sprintf("new-window -c %s ; set-window-option @tabby_group '%s'", dirArg, group.Name)
-		args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
+	newWindowScript := c.getScriptPath("new_window_with_group.sh")
+	groupEsc := strings.ReplaceAll(group.Name, "'", "'\"'\"'")
+	pathEsc := strings.ReplaceAll(newWindowPath, "'", "'\"'\"'")
+	if newWindowScript != "" {
+		if group.Name != "Default" {
+			c.pendingNewWindowGroup = group.Name
+			c.pendingNewWindowTime = time.Now()
+			newWindowCmd := fmt.Sprintf("set-option -g @tabby_new_window_group '%s' ; set-option -g @tabby_new_window_path '%s' ; run-shell '%s'", groupEsc, pathEsc, newWindowScript)
+			args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
+		} else {
+			newWindowCmd := fmt.Sprintf("set-option -g @tabby_new_window_group 'Default' ; set-option -g @tabby_new_window_path '%s' ; run-shell '%s'", pathEsc, newWindowScript)
+			args = append(args, "New Window", "n", newWindowCmd)
+		}
 	} else {
-		newWindowCmd := fmt.Sprintf("new-window -c %s", dirArg)
-		args = append(args, "New Window", "n", newWindowCmd)
+		dirArg := fmt.Sprintf("'%s'", pathEsc)
+		if group.Name != "Default" {
+			c.pendingNewWindowGroup = group.Name
+			c.pendingNewWindowTime = time.Now()
+			newWindowCmd := fmt.Sprintf("new-window -c %s ; set-window-option @tabby_group '%s'", dirArg, groupEsc)
+			args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
+		} else {
+			newWindowCmd := fmt.Sprintf("new-window -c %s", dirArg)
+			args = append(args, "New Window", "n", newWindowCmd)
+		}
 	}
 
 	toggleGroupScript := c.getScriptPath("toggle_group_collapse.sh")
@@ -9061,117 +9071,115 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	markerScript := c.getScriptPath("set_group_marker.sh")
 	workingDirScript := c.getScriptPath("set_group_working_dir.sh")
 	deleteScript := c.getScriptPath("delete_group.sh")
-	if group.Name != "Default" {
-		if renameScript != "" || colorScript != "" || markerScript != "" || workingDirScript != "" || deleteScript != "" {
-			args = append(args, "", "", "")
-			args = append(args, "-Edit Group", "", "")
+	if renameScript != "" || colorScript != "" || markerScript != "" || workingDirScript != "" || deleteScript != "" {
+		args = append(args, "", "", "")
+		args = append(args, "-Edit Group", "", "")
+	}
+	if renameScript != "" {
+		renameCmd := fmt.Sprintf(
+			"command-prompt -I '%s' -p 'New name:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
+			group.Name,
+			renameScript,
+			group.Name,
+		)
+		args = append(args, "  Rename", "r", renameCmd)
+	}
+
+	if colorScript != "" {
+		args = append(args, "  -Change Color", "", "")
+		colorOptions := []struct {
+			name string
+			hex  string
+			key  string
+		}{
+			{"Red", "#e74c3c", "r"},
+			{"Orange", "#e67e22", "o"},
+			{"Yellow", "#f1c40f", "y"},
+			{"Green", "#27ae60", "g"},
+			{"Blue", "#3498db", "b"},
+			{"Purple", "#9b59b6", "p"},
+			{"Pink", "#e91e63", "i"},
+			{"Cyan", "#00bcd4", "c"},
+			{"Gray", "#7f8c8d", "a"},
+			{"Transparent", "transparent", "t"},
 		}
-		if renameScript != "" {
-			renameCmd := fmt.Sprintf(
-				"command-prompt -I '%s' -p 'New name:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
-				group.Name,
-				renameScript,
-				group.Name,
-			)
-			args = append(args, "  Rename", "r", renameCmd)
+		for _, color := range colorOptions {
+			setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", colorScript, group.Name, color.hex)
+			args = append(args, fmt.Sprintf("    %s", color.name), color.key, setColorCmd)
+		}
+	}
+
+	canShowMarkerPicker := c.OnSendMenu != nil && !strings.HasPrefix(clientID, "header:")
+	if markerScript != "" || canShowMarkerPicker {
+		args = append(args, "  -Set Marker", "", "")
+	}
+	if markerScript != "" {
+		iconOptions := []struct {
+			name string
+			icon string
+			key  string
+		}{
+			{"Terminal", "", "1"},
+			{"Code", "", "2"},
+			{"Folder", "", "3"},
+			{"Git", "", "4"},
+			{"Bug", "", "5"},
+			{"Test", "", "6"},
+			{"Database", "", "7"},
+			{"Globe", "", "8"},
+			{"Star", "★", "s"},
+			{"Heart", "❤", "h"},
+			{"Fire", "🔥", "f"},
+			{"Rocket", "🚀", ""},
+			{"Lightning", "⚡", "l"},
+		}
+		for _, opt := range iconOptions {
+			setIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", markerScript, group.Name, opt.icon)
+			args = append(args, fmt.Sprintf("    %s %s", opt.icon, opt.name), opt.key, setIconCmd)
+		}
+		currentIcon := strings.TrimSpace(group.Theme.Icon)
+		promptIcon := fmt.Sprintf(
+			"command-prompt -I '%s' -p 'Icon:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
+			strings.ReplaceAll(currentIcon, "'", ""),
+			markerScript,
+			group.Name,
+		)
+		args = append(args, "    Prompt...", "i", promptIcon)
+		if currentIcon != "" {
+			removeIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"\\\"'", markerScript, group.Name)
+			args = append(args, "    Remove Icon", "0", removeIconCmd)
+		}
+	}
+	if canShowMarkerPicker {
+		groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
+		searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
+		args = append(args, "    Search...", "", searchCmd)
+	}
+
+	if workingDirScript != "" {
+		currentWorkingDir := workingDir
+		if currentWorkingDir == "" {
+			currentWorkingDir = "~"
 		}
 
-		if colorScript != "" {
-			args = append(args, "  -Change Color", "", "")
-			colorOptions := []struct {
-				name string
-				hex  string
-				key  string
-			}{
-				{"Red", "#e74c3c", "r"},
-				{"Orange", "#e67e22", "o"},
-				{"Yellow", "#f1c40f", "y"},
-				{"Green", "#27ae60", "g"},
-				{"Blue", "#3498db", "b"},
-				{"Purple", "#9b59b6", "p"},
-				{"Pink", "#e91e63", "i"},
-				{"Cyan", "#00bcd4", "c"},
-				{"Gray", "#7f8c8d", "a"},
-				{"Transparent", "transparent", "t"},
-			}
-			for _, color := range colorOptions {
-				setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", colorScript, group.Name, color.hex)
-				args = append(args, fmt.Sprintf("    %s", color.name), color.key, setColorCmd)
-			}
-		}
+		setWorkingDirCmd := fmt.Sprintf(
+			"command-prompt -I '%s' -p 'Working directory:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
+			currentWorkingDir,
+			workingDirScript,
+			group.Name,
+		)
+		args = append(args, "  Set Working Directory", "w", setWorkingDirCmd)
+	}
 
-		canShowMarkerPicker := c.OnSendMenu != nil && !strings.HasPrefix(clientID, "header:")
-		if markerScript != "" || canShowMarkerPicker {
-			args = append(args, "  -Set Marker", "", "")
-		}
-		if markerScript != "" {
-			iconOptions := []struct {
-				name string
-				icon string
-				key  string
-			}{
-				{"Terminal", "", "1"},
-				{"Code", "", "2"},
-				{"Folder", "", "3"},
-				{"Git", "", "4"},
-				{"Bug", "", "5"},
-				{"Test", "", "6"},
-				{"Database", "", "7"},
-				{"Globe", "", "8"},
-				{"Star", "★", "s"},
-				{"Heart", "❤", "h"},
-				{"Fire", "🔥", "f"},
-				{"Rocket", "🚀", ""},
-				{"Lightning", "⚡", "l"},
-			}
-			for _, opt := range iconOptions {
-				setIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", markerScript, group.Name, opt.icon)
-				args = append(args, fmt.Sprintf("    %s %s", opt.icon, opt.name), opt.key, setIconCmd)
-			}
-			currentIcon := strings.TrimSpace(group.Theme.Icon)
-			promptIcon := fmt.Sprintf(
-				"command-prompt -I '%s' -p 'Icon:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
-				strings.ReplaceAll(currentIcon, "'", ""),
-				markerScript,
-				group.Name,
-			)
-			args = append(args, "    Prompt...", "i", promptIcon)
-			if currentIcon != "" {
-				removeIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"\\\"'", markerScript, group.Name)
-				args = append(args, "    Remove Icon", "0", removeIconCmd)
-			}
-		}
-		if canShowMarkerPicker {
-			groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
-			searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
-			args = append(args, "    Search...", "", searchCmd)
-		}
-
-		if workingDirScript != "" {
-			currentWorkingDir := workingDir
-			if currentWorkingDir == "" {
-				currentWorkingDir = "~"
-			}
-
-			setWorkingDirCmd := fmt.Sprintf(
-				"command-prompt -I '%s' -p 'Working directory:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
-				currentWorkingDir,
-				workingDirScript,
-				group.Name,
-			)
-			args = append(args, "  Set Working Directory", "w", setWorkingDirCmd)
-		}
-
-		if deleteScript != "" {
-			args = append(args, "", "", "")
-			deleteCmd := fmt.Sprintf(
-				"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s \\\"%s\\\"'\"",
-				group.Name,
-				deleteScript,
-				group.Name,
-			)
-			args = append(args, "  Delete Group", "d", deleteCmd)
-		}
+	if deleteScript != "" {
+		args = append(args, "", "", "")
+		deleteCmd := fmt.Sprintf(
+			"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s \\\"%s\\\"'\"",
+			group.Name,
+			deleteScript,
+			group.Name,
+		)
+		args = append(args, "  Delete Group", "d", deleteCmd)
 	}
 
 	// Close all windows in group (only if group has windows)
@@ -9233,8 +9241,7 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 
 	c.stateMu.RUnlock()
 
-	// Build the new-window command
-	args := []string{"new-window", "-t", c.sessionID + ":"}
+	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
 
 	// Add working directory if configured
 	if workingDir != "" {
@@ -9249,7 +9256,8 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 
 	logEvent("NEW_WINDOW_CMD args=%v group=%s workdir=%s", args, currentGroup, workingDir)
 
-	// Set the group option for non-default groups
+	newWindowID := ""
+
 	if currentGroup != "" && currentGroup != "Default" {
 		// Set pending group for optimistic UI
 		c.stateMu.Lock()
@@ -9257,13 +9265,20 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		c.pendingNewWindowTime = time.Now()
 		c.stateMu.Unlock()
 
-		// Create window then set group option
 		out, err := exec.Command("tmux", args...).CombinedOutput()
+		newWindowID = strings.TrimSpace(string(out))
 		logEvent("NEW_WINDOW_RESULT err=%v out=%s", err, string(out))
-		exec.Command("tmux", "set-window-option", "@tabby_group", currentGroup).Run()
+		if newWindowID != "" {
+			exec.Command("tmux", "set-window-option", "-t", newWindowID, "@tabby_group", currentGroup).Run()
+		}
 	} else {
 		out, err := exec.Command("tmux", args...).CombinedOutput()
+		newWindowID = strings.TrimSpace(string(out))
 		logEvent("NEW_WINDOW_RESULT err=%v out=%s", err, string(out))
+	}
+
+	if newWindowID != "" {
+		exec.Command("tmux", "select-window", "-t", newWindowID).Run()
 	}
 }
 
