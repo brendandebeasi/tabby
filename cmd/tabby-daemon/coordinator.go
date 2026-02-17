@@ -3178,7 +3178,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
-		targetWidth := c.globalWidth
+		targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth)
 		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 
@@ -3194,62 +3194,198 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		return
 	}
 
-	if currentWidth != c.globalWidth {
-		if !isActive {
-			// INACTIVE window: sync it TO global
-			coordinatorDebugLog.Printf("Width sync: inactive %s has width %d, syncing to global %d", clientID, currentWidth, c.globalWidth)
-			c.lastWidthSync = time.Now()
-			targetWidth := c.globalWidth
-			untrackLock("widthSyncMu")
-			c.widthSyncMu.Unlock()
-
-			if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
-				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-					parts := strings.Split(line, " ")
-					if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
-						exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
-						break
-					}
-				}
-			}
-		} else if justBecameActive {
-			// Window JUST became active with stale width: sync it TO global once
-			coordinatorDebugLog.Printf("Width sync: %s just active with width %d, syncing to global %d", clientID, currentWidth, c.globalWidth)
-			c.lastActiveWindowID = clientID
-			c.lastWidthSync = time.Now()
-			targetWidth := c.globalWidth
-			untrackLock("widthSyncMu")
-			c.widthSyncMu.Unlock()
-
-			if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
-				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-					parts := strings.Split(line, " ")
-					if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
-						exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
-						break
-					}
-				}
-			}
-		} else {
-			// ACTIVE window (was already active): user drag-resized, update global and sync others
-			// No clamping - user can set any width they want
-			coordinatorDebugLog.Printf("Width sync: active %s resized to %d, syncing others", clientID, currentWidth)
-			c.globalWidth = currentWidth
-			c.lastWidthSync = time.Now()
-			untrackLock("widthSyncMu")
-			c.widthSyncMu.Unlock()
-
-			exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", currentWidth)).Run()
-			syncOtherSidebarWidths(currentWidth, clientID)
-		}
-	} else {
-		// Widths match
+	targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth)
+	if currentWidth == targetWidth {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
 		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
+		return
 	}
+
+	if justBecameActive {
+		c.lastActiveWindowID = clientID
+	}
+	c.lastWidthSync = time.Now()
+	coordinatorDebugLog.Printf("Width sync: window=%s current=%d target=%d", clientID, currentWidth, targetWidth)
+	untrackLock("widthSyncMu")
+	c.widthSyncMu.Unlock()
+
+	if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			parts := strings.Split(line, " ")
+			if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+				exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+				break
+			}
+		}
+	}
+}
+
+func (c *Coordinator) persistSidebarWidthProfile(windowID string, width int) {
+	if windowID == "" || width < 10 {
+		return
+	}
+
+	windowWidthOut, err := exec.Command("tmux", "display-message", "-p", "-t", windowID, "#{window_width}").Output()
+	if err != nil {
+		return
+	}
+	windowWidth, err := strconv.Atoi(strings.TrimSpace(string(windowWidthOut)))
+	if err != nil || windowWidth <= 0 {
+		return
+	}
+
+	mobileMax := 110
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_window_cols").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 60 {
+			mobileMax = v
+		}
+	}
+
+	tabletMax := 170
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_tablet_max_window_cols").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= mobileMax {
+			tabletMax = v
+		}
+	}
+
+	opt := "@tabby_sidebar_width_desktop"
+	if windowWidth <= mobileMax {
+		opt = "@tabby_sidebar_width_mobile"
+	} else if windowWidth <= tabletMax {
+		opt = "@tabby_sidebar_width_tablet"
+	}
+	exec.Command("tmux", "set-option", "-gq", opt, fmt.Sprintf("%d", width)).Run()
+}
+
+func (c *Coordinator) isLikelyAutoConstrainedSidebarWidth(windowID string, currentWidth int) bool {
+	if c.globalWidth <= 0 || windowID == "" {
+		return false
+	}
+
+	maxReasonable, ok := c.sidebarReasonableMaxForWindow(windowID)
+	if !ok {
+		return false
+	}
+
+	return currentWidth <= maxReasonable && maxReasonable < c.globalWidth
+}
+
+func (c *Coordinator) boundedSidebarWidthForWindow(windowID string, requested int) int {
+	if requested <= 0 {
+		return requested
+	}
+	maxReasonable, ok := c.sidebarReasonableMaxForWindow(windowID)
+	if !ok {
+		return requested
+	}
+	if requested > maxReasonable {
+		return maxReasonable
+	}
+	return requested
+}
+
+func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string) (int, bool) {
+	if windowID == "" {
+		return 0, false
+	}
+
+	windowWidthOut, err := exec.Command("tmux", "display-message", "-p", "-t", windowID, "#{window_width}").Output()
+	if err != nil {
+		return 0, false
+	}
+	windowWidth, err := strconv.Atoi(strings.TrimSpace(string(windowWidthOut)))
+	if err != nil || windowWidth <= 0 {
+		return 0, false
+	}
+
+	maxPercent := 20
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_percent").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 && v <= 60 {
+			maxPercent = v
+		}
+	}
+
+	minContentCols := 40
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_min_content_cols").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 20 {
+			minContentCols = v
+		}
+	}
+
+	maxWindowCols := 110
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_window_cols").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 60 {
+			maxWindowCols = v
+		}
+	}
+
+	tabletMaxWindowCols := 170
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_tablet_max_window_cols").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= maxWindowCols {
+			tabletMaxWindowCols = v
+		}
+	}
+
+	widthDesktop := c.globalWidth
+	if widthDesktop < 15 {
+		widthDesktop = 25
+	}
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_desktop").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 15 {
+			widthDesktop = v
+		}
+	}
+
+	if windowWidth > tabletMaxWindowCols {
+		return widthDesktop, true
+	}
+
+	widthTablet := 20
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_tablet").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 15 {
+			widthTablet = v
+		}
+	}
+
+	if windowWidth > maxWindowCols {
+		if widthTablet < 15 {
+			widthTablet = 15
+		}
+		return widthTablet, true
+	}
+
+	widthMobile := 15
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_mobile").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
+			widthMobile = v
+		}
+	}
+
+	maxByFraction := windowWidth * maxPercent / 100
+	if maxByFraction < 15 {
+		maxByFraction = 15
+	}
+
+	maxByContent := windowWidth - minContentCols
+	if maxByContent < 15 {
+		maxByContent = 15
+	}
+
+	maxReasonable := maxByFraction
+	if maxByContent < maxReasonable {
+		maxReasonable = maxByContent
+	}
+	if widthMobile < maxReasonable {
+		maxReasonable = widthMobile
+	}
+	if maxReasonable < 10 {
+		maxReasonable = 10
+	}
+
+	return maxReasonable, true
 }
 
 // RenderForClient generates content for a specific client's dimensions
@@ -7676,6 +7812,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		// Save to tmux option and sync all sidebar panes
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
+		c.persistSidebarWidthProfile(clientID, newWidth)
 		go syncAllSidebarWidths(newWidth)
 		// Update client width tracking
 		c.clientWidthsMu.Lock()
@@ -7693,6 +7830,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		// Save to tmux option and sync all sidebar panes
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
+		c.persistSidebarWidthProfile(clientID, newWidth)
 		go syncAllSidebarWidths(newWidth)
 		// Update client width tracking
 		c.clientWidthsMu.Lock()

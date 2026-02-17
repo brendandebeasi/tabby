@@ -83,6 +83,13 @@ sidebar:
   debug: true  # Enable debug logging to /tmp/tabby-debug.log
   touch_mode: false  # Force touch mode on when true. For auto mode, set TABBY_TOUCH=auto.
   line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
+  mobile_max_percent: 15
+  mobile_min_content_cols: 40
+  mobile_max_window_cols: 110
+  tablet_max_window_cols: 170
+  width_mobile: 15
+  width_tablet: 20
+  width_desktop: 25
   # Theme presets: rose-pine-dawn, rose-pine, rose-pine-moon, catppuccin-mocha,
   #   catppuccin-latte, dracula, nord, solarized-dark, solarized-light,
   #   gruvbox-dark, gruvbox-light, tokyo-night, one-dark, dark

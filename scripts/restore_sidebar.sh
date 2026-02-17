@@ -116,10 +116,7 @@ if [ "$MODE" = "enabled" ]; then
         kill -USR1 "$PID" 2>/dev/null || true
     fi
 
-    # Enforce saved sidebar width on all renderer panes (fixes tiny sidebar after reattach)
-    tmux list-panes -a -F '#{pane_id}:#{pane_current_command}:#{pane_start_command}' 2>/dev/null | grep -E ':(sidebar|sidebar-renderer)' | while IFS=: read -r pane_id _; do
-        tmux resize-pane -t "$pane_id" -x "$SIDEBAR_WIDTH" 2>/dev/null || true
-    done
+    "$CURRENT_DIR/scripts/resize_sidebar.sh" >/dev/null 2>&1 || true
 
 elif [ "$MODE" = "horizontal" ]; then
     # Horizontal tabbar mode
