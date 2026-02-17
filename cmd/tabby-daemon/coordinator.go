@@ -2015,10 +2015,21 @@ func (c *Coordinator) UpdatePetState() bool {
 	if width < 10 {
 		width = 25
 	}
+	adventureEnabled := c.config.Widgets.Pet.AdventureEnabled
 	// Account for emoji visual width (2 cols) - use safe play width
 	maxX := width - 5 // Reduced from width-2 to match safePlayWidth calculation
 	if maxX < 1 {
 		maxX = 1
+	}
+
+	if c.pet.Adventure.Active && !adventureEnabled {
+		c.pet.Adventure = adventureState{}
+		if c.pet.State == "walking" || c.pet.State == "jumping" {
+			c.pet.State = "idle"
+		}
+		c.pet.HasTarget = false
+		c.pet.ActionPending = ""
+		c.pet.LastThought = "back home."
 	}
 
 	// === ADVENTURE MODE ===
@@ -2305,7 +2316,7 @@ func (c *Coordinator) UpdatePetState() bool {
 					}
 				case 3:
 					// Bat at yarn (toss it) - avoid poop positions
-					tossX := rand.Intn(maxX-2) + 2
+					tossX := safeRandRange(2, maxX)
 					for attempts := 0; attempts < 5; attempts++ {
 						hasPoop := false
 						for _, poopX := range c.pet.PoopPositions {
@@ -2317,7 +2328,7 @@ func (c *Coordinator) UpdatePetState() bool {
 						if !hasPoop {
 							break
 						}
-						tossX = rand.Intn(maxX-2) + 2
+						tossX = safeRandRange(2, maxX)
 					}
 					c.pet.YarnPos = pos2D{X: tossX, Y: 2}
 					c.pet.YarnExpiresAt = now.Add(15 * time.Second)
@@ -2386,7 +2397,7 @@ func (c *Coordinator) UpdatePetState() bool {
 						{"🧀", []string{"cheese!", "yes please.", "gouda choice."}},
 					}
 					choice := shinyThings[rand.Intn(len(shinyThings))]
-					startX := rand.Intn(maxX-2) + 2
+					startX := safeRandRange(2, maxX)
 					dir := []int{-1, 1}[rand.Intn(2)]
 					c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
 						Emoji:     choice.emoji,
@@ -2421,11 +2432,6 @@ func (c *Coordinator) UpdatePetState() bool {
 					}
 				case 9:
 					// Start an adventure! (if enabled and happy enough)
-					adventureEnabled := c.config.Widgets.Pet.AdventureEnabled
-					// Default to enabled if not explicitly set
-					if !adventureEnabled && c.config.Widgets.Pet.AdventureChance == 0 {
-						adventureEnabled = true
-					}
 					if adventureEnabled && c.pet.Happiness >= 50 && !c.pet.Adventure.Active {
 						c.startAdventure(maxX)
 					}
@@ -3466,10 +3472,17 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	// Generate widget zones (top and bottom) using priority-based layout
 	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(width)
 	topWidgetLines := strings.Count(topWidgets, "\n")
+	bottomWidgetLines := strings.Count(bottomWidgets, "\n")
 
 	// Generate main content (window/pane list) with clickable regions
 	// Pass clientID so we can show this client's window as active
 	mainContent, mainRegions := c.generateMainContent(clientID, width, height)
+
+	maxMainLines := height - headerLines - topWidgetLines - bottomWidgetLines
+	if maxMainLines < 0 {
+		maxMainLines = 0
+	}
+	mainContent, mainRegions = trimContentAndRegions(mainContent, mainRegions, maxMainLines)
 	mainLines := strings.Count(mainContent, "\n")
 
 	// Offset top widget regions by header height
@@ -3555,7 +3568,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	// Debug logging
 	coordinatorDebugLog.Printf("RenderForClient: client=%s width=%d height=%d", clientID, width, height)
 	coordinatorDebugLog.Printf("  Content: %d lines (%d header + %d topW + %d main + %d bottomW)",
-		totalLines, headerLines, topWidgetLines, mainLines, strings.Count(bottomWidgets, "\n"))
+		totalLines, headerLines, topWidgetLines, mainLines, bottomWidgetLines)
 	coordinatorDebugLog.Printf("  Regions: %d total", len(allRegions))
 
 	sidebarBg := ""
@@ -3578,6 +3591,46 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		SidebarBg:     sidebarBg,
 		TerminalBg:    terminalBg,
 	}
+}
+
+func trimContentAndRegions(content string, regions []daemon.ClickableRegion, maxLines int) (string, []daemon.ClickableRegion) {
+	if maxLines < 0 {
+		maxLines = 0
+	}
+	if content == "" {
+		return "", nil
+	}
+
+	lines := strings.Split(content, "\n")
+	hasTrailingNewline := strings.HasSuffix(content, "\n")
+	if hasTrailingNewline && len(lines) > 0 {
+		lines = lines[:len(lines)-1]
+	}
+
+	if len(lines) <= maxLines {
+		return content, regions
+	}
+
+	if maxLines == 0 {
+		return "", nil
+	}
+
+	trimmedLines := lines[:maxLines]
+	trimmedContent := strings.Join(trimmedLines, "\n") + "\n"
+
+	filteredRegions := make([]daemon.ClickableRegion, 0, len(regions))
+	maxIdx := maxLines - 1
+	for _, r := range regions {
+		if r.StartLine > maxIdx {
+			continue
+		}
+		if r.EndLine > maxIdx {
+			r.EndLine = maxIdx
+		}
+		filteredRegions = append(filteredRegions, r)
+	}
+
+	return trimmedContent, filteredRegions
 }
 
 // abbreviatePath shortens a path for display in the header.
@@ -6271,6 +6324,19 @@ func abs(x int) int {
 	return x
 }
 
+func safeRandRange(minInclusive, maxInclusive int) int {
+	if maxInclusive < minInclusive {
+		if maxInclusive < 0 {
+			return 0
+		}
+		return maxInclusive
+	}
+	if maxInclusive == minInclusive {
+		return minInclusive
+	}
+	return minInclusive + rand.Intn(maxInclusive-minInclusive+1)
+}
+
 // stripAnsi removes ANSI escape codes from a string for accurate width calculation
 func stripAnsi(s string) string {
 	// Simple regex to strip ANSI escape sequences
@@ -6536,6 +6602,13 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	// Food icon (clickable to drop food) - track line for click detection
 	c.petLayout.FeedLine = currentLine
 	petFg := c.getInactiveTextColorWithFallback(petCfg.Fg)
+	playStyle := lipgloss.NewStyle()
+	if petFg != "" {
+		playStyle = playStyle.Foreground(lipgloss.Color(petFg))
+	}
+	if petCfg.Bg != "" && !strings.EqualFold(petCfg.Bg, "transparent") {
+		playStyle = playStyle.Background(lipgloss.Color(petCfg.Bg))
+	}
 	foodStyle := lipgloss.NewStyle()
 	if petFg != "" {
 		foodStyle = foodStyle.Foreground(lipgloss.Color(petFg))
@@ -6629,15 +6702,15 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		highAirLine, lowAirLine, groundContent := c.renderAdventurePlayArea(safePlayWidth, petSprite, sprites)
 
 		c.petLayout.HighAirLine = currentLine
-		result.WriteString(zone.Mark("pet:air_high", highAirLine) + "\n")
+		result.WriteString(zone.Mark("pet:air_high", playStyle.Render(highAirLine)) + "\n")
 		currentLine++
 
 		c.petLayout.LowAirLine = currentLine
-		result.WriteString(zone.Mark("pet:air_low", lowAirLine) + "\n")
+		result.WriteString(zone.Mark("pet:air_low", playStyle.Render(lowAirLine)) + "\n")
 		currentLine++
 
 		c.petLayout.GroundLine = currentLine
-		groundLine := zone.Mark("pet:ground", groundContent)
+		groundLine := zone.Mark("pet:ground", playStyle.Render(groundContent))
 		result.WriteString(groundLine + "\n")
 		currentLine++
 
@@ -6732,7 +6805,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		coordinatorDebugLog.Printf("WARNING: High air row width mismatch! expected=%d, actual=%d", safePlayWidth, highAirWidth)
 	}
 	c.petLayout.HighAirLine = currentLine
-	result.WriteString(zone.Mark("pet:air_high", highAirLine) + "\n")
+	result.WriteString(zone.Mark("pet:air_high", playStyle.Render(highAirLine)) + "\n")
 	currentLine++
 
 	// Line 2: Low air (Y=1) - build with proper width accounting
@@ -6758,7 +6831,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		coordinatorDebugLog.Printf("WARNING: Low air row width mismatch! expected=%d, actual=%d", safePlayWidth, lowAirWidth)
 	}
 	c.petLayout.LowAirLine = currentLine
-	result.WriteString(zone.Mark("pet:air_low", lowAirLine) + "\n")
+	result.WriteString(zone.Mark("pet:air_low", playStyle.Render(lowAirLine)) + "\n")
 	currentLine++
 
 	// Line 3: Ground (Y=0) - single clickable zone, action determined by click position
@@ -6822,7 +6895,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	if actualWidth != safePlayWidth {
 		coordinatorDebugLog.Printf("WARNING: Ground row width mismatch! expected=%d, actual=%d", safePlayWidth, actualWidth)
 	}
-	groundLine := zone.Mark("pet:ground", groundContent)
+	groundLine := zone.Mark("pet:ground", playStyle.Render(groundContent))
 	result.WriteString(groundLine + "\n")
 	currentLine++
 
@@ -7014,7 +7087,7 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			if w < 3 {
 				w = 3
 			}
-			poopX := rand.Intn(w - 2)
+			poopX := safeRandRange(0, w-2)
 			c.pet.PoopPositions = append(c.pet.PoopPositions, poopX)
 			c.pet.LastThought = randomThought("poop")
 			c.savePetState()
@@ -7028,7 +7101,7 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			if w < 3 {
 				w = 3
 			}
-			c.pet.MousePos = pos2D{X: rand.Intn(w - 2), Y: 0}
+			c.pet.MousePos = pos2D{X: safeRandRange(0, w-2), Y: 0}
 			c.pet.MouseAppearsAt = time.Time{} // Clear timer
 			c.pet.LastThought = randomThought("mouse_spot")
 			c.savePetState()
@@ -7042,7 +7115,7 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			if w < 3 {
 				w = 3
 			}
-			c.pet.YarnPos = pos2D{X: rand.Intn(w - 2), Y: 0}
+			c.pet.YarnPos = pos2D{X: safeRandRange(0, w-2), Y: 0}
 			c.pet.YarnExpiresAt = time.Now().Add(30 * time.Second)
 			c.pet.YarnPushCount = 0
 			c.pet.LastThought = randomThought("yarn")
@@ -7723,7 +7796,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			return false
 		}
 		width := c.getClientWidth(clientID)
-		dropX := rand.Intn(width-4) + 2
+		dropX := safeRandRange(2, width-2)
 		// Avoid dropping food on poop
 		for attempts := 0; attempts < 5; attempts++ {
 			hasPoop := false
@@ -7736,7 +7809,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			if !hasPoop {
 				break
 			}
-			dropX = rand.Intn(width-4) + 2
+			dropX = safeRandRange(2, width-2)
 		}
 		c.pet.FoodItem = pos2D{X: dropX, Y: 2} // Drop from high air
 		c.pet.LastThought = "food!"
@@ -8082,7 +8155,7 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 	if clickY == layout.FeedLine {
 		coordinatorDebugLog.Printf("  -> Feed line clicked, dropping food")
 		c.stateMu.Lock()
-		dropX := rand.Intn(clientWidth-4) + 2
+		dropX := safeRandRange(2, clientWidth-2)
 		c.pet.FoodItem = pos2D{X: dropX, Y: 2}
 		c.pet.LastThought = "food!"
 		c.savePetState()
@@ -8374,7 +8447,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		coordinatorDebugLog.Printf("    -> Clicked on yarn at X=%d (yarn rendered at %d)! Moving it.", clickX, yarnPosX)
 		// Toss the yarn to a new position using client-specific width
 		width := playWidth
-		newX := rand.Intn(width-4) + 2
+		newX := safeRandRange(2, width-2)
 		c.pet.YarnPos = pos2D{X: newX, Y: 2}
 		c.pet.YarnExpiresAt = time.Now().Add(15 * time.Second)
 		c.pet.TargetPos = pos2D{X: newX, Y: 0}

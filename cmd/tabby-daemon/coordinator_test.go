@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+
+	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 // TestHeaderColorsStruct verifies the HeaderColors struct has expected fields
@@ -49,5 +51,37 @@ func TestCollapsedHeightMinimum(t *testing.T) {
 
 	if collapsedHeight < 1 {
 		t.Errorf("Collapsed height %d is less than tmux minimum of 1", collapsedHeight)
+	}
+}
+
+func TestTrimContentAndRegions(t *testing.T) {
+	content := "a\nb\nc\nd\n"
+	regions := []daemon.ClickableRegion{
+		{StartLine: 0, EndLine: 0, Action: "one"},
+		{StartLine: 2, EndLine: 3, Action: "two"},
+		{StartLine: 4, EndLine: 4, Action: "drop"},
+	}
+
+	trimmed, trimmedRegions := trimContentAndRegions(content, regions, 3)
+
+	if trimmed != "a\nb\nc\n" {
+		t.Fatalf("unexpected trimmed content: %q", trimmed)
+	}
+	if len(trimmedRegions) != 2 {
+		t.Fatalf("expected 2 regions, got %d", len(trimmedRegions))
+	}
+	if trimmedRegions[1].StartLine != 2 || trimmedRegions[1].EndLine != 2 {
+		t.Fatalf("expected second region clamped to line 2, got start=%d end=%d", trimmedRegions[1].StartLine, trimmedRegions[1].EndLine)
+	}
+}
+
+func TestTrimContentAndRegionsZeroLines(t *testing.T) {
+	trimmed, trimmedRegions := trimContentAndRegions("a\nb\n", []daemon.ClickableRegion{{StartLine: 0, EndLine: 0}}, 0)
+
+	if trimmed != "" {
+		t.Fatalf("expected empty content, got %q", trimmed)
+	}
+	if len(trimmedRegions) != 0 {
+		t.Fatalf("expected no regions, got %d", len(trimmedRegions))
 	}
 }
