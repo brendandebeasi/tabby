@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -eu
 
+if [ "$(tmux show-option -gqv @tabby_spawning 2>/dev/null)" = "1" ]; then
+    exit 0
+fi
+
 SESSION_ID="${1:-}"
 if [ -z "$SESSION_ID" ]; then
     SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")

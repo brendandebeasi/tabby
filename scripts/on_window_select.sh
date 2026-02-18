@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Handler for window selection - signal daemon and update border color
 
+if [ "$(tmux show-option -gqv @tabby_spawning 2>/dev/null)" = "1" ]; then
+    exit 0
+fi
+
 # Clear AI tool input/bell indicators when user switches to a window
 # (user is now looking at it, so the notification is acknowledged)
 tmux set-option -w @tabby_input "" 2>/dev/null || true

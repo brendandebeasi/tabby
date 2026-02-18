@@ -5,6 +5,11 @@
 # Architecture: 1 daemon per session + 1 renderer per window
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
+
+if [ "$(tmux show-option -gqv @tabby_spawning 2>/dev/null)" = "1" ]; then
+    exit 0
+fi
+
 SESSION_ID="${1:-}"
 WINDOW_ID="${2:-}"
 

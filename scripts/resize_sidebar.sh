@@ -5,6 +5,10 @@
 # (which tmux may have compressed to 1-2 columns) and saved that as the
 # desired width. Now it reads the SAVED desired width and enforces it.
 
+if [ "$(tmux show-option -gqv @tabby_spawning 2>/dev/null)" = "1" ]; then
+    exit 0
+fi
+
 MIN_WIDTH=15
 
 MOBILE_MAX_PERCENT=$(tmux show-option -gqv @tabby_sidebar_mobile_max_percent 2>/dev/null || echo "")

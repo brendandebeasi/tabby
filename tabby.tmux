@@ -52,36 +52,60 @@ tmux set-option -g aggressive-resize on
 tmux bind-key '"' split-window -v -c "#{pane_current_path}"
 tmux bind-key '%' split-window -h -c "#{pane_current_path}"
 
-# Create script to capture current window's group and create new window
+# Create script to capture current window's group, create new window,
+# spawn sidebar, and restore focus — all synchronously in one shot.
 NEW_WINDOW_SCRIPT="$CURRENT_DIR/scripts/new_window_with_group.sh"
-cat > "$NEW_WINDOW_SCRIPT" << 'SCRIPT_EOF'
+cat > "$NEW_WINDOW_SCRIPT" << SCRIPT_EOF
 #!/usr/bin/env bash
 set -eu
 
-SAVED_GROUP=$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
-SAVED_PATH=$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
+PLUGIN_DIR="$CURRENT_DIR"
+RENDERER_BIN="\$PLUGIN_DIR/bin/sidebar-renderer"
 
-if [ -z "$SAVED_GROUP" ]; then
-    SAVED_GROUP=$(tmux show-window-options -v @tabby_group 2>/dev/null || echo "")
+tmux set-option -g @tabby_spawning 1 2>/dev/null || true
+trap 'tmux set-option -gu @tabby_spawning 2>/dev/null || true' EXIT
+
+SAVED_GROUP=\$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
+SAVED_PATH=\$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
+
+if [ -z "\$SAVED_GROUP" ]; then
+    SAVED_GROUP=\$(tmux show-window-options -v @tabby_group 2>/dev/null || echo "")
 fi
 
-if [ -z "$SAVED_PATH" ]; then
-    SAVED_PATH=$(tmux display-message -p "#{pane_current_path}")
+if [ -z "\$SAVED_PATH" ]; then
+    SAVED_PATH=\$(tmux display-message -p "#{pane_current_path}")
 fi
 
-NEW_WINDOW_ID=$(tmux new-window -P -F "#{window_id}" -c "$SAVED_PATH" 2>/dev/null || true)
-NEW_WINDOW_ID=$(printf "%s" "$NEW_WINDOW_ID" | tr -d '\r\n')
+NEW_WINDOW_ID=\$(tmux new-window -P -F "#{window_id}" -c "\$SAVED_PATH" 2>/dev/null || true)
+NEW_WINDOW_ID=\$(printf "%s" "\$NEW_WINDOW_ID" | tr -d '\r\n')
 
-if [ -n "$NEW_WINDOW_ID" ] && [ -n "$SAVED_GROUP" ] && [ "$SAVED_GROUP" != "Default" ]; then
-    tmux set-window-option -t "$NEW_WINDOW_ID" @tabby_group "$SAVED_GROUP" 2>/dev/null || true
+if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_GROUP" ] && [ "\$SAVED_GROUP" != "Default" ]; then
+    tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_group "\$SAVED_GROUP" 2>/dev/null || true
 fi
 
-# Note: new-window already selects the new window by default.
-# Do NOT call select-window here — it fires a redundant after-select-window
-# hook chain causing sidebar juggling and focus races.
+# Spawn sidebar renderer directly so the window is fully set up before
+# any hooks fire.  The daemon will see the renderer already exists and skip.
+MODE=\$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
+if [ "\$MODE" = "enabled" ] && [ -n "\$NEW_WINDOW_ID" ] && [ -x "\$RENDERER_BIN" ]; then
+    SESSION_ID=\$(tmux display-message -p '#{session_id}')
+    SIDEBAR_WIDTH=\$(tmux show-option -gqv @tabby_sidebar_width 2>/dev/null || echo "25")
+    [ -z "\$SIDEBAR_WIDTH" ] && SIDEBAR_WIDTH=25
+    FIRST_PANE=\$(tmux list-panes -t "\$NEW_WINDOW_ID" -F "#{pane_id}" 2>/dev/null | head -1)
+    if [ -n "\$FIRST_PANE" ]; then
+        DEBUG_FLAG=""
+        [ "\${TABBY_DEBUG:-}" = "1" ] && DEBUG_FLAG="-debug"
+        tmux split-window -d -t "\$FIRST_PANE" -h -b -f -l "\$SIDEBAR_WIDTH" \\
+            "exec '\$RENDERER_BIN' -session '\$SESSION_ID' -window '\$NEW_WINDOW_ID' \$DEBUG_FLAG" 2>/dev/null || true
+        tmux select-pane -t "\$FIRST_PANE" 2>/dev/null || true
+    fi
+fi
 
 tmux set-option -gu @tabby_new_window_group 2>/dev/null || true
 tmux set-option -gu @tabby_new_window_path 2>/dev/null || true
+
+# Single signal to daemon for rendering update
+PID_FILE="/tmp/tabby-daemon-\$(tmux display-message -p '#{session_id}').pid"
+[ -f "\$PID_FILE" ] && kill -USR1 "\$(cat "\$PID_FILE")" 2>/dev/null || true
 SCRIPT_EOF
 chmod +x "$NEW_WINDOW_SCRIPT"
 
@@ -447,7 +471,7 @@ tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$
 # Combined script to reduce latency + track window history
 ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
 chmod +x "$ON_WINDOW_SELECT_SCRIPT"
-tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-shell '$TRACK_WINDOW_HISTORY_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-shell '$TRACK_WINDOW_HISTORY_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 # Lock window name on manual rename via prefix+, keybinding
 # NOTE: We intentionally do NOT use after-rename-window hook because the daemon's
 # own rename-window calls would trigger it, locking the daemon out of future updates.
@@ -588,6 +612,7 @@ tmux bind-key 9 select-window -t :9
 tmux bind-key -n M-h previous-window
 tmux bind-key -n M-l next-window
 tmux bind-key -n M-n run-shell "$NEW_WINDOW_SCRIPT"
+tmux bind-key -n M-N run-shell "$NEW_WINDOW_SCRIPT"
 tmux bind-key -n M-x run-shell "$KILL_PANE_SCRIPT"
 tmux bind-key -n M-q display-panes
 tmux bind-key -n M-0 select-window -t :0
