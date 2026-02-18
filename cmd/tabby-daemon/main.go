@@ -985,6 +985,8 @@ func main() {
 		return coordinator.RenderForClient(clientID, width, height)
 	}
 
+	refreshCh := make(chan struct{}, 10)
+
 	// Set up input callback with panic recovery
 	server.OnInput = func(clientID string, input *daemon.InputPayload) {
 		logEvent("INPUT_START client=%s type=%s btn=%s action=%s x=%d y=%d", clientID, input.Type, input.Button, input.Action, input.MouseX, input.MouseY)
@@ -997,12 +999,23 @@ func main() {
 		needsRefresh := coordinator.HandleInput(clientID, input)
 		logEvent("INPUT_HANDLED client=%s needsRefresh=%v", clientID, needsRefresh)
 		if needsRefresh {
-			// Only refresh windows for window-related actions (expensive tmux calls)
-			coordinator.RefreshWindows()
-			logEvent("INPUT_REFRESHED client=%s", clientID)
+			// Signal the main refresh loop instead of doing expensive
+			// RefreshWindows + BroadcastRender inline. The tmux action
+			// (select_pane, select_window, etc.) already ran synchronously
+			// in HandleInput, so tmux state is updated. The refresh loop
+			// will pick this up and debounce with any USR1 signals from
+			// tmux hooks triggered by the same action.
+			select {
+			case refreshCh <- struct{}{}:
+			default:
+				// Channel full, refresh already pending
+			}
+			logEvent("INPUT_SIGNALED_REFRESH client=%s", clientID)
+		} else {
+			// Internal-only state change (e.g. toggle_group) - render immediately
+			// since no tmux state changed and no USR1 will arrive
+			server.BroadcastRender()
 		}
-		// Re-render all clients with fresh state
-		server.BroadcastRender()
 		logEvent("INPUT_DONE client=%s", clientID)
 	}
 
@@ -1049,9 +1062,6 @@ func main() {
 		time.Sleep(1500 * time.Millisecond)
 		restoreFocusState()
 	}()
-
-	// Channel for event-driven refresh (SIGUSR1 from tmux hooks)
-	refreshCh := make(chan struct{}, 10)
 
 	// Listen for SIGUSR1 signals from tmux hooks for instant refresh
 	refreshSigCh := make(chan os.Signal, 10)
