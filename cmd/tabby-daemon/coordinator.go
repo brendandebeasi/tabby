@@ -4037,6 +4037,9 @@ func hashContent(s string) uint32 {
 
 // isTouchMode checks if touch mode is enabled
 func (c *Coordinator) isTouchMode(width int) bool {
+	if c.config.Sidebar.DisableLargeMode {
+		return false
+	}
 	// Runtime override via @tabby_touch_mode tmux option
 	if c.touchModeOverride == "1" {
 		return true
@@ -7372,24 +7375,25 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 		s.WriteString(zone.Mark("sidebar:close_tab", btn) + "\n")
 	}
 
-	// Touch mode toggle button - label describes what clicking will do
-	touchLabel := "Large Mode"
-	touchColor := defaultBg
-	if large {
-		touchLabel = "Small Mode"
-		if c.theme != nil {
-			touchColor = c.getThemeColor(c.theme.ButtonPrimaryBg, "#2980b9")
-		} else {
-			touchColor = "#2980b9"
+	if !c.config.Sidebar.DisableLargeMode {
+		touchLabel := "Large Mode"
+		touchColor := defaultBg
+		if large {
+			touchLabel = "Small Mode"
+			if c.theme != nil {
+				touchColor = c.getThemeColor(c.theme.ButtonPrimaryBg, "#2980b9")
+			} else {
+				touchColor = "#2980b9"
+			}
 		}
+		var btn string
+		if large {
+			btn = c.renderTouchButton(width, touchLabel, touchColor, touchButtonOpts{FgColor: defaultFg})
+		} else {
+			btn = renderSmallButton(width, touchLabel, touchColor, defaultFg)
+		}
+		s.WriteString(zone.Mark("sidebar:toggle_touch_mode", btn) + "\n")
 	}
-	var btn string
-	if large {
-		btn = c.renderTouchButton(width, touchLabel, touchColor, touchButtonOpts{FgColor: defaultFg})
-	} else {
-		btn = renderSmallButton(width, touchLabel, touchColor, defaultFg)
-	}
-	s.WriteString(zone.Mark("sidebar:toggle_touch_mode", btn) + "\n")
 
 	return s.String()
 }
@@ -8037,6 +8041,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return false
 
 	case "toggle_touch_mode":
+		if c.config.Sidebar.DisableLargeMode {
+			return false
+		}
 		// Toggle touch mode via tmux option
 		newVal := "1"
 		if c.touchModeOverride == "1" {

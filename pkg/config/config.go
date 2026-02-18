@@ -280,26 +280,27 @@ type SidebarHeader struct {
 }
 
 type Sidebar struct {
-	Position        string        `yaml:"position"`     // "left" (default) or "right"
-	Mode            string        `yaml:"mode"`         // "full" (default) or "partial"
-	Header          SidebarHeader `yaml:"header"`       // Sidebar header configuration
-	PaneHeaders     bool          `yaml:"pane_headers"` // Enable clickable overlay pane headers
-	NewTabButton    bool          `yaml:"new_tab_button"`
-	CloseButton     bool          `yaml:"close_button"`
-	NewGroupButton  bool          `yaml:"new_group_button"`
-	ShowEmptyGroups bool          `yaml:"show_empty_groups"`
-	SortBy          string        `yaml:"sort_by"`
-	Debug           bool          `yaml:"debug"`           // Enable debug logging to /tmp/tabby-debug.log
-	TouchMode       bool          `yaml:"touch_mode"`      // Larger tap targets for mobile/touch
-	LineHeight      int           `yaml:"line_height"`     // Extra blank lines between items (0=compact, 1+=spaced)
-	ActionZone      string        `yaml:"action_zone"`     // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
-	ActionPriority  int           `yaml:"action_priority"` // Priority within zone (default: 90)
-	PrefixMode      bool          `yaml:"prefix_mode"`     // Flat window list with group prefixes (SD| NAME) instead of hierarchy
-	Theme           string        `yaml:"theme"`           // Color theme: rose-pine-dawn, catppuccin-mocha, dracula, nord, etc.
-	ThemeMode       string        `yaml:"theme_mode"`      // Theme detection: "auto" (default), "dark", or "light" (deprecated, use theme)
-	IconStyle       string        `yaml:"icon_style"`      // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
-	Colors          SidebarColors `yaml:"colors"`          // Manual color overrides (applied on top of theme)
-	TouchButtons    TouchButtons  `yaml:"touch_buttons"`   // Touch mode button styling
+	Position         string        `yaml:"position"`     // "left" (default) or "right"
+	Mode             string        `yaml:"mode"`         // "full" (default) or "partial"
+	Header           SidebarHeader `yaml:"header"`       // Sidebar header configuration
+	PaneHeaders      bool          `yaml:"pane_headers"` // Enable clickable overlay pane headers
+	NewTabButton     bool          `yaml:"new_tab_button"`
+	CloseButton      bool          `yaml:"close_button"`
+	NewGroupButton   bool          `yaml:"new_group_button"`
+	ShowEmptyGroups  bool          `yaml:"show_empty_groups"`
+	SortBy           string        `yaml:"sort_by"`
+	Debug            bool          `yaml:"debug"`              // Enable debug logging to /tmp/tabby-debug.log
+	TouchMode        bool          `yaml:"touch_mode"`         // Larger tap targets for mobile/touch
+	DisableLargeMode bool          `yaml:"disable_large_mode"` // Disable large touch-mode UI entirely
+	LineHeight       int           `yaml:"line_height"`        // Extra blank lines between items (0=compact, 1+=spaced)
+	ActionZone       string        `yaml:"action_zone"`        // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
+	ActionPriority   int           `yaml:"action_priority"`    // Priority within zone (default: 90)
+	PrefixMode       bool          `yaml:"prefix_mode"`        // Flat window list with group prefixes (SD| NAME) instead of hierarchy
+	Theme            string        `yaml:"theme"`              // Color theme: rose-pine-dawn, catppuccin-mocha, dracula, nord, etc.
+	ThemeMode        string        `yaml:"theme_mode"`         // Theme detection: "auto" (default), "dark", or "light" (deprecated, use theme)
+	IconStyle        string        `yaml:"icon_style"`         // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
+	Colors           SidebarColors `yaml:"colors"`             // Manual color overrides (applied on top of theme)
+	TouchButtons     TouchButtons  `yaml:"touch_buttons"`      // Touch mode button styling
 }
 
 // TouchButtons configures colors for touch mode buttons

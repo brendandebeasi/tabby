@@ -76,9 +76,9 @@ if [ -n "$NEW_WINDOW_ID" ] && [ -n "$SAVED_GROUP" ] && [ "$SAVED_GROUP" != "Defa
     tmux set-window-option -t "$NEW_WINDOW_ID" @tabby_group "$SAVED_GROUP" 2>/dev/null || true
 fi
 
-if [ -n "$NEW_WINDOW_ID" ]; then
-    tmux select-window -t "$NEW_WINDOW_ID" 2>/dev/null || true
-fi
+# Note: new-window already selects the new window by default.
+# Do NOT call select-window here — it fires a redundant after-select-window
+# hook chain causing sidebar juggling and focus races.
 
 tmux set-option -gu @tabby_new_window_group 2>/dev/null || true
 tmux set-option -gu @tabby_new_window_path 2>/dev/null || true
@@ -199,9 +199,12 @@ tmux set-window-option -g window-size "latest"
 tmux unbind-key -T root MouseDown3Pane 2>/dev/null || true
 tmux bind-key -T root MouseDown3Pane send-keys -M -t =
 
-# Ensure drag gestures on utility panes are always forwarded (no copy-mode intercept).
+# Keep utility-pane drag events forwarded, but force tmux copy-drag in normal panes.
 tmux unbind-key -T root MouseDrag1Pane 2>/dev/null || true
-tmux bind-key -T root MouseDrag1Pane send-keys -M -t =
+tmux bind-key -T root MouseDrag1Pane \
+    if-shell -F -t = "#{||:#{m:*sidebar-render*,#{pane_current_command}},#{m:*pane-header*,#{pane_current_command}}}" \
+        "send-keys -M -t =" \
+        "select-pane -t = ; copy-mode -M"
 
 # Handle clicks on pane-header panes specially to allow buttons to work regardless of focus
 # Architecture: Only intercept pane-header clicks. Let sidebar and normal panes use default tmux behavior.
@@ -436,7 +439,11 @@ tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$
 # On window close: select previous from history, preserve sidebar width, then refresh
 tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT'; run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 tmux set-hook -g after-kill-window "run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
-tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+# after-new-window: apply group label, then let ensure_sidebar handle the
+# single USR1 signal to the daemon (which spawns the renderer).  We do NOT
+# also call signal_sidebar here — that would send a duplicate USR1 before
+# ensure_sidebar's own signal, causing the sidebar to "juggle" visually.
+tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 # Combined script to reduce latency + track window history
 ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
 chmod +x "$ON_WINDOW_SELECT_SCRIPT"

@@ -82,6 +82,7 @@ sidebar:
   sort_by: "group"  # "group" or "index"
   debug: true  # Enable debug logging to /tmp/tabby-debug.log
   touch_mode: false  # Force touch mode on when true. For auto mode, set TABBY_TOUCH=auto.
+  disable_large_mode: true
   line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
   mobile_max_percent: 15
   mobile_min_content_cols: 40

@@ -221,16 +221,10 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			continue
 		}
 
-		// Ensure sidebar is configured correctly
-		// Since we just spawned it, we can't rely on cached panes to find it immediately.
-		// However, we know split-window was successful.
-		// We can let the next refresh cycle handle detailed cleanup/resize if needed.
-		// Or assume the split-window flags (-l width) handled the sizing.
-
-		// Ensure main pane has focus if we are in the active window
-		if windowID == activeWindow {
-			exec.Command("tmux", "select-pane", "-t", firstPane).Run()
-		}
+		// split-window -d keeps focus on the original pane, so we do NOT need
+		// to call select-pane here.  Calling select-pane fires after-select-pane
+		// hooks which send USR1 back to us, causing a feedback loop that makes
+		// the sidebar visually "juggle" on new-window creation.
 
 		logEvent("SPAWN_COMPLETE window=%s", windowID)
 	}
