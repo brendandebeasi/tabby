@@ -65,10 +65,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						_ = exec.Command("tmux", "select-pane", "-t", region.paneID).Run()
 						return m, triggerRefresh()
 					case region.action == "split-v":
-						_ = exec.Command("tmux", "split-window", "-v").Run()
+						_ = exec.Command("tmux", "split-window", "-h").Run()
 						return m, delayedRefresh()
 					case region.action == "split-h":
-						_ = exec.Command("tmux", "split-window", "-h").Run()
+						_ = exec.Command("tmux", "split-window", "-v").Run()
 						return m, delayedRefresh()
 					case region.action == "close":
 						_ = exec.Command("tmux", "kill-pane").Run()

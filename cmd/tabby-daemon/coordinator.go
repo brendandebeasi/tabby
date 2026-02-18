@@ -7960,7 +7960,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if panePath == "" {
 			panePath = "~"
 		}
-		exec.Command("tmux", "split-window", "-v", "-t", input.ResolvedTarget, "-c", panePath).Run()
+		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath).Run()
 		return true
 
 	case "header_split_h":
@@ -7970,7 +7970,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if panePath2 == "" {
 			panePath2 = "~"
 		}
-		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath2).Run()
+		exec.Command("tmux", "split-window", "-v", "-t", input.ResolvedTarget, "-c", panePath2).Run()
 		return true
 
 	case "header_close":
@@ -8994,8 +8994,8 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 		splitTarget = activePaneID
 	}
 	if !c.isVerticalStackedPane(win, activePaneID) {
-		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", win.Index, splitTarget)
-		splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", win.Index, splitTarget)
+		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", win.Index, splitTarget)
+		splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", win.Index, splitTarget)
 		args = append(args, "Split Horizontal |", "|", splitHCmd)
 		args = append(args, "Split Vertical -", "-", splitVCmd)
 	}
@@ -9128,8 +9128,8 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 
 	// Split options
 	if !c.isVerticalStackedPane(window, pane.ID) {
-		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
-		splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
+		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
+		splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
 		args = append(args, "Split Horizontal |", "|", splitHCmd)
 		args = append(args, "Split Vertical -", "-", splitVCmd)
 	}

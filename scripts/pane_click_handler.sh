@@ -11,6 +11,9 @@ tmux set-option -g @tabby_last_click_x "$MOUSE_X"
 tmux set-option -g @tabby_last_click_y "$MOUSE_Y"
 tmux set-option -g @tabby_last_click_pane "$PANE_ID"
 
-# Select the header pane - this triggers FocusMsg in its BubbleTea
-# The header's handleFocusGain() reads the stored click position and processes it
-tmux select-pane -t "$PANE_ID"
+IS_ACTIVE=$(tmux display-message -p -t "$PANE_ID" "#{pane_active}" 2>/dev/null || echo "0")
+if [ "$IS_ACTIVE" = "1" ]; then
+    tmux send-keys -M -t "$PANE_ID"
+else
+    tmux select-pane -t "$PANE_ID"
+fi
