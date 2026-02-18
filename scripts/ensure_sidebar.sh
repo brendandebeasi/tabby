@@ -50,8 +50,11 @@ TABBAR_HEIGHT=2
 DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
 RENDERER_BIN="$CURRENT_DIR/bin/sidebar-renderer"
 
-# Get mode from tmux option or state file
-MODE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
+# Get mode: prefer global option (source of truth), fall back to session then state file
+MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
+if [ -z "$MODE" ]; then
+    MODE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
+fi
 if [ -z "$MODE" ] && [ -f "$SIDEBAR_STATE_FILE" ]; then
     MODE=$(cat "$SIDEBAR_STATE_FILE" 2>/dev/null || echo "")
 fi

@@ -6,7 +6,10 @@ if [ -z "$SESSION_ID" ]; then
     SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
 fi
 
-MODE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
+MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
+if [ -z "$MODE" ]; then
+    MODE=$(tmux show-options -qv @tabby_sidebar 2>/dev/null || echo "")
+fi
 
 HAS_TABBY_PANES="no"
 if [ -n "$SESSION_ID" ]; then
