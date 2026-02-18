@@ -634,9 +634,9 @@ tmux bind-key -n M-# select-window -t :3
 tmux bind-key -n M-$ select-window -t :4
 tmux bind-key -n M-% select-window -t :5
 
-# Ensure sidebar panes exist in default vertical mode on first load.
-if [ -z "$INITIAL_MODE" ]; then
-    tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\""
-fi
+# Ensure mode surfaces are present on load.
+# This covers first-run bootstrap and config reloads where mode is already set
+# but daemon/renderers are not running yet.
+tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\""
 
 tmux run-shell -b "$STATUS_GUARD_SCRIPT \"#{session_id}\""
