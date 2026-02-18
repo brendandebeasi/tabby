@@ -128,12 +128,14 @@ func getPaneHeaderBin() string {
 	return filepath.Join(dir, "pane-header")
 }
 
-// spawnRenderersForNewWindows checks for windows without renderers and spawns them
-func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window) {
+// spawnRenderersForNewWindows checks for windows without renderers and spawns them.
+// Returns true if any renderer was spawned (caller should restore focus afterward).
+func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window) bool {
 	rendererBin := getRendererBin()
 	if rendererBin == "" {
-		return
+		return false
 	}
+	spawned := false
 
 	// Get saved sidebar width or default
 	width := "25"
@@ -221,13 +223,10 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			continue
 		}
 
-		// split-window -d keeps focus on the original pane, so we do NOT need
-		// to call select-pane here.  Calling select-pane fires after-select-pane
-		// hooks which send USR1 back to us, causing a feedback loop that makes
-		// the sidebar visually "juggle" on new-window creation.
-
+		spawned = true
 		logEvent("SPAWN_COMPLETE window=%s", windowID)
 	}
+	return spawned
 }
 
 // cleanupSidebarsForClosedWindows removes sidebar panes from windows that no longer exist
@@ -1106,7 +1105,7 @@ func main() {
 
 				// Optimization: Reuse window/pane data fetched by coordinator
 				windows := coordinator.GetWindows()
-				spawnRenderersForNewWindows(server, *sessionID, windows)
+				spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows)
 				t2 := time.Now()
 
 				cleanupOrphanedSidebars(windows)
@@ -1121,6 +1120,9 @@ func main() {
 				currentHash := coordinator.GetWindowsHash()
 				if currentHash != lastWindowsHash {
 					updateHeaderBorderStyles(coordinator)
+				}
+				if spawnedRenderer {
+					selectContentPaneInActiveWindow()
 				}
 				// Sync client sizes from tmux before broadcasting
 				// This ensures background sidebars render at correct dimensions
@@ -1139,10 +1141,13 @@ func main() {
 				coordinator.RefreshWindows()
 				windows := coordinator.GetWindows()
 
-				spawnRenderersForNewWindows(server, *sessionID, windows)
+				spawnedFallback := spawnRenderersForNewWindows(server, *sessionID, windows)
 				cleanupOrphanedSidebars(windows)
 				cleanupSidebarsForClosedWindows(server, windows)
 				doPaneLayoutOps()
+				if spawnedFallback {
+					selectContentPaneInActiveWindow()
+				}
 			case <-watchdogTicker.C:
 				logInput("HEALTH clients=%d", server.ClientCount())
 				watchdogCheckRenderers(server, *sessionID)
