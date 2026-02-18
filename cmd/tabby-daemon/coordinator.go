@@ -4646,13 +4646,32 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			currentLine++
 		}
 
-		// Record group region for click handling
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: groupStartLine,
-			EndLine:   currentLine - 1,
-			Action:    "toggle_group",
-			Target:    group.Name,
-		})
+		if hasWindows {
+			if c.isTouchMode(width) {
+				iconLine := groupStartLine + 1
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: iconLine,
+					EndLine:   iconLine,
+					StartCol:  1,
+					EndCol:    2,
+					Action:    "toggle_group",
+					Target:    group.Name,
+				})
+			} else {
+				iconWidth := runewidth.StringWidth(stripAnsi(collapseStyle.Render(collapseIcon)))
+				if iconWidth < 1 {
+					iconWidth = 1
+				}
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: groupStartLine,
+					EndLine:   currentLine - 1,
+					StartCol:  0,
+					EndCol:    iconWidth,
+					Action:    "toggle_group",
+					Target:    group.Name,
+				})
+			}
+		}
 
 		if isCollapsed {
 			continue
@@ -10023,10 +10042,9 @@ func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
 		if bgColor == "" {
 			bgColor = theme.Bg
 		}
-		fgColor = theme.ActiveFg
-		if fgColor == "" {
-			fgColor = theme.Fg
-		}
+		// Use base group fg for consistency — active/inactive distinction
+		// comes from bg color + bold, not text color flipping white↔black
+		fgColor = theme.Fg
 	} else {
 		bgColor = theme.Bg
 		fgColor = theme.Fg
