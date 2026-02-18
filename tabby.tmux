@@ -422,6 +422,9 @@ chmod +x "$STABILIZE_CLIENT_RESIZE_SCRIPT"
 STATUS_GUARD_SCRIPT="$CURRENT_DIR/scripts/enforce_status_exclusivity.sh"
 chmod +x "$STATUS_GUARD_SCRIPT"
 
+FOCUS_RECOVERY_SCRIPT="$CURRENT_DIR/scripts/restore_input_focus.sh"
+chmod +x "$FOCUS_RECOVERY_SCRIPT"
+
 # Helper script to update pane bar (horizontal mode second line)
 UPDATE_PANE_BAR_SCRIPT="$CURRENT_DIR/scripts/update_pane_bar.sh"
 chmod +x "$UPDATE_PANE_BAR_SCRIPT"
@@ -651,3 +654,4 @@ tmux bind-key -n M-% select-window -t :5
 tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\""
 
 tmux run-shell -b "$STATUS_GUARD_SCRIPT \"#{session_id}\""
+tmux run-shell -b "$FOCUS_RECOVERY_SCRIPT \"#{session_id}\""

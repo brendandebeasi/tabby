@@ -7,6 +7,7 @@
 set -eu
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
+FOCUS_RECOVERY_SCRIPT="$CURRENT_DIR/scripts/restore_input_focus.sh"
 
 # Check if dev reload is enabled (opt-in)
 DEV_RELOAD_ENABLED="${TABBY_DEV_RELOAD:-}"
@@ -72,10 +73,13 @@ if [ "$SIDEBAR_STATE" = "enabled" ]; then
     sleep 0.1
     tmux set -g mouse on 2>/dev/null || true
     
-    # Re-enable sidebar using toggle script
     sleep 0.5
-    if ! "$CURRENT_DIR/scripts/toggle_sidebar_daemon.sh" >/dev/null 2>&1; then
-        tmux display-message -d 4000 "Tabby: reload failed (could not restart daemon)" 2>/dev/null || true
+    if ! TABBY_SKIP_BUILD=1 TABBY_SESSION_TARGET="${SESSION_NAME:-$SESSION_ID}" "$CURRENT_DIR/scripts/toggle_sidebar.sh" >/dev/null 2>&1; then
+        tmux display-message -d 4000 "Tabby: reload failed (toggle step 1)" 2>/dev/null || true
+        exit 1
+    fi
+    if ! TABBY_SKIP_BUILD=1 TABBY_SESSION_TARGET="${SESSION_NAME:-$SESSION_ID}" "$CURRENT_DIR/scripts/toggle_sidebar.sh" >/dev/null 2>&1; then
+        tmux display-message -d 4000 "Tabby: reload failed (toggle step 2)" 2>/dev/null || true
         exit 1
     fi
 
@@ -90,7 +94,10 @@ if [ "$SIDEBAR_STATE" = "enabled" ]; then
         exit 1
     fi
 
+    "$FOCUS_RECOVERY_SCRIPT" "$SESSION_ID" >/dev/null 2>&1 || true
+
     tmux display-message -d 2000 "Tabby: reload complete" 2>/dev/null || true
 else
+    "$FOCUS_RECOVERY_SCRIPT" "$SESSION_ID" >/dev/null 2>&1 || true
     tmux display-message -d 2000 "Tabby: rebuild complete (sidebar disabled)" 2>/dev/null || true
 fi
