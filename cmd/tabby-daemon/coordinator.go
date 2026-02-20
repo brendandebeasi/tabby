@@ -4663,6 +4663,14 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					Action:    "toggle_group",
 					Target:    group.Name,
 				})
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: groupStartLine,
+					EndLine:   currentLine - 1,
+					StartCol:  3,
+					EndCol:    0,
+					Action:    "group_header",
+					Target:    group.Name,
+				})
 			} else {
 				iconWidth := runewidth.StringWidth(stripAnsi(collapseStyle.Render(collapseIcon)))
 				if iconWidth < 1 {
@@ -4676,7 +4684,22 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					Action:    "toggle_group",
 					Target:    group.Name,
 				})
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: groupStartLine,
+					EndLine:   currentLine - 1,
+					StartCol:  iconWidth,
+					EndCol:    0,
+					Action:    "group_header",
+					Target:    group.Name,
+				})
 			}
+		} else {
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: groupStartLine,
+				EndLine:   currentLine - 1,
+				Action:    "group_header",
+				Target:    group.Name,
+			})
 		}
 
 		if isCollapsed {
@@ -8859,7 +8882,7 @@ func (c *Coordinator) handleRightClick(clientID string, input *daemon.InputPaylo
 		}
 	case "select_pane":
 		c.showPaneContextMenu(clientID, input.ResolvedTarget, pos)
-	case "toggle_group":
+	case "toggle_group", "group_header":
 		c.showGroupContextMenu(clientID, input.ResolvedTarget, pos)
 	case "sidebar_header_area", "sidebar_settings":
 		c.showSidebarSettingsMenu(clientID, pos)

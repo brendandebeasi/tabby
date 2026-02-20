@@ -722,7 +722,7 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSim
 				continue
 			}
 			switch region.Action {
-			case "select_window", "select_pane", "toggle_group", "toggle_panes", "sidebar_header_area", "sidebar_settings":
+			case "select_window", "select_pane", "toggle_group", "toggle_panes", "group_header", "sidebar_header_area", "sidebar_settings":
 				resolvedAction = region.Action
 				resolvedTarget = region.Target
 				if region.Action == "select_window" || region.Action == "select_pane" {
