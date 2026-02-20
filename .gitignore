@@ -20,6 +20,18 @@ tabby-web-*.png
 *.tmp
 /tmp/
 
+# Sensitive local files
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.credentials
+credentials.json
+
 # Go
 *.exe
 *.exe~
