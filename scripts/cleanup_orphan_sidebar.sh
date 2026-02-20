@@ -66,7 +66,9 @@ fi
 if [ -n "$SESSION_ID" ]; then
     DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
     if [ -f "$DAEMON_PID_FILE" ]; then
-        read -r PID < "$DAEMON_PID_FILE"
-        kill -USR1 "$PID" 2>/dev/null || true
+        PID="$(cat "$DAEMON_PID_FILE" 2>/dev/null || true)"
+        if [ -n "$PID" ]; then
+            kill -USR1 "$PID" 2>/dev/null || true
+        fi
     fi
 fi
