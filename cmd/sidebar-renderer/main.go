@@ -126,6 +126,7 @@ type rendererModel struct {
 	// Long-press detection for iOS/mobile right-click
 	mouseDownTime   time.Time
 	mouseDownPos    struct{ X, Y int }
+	mouseDownValid  bool
 	longPressActive bool
 	skipNextRelease bool // Set when menu closes to prevent false drag detection
 
@@ -281,6 +282,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case disconnectedMsg:
 		m.connected = false
+		m.mouseDownValid = false
+		m.longPressActive = false
+		m.mouseDownTime = time.Time{}
 		// Close old connection to clean up resources
 		if m.conn != nil {
 			m.conn.Close()
@@ -296,6 +300,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case tea.BlurMsg:
+		m.mouseDownValid = false
+		m.longPressActive = false
+		m.mouseDownTime = time.Time{}
 		if m.menuShowing {
 			m.menuDismiss()
 			m.menuShowing = false
@@ -529,10 +536,12 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 			m.skipNextRelease = true      // Skip release to prevent false drag detection
 			m.mouseDownTime = time.Time{} // Clear stale timestamp
+			m.mouseDownValid = false
 			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
 		}
 
 		if msg.Button == tea.MouseButtonLeft {
+			m.mouseDownValid = true
 			if !m.isTouchMode {
 				m.mouseDownTime = time.Now()
 				m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
@@ -552,6 +561,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 				m.lastTapTime = time.Time{} // Reset to prevent triple-click
 				m.skipNextRelease = true    // Don't process the release
+				m.mouseDownValid = false
 				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
 			}
 
@@ -571,6 +581,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// Skip the release to prevent false drag detection from stale mouseDownPos
 		m.skipNextRelease = true
 		m.mouseDownTime = time.Time{} // Clear to prevent stale elapsed time checks
+		m.mouseDownValid = false
 		return m.processMouseClick(msg.X, msg.Y, msg.Button, false)
 
 	case tea.MouseActionMotion:
@@ -584,6 +595,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 				m.longPressActive = false
 				m.mouseDownTime = time.Time{}
+				m.mouseDownValid = false
 			}
 		}
 		return m, nil
@@ -594,10 +606,21 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.skipNextRelease = false
 			m.longPressActive = false
 			m.mouseDownTime = time.Time{}
+			m.mouseDownValid = false
 			return m, nil
 		}
 
+		if !m.mouseDownValid {
+			m.longPressActive = false
+			m.mouseDownTime = time.Time{}
+			return m, nil
+		}
+		m.mouseDownValid = false
+
 		if !m.isTouchMode {
+			if m.mouseDownTime.IsZero() {
+				return m, nil
+			}
 			elapsed := time.Since(m.mouseDownTime)
 			m.mouseDownTime = time.Time{}
 
@@ -613,6 +636,9 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 		wasLongPressActive := m.longPressActive
 		m.longPressActive = false
+		if m.mouseDownTime.IsZero() {
+			return m, nil
+		}
 		elapsed := time.Since(m.mouseDownTime)
 		m.mouseDownTime = time.Time{}
 
@@ -686,6 +712,22 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSim
 						i, region.StartLine, region.EndLine, region.StartCol, endCol, region.Action, region.Target)
 				}
 				break
+			}
+		}
+	}
+
+	if button == tea.MouseButtonRight && resolvedAction == "" {
+		for _, region := range m.regions {
+			if contentY < region.StartLine || contentY > region.EndLine {
+				continue
+			}
+			switch region.Action {
+			case "select_window", "select_pane", "toggle_group", "toggle_panes", "sidebar_header_area", "sidebar_settings":
+				resolvedAction = region.Action
+				resolvedTarget = region.Target
+				if region.Action == "select_window" || region.Action == "select_pane" {
+					break
+				}
 			}
 		}
 	}

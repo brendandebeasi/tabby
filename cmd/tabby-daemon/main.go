@@ -987,6 +987,10 @@ func main() {
 
 	refreshCh := make(chan struct{}, 10)
 
+	// Handle signals for graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
 	// Set up input callback with panic recovery
 	server.OnInput = func(clientID string, input *daemon.InputPayload) {
 		logEvent("INPUT_START client=%s type=%s btn=%s action=%s x=%d y=%d", clientID, input.Type, input.Button, input.Action, input.MouseX, input.MouseY)
@@ -1068,10 +1072,20 @@ func main() {
 	signal.Notify(refreshSigCh, syscall.SIGUSR1)
 	go func() {
 		for range refreshSigCh {
+			logEvent("SIGNAL_USR1 session=%s", *sessionID)
+
 			select {
 			case refreshCh <- struct{}{}:
 			default:
-				// Channel full, refresh already pending
+				select {
+				case <-refreshCh:
+				default:
+				}
+				select {
+				case refreshCh <- struct{}{}:
+				default:
+				}
+				logEvent("SIGNAL_USR1 queue=full action=coalesced")
 			}
 		}
 	}()
@@ -1079,6 +1093,29 @@ func main() {
 	// Start coordinator refresh loops with change detection
 	go func() {
 		defer recoverAndLog("refresh-loop")
+
+		runLoopTask := func(task string, timeout time.Duration, fn func()) bool {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				fn()
+			}()
+
+			select {
+			case <-done:
+				return true
+			case <-time.After(timeout):
+				logEvent("LOOP_STALL task=%s timeout_ms=%d", task, timeout.Milliseconds())
+				if crashLog != nil {
+					crashLog.Printf("LOOP_STALL task=%s timeout=%v", task, timeout)
+				}
+				select {
+				case sigCh <- syscall.SIGTERM:
+				default:
+				}
+				return false
+			}
+		}
 
 		refreshTicker := time.NewTicker(5 * time.Second)          // Window list poll (fallback, less frequent now)
 		windowCheckTicker := time.NewTicker(2 * time.Second)      // Spawn/cleanup poll (fallback)
@@ -1147,77 +1184,97 @@ func main() {
 
 			select {
 			case <-refreshCh:
-				start := time.Now()
-				logEvent("SIGNAL_REFRESH session=%s", *sessionID)
+				ok := runLoopTask("signal_refresh", 8*time.Second, func() {
+					start := time.Now()
+					logEvent("SIGNAL_REFRESH session=%s", *sessionID)
 
-				updateActiveWindow()
-				coordinator.RefreshWindows()
-				t1 := time.Now()
+					updateActiveWindow()
+					coordinator.RefreshWindows()
+					t1 := time.Now()
 
-				windows := coordinator.GetWindows()
-				spawnRenderersForNewWindows(server, *sessionID, windows)
-				t2 := time.Now()
+					windows := coordinator.GetWindows()
+					spawnRenderersForNewWindows(server, *sessionID, windows)
+					t2 := time.Now()
 
-				cleanupOrphanedSidebars(windows)
-				t3 := time.Now()
+					cleanupOrphanedSidebars(windows)
+					t3 := time.Now()
 
-				cleanupSidebarsForClosedWindows(server, windows)
-				t4 := time.Now()
+					cleanupSidebarsForClosedWindows(server, windows)
+					t4 := time.Now()
 
-				doPaneLayoutOps()
-				t5 := time.Now()
+					doPaneLayoutOps()
+					t5 := time.Now()
 
-				currentHash := coordinator.GetWindowsHash()
-				if currentHash != lastWindowsHash {
-					updateHeaderBorderStyles(coordinator)
-				}
-				syncClientSizesFromTmux(server)
-				server.BroadcastRender()
-				t6 := time.Now()
-				lastWindowsHash = currentHash
-
-				// Drain stale USR1 signals our tmux commands generated via hooks
-				drainCount := 0
-				for {
-					select {
-					case <-refreshCh:
-						drainCount++
-					default:
-						goto drained
+					currentHash := coordinator.GetWindowsHash()
+					if currentHash != lastWindowsHash {
+						updateHeaderBorderStyles(coordinator)
 					}
-				}
-			drained:
-				if drainCount > 0 {
-					logEvent("DRAIN_STALE count=%d", drainCount)
-				}
-
-				debugLog.Printf("PERF: RefreshWindows=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v Render=%v TOTAL=%v",
-					t1.Sub(start), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t6.Sub(t5), t6.Sub(start))
-			case <-windowCheckTicker.C: // Fallback polling: spawn/cleanup for missed events
-				logEvent("WINDOW_CHECK_TICK")
-				// Update active window in case user switched windows without triggering refresh
-				updateActiveWindow()
-				// Refresh windows first to get latest state for fallback ops
-				coordinator.RefreshWindows()
-				windows := coordinator.GetWindows()
-
-				spawnRenderersForNewWindows(server, *sessionID, windows)
-				cleanupOrphanedSidebars(windows)
-				cleanupSidebarsForClosedWindows(server, windows)
-				doPaneLayoutOps()
-			case <-watchdogTicker.C:
-				logInput("HEALTH clients=%d", server.ClientCount())
-				watchdogCheckRenderers(server, *sessionID)
-			case <-refreshTicker.C:
-				// Fallback polling: always refresh windows (needed for staleness
-				// detection of stuck @tabby_busy), but only broadcast render and
-				// update header styles if the hash actually changed.
-				coordinator.RefreshWindows()
-				currentHash := coordinator.GetWindowsHash()
-				if currentHash != lastWindowsHash {
-					updateHeaderBorderStyles(coordinator)
+					syncClientSizesFromTmux(server)
 					server.BroadcastRender()
+					t6 := time.Now()
 					lastWindowsHash = currentHash
+
+					// Drain stale USR1 signals our tmux commands generated via hooks
+					drainCount := 0
+					for {
+						select {
+						case <-refreshCh:
+							drainCount++
+						default:
+							goto drained
+						}
+					}
+				drained:
+					if drainCount > 0 {
+						logEvent("DRAIN_STALE count=%d", drainCount)
+					}
+
+					debugLog.Printf("PERF: RefreshWindows=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v Render=%v TOTAL=%v",
+						t1.Sub(start), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t6.Sub(t5), t6.Sub(start))
+				})
+				if !ok {
+					return
+				}
+			case <-windowCheckTicker.C: // Fallback polling: spawn/cleanup for missed events
+				ok := runLoopTask("window_check", 8*time.Second, func() {
+					logEvent("WINDOW_CHECK_TICK")
+					// Update active window in case user switched windows without triggering refresh
+					updateActiveWindow()
+					// Refresh windows first to get latest state for fallback ops
+					coordinator.RefreshWindows()
+					windows := coordinator.GetWindows()
+
+					spawnRenderersForNewWindows(server, *sessionID, windows)
+					cleanupOrphanedSidebars(windows)
+					cleanupSidebarsForClosedWindows(server, windows)
+					doPaneLayoutOps()
+				})
+				if !ok {
+					return
+				}
+			case <-watchdogTicker.C:
+				ok := runLoopTask("watchdog", 6*time.Second, func() {
+					logInput("HEALTH clients=%d", server.ClientCount())
+					watchdogCheckRenderers(server, *sessionID)
+				})
+				if !ok {
+					return
+				}
+			case <-refreshTicker.C:
+				ok := runLoopTask("refresh_tick", 8*time.Second, func() {
+					// Fallback polling: always refresh windows (needed for staleness
+					// detection of stuck @tabby_busy), but only broadcast render and
+					// update header styles if the hash actually changed.
+					coordinator.RefreshWindows()
+					currentHash := coordinator.GetWindowsHash()
+					if currentHash != lastWindowsHash {
+						updateHeaderBorderStyles(coordinator)
+						server.BroadcastRender()
+						lastWindowsHash = currentHash
+					}
+				})
+				if !ok {
+					return
 				}
 			case <-animationTicker.C:
 				// Combined spinner + pet animation tick (was two separate tickers causing 2x BroadcastRender)
@@ -1231,22 +1288,23 @@ func main() {
 					server.RenderActiveWindowOnly(activeWindowID)
 				}
 			case <-gitTicker.C:
-				// Only broadcast if git state changed
-				currentGitState := coordinator.GetGitStateHash()
-				if currentGitState != lastGitState {
-					perf.Log("gitTick (changed)")
-					coordinator.RefreshGit()
-					coordinator.RefreshSession()
-					server.BroadcastRender()
-					lastGitState = currentGitState
+				ok := runLoopTask("git_tick", 6*time.Second, func() {
+					// Only broadcast if git state changed
+					currentGitState := coordinator.GetGitStateHash()
+					if currentGitState != lastGitState {
+						perf.Log("gitTick (changed)")
+						coordinator.RefreshGit()
+						coordinator.RefreshSession()
+						server.BroadcastRender()
+						lastGitState = currentGitState
+					}
+				})
+				if !ok {
+					return
 				}
 			}
 		}
 	}()
-
-	// Handle signals for graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	// Monitor for idle shutdown (no clients for 30s), session existence, and socket/PID health
 	go func() {

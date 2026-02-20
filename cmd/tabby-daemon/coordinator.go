@@ -204,6 +204,10 @@ type Coordinator struct {
 	pendingMenus       map[string][]menuItemDef
 	pendingMenusMu     sync.Mutex
 
+	lastWindowSelect   map[string]time.Time
+	lastWindowByClient map[string]time.Time
+	lastWindowSelectMu sync.Mutex
+
 	// Background theme detector (deprecated, kept for fallback)
 	bgDetector *colors.BackgroundDetector
 
@@ -634,6 +638,8 @@ func NewCoordinator(sessionID string) *Coordinator {
 		collapsedGroups:    make(map[string]bool),
 		clientWidths:       make(map[string]int),
 		pendingMenus:       make(map[string][]menuItemDef),
+		lastWindowSelect:   make(map[string]time.Time),
+		lastWindowByClient: make(map[string]time.Time),
 		prevPaneBusy:       make(map[string]bool),
 		prevPaneTitle:      make(map[string]string),
 		aiBellUntil:        make(map[int]int64),
@@ -4974,14 +4980,14 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					StartCol:  collapseColEnd,
 					EndCol:    0, // full width from here
 					Action:    "select_window",
-					Target:    strconv.Itoa(win.Index),
+					Target:    win.ID,
 				})
 			} else {
 				regions = append(regions, daemon.ClickableRegion{
 					StartLine: windowStartLine,
 					EndLine:   currentLine - 1,
 					Action:    "select_window",
-					Target:    strconv.Itoa(win.Index),
+					Target:    win.ID,
 				})
 			}
 
@@ -5488,14 +5494,14 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				StartCol:  collapseColEnd,
 				EndCol:    0,
 				Action:    "select_window",
-				Target:    strconv.Itoa(win.Index),
+				Target:    win.ID,
 			})
 		} else {
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: windowStartLine,
 				EndLine:   currentLine - 1,
 				Action:    "select_window",
-				Target:    strconv.Itoa(win.Index),
+				Target:    win.ID,
 			})
 		}
 
@@ -7544,27 +7550,63 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	switch input.ResolvedAction {
 	case "select_window":
-		// Run synchronously so RefreshWindows() sees the new state
-		// Use timeout context to prevent hanging if tmux is slow
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		exec.CommandContext(ctx, "tmux", "select-window", "-t", input.ResolvedTarget).Run()
-		// Find and select the first content pane (not sidebar or header)
-		// Get panes in the target window
-		out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", input.ResolvedTarget,
-			"-F", "#{pane_id}:#{pane_current_command}").Output()
+		rawTarget := input.ResolvedTarget
+		targetWindow := input.ResolvedTarget
+		if win := findWindowByTarget(c.windows, input.ResolvedTarget); win != nil {
+			targetWindow = win.ID
+		}
+
+		now := time.Now()
+		selectKey := clientID + "|" + targetWindow
+		c.lastWindowSelectMu.Lock()
+		if lastAny, ok := c.lastWindowByClient[clientID]; ok && now.Sub(lastAny) < 300*time.Millisecond {
+			c.lastWindowSelectMu.Unlock()
+			logEvent("SELECT_WINDOW_DEBOUNCED_CLIENT client=%s raw=%s target=%s age_ms=%d", clientID, rawTarget, targetWindow, now.Sub(lastAny).Milliseconds())
+			return false
+		}
+		if last, ok := c.lastWindowSelect[selectKey]; ok && now.Sub(last) < 450*time.Millisecond {
+			c.lastWindowSelectMu.Unlock()
+			logEvent("SELECT_WINDOW_DEBOUNCED client=%s raw=%s target=%s age_ms=%d", clientID, rawTarget, targetWindow, now.Sub(last).Milliseconds())
+			return false
+		}
+		c.lastWindowByClient[clientID] = now
+		c.lastWindowSelect[selectKey] = now
+		c.lastWindowSelectMu.Unlock()
+		logEvent("SELECT_WINDOW client=%s raw=%s target=%s", clientID, rawTarget, targetWindow)
+
+		selectCtx, selectCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		exec.CommandContext(selectCtx, "tmux", "select-window", "-t", targetWindow).Run()
+		selectCancel()
+
+		activeCtx, activeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		activeOut, activeErr := exec.CommandContext(activeCtx, "tmux", "display-message", "-p", "-t", targetWindow,
+			"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+		activeCancel()
+		if activeErr == nil {
+			parts := strings.SplitN(strings.TrimSpace(string(activeOut)), "\x1f", 3)
+			if len(parts) == 3 && !isAuxiliaryPaneCommand(parts[1]) && !isAuxiliaryPaneCommand(parts[2]) {
+				return true
+			}
+		}
+
+		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", targetWindow,
+			"-F", "#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+		listCancel()
 		if err == nil {
-			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-			for _, line := range lines {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					paneID := parts[0]
-					cmd := parts[1]
-					// Skip sidebar and header panes
-					if !isAuxiliaryPaneCommand(cmd) {
-						exec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID).Run()
-						break
-					}
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				parts := strings.SplitN(line, "\x1f", 3)
+				if len(parts) != 3 {
+					continue
+				}
+				paneID := parts[0]
+				cmd := parts[1]
+				startCmd := parts[2]
+				if !isAuxiliaryPaneCommand(cmd) && !isAuxiliaryPaneCommand(startCmd) {
+					switchCtx, switchCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					exec.CommandContext(switchCtx, "tmux", "select-pane", "-t", paneID).Run()
+					switchCancel()
+					break
 				}
 			}
 		}
@@ -8830,22 +8872,11 @@ func (c *Coordinator) handleRightClick(clientID string, input *daemon.InputPaylo
 }
 
 // showWindowContextMenu displays the context menu for a window
-func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, pos menuPosition) {
+func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string, pos menuPosition) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 
-	// Find the window
-	idx, err := strconv.Atoi(windowIdx)
-	if err != nil {
-		return
-	}
-	var win *tmux.Window
-	for i := range c.windows {
-		if c.windows[i].Index == idx {
-			win = &c.windows[i]
-			break
-		}
-	}
+	win := findWindowByTarget(c.windows, windowTarget)
 	if win == nil {
 		return
 	}
@@ -8855,11 +8886,6 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowIdx string, p
 		"-O",
 		"-T", fmt.Sprintf("Window %d: %s", win.Index, win.Name),
 	}, pos.args()...)
-
-	windowTarget := fmt.Sprintf(":%d", win.Index)
-	if c.sessionID != "" {
-		windowTarget = fmt.Sprintf("%s:%d", c.sessionID, win.Index)
-	}
 
 	// Rename option - locks the name so syncWindowNames won't overwrite it
 	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d @tabby_name_locked 1\"", win.Name, win.Index, win.Index)
@@ -9520,22 +9546,11 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 }
 
 // showIndicatorContextMenu displays the context menu for window indicators (busy, bell, etc.)
-func (c *Coordinator) showIndicatorContextMenu(clientID string, windowIdx string, pos menuPosition) {
+func (c *Coordinator) showIndicatorContextMenu(clientID string, windowTarget string, pos menuPosition) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 
-	// Find the window
-	idx, err := strconv.Atoi(windowIdx)
-	if err != nil {
-		return
-	}
-	var win *tmux.Window
-	for i := range c.windows {
-		if c.windows[i].Index == idx {
-			win = &c.windows[i]
-			break
-		}
-	}
+	win := findWindowByTarget(c.windows, windowTarget)
 	if win == nil {
 		return
 	}
@@ -9912,6 +9927,33 @@ func isAuxiliaryPaneCommand(cmd string) bool {
 
 func isAuxiliaryPane(p tmux.Pane) bool {
 	return isAuxiliaryPaneCommand(p.Command) || isAuxiliaryPaneCommand(p.StartCommand)
+}
+
+func findWindowByTarget(windows []tmux.Window, target string) *tmux.Window {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(target, "@") {
+		for i := range windows {
+			if windows[i].ID == target {
+				return &windows[i]
+			}
+		}
+		return nil
+	}
+
+	idx, err := strconv.Atoi(target)
+	if err != nil {
+		return nil
+	}
+	for i := range windows {
+		if windows[i].Index == idx {
+			return &windows[i]
+		}
+	}
+	return nil
 }
 
 // selectContentPaneInActiveWindow finds and selects the first non-auxiliary pane
