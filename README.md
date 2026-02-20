@@ -1,5 +1,7 @@
 # Tabby
 
+![Tabby screenshot](./screenshot.png)
+
 A modern tab manager for tmux with grouping, a clickable vertical sidebar, and deep linking for notifications.
 
 ## Table of Contents
@@ -31,22 +33,6 @@ Tabby started as an opinionated solution to a personal problem: managing dozens 
 - Terminal-agnostic - works with most modern terminals (Ghostty, iTerm, Kitty, Alacritty, etc.)
 
 **Contributing:** PRs are welcome. This is actively developed but cannot promise support for all terminal emulators or use cases. If you find Tabby useful or have ideas, contributions are appreciated.
-
-```
-+---------------------------+----------------------------------------+
-| Frontend                  |                                        |
-|   0. dashboard            |  $ vim src/app.tsx                     |
-|   1. components           |                                        |
-| Backend                   |                                        |
-|   2. api                  |                                        |
-|   3. tests                |                                        |
-| Default                   |                                        |
-| > 4. vim  <-- active      |                                        |
-|   5. notes                |                                        |
-|                           |                                        |
-| [+] New Tab               |                                        |
-+---------------------------+----------------------------------------+
-```
 
 ## Key Features
 
@@ -456,6 +442,8 @@ cd ~/.tmux/plugins/tabby
 ## Tabby Web (Local-Only)
 
 Tabby Web runs a local-only bridge that exposes tmux + sidebar over WebSocket. The bridge only binds to loopback and requires user/password for access.
+
+Note: the web interface is currently alpha and is not guaranteed to work in all setups yet.
 
 ### Enable in config (default disabled)
 Add this to `~/.config/tabby/config.yaml`:
