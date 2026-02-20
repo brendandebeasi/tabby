@@ -321,13 +321,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 		return
 	}
 
-	// Track which content panes already have headers (connected to daemon or process exists)
 	panesWithHeader := make(map[string]bool) // content paneID -> has header
-	for _, clientID := range server.GetAllClientIDs() {
-		if strings.HasPrefix(clientID, "header:") {
-			panesWithHeader[strings.TrimPrefix(clientID, "header:")] = true
-		}
-	}
 
 	if headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
 		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
