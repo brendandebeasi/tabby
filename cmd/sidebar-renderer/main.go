@@ -611,6 +611,15 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 
 		if !m.mouseDownValid {
+			if m.isTouchMode && msg.Button == tea.MouseButtonLeft {
+				if *debugMode {
+					debugLog.Printf("  Release-only left click fallback at x=%d y=%d", msg.X, msg.Y)
+				}
+				if inputLog != nil && isInputLogEnabled() {
+					inputLog.Printf("RELEASE_ONLY_FALLBACK x=%d y=%d", msg.X, msg.Y)
+				}
+				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
+			}
 			m.longPressActive = false
 			m.mouseDownTime = time.Time{}
 			return m, nil
