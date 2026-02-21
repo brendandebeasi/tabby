@@ -302,6 +302,80 @@ func cleanupOrphanedSidebars(windows []tmux.Window) {
 	}
 }
 
+func paneIsSystemPane(cmd string, startCmd string) bool {
+	return strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") ||
+		strings.Contains(cmd, "tabby") || strings.Contains(cmd, "pane-header") ||
+		strings.Contains(cmd, "tabbar") || strings.Contains(cmd, "pane-bar") ||
+		strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") ||
+		strings.Contains(startCmd, "tabby") || strings.Contains(startCmd, "pane-header") ||
+		strings.Contains(startCmd, "tabbar") || strings.Contains(startCmd, "pane-bar")
+}
+
+func cleanupOrphanWindowsByTmux(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+
+	out, err := exec.Command("tmux", "list-windows", "-t", sessionID, "-F", "#{window_id}").Output()
+	if err != nil {
+		return
+	}
+
+	for _, rawWid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		windowID := strings.TrimSpace(rawWid)
+		if windowID == "" {
+			continue
+		}
+
+		paneOut, paneErr := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+			"#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+		if paneErr != nil {
+			continue
+		}
+
+		lines := strings.Split(strings.TrimSpace(string(paneOut)), "\n")
+		if len(lines) == 0 || (len(lines) == 1 && strings.TrimSpace(lines[0]) == "") {
+			continue
+		}
+
+		hasSidebar := false
+		nonSystemLive := 0
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "\x1f", 3)
+			if len(parts) < 3 {
+				continue
+			}
+			dead := parts[0] == "1"
+			cmd := parts[1]
+			startCmd := parts[2]
+			if strings.Contains(cmd, "sidebar") || strings.Contains(startCmd, "sidebar") {
+				hasSidebar = true
+			}
+			if dead {
+				continue
+			}
+			if !paneIsSystemPane(cmd, startCmd) {
+				nonSystemLive++
+			}
+		}
+
+		if hasSidebar && nonSystemLive == 0 {
+			currentWindow := ""
+			if curOut, curErr := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); curErr == nil {
+				currentWindow = strings.TrimSpace(string(curOut))
+			}
+			if currentWindow == windowID {
+				exec.Command("tmux", "last-window").Run()
+			}
+			logEvent("CLEANUP_ORPHAN_WINDOW window=%s source=daemon_fallback", windowID)
+			exec.Command("tmux", "kill-window", "-t", windowID).Run()
+		}
+	}
+}
+
 // spawnPaneHeaders spawns header panes above each content pane in all windows.
 // Each content pane gets its own header showing that pane's info and action buttons.
 // Height is 1 line normally, or 2 lines when custom_border is enabled (to render our own border).
@@ -1191,6 +1265,7 @@ func main() {
 					t2 := time.Now()
 
 					cleanupOrphanedSidebars(windows)
+					cleanupOrphanWindowsByTmux(*sessionID)
 					t3 := time.Now()
 
 					cleanupSidebarsForClosedWindows(server, windows)
@@ -1240,6 +1315,7 @@ func main() {
 
 					spawnRenderersForNewWindows(server, *sessionID, windows)
 					cleanupOrphanedSidebars(windows)
+					cleanupOrphanWindowsByTmux(*sessionID)
 					cleanupSidebarsForClosedWindows(server, windows)
 					doPaneLayoutOps()
 				})
