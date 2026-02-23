@@ -1449,7 +1449,8 @@ func main() {
 					return
 				}
 			case <-windowCheckTicker.C: // Fallback polling: spawn/cleanup for missed events
-				ok := runLoopTask("window_check", 8*time.Second, func() {
+				// Window check is a polling task — stalls are non-fatal (skip and retry next tick)
+				runLoopTaskNonFatal("window_check", 8*time.Second, func() {
 					logEvent("WINDOW_CHECK_TICK")
 					// Update active window in case user switched windows without triggering refresh
 					updateActiveWindow()
@@ -1463,9 +1464,6 @@ func main() {
 					cleanupSidebarsForClosedWindows(server, windows)
 					doPaneLayoutOps()
 				})
-				if !ok {
-					return
-				}
 			case <-watchdogTicker.C:
 				ok := runLoopTask("watchdog", 6*time.Second, func() {
 					logInput("HEALTH clients=%d", server.ClientCount())

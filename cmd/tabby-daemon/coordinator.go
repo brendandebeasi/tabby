@@ -172,6 +172,9 @@ type Coordinator struct {
 	// Last known width (for pet physics clamping)
 	lastWidth int
 
+	// Click debounce for pet widget (prevents render floods from spam clicks)
+	lastPetClick time.Time
+
 	// Global width for synchronization
 	globalWidth            int
 	lastWidthSync          time.Time // Last time we synced widths (for debouncing)
@@ -8240,6 +8243,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 // This bypasses BubbleZone and uses tracked line positions for precise hit testing
 // Returns true if the click was handled, false otherwise
 func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputPayload) bool {
+	// Debounce rapid clicks (200ms) to prevent render floods
+	now := time.Now()
+	if now.Sub(c.lastPetClick) < 200*time.Millisecond {
+		return true // Absorb the click without processing
+	}
+	c.lastPetClick = now
+
 	// Get client-specific width for accurate click detection
 	clientWidth := c.getClientWidth(clientID)
 
