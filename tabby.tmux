@@ -269,7 +269,7 @@ tmux bind-key -T root MouseUp1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M -t =" \
         "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
-		    \"run-shell -b '$CLICK_HANDLER_SCRIPT \\\"#{pane_id}\\\" \\\"#{mouse_x}\\\" \\\"#{mouse_y}\\\"'\" \
+		    \"\" \
             \"select-pane -t = ; send-keys -M -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 
 tmux unbind-key -T root MouseUp3Pane 2>/dev/null || true
