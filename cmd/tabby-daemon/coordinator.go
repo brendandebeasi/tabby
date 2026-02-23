@@ -3194,11 +3194,15 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 
-		if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
+		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer listCancel()
+		if out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
 			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 				parts := strings.Split(line, " ")
 				if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
-					exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+					resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+					resizeCancel()
 					break
 				}
 			}
@@ -3224,11 +3228,15 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	untrackLock("widthSyncMu")
 	c.widthSyncMu.Unlock()
 
-	if out, err := exec.Command("tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
+	listCtx2, listCancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer listCancel2()
+	if out, err := exec.CommandContext(listCtx2, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.Split(line, " ")
 			if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
-				exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+				resizeCtx2, resizeCancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+				exec.CommandContext(resizeCtx2, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+				resizeCancel2()
 				break
 			}
 		}

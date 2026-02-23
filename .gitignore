@@ -55,7 +55,8 @@ web/tsconfig.tsbuildinfo
 
 # Local agent/tooling state
 .omc/
-.claude/
+.claude/*
+!.claude/CLAUDE.md
 .sisyphus/
 .archive/
 .entire/
