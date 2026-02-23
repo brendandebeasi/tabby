@@ -401,7 +401,7 @@ SIGNAL_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/signal_sidebar.sh"
 cat > "$SIGNAL_SIDEBAR_SCRIPT" << 'SCRIPT_EOF'
 #!/usr/bin/env bash
 # Signal daemon to refresh window list (instant re-render + spawn new renderers)
-SESSION_ID=$(tmux display-message -p '#{session_id}')
+SESSION_ID="${1:-$(tmux display-message -p '#{session_id}')}"
 PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
 
 if [ -f "$PID_FILE" ]; then
@@ -501,7 +501,7 @@ tmux set-hook -g after-select-pane "run-shell -b '$ON_PANE_SELECT_SCRIPT \"#{ses
 # Update pane bar when panes are split, and preserve group prefixes
 PRESERVE_NAME_SCRIPT="$CURRENT_DIR/scripts/preserve_window_name.sh"
 chmod +x "$PRESERVE_NAME_SCRIPT"
-tmux set-hook -g after-split-window "run-shell '$PRESERVE_NAME_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'"
+tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_SIDEBAR_SCRIPT #{session_id}'; run-shell '$PRESERVE_NAME_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT #{window_id} #{window_layout}'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'"
 
 # Close window if only sidebar/tabbar remains after main pane exits
 CLEANUP_SCRIPT="$CURRENT_DIR/scripts/cleanup_orphan_sidebar.sh"

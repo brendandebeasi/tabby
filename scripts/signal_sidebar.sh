@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Signal daemon to refresh window list (instant re-render + spawn new renderers)
-SESSION_ID=$(tmux display-message -p '#{session_id}')
+SESSION_ID="${1:-$(tmux display-message -p '#{session_id}')}"
 PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
 
 if [ -f "$PID_FILE" ]; then
