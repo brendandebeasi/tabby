@@ -84,14 +84,31 @@ func StartDeadlockWatchdog() {
 
 				// Dump lock holders
 				lockHoldersMu.Lock()
-				if len(lockHolders) > 0 {
+				holders := make(map[string]lockInfo, len(lockHolders))
+				for k, v := range lockHolders {
+					holders[k] = v
+				}
+				lockHoldersMu.Unlock()
+
+				if len(holders) > 0 {
 					coordinatorDebugLog.Printf("DEADLOCK: Current lock holders:")
-					for name, info := range lockHolders {
+					for name, info := range holders {
 						coordinatorDebugLog.Printf("  %s: held by %s at %s for %v",
 							name, info.goroutine, info.location, time.Since(info.acquired))
 					}
 				}
-				lockHoldersMu.Unlock()
+
+				// Also write to crash log (debug log may be /dev/null in non-debug mode)
+				if crashLog != nil {
+					crashLog.Printf("DEADLOCK WARNING: No heartbeat for %v", elapsed)
+					if len(holders) > 0 {
+						crashLog.Printf("DEADLOCK: Lock holders:")
+						for name, info := range holders {
+							crashLog.Printf("  %s: held by %s at %s for %v",
+								name, info.goroutine, info.location, time.Since(info.acquired))
+						}
+					}
+				}
 			}
 		}
 	}()
@@ -1060,7 +1077,7 @@ func petStatePath() string {
 	return paths.StatePath("pet.json")
 }
 
-// loadPetState loads the pet state from the shared file
+// loadPetState loads pet state from disk (used once at startup for persistence across restarts).
 func (c *Coordinator) loadPetState() {
 	data, err := os.ReadFile(petStatePath())
 	if err != nil {
@@ -2009,11 +2026,6 @@ func (c *Coordinator) UpdatePetState() bool {
 	prevYarnPos := c.pet.YarnPos
 	prevFloatingCount := len(c.pet.FloatingItems)
 	prevMousePos := c.pet.MousePos
-
-	// Reload shared state periodically (for cross-sidebar sync)
-	if c.pet.AnimFrame%5 == 0 {
-		c.loadPetState()
-	}
 
 	c.pet.AnimFrame++
 	now := time.Now()

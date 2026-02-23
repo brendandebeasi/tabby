@@ -26,6 +26,116 @@ import (
 var crashLog *log.Logger
 var eventLog *log.Logger
 var inputLog *log.Logger
+var daemonStartTime time.Time
+
+// rotateLogFile rotates a log file if it exceeds maxBytes.
+// Keeps one .prev backup. Returns nil on success or if file is small enough.
+func rotateLogFile(path string, maxBytes int64) {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= maxBytes {
+		return
+	}
+	prevPath := path + ".prev"
+	os.Remove(prevPath)
+	os.Rename(path, prevPath)
+}
+
+// rotateLogs rotates all tabby log files on startup to prevent unbounded growth.
+func rotateLogs(sessionID string) {
+	// Rotate session-specific logs
+	rotateLogFile(fmt.Sprintf("/tmp/tabby-daemon-%s-events.log", sessionID), 1*1024*1024)   // 1MB
+	rotateLogFile(fmt.Sprintf("/tmp/tabby-daemon-%s-crash.log", sessionID), 512*1024)        // 512KB
+	rotateLogFile(fmt.Sprintf("/tmp/tabby-daemon-%s-input.log", sessionID), 1*1024*1024)     // 1MB
+	rotateLogFile("/tmp/tabby-debug.log", 50*1024*1024)                                       // 50MB
+	rotateLogFile("/tmp/tabby-indicator-debug.log", 5*1024*1024)                               // 5MB
+}
+
+// checkPreviousCrash detects if the previous daemon died abnormally and logs forensics.
+func checkPreviousCrash(sessionID string) {
+	pidPath := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
+	heartbeatPath := fmt.Sprintf("/tmp/tabby-daemon-%s.heartbeat", sessionID)
+
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return // No previous PID file — clean start
+	}
+
+	pidStr := strings.TrimSpace(string(data))
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil || pid <= 0 {
+		return
+	}
+
+	// Check if process is still alive
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	if proc.Signal(syscall.Signal(0)) == nil {
+		return // Previous daemon still running (will be handled by PID claim logic)
+	}
+
+	// Previous daemon is dead — log forensics
+	crashLog.Printf("=== PREVIOUS DAEMON DIED ABNORMALLY ===")
+	crashLog.Printf("Previous PID: %d (dead)", pid)
+
+	// Check heartbeat file for last-alive timestamp
+	if hbData, err := os.ReadFile(heartbeatPath); err == nil {
+		parts := strings.SplitN(strings.TrimSpace(string(hbData)), "\n", 2)
+		if len(parts) >= 1 {
+			crashLog.Printf("Last heartbeat: %s", parts[0])
+		}
+	}
+
+	// Read last 20 lines of the previous events log for context
+	eventsPath := fmt.Sprintf("/tmp/tabby-daemon-%s-events.log", sessionID)
+	// Check .prev first (in case we just rotated), then current
+	for _, path := range []string{eventsPath + ".prev", eventsPath} {
+		if evData, err := os.ReadFile(path); err == nil && len(evData) > 0 {
+			lines := strings.Split(strings.TrimSpace(string(evData)), "\n")
+			start := 0
+			if len(lines) > 20 {
+				start = len(lines) - 20
+			}
+			crashLog.Printf("Last events from %s:", filepath.Base(path))
+			for _, line := range lines[start:] {
+				crashLog.Printf("  %s", line)
+			}
+			break // Only show one file
+		}
+	}
+
+	crashLog.Printf("=== END PREVIOUS CRASH FORENSICS ===")
+	logEvent("PREVIOUS_CRASH pid=%d", pid)
+}
+
+// writeHeartbeatLoop periodically writes a heartbeat file with PID and timestamp.
+// External tools (or the next daemon startup) can check this to detect hangs.
+func writeHeartbeatLoop(sessionID string, done <-chan struct{}) {
+	heartbeatPath := fmt.Sprintf("/tmp/tabby-daemon-%s.heartbeat", sessionID)
+	pid := os.Getpid()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	writeHeartbeat := func() {
+		content := fmt.Sprintf("%s\npid=%d\nuptime=%s\n",
+			time.Now().Format(time.RFC3339),
+			pid,
+			time.Since(daemonStartTime).Truncate(time.Second))
+		os.WriteFile(heartbeatPath, []byte(content), 0644)
+	}
+
+	writeHeartbeat() // Write immediately on start
+	for {
+		select {
+		case <-ticker.C:
+			writeHeartbeat()
+		case <-done:
+			os.Remove(heartbeatPath)
+			return
+		}
+	}
+}
 
 func initCrashLog(sessionID string) {
 	crashLogPath := fmt.Sprintf("/tmp/tabby-daemon-%s-crash.log", sessionID)
@@ -998,11 +1108,19 @@ func main() {
 		}
 	}
 
+	daemonStartTime = time.Now()
+
+	// Rotate logs before opening them to prevent unbounded growth
+	rotateLogs(*sessionID)
+
 	// Initialize logging early
 	initCrashLog(*sessionID)
 	initEventLog(*sessionID)
 	initInputLog(*sessionID)
 	defer recoverAndLog("main")
+
+	// Check if previous daemon died abnormally (before we claim the PID file)
+	checkPreviousCrash(*sessionID)
 
 	// Scope tmux queries to this session
 	tmux.SetSessionTarget(*sessionID)
@@ -1015,7 +1133,7 @@ func main() {
 	}
 
 	debugLog.Printf("Starting daemon for session %s", *sessionID)
-	crashLog.Printf("Daemon started for session %s", *sessionID)
+	crashLog.Printf("Daemon started for session %s pid=%d", *sessionID, os.Getpid())
 
 	// Save current window and pane for focus restoration after setup
 	saveFocusState(*sessionID)
@@ -1125,6 +1243,10 @@ func main() {
 	logEvent("DAEMON_START session=%s pid=%d", *sessionID, os.Getpid())
 	resetTerminalModes(*sessionID)
 
+	// Start heartbeat writer (detects hangs on next startup)
+	heartbeatDone := make(chan struct{})
+	go writeHeartbeatLoop(*sessionID, heartbeatDone)
+
 	// Start deadlock watchdog
 	StartDeadlockWatchdog()
 
@@ -1173,9 +1295,11 @@ func main() {
 			case <-done:
 				return true
 			case <-time.After(timeout):
-				logEvent("LOOP_STALL task=%s timeout_ms=%d", task, timeout.Milliseconds())
+				uptime := time.Since(daemonStartTime).Truncate(time.Second)
+				logEvent("LOOP_STALL task=%s timeout_ms=%d uptime=%s clients=%d", task, timeout.Milliseconds(), uptime, server.ClientCount())
 				if crashLog != nil {
-					crashLog.Printf("LOOP_STALL task=%s timeout=%v", task, timeout)
+					crashLog.Printf("LOOP_STALL task=%s timeout=%v uptime=%s clients=%d", task, timeout, uptime, server.ClientCount())
+					crashLog.Printf("LOOP_STALL stack:\n%s", debug.Stack())
 				}
 				select {
 				case sigCh <- syscall.SIGTERM:
@@ -1347,15 +1471,21 @@ func main() {
 					return
 				}
 			case <-animationTicker.C:
-				// Combined spinner + pet animation tick (was two separate tickers causing 2x BroadcastRender)
-				// Only render if something visual actually changed (dirty flag pattern)
-				spinnerVisible := coordinator.IncrementSpinner()
-				petChanged := coordinator.UpdatePetState()
-				indicatorAnimated := coordinator.HasActiveIndicatorAnimation()
-				if spinnerVisible || petChanged || indicatorAnimated {
-					perf.Log("animationTick (render)")
-					// Only render active window during animation ticks (hidden windows don't need updates)
-					server.RenderActiveWindowOnly(activeWindowID)
+				// Combined spinner + pet animation tick with timeout protection.
+				// This was previously inline (no timeout) and could freeze the
+				// entire event loop if RenderActiveWindowOnly or coordinator
+				// methods blocked.
+				ok := runLoopTask("animation_tick", 2*time.Second, func() {
+					spinnerVisible := coordinator.IncrementSpinner()
+					petChanged := coordinator.UpdatePetState()
+					indicatorAnimated := coordinator.HasActiveIndicatorAnimation()
+					if spinnerVisible || petChanged || indicatorAnimated {
+						perf.Log("animationTick (render)")
+						server.RenderActiveWindowOnly(activeWindowID)
+					}
+				})
+				if !ok {
+					return
 				}
 			case <-gitTicker.C:
 				ok := runLoopTask("git_tick", 6*time.Second, func() {
@@ -1446,7 +1576,10 @@ func main() {
 	}()
 
 	sig := <-sigCh
-	debugLog.Printf("Shutting down daemon (signal=%v)", sig)
-	logEvent("DAEMON_STOP session=%s pid=%d signal=%v", *sessionID, os.Getpid(), sig)
+	uptime := time.Since(daemonStartTime).Truncate(time.Second)
+	debugLog.Printf("Shutting down daemon (signal=%v, uptime=%s)", sig, uptime)
+	logEvent("DAEMON_STOP session=%s pid=%d signal=%v uptime=%s clients=%d", *sessionID, os.Getpid(), sig, uptime, server.ClientCount())
+	crashLog.Printf("Daemon stopped: signal=%v pid=%d uptime=%s clients=%d", sig, os.Getpid(), uptime, server.ClientCount())
+	close(heartbeatDone)
 	server.Stop()
 }
