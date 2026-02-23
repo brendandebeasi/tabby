@@ -300,7 +300,7 @@ func (d *BackgroundDetector) GetDefaultPaneHeaderInactiveBg() string {
 // GetDefaultPaneHeaderInactiveFg returns default inactive pane header text
 func (d *BackgroundDetector) GetDefaultPaneHeaderInactiveFg() string {
 	if d.IsDarkBackground() {
-		return "#cccccc" // Light gray
+		return "#ffffff" // White
 	}
 	return "#9893a5" // Muted text
 }

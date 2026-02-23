@@ -89,16 +89,17 @@ func DeriveInactiveBg(baseColor string, isDarkTerminalBg bool) string {
 	return hslToHex(h, s, l)
 }
 
-// DeriveTextColor determines the best text color (white or black) for a background
-// Ensures WCAG AA contrast ratio (4.5:1)
+// DeriveTextColor determines the best text color (white or black) for a background.
+// Uses WCAG AA large-text threshold (3:1) to prefer white on colored backgrounds,
+// falling back to black for truly light backgrounds.
 func DeriveTextColor(bgColor string) string {
-	// Try white first
-	if GetContrastRatio("#ffffff", bgColor) >= 4.5 {
+	// Prefer white on colored/dark backgrounds (3:1 = WCAG AA large text)
+	if GetContrastRatio("#ffffff", bgColor) >= 3.0 {
 		return "#ffffff"
 	}
 
-	// Try black
-	if GetContrastRatio("#000000", bgColor) >= 4.5 {
+	// Fall back to black for light backgrounds
+	if GetContrastRatio("#000000", bgColor) >= 3.0 {
 		return "#000000"
 	}
 

@@ -110,7 +110,7 @@ func (m model) getInactiveFg() string {
 	if m.theme != nil {
 		return m.theme.PaneInactiveFg
 	}
-	return "#cccccc"
+	return "#ffffff"
 }
 
 func (m model) getButtonFg() string {
@@ -120,7 +120,7 @@ func (m model) getButtonFg() string {
 	if m.theme != nil {
 		return m.theme.PaneButtonFg
 	}
-	return "#888888"
+	return "#ffffff"
 }
 
 func (m model) View() string {
