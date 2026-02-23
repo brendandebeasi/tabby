@@ -656,7 +656,13 @@ tmux bind-key -n M-% select-window -t :5
 # Ensure mode surfaces are present on load.
 # This covers first-run bootstrap and config reloads where mode is already set
 # but daemon/renderers are not running yet.
-tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\""
+# Run synchronously (no -b) so the sidebar is ready before the first prompt appears.
+# session-created and client-attached hooks fire before tabby.tmux runs, so this
+# is the only reliable bootstrap path for the initial session.
+_TABBY_BOOT_T0=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null || date +%s)
+tmux run-shell "$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\""
+_TABBY_BOOT_T1=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null || date +%s)
+printf "%s tabby_bootstrap_ms=%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$((_TABBY_BOOT_T1 - _TABBY_BOOT_T0))" >> /tmp/tabby-startup.log 2>/dev/null || true
 
 tmux run-shell -b "$STATUS_GUARD_SCRIPT \"#{session_id}\""
 tmux run-shell -b "$FOCUS_RECOVERY_SCRIPT \"#{session_id}\""

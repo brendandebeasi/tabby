@@ -14,6 +14,16 @@ if [ -z "$WINDOW_ID" ]; then
     WINDOW_ID=$(tmux display-message -p '#{window_id}' 2>/dev/null || echo "")
 fi
 
+signal_daemon() {
+    if [ -n "$SESSION_ID" ]; then
+        DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
+        if [ -f "$DAEMON_PID_FILE" ]; then
+            PID="$(cat "$DAEMON_PID_FILE" 2>/dev/null || true)"
+            [ -n "$PID" ] && kill -USR1 "$PID" 2>/dev/null || true
+        fi
+    fi
+}
+
 cleanup_window_if_orphan() {
     local target_window="$1"
     [ -z "$target_window" ] && return 0
@@ -41,6 +51,10 @@ cleanup_window_if_orphan() {
                 tmux run-shell "$CURRENT_DIR/scripts/select_previous_window.sh" 2>/dev/null || true
             fi
             tmux kill-window -t "$target_window" 2>/dev/null || true
+            # Signal daemon immediately after kill so the tab vanishes without waiting
+            # for the rest of this script. The daemon's cleanupOrphanWindowsByTmux
+            # handles any remaining orphans in other windows on the same refresh cycle.
+            signal_daemon
             return 0
         fi
 
@@ -55,20 +69,6 @@ if [ -n "$WINDOW_ID" ]; then
     cleanup_window_if_orphan "$WINDOW_ID"
 fi
 
-if [ -n "$SESSION_ID" ]; then
-    while IFS= read -r wid; do
-        [ -z "$wid" ] && continue
-        [ "$wid" = "$WINDOW_ID" ] && continue
-        cleanup_window_if_orphan "$wid"
-    done < <(tmux list-windows -t "$SESSION_ID" -F "#{window_id}" 2>/dev/null || true)
-fi
-
-if [ -n "$SESSION_ID" ]; then
-    DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
-    if [ -f "$DAEMON_PID_FILE" ]; then
-        PID="$(cat "$DAEMON_PID_FILE" 2>/dev/null || true)"
-        if [ -n "$PID" ]; then
-            kill -USR1 "$PID" 2>/dev/null || true
-        fi
-    fi
-fi
+# The daemon's cleanupOrphanWindowsByTmux already scans all windows on every
+# refresh cycle triggered above, so a redundant session-wide shell scan here
+# only adds latency (N-1 extra tmux queries). Removed.
