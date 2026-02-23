@@ -1309,6 +1309,26 @@ func main() {
 			}
 		}
 
+		// runLoopTaskNonFatal runs a task with a timeout but only logs on stall (no SIGTERM).
+		// Use for cosmetic tasks like animation where a skipped frame is acceptable.
+		runLoopTaskNonFatal := func(task string, timeout time.Duration, fn func()) {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				fn()
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(timeout):
+				uptime := time.Since(daemonStartTime).Truncate(time.Second)
+				logEvent("LOOP_SKIP task=%s timeout_ms=%d uptime=%s clients=%d", task, timeout.Milliseconds(), uptime, server.ClientCount())
+				if crashLog != nil {
+					crashLog.Printf("LOOP_SKIP task=%s timeout=%v (non-fatal, skipping frame)", task, timeout)
+				}
+			}
+		}
+
 		refreshTicker := time.NewTicker(5 * time.Second)          // Window list poll (fallback, less frequent now)
 		windowCheckTicker := time.NewTicker(2 * time.Second)      // Spawn/cleanup poll (fallback)
 		animationTicker := time.NewTicker(100 * time.Millisecond) // Combined spinner + pet animation (was two separate tickers)
@@ -1472,10 +1492,8 @@ func main() {
 				}
 			case <-animationTicker.C:
 				// Combined spinner + pet animation tick with timeout protection.
-				// This was previously inline (no timeout) and could freeze the
-				// entire event loop if RenderActiveWindowOnly or coordinator
-				// methods blocked.
-				ok := runLoopTask("animation_tick", 2*time.Second, func() {
+				// Animation is cosmetic — a stall just skips the frame (non-fatal).
+				runLoopTaskNonFatal("animation_tick", 2*time.Second, func() {
 					spinnerVisible := coordinator.IncrementSpinner()
 					petChanged := coordinator.UpdatePetState()
 					indicatorAnimated := coordinator.HasActiveIndicatorAnimation()
@@ -1484,9 +1502,6 @@ func main() {
 						server.RenderActiveWindowOnly(activeWindowID)
 					}
 				})
-				if !ok {
-					return
-				}
 			case <-gitTicker.C:
 				ok := runLoopTask("git_tick", 6*time.Second, func() {
 					// Only broadcast if git state changed

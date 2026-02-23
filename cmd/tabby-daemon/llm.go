@@ -172,15 +172,22 @@ func triggerThoughtGeneration(pet *petState, name string) {
 	}
 
 	thoughtBufferMutex.Lock()
-	needsRefresh := len(thoughtBuffer) < 50 || time.Since(lastThoughtGeneration) > thoughtGenerationInterval
+	bufferLow := len(thoughtBuffer) < 50
+	timeExpired := thoughtGenerationInterval > 0 && time.Since(lastThoughtGeneration) > thoughtGenerationInterval
 	thoughtBufferMutex.Unlock()
 
-	if needsRefresh {
+	if bufferLow || timeExpired {
 		go func() {
 			thoughts := generateBulkThoughts(pet, name, 200)
 			if len(thoughts) > 0 {
 				thoughtBufferMutex.Lock()
-				thoughtBuffer = append(thoughtBuffer, thoughts...)
+				if timeExpired {
+					// Time-based refresh: replace stale buffer with fresh thoughts
+					thoughtBuffer = thoughts
+				} else {
+					// Low-buffer refill: append
+					thoughtBuffer = append(thoughtBuffer, thoughts...)
+				}
 				lastThoughtGeneration = time.Now()
 				thoughtBufferMutex.Unlock()
 				saveThoughtBuffer()
