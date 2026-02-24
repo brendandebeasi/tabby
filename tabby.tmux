@@ -51,6 +51,8 @@ tmux set-option -g aggressive-resize on
 # New panes/windows open in the current pane's directory
 tmux bind-key '"' split-window -v -c "#{pane_current_path}"
 tmux bind-key '%' split-window -h -c "#{pane_current_path}"
+tmux bind-key '|' split-window -h -c "#{pane_current_path}"
+tmux bind-key '-' split-window -v -c "#{pane_current_path}"
 
 # Create script to capture current window's group, create new window,
 # spawn sidebar, and restore focus — all synchronously in one shot.

@@ -1834,6 +1834,9 @@ func (c *Coordinator) updatePaneHeaderColors() {
 				}
 				args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", tabBg)
 				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", tabBg)
+				if group.Theme.Icon != "" {
+					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_group_icon", group.Theme.Icon)
+				}
 
 				if autoBorder || borderFromTab {
 					// Border fg = tab's text color, border bg = tab's bg color
