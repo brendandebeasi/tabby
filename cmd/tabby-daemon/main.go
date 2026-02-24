@@ -43,17 +43,17 @@ func rotateLogFile(path string, maxBytes int64) {
 // rotateLogs rotates all tabby log files on startup to prevent unbounded growth.
 func rotateLogs(sessionID string) {
 	// Rotate session-specific logs
-	rotateLogFile(fmt.Sprintf("/tmp/tabby-daemon-%s-events.log", sessionID), 1*1024*1024)   // 1MB
-	rotateLogFile(fmt.Sprintf("/tmp/tabby-daemon-%s-crash.log", sessionID), 512*1024)        // 512KB
-	rotateLogFile(fmt.Sprintf("/tmp/tabby-daemon-%s-input.log", sessionID), 1*1024*1024)     // 1MB
+	rotateLogFile(daemon.RuntimePath(sessionID, "-events.log"), 1*1024*1024)   // 1MB
+	rotateLogFile(daemon.RuntimePath(sessionID, "-crash.log"), 512*1024)        // 512KB
+	rotateLogFile(daemon.RuntimePath(sessionID, "-input.log"), 1*1024*1024)     // 1MB
 	rotateLogFile("/tmp/tabby-debug.log", 50*1024*1024)                                       // 50MB
 	rotateLogFile("/tmp/tabby-indicator-debug.log", 5*1024*1024)                               // 5MB
 }
 
 // checkPreviousCrash detects if the previous daemon died abnormally and logs forensics.
 func checkPreviousCrash(sessionID string) {
-	pidPath := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
-	heartbeatPath := fmt.Sprintf("/tmp/tabby-daemon-%s.heartbeat", sessionID)
+	pidPath := daemon.RuntimePath(sessionID, ".pid")
+	heartbeatPath := daemon.RuntimePath(sessionID, ".heartbeat")
 
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
@@ -88,7 +88,7 @@ func checkPreviousCrash(sessionID string) {
 	}
 
 	// Read last 20 lines of the previous events log for context
-	eventsPath := fmt.Sprintf("/tmp/tabby-daemon-%s-events.log", sessionID)
+	eventsPath := daemon.RuntimePath(sessionID, "-events.log")
 	// Check .prev first (in case we just rotated), then current
 	for _, path := range []string{eventsPath + ".prev", eventsPath} {
 		if evData, err := os.ReadFile(path); err == nil && len(evData) > 0 {
@@ -112,7 +112,7 @@ func checkPreviousCrash(sessionID string) {
 // writeHeartbeatLoop periodically writes a heartbeat file with PID and timestamp.
 // External tools (or the next daemon startup) can check this to detect hangs.
 func writeHeartbeatLoop(sessionID string, done <-chan struct{}) {
-	heartbeatPath := fmt.Sprintf("/tmp/tabby-daemon-%s.heartbeat", sessionID)
+	heartbeatPath := daemon.RuntimePath(sessionID, ".heartbeat")
 	pid := os.Getpid()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -138,7 +138,7 @@ func writeHeartbeatLoop(sessionID string, done <-chan struct{}) {
 }
 
 func initCrashLog(sessionID string) {
-	crashLogPath := fmt.Sprintf("/tmp/tabby-daemon-%s-crash.log", sessionID)
+	crashLogPath := daemon.RuntimePath(sessionID, "-crash.log")
 	f, err := os.OpenFile(crashLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		crashLog = log.New(os.Stderr, "[CRASH] ", log.LstdFlags)
@@ -148,7 +148,7 @@ func initCrashLog(sessionID string) {
 }
 
 func initEventLog(sessionID string) {
-	eventLogPath := fmt.Sprintf("/tmp/tabby-daemon-%s-events.log", sessionID)
+	eventLogPath := daemon.RuntimePath(sessionID, "-events.log")
 	f, err := os.OpenFile(eventLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		eventLog = log.New(os.Stderr, "[EVENT] ", log.LstdFlags)
@@ -167,7 +167,7 @@ var inputLogEnabled bool
 var inputLogCheckTime time.Time
 
 func initInputLog(sessionID string) {
-	inputLogPath := fmt.Sprintf("/tmp/tabby-daemon-%s-input.log", sessionID)
+	inputLogPath := daemon.RuntimePath(sessionID, "-input.log")
 	f, err := os.OpenFile(inputLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		inputLog = log.New(os.Stderr, "[INPUT] ", log.LstdFlags)
@@ -1202,9 +1202,11 @@ func main() {
 			}
 			logEvent("INPUT_SIGNALED_REFRESH client=%s", clientID)
 		} else {
-			// Internal-only state change (e.g. toggle_group) - render immediately
-			// since no tmux state changed and no USR1 will arrive
-			server.BroadcastRender()
+			// Internal-only state change (e.g. toggle_group) - render the
+			// requesting client immediately for snappy response, then broadcast
+			// to remaining clients asynchronously.
+			server.SendRenderToClient(clientID)
+			go server.BroadcastRender()
 		}
 		logEvent("INPUT_DONE client=%s", clientID)
 	}
@@ -1235,29 +1237,10 @@ func main() {
 		server.SendMarkerPickerToClient(clientID, picker)
 	}
 
-	// Start server
-	if err := server.Start(); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
-	}
-	debugLog.Printf("Server listening on %s", server.GetSocketPath())
-	logEvent("DAEMON_START session=%s pid=%d", *sessionID, os.Getpid())
-	resetTerminalModes(*sessionID)
-
-	// Start heartbeat writer (detects hangs on next startup)
-	heartbeatDone := make(chan struct{})
-	go writeHeartbeatLoop(*sessionID, heartbeatDone)
-
-	// Start deadlock watchdog
-	StartDeadlockWatchdog()
-
-	// Restore focus after daemon initialization completes
-	// Wait for renderers to spawn and settle before restoring focus
-	go func() {
-		time.Sleep(1500 * time.Millisecond)
-		restoreFocusState()
-	}()
-
-	// Listen for SIGUSR1 signals from tmux hooks for instant refresh
+	// Register SIGUSR1 handler BEFORE server.Start() creates the socket.
+	// ensure_sidebar.sh sends USR1 the moment it detects the socket, so the
+	// handler must be in place before the socket appears or the signal arrives
+	// before Notify and kills the process (Go uses the OS default — terminate).
 	refreshSigCh := make(chan os.Signal, 10)
 	signal.Notify(refreshSigCh, syscall.SIGUSR1)
 	go func() {
@@ -1278,6 +1261,29 @@ func main() {
 				logEvent("SIGNAL_USR1 queue=full action=coalesced")
 			}
 		}
+	}()
+
+	// Start server (creates the socket — SIGUSR1 is already registered above,
+	// so any signal from ensure_sidebar.sh that arrives immediately is safe).
+	if err := server.Start(); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
+	debugLog.Printf("Server listening on %s", server.GetSocketPath())
+	logEvent("DAEMON_START session=%s pid=%d", *sessionID, os.Getpid())
+	resetTerminalModes(*sessionID)
+
+	// Start heartbeat writer (detects hangs on next startup)
+	heartbeatDone := make(chan struct{})
+	go writeHeartbeatLoop(*sessionID, heartbeatDone)
+
+	// Start deadlock watchdog
+	StartDeadlockWatchdog()
+
+	// Restore focus after daemon initialization completes
+	// Wait for renderers to spawn and settle before restoring focus
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		restoreFocusState()
 	}()
 
 	// Start coordinator refresh loops with change detection
@@ -1542,7 +1548,7 @@ func main() {
 				}
 
 				// Check if PID file still has our PID (another daemon may have taken over)
-				pidPath := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", *sessionID)
+				pidPath := daemon.RuntimePath(*sessionID, ".pid")
 				if data, err := os.ReadFile(pidPath); err == nil {
 					pidStr := strings.TrimSpace(string(data))
 					if pid, err := strconv.Atoi(pidStr); err == nil && pid != myPid {

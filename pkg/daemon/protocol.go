@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -172,18 +173,26 @@ type MarkerPickerPayload struct {
 	Options []MarkerOptionPayload `json:"options"`
 }
 
-// SocketPath returns the daemon socket path for a session
-func SocketPath(sessionID string) string {
+// runtimePrefix returns an optional prefix for runtime files.
+// Set TABBY_RUNTIME_PREFIX to isolate demo/test instances (e.g. "demo-").
+func runtimePrefix() string {
+	return os.Getenv("TABBY_RUNTIME_PREFIX")
+}
+
+// RuntimePath builds a runtime file path: /tmp/{prefix}tabby-daemon-{session}{suffix}
+func RuntimePath(sessionID, suffix string) string {
 	if sessionID == "" {
 		sessionID = "default"
 	}
-	return fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
+	return fmt.Sprintf("/tmp/%stabby-daemon-%s%s", runtimePrefix(), sessionID, suffix)
+}
+
+// SocketPath returns the daemon socket path for a session
+func SocketPath(sessionID string) string {
+	return RuntimePath(sessionID, ".sock")
 }
 
 // PidPath returns the pidfile path for a session
 func PidPath(sessionID string) string {
-	if sessionID == "" {
-		sessionID = "default"
-	}
-	return fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
+	return RuntimePath(sessionID, ".pid")
 }

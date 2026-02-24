@@ -10,12 +10,12 @@ if [ "$(tmux show-option -gqv @tabby_spawning 2>/dev/null)" = "1" ]; then
     exit 0
 fi
 
-SESSION_ID="${1:-}"
+# Always query tmux directly for session ID. Passing #{session_id} through
+# tmux run-shell embeds e.g. "$0" in the shell command, which sh then
+# re-expands to the shell executable name instead of the tmux session ID.
+SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
 WINDOW_ID="${2:-}"
 
-if [ -z "$SESSION_ID" ]; then
-    SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
-fi
 if [ -z "$WINDOW_ID" ]; then
     WINDOW_ID=$(tmux display-message -p '#{window_id}' 2>/dev/null || echo "")
 fi

@@ -234,7 +234,7 @@ func (s *Server) handleClient(conn net.Conn) {
 				s.OnConnect(clientID, paneID)
 			}
 			// Send initial render
-			s.sendRenderToClient(clientID)
+			s.SendRenderToClient(clientID)
 
 		case MsgUnsubscribe:
 			s.clientsMu.Lock()
@@ -257,7 +257,7 @@ func (s *Server) handleClient(conn net.Conn) {
 					if s.OnResize != nil {
 						s.OnResize(clientID, resize.Width, resize.Height, resize.PaneID)
 					}
-					s.sendRenderToClient(clientID)
+					s.SendRenderToClient(clientID)
 				}
 			}
 
@@ -330,7 +330,7 @@ func (s *Server) BroadcastRender() {
 	}
 
 	for _, id := range clientIDs {
-		s.sendRenderToClient(id)
+		s.SendRenderToClient(id)
 	}
 }
 
@@ -352,15 +352,15 @@ func (s *Server) RenderActiveWindowOnly(activeWindowID string) {
 		// Render if: sidebar for active window, or header in active window
 		// ClientID format: "@1" for sidebar, "header:%123" for pane headers
 		if id == activeWindowID {
-			s.sendRenderToClient(id)
+			s.SendRenderToClient(id)
 		}
 		// Note: headers are per-pane, not per-window, so we skip them during
 		// animation-only renders. They'll get updated on window state changes.
 	}
 }
 
-// sendRenderToClient generates and sends render content to a specific client
-func (s *Server) sendRenderToClient(clientID string) {
+// SendRenderToClient generates and sends render content to a specific client
+func (s *Server) SendRenderToClient(clientID string) {
 	s.clientsMu.RLock()
 	client, ok := s.clients[clientID]
 	if !ok {

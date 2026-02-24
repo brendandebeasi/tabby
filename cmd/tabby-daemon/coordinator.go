@@ -4585,13 +4585,20 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		}
 
 		// Build header
-		icon := theme.Icon
-		if icon != "" {
-			icon += " "
-		}
-		headerText := icon + group.Name
+		icon := strings.TrimSpace(theme.Icon)
+		headerText := group.Name
 		if isCollapsed && len(group.Windows) > 0 {
 			headerText += fmt.Sprintf(" (%d)", len(group.Windows))
+		}
+		// Icon is rendered separately with transparent bg (no group color behind emoji).
+		// The space between icon and name goes INSIDE headerText (with bg fill),
+		// not after the icon (which would create a transparent gap).
+		renderedIcon := ""
+		renderedIconW := 0
+		if icon != "" {
+			renderedIcon = icon
+			renderedIconW = runewidth.StringWidth(icon)
+			headerText = " " + headerText
 		}
 
 		// Track group header line
@@ -4623,12 +4630,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			if hasWindows {
 				prefix := collapseStyle.Render(collapseIcon)
 				prefixW := runewidth.StringWidth(stripAnsi(prefix))
-				restW := width - prefixW
+				restW := width - prefixW - renderedIconW
 				if restW < 1 {
 					restW = 1
 				}
 
-				// Truncate header text to fit width (accounting for tree branch + collapse icon)
+				// Truncate header text to fit width (accounting for tree branch + collapse icon + icon)
 				headerMaxWidth := restW
 				if lipgloss.Width(headerText) > headerMaxWidth {
 					truncated := ""
@@ -4646,12 +4653,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				} else {
 					rest = lipgloss.NewStyle().Width(restW).Render(rest)
 				}
-				s.WriteString(prefix + rest + "\n")
+				s.WriteString(prefix + renderedIcon + rest + "\n")
 			} else {
 				// No windows - show header with group tree branch but no collapse icon
 				prefix := " "
 				prefixW := runewidth.StringWidth(stripAnsi(prefix))
-				restW := width - prefixW
+				restW := width - prefixW - renderedIconW
 				if restW < 1 {
 					restW = 1
 				}
@@ -4666,9 +4673,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					headerText = truncated + "~"
 				}
 				headerContent := headerStyle.Render(headerText)
-				renderedHeader := prefix + headerContent
+				renderedHeader := prefix + renderedIcon + headerContent
 				if bg != "" {
-					renderedHeader = prefix + c.applyBackgroundFill(headerContent, bg, restW)
+					renderedHeader = prefix + renderedIcon + c.applyBackgroundFill(headerContent, bg, restW)
 				}
 				s.WriteString(renderedHeader + "\n")
 			}
@@ -7851,7 +7858,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.collapsedGroups[groupName] = true
 		}
 		c.stateMu.Unlock()
-		c.saveCollapsedGroups()
+		// Save async - don't block render on multiple tmux round-trips
+		go c.saveCollapsedGroups()
 		return false // No tmux window state change
 
 	case "button":
