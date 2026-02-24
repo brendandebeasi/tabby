@@ -1812,6 +1812,12 @@ func (c *Coordinator) updatePaneHeaderColors() {
 	}
 	// Resolve border fg: config border_fg > group theme fg > same as bg (transparent/solid bar)
 	configBorderFg := c.config.PaneHeader.BorderFg
+	// Shell prompt integration: default enabled unless explicitly disabled
+	shellIntegration := c.config.Prompt.ShellIntegration == nil || *c.config.Prompt.ShellIntegration
+	promptFallbackIcon := c.config.Prompt.FallbackIcon
+	if promptFallbackIcon == "" {
+		promptFallbackIcon = "•"
+	}
 	go func() {
 		var args []string
 		for _, group := range grouped {
@@ -1834,8 +1840,16 @@ func (c *Coordinator) updatePaneHeaderColors() {
 				}
 				args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", tabBg)
 				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", tabBg)
-				if group.Theme.Icon != "" {
-					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_group_icon", group.Theme.Icon)
+				// Shell prompt integration: store effective icon per window
+				if shellIntegration {
+					effectiveIcon := group.Theme.Icon
+					if win.Icon != "" {
+						effectiveIcon = win.Icon
+					}
+					if effectiveIcon == "" {
+						effectiveIcon = promptFallbackIcon
+					}
+					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_prompt_icon", effectiveIcon)
 				}
 
 				if autoBorder || borderFromTab {

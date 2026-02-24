@@ -139,6 +139,11 @@ pane_header:
 prompt:
   # Colors auto-derived from terminal theme
   bold: true
+  # Shell prompt integration: sets @tabby_prompt_icon and @tabby_pane_active
+  # on each window so your shell prompt can mirror the window's group color/icon.
+  # See scripts/tabby-prompt.sh for zsh setup instructions.
+  shell_integration: true
+  fallback_icon: "•"  # Icon used when a group has no icon defined
 
 # Terminal app for notifications deep-linking (used by focus_pane.sh)
 # Options: Ghostty, iTerm, Terminal, Alacritty, kitty, WezTerm

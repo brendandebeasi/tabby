@@ -237,9 +237,11 @@ type ClockWidget struct {
 }
 
 type PromptStyle struct {
-	Fg   string `yaml:"fg"`   // Prompt text color (default: #000000)
-	Bg   string `yaml:"bg"`   // Prompt background (default: #f0f0f0)
-	Bold bool   `yaml:"bold"` // Bold text (default: true)
+	Fg               string `yaml:"fg"`                // Prompt text color (default: #000000)
+	Bg               string `yaml:"bg"`                // Prompt background (default: #f0f0f0)
+	Bold             bool   `yaml:"bold"`              // Bold text (default: true)
+	ShellIntegration *bool  `yaml:"shell_integration"` // Set @tabby_prompt_icon on windows for shell prompt use (default: true)
+	FallbackIcon     string `yaml:"fallback_icon"`     // Icon when group has no icon defined (default: •)
 }
 
 type PaneHeader struct {
