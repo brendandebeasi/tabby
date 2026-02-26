@@ -65,7 +65,13 @@ PLUGIN_DIR="$CURRENT_DIR"
 RENDERER_BIN="\$PLUGIN_DIR/bin/sidebar-renderer"
 
 tmux set-option -g @tabby_spawning 1 2>/dev/null || true
-trap 'tmux set-option -gu @tabby_spawning 2>/dev/null || true' EXIT
+# NOTE: Do NOT clear @tabby_spawning in an EXIT trap -- the after-new-window
+# hook fires AFTER run-shell completes, so an EXIT trap would clear the
+# guard before hooks can check it.  Clear it asynchronously with a delay
+# so hooks that check @tabby_spawning (ensure_sidebar, enforce_status)
+# still see it as set.
+cleanup_spawning() { sleep 0.3; tmux set-option -gu @tabby_spawning 2>/dev/null || true; }
+trap 'cleanup_spawning &' EXIT
 
 SAVED_GROUP=\$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
 SAVED_PATH=\$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
@@ -78,6 +84,12 @@ if [ -z "\$SAVED_PATH" ]; then
     SAVED_PATH=\$(tmux display-message -p "#{pane_current_path}")
 fi
 
+# Capture the current window's prompt icon and pane colors so we can pre-set
+# them on the new window BEFORE the shell starts (the daemon's USR1 refresh
+# is async and would arrive too late for the initial prompt render).
+SAVED_ICON=\$(tmux show-option -wqv @tabby_prompt_icon 2>/dev/null || echo "")
+SAVED_PANE_ACTIVE=\$(tmux show-option -wqv @tabby_pane_active 2>/dev/null || echo "")
+SAVED_PANE_INACTIVE=\$(tmux show-option -wqv @tabby_pane_inactive 2>/dev/null || echo "")
 NEW_WINDOW_ID=\$(tmux new-window -P -F "#{window_id}" -c "\$SAVED_PATH" 2>/dev/null || true)
 NEW_WINDOW_ID=\$(printf "%s" "\$NEW_WINDOW_ID" | tr -d '\r\n')
 
@@ -85,6 +97,18 @@ if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_GROUP" ] && [ "\$SAVED_GROUP" != "D
     tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_group "\$SAVED_GROUP" 2>/dev/null || true
 fi
 
+# Pre-set prompt icon and pane colors on the new window so the shell sees
+# them immediately (same group = same icon/colors; daemon will correct later
+# if they differ).
+if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_ICON" ]; then
+    tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_prompt_icon "\$SAVED_ICON" 2>/dev/null || true
+fi
+if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_PANE_ACTIVE" ]; then
+    tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_pane_active "\$SAVED_PANE_ACTIVE" 2>/dev/null || true
+fi
+if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_PANE_INACTIVE" ]; then
+    tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_pane_inactive "\$SAVED_PANE_INACTIVE" 2>/dev/null || true
+fi
 # Spawn sidebar renderer directly so the window is fully set up before
 # any hooks fire.  The daemon will see the renderer already exists and skip.
 MODE=\$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
@@ -105,8 +129,9 @@ fi
 # but sidebar spawn + hooks can steal it)
 if [ -n "\$NEW_WINDOW_ID" ]; then
     tmux select-window -t "\$NEW_WINDOW_ID" 2>/dev/null || true
-    # Select the content pane (not the sidebar) in the new window
-    CONTENT_PANE=\$(tmux list-panes -t "\$NEW_WINDOW_ID" -F '#{pane_id}\x1f#{pane_current_command}' 2>/dev/null | grep -v 'sidebar-render' | head -1 | cut -d$'\x1f' -f1)
+    # Select the content pane (not the sidebar) — sidebar is spawned with -b
+    # so it is pane index 0; the content pane is the last pane in the window.
+    CONTENT_PANE=\$(tmux list-panes -t "\$NEW_WINDOW_ID" -F '#{pane_id}' 2>/dev/null | tail -1)
     [ -n "\$CONTENT_PANE" ] && tmux select-pane -t "\$CONTENT_PANE" 2>/dev/null || true
 fi
 
