@@ -65,13 +65,11 @@ PLUGIN_DIR="$CURRENT_DIR"
 RENDERER_BIN="\$PLUGIN_DIR/bin/sidebar-renderer"
 
 tmux set-option -g @tabby_spawning 1 2>/dev/null || true
-# NOTE: Do NOT clear @tabby_spawning in an EXIT trap -- the after-new-window
-# hook fires AFTER run-shell completes, so an EXIT trap would clear the
-# guard before hooks can check it.  Clear it asynchronously with a delay
-# so hooks that check @tabby_spawning (ensure_sidebar, enforce_status)
-# still see it as set.
-cleanup_spawning() { sleep 0.3; tmux set-option -gu @tabby_spawning 2>/dev/null || true; }
-trap 'cleanup_spawning &' EXIT
+# NOTE: @tabby_spawning is cleared at the end of this script via
+# 'tmux run-shell -b' which schedules an independent background
+# process that survives after run-shell teardown.  The EXIT trap
+# approach (cleanup &) does NOT work because tmux kills bg
+# processes when the run-shell context exits.
 
 SAVED_GROUP=\$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
 SAVED_PATH=\$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
@@ -137,6 +135,12 @@ fi
 
 tmux set-option -gu @tabby_new_window_group 2>/dev/null || true
 tmux set-option -gu @tabby_new_window_path 2>/dev/null || true
+
+# Clear @tabby_spawning after a short delay so after-new-window hooks
+# (which fire after this script exits) still see it as set.
+# Uses 'run-shell -b' which spawns an independent tmux-managed process
+# that survives after this script's run-shell context exits.
+tmux run-shell -b 'sleep 0.3; tmux set-option -gu @tabby_spawning 2>/dev/null || true'
 
 # Single signal to daemon for rendering update
 PID_FILE="/tmp/tabby-daemon-\$(tmux display-message -p '#{session_id}').pid"
