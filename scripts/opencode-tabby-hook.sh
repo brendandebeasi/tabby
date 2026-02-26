@@ -7,11 +7,15 @@ TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INDICATOR="$SCRIPT_DIR/set-tabby-indicator.sh"
 FOCUS_PANE="$SCRIPT_DIR/focus_pane.sh"
 LOG_FILE="/tmp/tabby-opencode-hook.log"
-TMUX_CMD="/opt/homebrew/bin/tmux"
+
+# Use tmux from PATH — never hardcode a specific installation path
+TMUX_CMD="tmux"
 
 # ── Resolve TMUX_PANE ─────────────────────────────────────────────────────
 # The opencode-notifier plugin often spawns hooks without TMUX/TMUX_PANE.
-# Fall back to finding the opencode process's pane via tmux list-panes.
+# We MUST find the correct pane — using the active pane is wrong because
+# the user may have switched windows since the hook was registered.
+
 if [ -z "${TMUX:-}" ]; then
     # Try to discover tmux socket from running server
     TMUX_SOCKET=$($TMUX_CMD display-message -p '#{socket_path},#{pid},#{client_tty}' 2>/dev/null || true)
@@ -20,16 +24,14 @@ if [ -z "${TMUX:-}" ]; then
     fi
 fi
 
-if [ -z "${TMUX_PANE:-}" ] && [ -n "${TMUX:-}" ]; then
-    TMUX_PANE=$($TMUX_CMD display-message -p '#{pane_id}' 2>/dev/null || true)
-    export TMUX_PANE
-fi
+# Do NOT use `display-message -p` as fallback — that returns the active pane,
+# which may be a completely different window. Only trust TMUX_PANE if it was
+# set by tmux itself, or if we find it via process tree walking.
 
-# If still no pane, find it from the opencode process tree
+# Walk up from our PID to find a parent that's in a tmux pane
 if [ -z "${TMUX_PANE:-}" ]; then
-    # Walk up from our PID to find a parent that's in a tmux pane
     SEARCH_PID=$$
-    for _ in 1 2 3 4 5 6 7 8; do
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
         SEARCH_PID=$(ps -o ppid= -p "$SEARCH_PID" 2>/dev/null | tr -d ' ') || break
         [ -z "$SEARCH_PID" ] || [ "$SEARCH_PID" = "1" ] && break
         # Check if this PID matches any tmux pane
@@ -43,28 +45,36 @@ if [ -z "${TMUX_PANE:-}" ]; then
 fi
 
 # ── Parse event ───────────────────────────────────────────────────────────
+# OpenCode events come as either:
+#   1. Plain string: "complete", "permission", etc.
+#   2. JSON: {"event": "complete", ...} or {"type": "complete", ...}
 EVENT="$RAW_EVENT"
 if [[ "$EVENT" =~ ^\{.*\}$ ]]; then
-    PARSED=$(python3 - <<'PY' "$EVENT"
+    # Try jq first (fast, reliable), fall back to python3
+    if command -v jq &>/dev/null; then
+        PARSED=$(echo "$EVENT" | jq -r '(.event // .type // .name // empty)' 2>/dev/null || true)
+    elif command -v python3 &>/dev/null; then
+        PARSED=$(python3 -c "
 import json,sys
 try:
-    data=json.loads(sys.argv[1])
+    data=json.loads(sys.stdin.read())
+    for key in ('event','type','name'):
+        v=data.get(key)
+        if isinstance(v,str) and v:
+            print(v)
+            break
 except Exception:
-    print("")
-    raise SystemExit
-for key in ("event","type","name"):
-    v=data.get(key)
-    if isinstance(v,str) and v:
-        print(v)
-        break
-PY
-)
+    pass
+" <<< "$EVENT" 2>/dev/null || true)
+    else
+        PARSED=""
+    fi
     if [ -n "$PARSED" ]; then
         EVENT="$PARSED"
     fi
 fi
 
-printf "%s event=%s tmux=%s pane=%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$EVENT" "${TMUX:-}" "${TMUX_PANE:-}" >> "$LOG_FILE"
+printf "%s event=%s pane=%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$EVENT" "${TMUX_PANE:-}" >> "$LOG_FILE"
 
 # ── Get tmux context for notifications ────────────────────────────────────
 WINDOW_NAME=""
@@ -142,7 +152,11 @@ case "$EVENT" in
             "Error occurred — click to check"
         ;;
     *)
-        "$INDICATOR" busy 0
-        "$INDICATOR" input 1
+        # Unknown event — log but don't change state aggressively.
+        # Only clear busy if we have a valid pane; otherwise skip entirely.
+        if [ -n "${TMUX_PANE:-}" ]; then
+            "$INDICATOR" busy 0
+            "$INDICATOR" input 1
+        fi
         ;;
 esac

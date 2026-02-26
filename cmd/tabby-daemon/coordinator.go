@@ -9702,7 +9702,13 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 
 	if newWindowID != "" {
 		exec.Command("tmux", "select-window", "-t", newWindowID).Run()
+		// Select the content pane (not the sidebar) in the new window
+		selectContentPaneInWindow(newWindowID)
 	}
+
+	// Force immediate refresh so pane headers get correct colors/icons
+	// without waiting for the async USR1 signal
+	c.RefreshWindows()
 }
 
 // showIndicatorContextMenu displays the context menu for window indicators (busy, bell, etc.)
@@ -10121,6 +10127,24 @@ func findWindowByTarget(windows []tmux.Window, target string) *tmux.Window {
 // than a sidebar or pane-header.
 func selectContentPaneInActiveWindow() {
 	out, err := exec.Command("tmux", "list-panes",
+		"-F", "#{pane_id}\x1f#{pane_current_command}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "\x1f", 2)
+		if len(parts) == 2 {
+			if !isAuxiliaryPaneCommand(parts[1]) {
+				exec.Command("tmux", "select-pane", "-t", parts[0]).Run()
+				return
+			}
+		}
+	}
+}
+
+// selectContentPaneInWindow selects the first non-auxiliary pane in the given window.
+func selectContentPaneInWindow(windowID string) {
+	out, err := exec.Command("tmux", "list-panes", "-t", windowID,
 		"-F", "#{pane_id}\x1f#{pane_current_command}").Output()
 	if err != nil {
 		return

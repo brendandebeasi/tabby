@@ -98,8 +98,16 @@ if [ "\$MODE" = "enabled" ] && [ -n "\$NEW_WINDOW_ID" ] && [ -x "\$RENDERER_BIN"
         [ "\${TABBY_DEBUG:-}" = "1" ] && DEBUG_FLAG="-debug"
         tmux split-window -d -t "\$FIRST_PANE" -h -b -f -l "\$SIDEBAR_WIDTH" \\
             "exec '\$RENDERER_BIN' -session '\$SESSION_ID' -window '\$NEW_WINDOW_ID' \$DEBUG_FLAG" 2>/dev/null || true
-        tmux select-pane -t "\$FIRST_PANE" 2>/dev/null || true
     fi
+fi
+
+# Ensure the new window has focus (tmux new-window usually does this,
+# but sidebar spawn + hooks can steal it)
+if [ -n "\$NEW_WINDOW_ID" ]; then
+    tmux select-window -t "\$NEW_WINDOW_ID" 2>/dev/null || true
+    # Select the content pane (not the sidebar) in the new window
+    CONTENT_PANE=\$(tmux list-panes -t "\$NEW_WINDOW_ID" -F '#{pane_id}\x1f#{pane_current_command}' 2>/dev/null | grep -v 'sidebar-render' | head -1 | cut -d$'\x1f' -f1)
+    [ -n "\$CONTENT_PANE" ] && tmux select-pane -t "\$CONTENT_PANE" 2>/dev/null || true
 fi
 
 tmux set-option -gu @tabby_new_window_group 2>/dev/null || true
@@ -297,8 +305,10 @@ tmux kill-pane "$@"
 SCRIPT_EOF
 chmod +x "$KILL_PANE_SCRIPT"
 
-# Right-click on pane border shows context menu (left-click+drag resizes panes)
-tmux unbind-key -T root MouseDown1Border 2>/dev/null || true
+# Pane border mouse: left-click+drag resizes panes, right-click shows context menu
+# IMPORTANT: MouseDown1Border must stay bound for MouseDrag1Border (resize) to work
+tmux bind-key -T root MouseDown1Border select-pane -t =
+tmux bind-key -T root MouseDrag1Border resize-pane -M
 tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M \
     "Split Vertical" "|" "split-window -h -c '#{pane_current_path}'" \
     "Split Horizontal" "-" "split-window -v -c '#{pane_current_path}'" \
@@ -308,6 +318,7 @@ tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M 
     "Swap Down" "d" "swap-pane -D" \
     "" \
     "Kill Pane" "x" "run-shell '$KILL_PANE_SCRIPT'"
+
 
 
 # Terminal title configuration
