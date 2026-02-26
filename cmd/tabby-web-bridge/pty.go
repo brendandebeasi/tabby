@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"strconv"
 	"sync"
 )
 
@@ -77,19 +78,10 @@ func (c *ControlModeSession) parseOutput() {
 
 		switch {
 		case bytes.HasPrefix(line, []byte("%output ")):
-			if inBlock {
-				continue
-			}
-			rest := line[len("%output "):]
-			idx := bytes.IndexByte(rest, ' ')
-			if idx <= 0 {
-				continue
-			}
-			paneID := string(rest[:idx])
-			data := unescapeControlData(rest[idx+1:])
-			if c.onOutput != nil {
-				c.onOutput(paneID, data)
-			}
+			c.forwardOutputLine(line[len("%output "):], false)
+
+		case bytes.HasPrefix(line, []byte("%extended-output ")):
+			c.forwardOutputLine(line[len("%extended-output "):], true)
 
 		case bytes.HasPrefix(line, []byte("%begin ")):
 			inBlock = true
@@ -107,6 +99,29 @@ func (c *ControlModeSession) parseOutput() {
 				continue
 			}
 		}
+	}
+}
+
+func (c *ControlModeSession) forwardOutputLine(rest []byte, extended bool) {
+	idx := bytes.IndexByte(rest, ' ')
+	if idx <= 0 {
+		return
+	}
+	paneID := string(rest[:idx])
+	payload := rest[idx+1:]
+	if extended {
+		ageIdx := bytes.IndexByte(payload, ' ')
+		if ageIdx <= 0 {
+			return
+		}
+		payload = payload[ageIdx+1:]
+		if len(payload) > 0 && payload[0] == ':' {
+			payload = bytes.TrimLeft(payload[1:], " ")
+		}
+	}
+	data := unescapeControlData(payload)
+	if c.onOutput != nil {
+		c.onOutput(paneID, data)
 	}
 }
 
@@ -201,7 +216,130 @@ func (c *ControlModeSession) SendKeys(paneID string, keys []byte) {
 	if c.stdin == nil {
 		return
 	}
-	fmt.Fprintf(c.stdin, "send-keys -l -t %s %q\n", paneID, string(keys))
+
+	flushLiteral := func(buf *bytes.Buffer) {
+		if buf.Len() == 0 {
+			return
+		}
+		quoted := strconv.Quote(buf.String())
+		fmt.Fprintf(c.stdin, "send-keys -l -t %s -- %s\n", paneID, quoted)
+		buf.Reset()
+	}
+
+	sendKey := func(name string) {
+		fmt.Fprintf(c.stdin, "send-keys -t %s %s\n", paneID, name)
+	}
+
+	var literal bytes.Buffer
+	for i := 0; i < len(keys); i++ {
+		b := keys[i]
+
+		if b == 0x1b {
+			if i+2 < len(keys) && keys[i+1] == '[' {
+				flushLiteral(&literal)
+				switch keys[i+2] {
+				case 'A':
+					sendKey("Up")
+					i += 2
+					continue
+				case 'B':
+					sendKey("Down")
+					i += 2
+					continue
+				case 'C':
+					sendKey("Right")
+					i += 2
+					continue
+				case 'D':
+					sendKey("Left")
+					i += 2
+					continue
+				case 'H':
+					sendKey("Home")
+					i += 2
+					continue
+				case 'F':
+					sendKey("End")
+					i += 2
+					continue
+				case '3':
+					if i+3 < len(keys) && keys[i+3] == '~' {
+						sendKey("Delete")
+						i += 3
+						continue
+					}
+				case '5':
+					if i+3 < len(keys) && keys[i+3] == '~' {
+						sendKey("PageUp")
+						i += 3
+						continue
+					}
+				case '6':
+					if i+3 < len(keys) && keys[i+3] == '~' {
+						sendKey("PageDown")
+						i += 3
+						continue
+					}
+				}
+			}
+			if i+2 < len(keys) && keys[i+1] == 'O' {
+				flushLiteral(&literal)
+				switch keys[i+2] {
+				case 'A':
+					sendKey("Up")
+					i += 2
+					continue
+				case 'B':
+					sendKey("Down")
+					i += 2
+					continue
+				case 'C':
+					sendKey("Right")
+					i += 2
+					continue
+				case 'D':
+					sendKey("Left")
+					i += 2
+					continue
+				case 'H':
+					sendKey("Home")
+					i += 2
+					continue
+				case 'F':
+					sendKey("End")
+					i += 2
+					continue
+				default:
+					i += 2
+					continue
+				}
+			}
+			flushLiteral(&literal)
+			sendKey("Escape")
+			continue
+		}
+
+		switch b {
+		case '\r', '\n':
+			flushLiteral(&literal)
+			sendKey("Enter")
+		case '\t':
+			flushLiteral(&literal)
+			sendKey("Tab")
+		case 0x7f:
+			flushLiteral(&literal)
+			sendKey("BSpace")
+		default:
+			if b >= 0x01 && b <= 0x1a {
+				flushLiteral(&literal)
+				sendKey("C-" + string('a'+(b-1)))
+				continue
+			}
+			literal.WriteByte(b)
+		}
+	}
+
+	flushLiteral(&literal)
 }
 
 func (c *ControlModeSession) Resize(paneID string, cols, rows int) {
@@ -213,6 +351,15 @@ func (c *ControlModeSession) Resize(paneID string, cols, rows int) {
 	fmt.Fprintf(c.stdin, "resize-pane -t %s -x %d -y %d\n", paneID, cols, rows)
 }
 
+func (c *ControlModeSession) SelectPane(paneID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stdin == nil || paneID == "" {
+		return
+	}
+	fmt.Fprintf(c.stdin, "select-pane -t %s\n", paneID)
+}
+
 func (c *ControlModeSession) RefreshClient(cols, rows int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -220,4 +367,26 @@ func (c *ControlModeSession) RefreshClient(cols, rows int) {
 		return
 	}
 	fmt.Fprintf(c.stdin, "refresh-client -C %d,%d\n", cols, rows)
+}
+
+func (c *ControlModeSession) CapturePane(paneID string) {
+	data, err := c.CapturePaneData(paneID)
+	if err != nil {
+		return
+	}
+	if len(data) == 0 || c.onOutput == nil {
+		return
+	}
+	c.onOutput(paneID, data)
+}
+
+func (c *ControlModeSession) CapturePaneData(paneID string) ([]byte, error) {
+	if paneID == "" {
+		return nil, nil
+	}
+	out, err := exec.Command("tmux", "capture-pane", "-p", "-e", "-a", "-S", "-200", "-t", paneID).Output()
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

@@ -16,6 +16,8 @@ type SidebarBridge struct {
 	sessionID string
 	conn      net.Conn
 	sendMu    sync.Mutex
+	stateMu   sync.Mutex
+	clientID  string
 	onMessage func(msg daemon.Message)
 	stopOnce  sync.Once
 }
@@ -43,12 +45,47 @@ func (s *SidebarBridge) Start() error {
 	}
 	s.conn = conn
 
-	if err := s.Send(daemon.Message{Type: daemon.MsgSubscribe, ClientID: "web-bridge"}); err != nil {
-		return err
-	}
-
 	go s.readLoop()
 	return nil
+}
+
+func (s *SidebarBridge) SwitchClient(clientID string) error {
+	if clientID == "" {
+		return nil
+	}
+
+	s.stateMu.Lock()
+	prev := s.clientID
+	if prev == clientID {
+		s.stateMu.Unlock()
+		return nil
+	}
+	s.clientID = clientID
+	s.stateMu.Unlock()
+
+	if prev != "" {
+		if err := s.Send(daemon.Message{Type: daemon.MsgUnsubscribe, ClientID: prev}); err != nil {
+			return err
+		}
+	}
+
+	return s.Send(daemon.Message{Type: daemon.MsgSubscribe, ClientID: clientID})
+}
+
+func (s *SidebarBridge) ClearClient(clientID string) error {
+	if clientID == "" {
+		return nil
+	}
+
+	s.stateMu.Lock()
+	if s.clientID != clientID {
+		s.stateMu.Unlock()
+		return nil
+	}
+	s.clientID = ""
+	s.stateMu.Unlock()
+
+	return s.Send(daemon.Message{Type: daemon.MsgUnsubscribe, ClientID: clientID})
 }
 
 func (s *SidebarBridge) Stop() {

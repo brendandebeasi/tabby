@@ -4,6 +4,7 @@ import { initialConnectionState, type ConnectionState } from '../stores/connecti
 
 interface WebSocketHandlers {
   onSidebarMessage?: (type: string, payload: unknown) => void
+  onControlMessage?: (type: string, payload: unknown) => void
   onPtyData?: (paneId: string, data: Uint8Array) => void
 }
 
@@ -27,29 +28,64 @@ export function useWebSocket(url: string | null, handlers: WebSocketHandlers): W
 			return
 		}
 
-    setState({ status: 'connecting' })
-    const ws = new WebSocket(url)
-    ws.binaryType = 'arraybuffer'
-    socketRef.current = ws
+		let closed = false
+		let reconnectTimer: number | null = null
+		let reconnectAttempts = 0
 
-    ws.onopen = () => {
-      setState({ status: 'connected' })
-    }
+		const clearReconnectTimer = () => {
+			if (reconnectTimer !== null) {
+				window.clearTimeout(reconnectTimer)
+				reconnectTimer = null
+			}
+		}
 
-    ws.onerror = () => {
-      setState({ status: 'disconnected', error: 'websocket error' })
-    }
+		const scheduleReconnect = () => {
+			if (closed) {
+				return
+			}
+			clearReconnectTimer()
+			const delay = Math.min(3000, 400+reconnectAttempts*400)
+			reconnectTimer = window.setTimeout(() => {
+				reconnectTimer = null
+				connect()
+			}, delay)
+		}
 
-    ws.onclose = () => {
-      setState({ status: 'disconnected' })
-    }
+		const connect = () => {
+			if (closed) {
+				return
+			}
+			setState({ status: 'connecting' })
+			const ws = new WebSocket(url)
+			ws.binaryType = 'arraybuffer'
+			socketRef.current = ws
 
-    ws.onmessage = (event) => {
-		if (typeof event.data === 'string') {
-			try {
-				const msg = JSON.parse(event.data) as { channel: string; type: string; payload: unknown }
+			ws.onopen = () => {
+				reconnectAttempts = 0
+				setState({ status: 'connected' })
+			}
+
+			ws.onerror = () => {
+				setState({ status: 'disconnected', error: 'websocket error' })
+			}
+
+			ws.onclose = () => {
+				if (socketRef.current === ws) {
+					socketRef.current = null
+				}
+				setState({ status: 'disconnected' })
+				reconnectAttempts += 1
+				scheduleReconnect()
+			}
+
+			ws.onmessage = (event) => {
+				if (typeof event.data === 'string') {
+					try {
+						const msg = JSON.parse(event.data) as { channel: string; type: string; payload: unknown }
 				if (msg.channel === 'sidebar') {
 					handlersRef.current.onSidebarMessage?.(msg.type, msg.payload)
+				} else if (msg.channel === 'control') {
+					handlersRef.current.onControlMessage?.(msg.type, msg.payload)
 				}
 			} catch {
 				return
@@ -57,18 +93,35 @@ export function useWebSocket(url: string | null, handlers: WebSocketHandlers): W
         return
       }
 
-		if (event.data instanceof ArrayBuffer) {
-			const frame = decodePtyFrame(event.data)
+		const handleBinaryFrame = (buffer: ArrayBuffer) => {
+			const frame = decodePtyFrame(buffer)
 			if (frame && frame.type === PTY_FRAME_DATA) {
 				handlersRef.current.onPtyData?.(frame.paneId, frame.data)
 			}
 		}
-	}
 
-    return () => {
-      ws.close()
-      socketRef.current = null
-    }
+		if (event.data instanceof ArrayBuffer) {
+			handleBinaryFrame(event.data)
+			return
+				}
+
+				if (event.data instanceof Blob) {
+					event.data.arrayBuffer().then(handleBinaryFrame).catch(() => undefined)
+				}
+			}
+		}
+
+		connect()
+
+		return () => {
+			closed = true
+			clearReconnectTimer()
+			const ws = socketRef.current
+			socketRef.current = null
+			if (ws) {
+				ws.close()
+			}
+		}
 	}, [url])
 
   const sendJson = useCallback((channel: 'sidebar' | 'control', type: string, payload: unknown) => {

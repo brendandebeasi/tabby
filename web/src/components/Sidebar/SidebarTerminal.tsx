@@ -8,10 +8,11 @@ interface SidebarTerminalProps {
   regions: ClickableRegion[]
   onRegionClick: (region: ClickableRegion) => void
   onResize: (cols: number, rows: number) => void
+  backgroundColor?: string
 }
 
-export default function SidebarTerminal({ content, regions, onRegionClick, onResize }: SidebarTerminalProps) {
-  const { containerRef, terminalRef, write, reset } = useTerminal({ readOnly: true, fontSize: 14, onResize })
+export default function SidebarTerminal({ content, regions, onRegionClick, onResize, backgroundColor }: SidebarTerminalProps) {
+  const { containerRef, terminalRef, write, reset } = useTerminal({ readOnly: true, fontSize: 14, onResize, backgroundColor })
 
   useEffect(() => {
     reset()
