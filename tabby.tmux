@@ -489,9 +489,11 @@ chmod +x "$SAVE_LAYOUT_SCRIPT"
 # Set up hooks for window events
 # These hooks trigger both sidebar and status bar refresh
 tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
-# On window close: select previous from history, preserve sidebar width, then refresh
-tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT'; run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
-tmux set-hook -g after-kill-window "run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+# On window close: select previous window (sync for UX), then background the rest.
+# The daemon handles orphan cleanup, sidebar spawning, and pane-bar signaling on USR1.
+tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT'; run-shell -b '$RESIZE_SIDEBAR_SCRIPT; $SIGNAL_SIDEBAR_SCRIPT; $REFRESH_STATUS_SCRIPT; $EXIT_IF_NO_MAIN_WINDOWS_SCRIPT; $STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+# Note: after-kill-window is not a valid hook in tmux 3.6+; window-unlinked
+# covers the window-close case. exit_if_no_main runs in the background chains above.
 # after-new-window: apply group label, then let ensure_sidebar handle the
 # single USR1 signal to the daemon (which spawns the renderer).  We do NOT
 # also call signal_sidebar here — that would send a duplicate USR1 before
@@ -521,13 +523,13 @@ PRESERVE_NAME_SCRIPT="$CURRENT_DIR/scripts/preserve_window_name.sh"
 chmod +x "$PRESERVE_NAME_SCRIPT"
 tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_SIDEBAR_SCRIPT #{session_id}'; run-shell '$PRESERVE_NAME_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT #{window_id} #{window_layout}'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'"
 
-# Close window if only sidebar/tabbar remains after main pane exits
-CLEANUP_SCRIPT="$CURRENT_DIR/scripts/cleanup_orphan_sidebar.sh"
-chmod +x "$CLEANUP_SCRIPT"
+# When a pane is killed: preserve ratios synchronously (must happen before tmux
+# reflows), then signal daemon in background. The daemon's USR1 handler takes
+# care of orphan cleanup, sidebar spawning, and pane-bar refresh.
+# Note: uses after-kill-pane (not pane-exited which doesn't exist in tmux 3.6+).
 PRESERVE_RATIOS_SCRIPT="$CURRENT_DIR/scripts/preserve_pane_ratios.sh"
 chmod +x "$PRESERVE_RATIOS_SCRIPT"
-# When a pane exits: preserve ratios, cleanup orphans, refresh sidebar and pane bar
-tmux set-hook -g pane-exited "run-shell '$PRESERVE_RATIOS_SCRIPT'; run-shell '$CLEANUP_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'; run-shell '$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_SCRIPT'; run-shell -b '$SIGNAL_SIDEBAR_SCRIPT; $EXIT_IF_NO_MAIN_WINDOWS_SCRIPT; $STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'; run-shell '$STABILIZE_CLIENT_RESIZE_SCRIPT \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
