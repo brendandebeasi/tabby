@@ -21,7 +21,7 @@ source "$SCRIPT_DIR/_config_path.sh"
 CONFIG_FILE="$TABBY_CONFIG_FILE"
 
 # Read terminal app from config
-TERMINAL_APP=$(grep "^terminal_app:" "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' || echo "")
+TERMINAL_APP=$(grep -E '^\s*terminal_app:' "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/.*terminal_app:\s*//' | tr -d '"'"'"' ' || echo "")
 
 echo "  TERMINAL_APP from config: '$TERMINAL_APP'" >> "$LOG"
 if [ -z "$TERMINAL_APP" ]; then
@@ -91,6 +91,30 @@ $TMUX_CMD refresh-client -t "$SESSION" -S 2>/dev/null || true
 echo "  Refreshed tmux client status bar" >> "$LOG"
 
 # Bring terminal to foreground using AppleScript
-echo "  Running: osascript to activate $TERMINAL_APP" >> "$LOG"
-osascript -e "tell application \"$TERMINAL_APP\" to activate" 2>>"$LOG" || echo "  osascript failed" >> "$LOG"
+# For Ghostty: try to raise the specific window containing our tmux session
+echo "  Activating $TERMINAL_APP (raising correct window)" >> "$LOG"
+if [ "$TERMINAL_APP" = "Ghostty" ]; then
+    # Ghostty doesn't expose AppleScript windows directly, but System Events can
+    # enumerate and raise windows by title. tmux set-titles puts session info in the title.
+    # After select-window, the title updates to reflect the new active window.
+    osascript 2>>"$LOG" <<APPLESCRIPT
+tell application "Ghostty" to activate
+delay 0.05
+tell application "System Events"
+    tell process "Ghostty"
+        set wCount to count of windows
+        repeat with i from 1 to wCount
+            set wName to name of window i
+            if wName contains "tmux" then
+                perform action "AXRaise" of window i
+                exit repeat
+            end if
+        end repeat
+    end tell
+end tell
+APPLESCRIPT
+    [ $? -ne 0 ] && echo "  Ghostty AXRaise failed, fell back to activate" >> "$LOG"
+else
+    osascript -e "tell application \"$TERMINAL_APP\" to activate" 2>>"$LOG" || echo "  osascript failed" >> "$LOG"
+fi
 echo "  Done" >> "$LOG"
