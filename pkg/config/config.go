@@ -386,6 +386,8 @@ type Bindings struct {
 	KillWindowGlobal string `yaml:"kill_window_global"`
 	NextWindowGlobal string `yaml:"next_window_global"`
 	PrevWindowGlobal string `yaml:"prev_window_global"`
+
+	SwapPane string `yaml:"swap_pane"` // Cycle active pane within window (default: cmd+`)
 }
 
 type Indicators struct {

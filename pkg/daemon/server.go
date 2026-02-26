@@ -251,6 +251,9 @@ func (s *Server) handleClient(conn net.Conn) {
 					if client, ok := s.clients[clientID]; ok {
 						client.Width = resize.Width
 						client.Height = resize.Height
+						if resize.ColorProfile != "" {
+							client.ColorProfile = resize.ColorProfile
+						}
 					}
 					s.clientsMu.Unlock()
 					// Notify and re-render

@@ -69,6 +69,8 @@ bindings:
   display_panes: "prefix + q"
   detach: "prefix + d"
 
+  swap_pane: "cmd+`"  # Cycle active pane in window (Cmd+` -> Meta+`)
+
 sidebar:
   header:
     fg: "auto"

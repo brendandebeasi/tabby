@@ -43,11 +43,11 @@ func rotateLogFile(path string, maxBytes int64) {
 // rotateLogs rotates all tabby log files on startup to prevent unbounded growth.
 func rotateLogs(sessionID string) {
 	// Rotate session-specific logs
-	rotateLogFile(daemon.RuntimePath(sessionID, "-events.log"), 1*1024*1024)   // 1MB
-	rotateLogFile(daemon.RuntimePath(sessionID, "-crash.log"), 512*1024)        // 512KB
-	rotateLogFile(daemon.RuntimePath(sessionID, "-input.log"), 1*1024*1024)     // 1MB
-	rotateLogFile("/tmp/tabby-debug.log", 50*1024*1024)                                       // 50MB
-	rotateLogFile("/tmp/tabby-indicator-debug.log", 5*1024*1024)                               // 5MB
+	rotateLogFile(daemon.RuntimePath(sessionID, "-events.log"), 1*1024*1024) // 1MB
+	rotateLogFile(daemon.RuntimePath(sessionID, "-crash.log"), 512*1024)     // 512KB
+	rotateLogFile(daemon.RuntimePath(sessionID, "-input.log"), 1*1024*1024)  // 1MB
+	rotateLogFile("/tmp/tabby-debug.log", 50*1024*1024)                      // 50MB
+	rotateLogFile("/tmp/tabby-indicator-debug.log", 5*1024*1024)             // 5MB
 }
 
 // checkPreviousCrash detects if the previous daemon died abnormally and logs forensics.
@@ -1168,7 +1168,11 @@ func main() {
 		if strings.HasPrefix(clientID, "header:") {
 			return coordinator.RenderHeaderForClient(clientID, width, height)
 		}
-		return coordinator.RenderForClient(clientID, width, height)
+		renderClientID := clientID
+		if idx := strings.Index(clientID, "#web-"); idx > 0 {
+			renderClientID = clientID[:idx]
+		}
+		return coordinator.RenderForClient(renderClientID, width, height)
 	}
 
 	refreshCh := make(chan struct{}, 10)
@@ -1189,12 +1193,13 @@ func main() {
 		needsRefresh := coordinator.HandleInput(clientID, input)
 		logEvent("INPUT_HANDLED client=%s needsRefresh=%v", clientID, needsRefresh)
 		if needsRefresh {
-			// Signal the main refresh loop instead of doing expensive
-			// RefreshWindows + BroadcastRender inline. The tmux action
-			// (select_pane, select_window, etc.) already ran synchronously
-			// in HandleInput, so tmux state is updated. The refresh loop
-			// will pick this up and debounce with any USR1 signals from
-			// tmux hooks triggered by the same action.
+			// Immediate optimistic render: HandleInput already updated the
+			// coordinator state (e.g. SetActiveWindowOptimistic for select_window)
+			// so rendering NOW gives the sidebar the correct header color
+			// without waiting for the full RefreshWindows round-trip.
+			server.BroadcastRender()
+			// Also signal the main refresh loop for the full state sync
+			// (spawn/cleanup renderers, update pane colors, etc.)
 			select {
 			case refreshCh <- struct{}{}:
 			default:
@@ -1410,8 +1415,15 @@ func main() {
 					coordinator.RefreshWindows()
 					t1 := time.Now()
 
+					// Broadcast render IMMEDIATELY after RefreshWindows so headers
+					// get updated colors before slow spawn/cleanup/layout ops.
+					// This eliminates the visible flicker when switching windows.
+					syncClientSizesFromTmux(server)
+					server.BroadcastRender()
+					t1b := time.Now()
+
 					windows := coordinator.GetWindows()
-					spawnRenderersForNewWindows(server, *sessionID, windows)
+					spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows)
 					t2 := time.Now()
 
 					cleanupOrphanedSidebars(windows)
@@ -1424,12 +1436,21 @@ func main() {
 					doPaneLayoutOps()
 					t5 := time.Now()
 
+					if spawnedRenderer {
+						selectContentPaneInActiveWindow()
+					}
+
 					currentHash := coordinator.GetWindowsHash()
 					if currentHash != lastWindowsHash {
 						updateHeaderBorderStyles(coordinator)
 					}
-					syncClientSizesFromTmux(server)
-					server.BroadcastRender()
+
+					// Second broadcast only if structure changed (new/removed renderers)
+					structureChanged := spawnedRenderer || currentHash != lastWindowsHash
+					if structureChanged {
+						syncClientSizesFromTmux(server)
+						server.BroadcastRender()
+					}
 					t6 := time.Now()
 					lastWindowsHash = currentHash
 
@@ -1443,13 +1464,13 @@ func main() {
 							goto drained
 						}
 					}
-				drained:
+				 drained:
 					if drainCount > 0 {
 						logEvent("DRAIN_STALE count=%d", drainCount)
 					}
 
-					debugLog.Printf("PERF: RefreshWindows=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v Render=%v TOTAL=%v",
-						t1.Sub(start), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t6.Sub(t5), t6.Sub(start))
+					debugLog.Printf("PERF: RefreshWindows=%v EarlyRender=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v LateRender=%v TOTAL=%v",
+						t1.Sub(start), t1b.Sub(t1), t2.Sub(t1b), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t6.Sub(t5), t6.Sub(start))
 				})
 				if !ok {
 					return
@@ -1464,11 +1485,14 @@ func main() {
 					coordinator.RefreshWindows()
 					windows := coordinator.GetWindows()
 
-					spawnRenderersForNewWindows(server, *sessionID, windows)
+					spawnedFallback := spawnRenderersForNewWindows(server, *sessionID, windows)
 					cleanupOrphanedSidebars(windows)
 					cleanupOrphanWindowsByTmux(*sessionID)
 					cleanupSidebarsForClosedWindows(server, windows)
 					doPaneLayoutOps()
+					if spawnedFallback {
+						selectContentPaneInActiveWindow()
+					}
 				})
 			case <-watchdogTicker.C:
 				ok := runLoopTask("watchdog", 6*time.Second, func() {

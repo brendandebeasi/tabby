@@ -210,9 +210,14 @@ if [[ "$CUSTOM_BORDER" != "true" ]]; then
     tmux set-option -g pane-active-border-style "fg=$PANE_ACTIVE_BG"
 fi
 
-# Always use default pane backgrounds (no forced dimming)
+# Inactive pane dimming: handled by bin/cycle-pane binary (--dim-only flag)
+# Applied on plugin load and after pane cycling. Skips utility panes.
+CYCLE_PANE_BIN="$CURRENT_DIR/bin/cycle-pane"
 tmux set-option -g window-style "default"
 tmux set-option -g window-active-style "default"
+if [ -x "$CYCLE_PANE_BIN" ]; then
+    "$CYCLE_PANE_BIN" --dim-only
+fi
 
 # Keep session windows sized to the most recently active client so mobile
 # attaches do not end up with off-screen sidebars in dual-client setups.
@@ -484,7 +489,7 @@ tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$
 # Combined script to reduce latency + track window history
 ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
 chmod +x "$ON_WINDOW_SELECT_SCRIPT"
-tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-shell '$TRACK_WINDOW_HISTORY_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-shell '$TRACK_WINDOW_HISTORY_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'; run-shell -b '[ -x \"$CYCLE_PANE_BIN\" ] && \"$CYCLE_PANE_BIN\" --dim-only'"
 # Lock window name on manual rename via prefix+, keybinding
 # NOTE: We intentionally do NOT use after-rename-window hook because the daemon's
 # own rename-window calls would trigger it, locking the daemon out of future updates.
@@ -497,7 +502,7 @@ chmod +x "$ON_PANE_SELECT_SCRIPT"
 # Use -b flag to run scripts in background so focus happens immediately
 # Combined into a single run-shell to reduce process overhead
 # optimization: pass args to avoid internal tmux calls
-tmux set-hook -g after-select-pane "run-shell -b '$ON_PANE_SELECT_SCRIPT \"#{session_id}\"; $SAVE_LAYOUT_SCRIPT \"#{window_id}\" \"#{window_layout}\"'"
+tmux set-hook -g after-select-pane "run-shell -b '$ON_PANE_SELECT_SCRIPT \"#{session_id}\"; $SAVE_LAYOUT_SCRIPT \"#{window_id}\" \"#{window_layout}\"; [ -x \"$CYCLE_PANE_BIN\" ] && \"$CYCLE_PANE_BIN\" --dim-only'"
 # pane-focus-in is redundant/unreliable, using after-select-pane is sufficient
 # tmux set-hook -g pane-focus-in "run-shell '$ON_PANE_SELECT_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT'"
 # Update pane bar when panes are split, and preserve group prefixes
@@ -588,6 +593,18 @@ bind_from_config "$NEXT_WINDOW_BINDING" "next-window"
 bind_from_config "$PREV_WINDOW_BINDING" "previous-window"
 bind_from_config "$NEW_WINDOW_BINDING" "run-shell '$NEW_WINDOW_SCRIPT'"
 bind_from_config "$KILL_WINDOW_BINDING" "kill-window"
+
+# Swap/cycle active pane within current window (skips utility panes, signals daemon)
+# Uses Go binary: bin/cycle-pane (also handles dimming)
+SWAP_PANE_BINDING=$(grep "swap_pane:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
+if [ -n "$SWAP_PANE_BINDING" ] && [ -x "$CYCLE_PANE_BIN" ]; then
+    SWAP_KEY=$(normalize_global_key "$SWAP_PANE_BINDING")
+    [ -n "$SWAP_KEY" ] && tmux bind-key -n "$SWAP_KEY" run-shell "$CYCLE_PANE_BIN"
+fi
+# Also override prefix+o to use the smart cycle binary
+if [ -x "$CYCLE_PANE_BIN" ]; then
+    tmux bind-key o run-shell "$CYCLE_PANE_BIN"
+fi
 
 # Optional: Also bind to a prefix-less key for quick access
 # tmux bind-key -n M-Tab run-shell "$CURRENT_DIR/scripts/toggle_sidebar.sh"

@@ -32,10 +32,11 @@ if [ "$BORDER_FROM_TAB" = "true" ]; then
         TAB_FG="#ffffff"
     fi
 
-    # BOTH borders use SAME color to prevent any half/half on shared edges
+    # Set active border to tab color
+    # pane-border-style (inactive) is set by cycle-pane --dim-only
+    # which runs after this in the hook chain and desaturates the color
     if [ -n "$TAB_BG" ]; then
         tmux set-option -g pane-active-border-style "fg=$TAB_BG"
-        tmux set-option -g pane-border-style "fg=$TAB_BG"
     fi
 fi
 

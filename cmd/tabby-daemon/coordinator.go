@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1097,11 +1098,34 @@ func (c *Coordinator) savePetState() {
 
 // RefreshWindows fetches current window/pane state from tmux
 func (c *Coordinator) RefreshWindows() {
+	// Do all external I/O (tmux, config, ps) BEFORE acquiring stateMu.
+	// Holding stateMu during slow external calls causes lock contention:
+	// leaked task goroutines that timed out continue holding the lock,
+	// blocking subsequent tasks that need stateMu.RLock() (e.g. handleWidthSync
+	// via BroadcastRender), causing LOOP_STALL and daemon termination.
+
+	newCfg, _ := config.LoadConfig(config.DefaultConfigPath())
+
+	windows, err := tmux.ListWindowsWithPanes()
+	if err != nil {
+		return
+	}
+
+	touchModeOverride := ""
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_touch_mode").Output(); err == nil {
+		touchModeOverride = strings.TrimSpace(string(out))
+	}
+
+	prefixModeRaw := ""
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_prefix_mode").Output(); err == nil {
+		prefixModeRaw = strings.TrimSpace(string(out))
+	}
+
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 
-	if cfg, err := config.LoadConfig(config.DefaultConfigPath()); err == nil {
-		c.config = cfg
+	if newCfg != nil {
+		c.config = newCfg
 	}
 
 	// Note: collapsed groups state is managed in-memory and synced to tmux options
@@ -1111,11 +1135,6 @@ func (c *Coordinator) RefreshWindows() {
 	oldWindowIDs := make(map[string]bool)
 	for _, w := range c.windows {
 		oldWindowIDs[w.ID] = true
-	}
-
-	windows, err := tmux.ListWindowsWithPanes()
-	if err != nil {
-		return
 	}
 
 	// Check for pending group assignment (optimistic UI for new windows in groups)
@@ -1149,19 +1168,27 @@ func (c *Coordinator) RefreshWindows() {
 	c.computeVisualPositions()
 	c.syncWindowIndices()
 
-	// Read runtime touch mode override
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_touch_mode").Output(); err == nil {
-		c.touchModeOverride = strings.TrimSpace(string(out))
-	}
-
-	// Read prefix mode override
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_prefix_mode").Output(); err == nil {
-		val := strings.TrimSpace(string(out))
-		c.config.Sidebar.PrefixMode = (val == "1" || val == "true")
+	c.touchModeOverride = touchModeOverride
+	if prefixModeRaw != "" {
+		c.config.Sidebar.PrefixMode = (prefixModeRaw == "1" || prefixModeRaw == "true")
 	}
 
 	// Update pane header colors to match group themes
 	c.updatePaneHeaderColors()
+}
+
+// SetActiveWindowOptimistic flips the Active flag on c.windows so the next
+// BroadcastRender uses the correct active window immediately, without waiting
+// for a full RefreshWindows round-trip through tmux.
+func (c *Coordinator) SetActiveWindowOptimistic(windowID string) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	for i := range c.windows {
+		c.windows[i].Active = (c.windows[i].ID == windowID)
+	}
+	// Re-group so generateSidebarHeader picks up the new active window's colors
+	c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
+	c.computeVisualPositions()
 }
 
 // processAIToolStates detects AI tool busy/done/idle states using stateful
@@ -1818,7 +1845,7 @@ func (c *Coordinator) updatePaneHeaderColors() {
 	if promptFallbackIcon == "" {
 		promptFallbackIcon = "•"
 	}
-	go func() {
+	{
 		var args []string
 		for _, group := range grouped {
 			baseBg := group.Theme.Bg
@@ -1873,11 +1900,20 @@ func (c *Coordinator) updatePaneHeaderColors() {
 					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
 						"pane-active-border-style", activeStyle)
 
-					// Inactive border: tab fg on tab bg, with config bg override
+					// Inactive border: desaturate when dim_inactive is enabled
 					iFg := bFg
 					iBg := borderBg
 					if iBg == "" {
 						iBg = bBg
+					}
+					if c.config.PaneHeader.DimInactive {
+						opacity := c.config.PaneHeader.DimOpacity
+						if opacity <= 0 || opacity > 1 {
+							opacity = 0.6
+						}
+						tBg := c.config.PaneHeader.TerminalBg
+						iFg = desaturateHex(iFg, opacity, tBg)
+						iBg = desaturateHex(iBg, opacity, tBg)
 					}
 					inactiveStyle := buildBorderStyle(iFg, iBg)
 					if inactiveStyle == "" {
@@ -1898,7 +1934,17 @@ func (c *Coordinator) updatePaneHeaderColors() {
 						if iBg == "" {
 							iBg = bBg
 						}
-						inactiveStyle := buildBorderStyle(bFg, iBg)
+						iFg := bFg
+						if c.config.PaneHeader.DimInactive {
+							opacity := c.config.PaneHeader.DimOpacity
+							if opacity <= 0 || opacity > 1 {
+								opacity = 0.6
+							}
+							tBg := c.config.PaneHeader.TerminalBg
+							iFg = desaturateHex(iFg, opacity, tBg)
+							iBg = desaturateHex(iBg, opacity, tBg)
+						}
+						inactiveStyle := buildBorderStyle(iFg, iBg)
 						if inactiveStyle == "" {
 							inactiveStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
 						}
@@ -1911,7 +1957,7 @@ func (c *Coordinator) updatePaneHeaderColors() {
 		if len(args) > 0 {
 			exec.Command("tmux", args...).Run()
 		}
-	}()
+	}
 }
 
 // GetWindowsHash returns a hash of current window state for change detection
@@ -1941,67 +1987,101 @@ func (c *Coordinator) GetWindowsHash() string {
 
 // RefreshGit updates git state
 func (c *Coordinator) RefreshGit() {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
+	// Run all git commands WITHOUT holding stateMu. Holding stateMu during
+	// network-bound git commands (e.g. @{upstream} fetch) can block for seconds,
+	// causing git_tick to exceed its timeout and kill the daemon.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	out, err := exec.Command("git", "rev-parse", "--is-inside-work-tree").Output()
-	c.isGitRepo = err == nil && strings.TrimSpace(string(out)) == "true"
-	if !c.isGitRepo {
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree").Output()
+	isGitRepo := err == nil && strings.TrimSpace(string(out)) == "true"
+	if !isGitRepo {
+		c.stateMu.Lock()
+		c.isGitRepo = false
+		c.stateMu.Unlock()
 		return
 	}
 
 	// Get branch
-	out, err = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
-	if err == nil {
-		c.gitBranch = strings.TrimSpace(string(out))
+	var branch string
+	if out, err = exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+		branch = strings.TrimSpace(string(out))
 	}
 
 	// Get dirty count
-	c.gitDirty = 0
-	out, err = exec.Command("git", "status", "--porcelain").Output()
-	if err == nil {
+	dirty := 0
+	if out, err = exec.CommandContext(ctx, "git", "status", "--porcelain").Output(); err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
 			if len(line) > 0 {
-				c.gitDirty++
+				dirty++
 			}
 		}
 	}
 
 	// Get ahead/behind
-	out, err = exec.Command("git", "rev-list", "--left-right", "--count", "@{upstream}...HEAD").Output()
-	if err == nil {
+	var ahead, behind int
+	if out, err = exec.CommandContext(ctx, "git", "rev-list", "--left-right", "--count", "@{upstream}...HEAD").Output(); err == nil {
 		parts := strings.Fields(string(out))
 		if len(parts) == 2 {
-			c.gitBehind, _ = strconv.Atoi(parts[0])
-			c.gitAhead, _ = strconv.Atoi(parts[1])
+			behind, _ = strconv.Atoi(parts[0])
+			ahead, _ = strconv.Atoi(parts[1])
 		}
 	}
+
+	// Store results under lock (minimal critical section)
+	c.stateMu.Lock()
+	c.isGitRepo = true
+	if branch != "" {
+		c.gitBranch = branch
+	}
+	c.gitDirty = dirty
+	c.gitAhead = ahead
+	c.gitBehind = behind
+	c.stateMu.Unlock()
 }
 
 // RefreshSession updates session state
 func (c *Coordinator) RefreshSession() {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
+	// Run all tmux commands WITHOUT holding stateMu to avoid blocking
+	// the lock during potentially slow tmux calls.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
-	if err == nil {
-		c.sessionName = strings.TrimSpace(string(out))
+	var sessionName string
+	if out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
+		sessionName = strings.TrimSpace(string(out))
 	}
 
-	out, err = exec.Command("tmux", "list-clients", "-t", c.sessionName).Output()
-	if err == nil {
+	// Need sessionName for the list-clients call; read current value if not refreshed
+	if sessionName == "" {
+		c.stateMu.RLock()
+		sessionName = c.sessionName
+		c.stateMu.RUnlock()
+	}
+
+	sessionClients := 0
+	if out, err := exec.CommandContext(ctx, "tmux", "list-clients", "-t", sessionName).Output(); err == nil {
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		if lines[0] == "" {
-			c.sessionClients = 0
-		} else {
-			c.sessionClients = len(lines)
+		if lines[0] != "" {
+			sessionClients = len(lines)
 		}
 	}
 
-	out, err = exec.Command("tmux", "display-message", "-p", "#{session_windows}").Output()
-	if err == nil {
-		c.windowCount, _ = strconv.Atoi(strings.TrimSpace(string(out)))
+	windowCount := 0
+	if out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{session_windows}").Output(); err == nil {
+		windowCount, _ = strconv.Atoi(strings.TrimSpace(string(out)))
 	}
+
+	// Store results under lock (minimal critical section)
+	c.stateMu.Lock()
+	if sessionName != "" {
+		c.sessionName = sessionName
+	}
+	c.sessionClients = sessionClients
+	if windowCount > 0 {
+		c.windowCount = windowCount
+	}
+	c.stateMu.Unlock()
 }
 
 // IncrementSpinner advances the spinner frame and returns true if any spinner is visible
@@ -3159,7 +3239,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		return
 	}
 
-	// Query tmux BEFORE acquiring lock to prevent deadlock if tmux hangs
+	// Query tmux BEFORE acquiring any lock to prevent deadlock if tmux hangs
 	// Use a timeout context to prevent blocking forever
 	activeWindowID := ""
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -3168,6 +3248,21 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		activeWindowID = strings.TrimSpace(string(out))
 	}
 	isActive := (clientID == activeWindowID)
+
+	// Read window sync setting under stateMu BEFORE acquiring widthSyncMu.
+	// Lock ordering must always be: stateMu -> widthSyncMu. Acquiring widthSyncMu
+	// first and then stateMu.RLock() inside it causes a deadlock with RefreshGit,
+	// which holds stateMu.Lock() while git commands run, and then calls
+	// BroadcastRender -> handleWidthSync -> widthSyncMu.
+	syncWidth := false
+	c.stateMu.RLock()
+	for i := range c.windows {
+		if c.windows[i].ID == clientID {
+			syncWidth = c.windows[i].SyncWidth
+			break
+		}
+	}
+	c.stateMu.RUnlock()
 
 	trackLock("widthSyncMu", "handleWidthSync")
 	c.widthSyncMu.Lock()
@@ -3191,17 +3286,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		return
 	}
 
-	var win *tmux.Window
-	c.stateMu.RLock()
-	for i := range c.windows {
-		if c.windows[i].ID == clientID {
-			win = &c.windows[i]
-			break
-		}
-	}
-	c.stateMu.RUnlock()
-
-	if win == nil || !win.SyncWidth {
+	if !syncWidth {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
@@ -3785,6 +3870,26 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	headerColors := c.GetHeaderColorsForPane(paneID)
 	headerBg := headerColors.Bg
 	headerFg := headerColors.Fg
+
+	// Dim header colors for inactive content panes (no exec — use cached pane state)
+	if c.config.PaneHeader.DimInactive {
+		paneIsDimmed := false
+		for _, p := range foundWindow.Panes {
+			if p.ID == paneID && !p.Active {
+				paneIsDimmed = true
+				break
+			}
+		}
+		if paneIsDimmed {
+			opacity := c.config.PaneHeader.DimOpacity
+			if opacity <= 0 || opacity > 1 {
+				opacity = 0.6
+			}
+			tBg := c.config.PaneHeader.TerminalBg
+			headerBg = desaturateHex(headerBg, opacity, tBg)
+			headerFg = desaturateHex(headerFg, opacity, tBg)
+		}
+	}
 	groupColor := headerBg
 	isWindowActive := foundWindow.Active
 
@@ -3947,9 +4052,10 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		btnStyle.Render(buttonsStr)
 
 	// Ensure the final rendered line has the correct background applied everywhere
-	line = fullLineStyle.Render(line)
 	if headerBg != "" {
 		line = c.applyBackgroundFill(line, headerBg, width)
+	} else {
+		line = fullLineStyle.Render(line)
 	}
 
 	if collapseBtn != "" {
@@ -4018,9 +4124,8 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			caratStyle.Render(caratUp+" "+caratDown) +
 			baseStyle.Render(strings.Repeat(" ", width-width/2-2))
 
-		for i := range regions {
-			regions[i].EndLine = 1
-		}
+		// Large mode: line-0 regions stay on line 0 (do NOT extend to line 1)
+		// The carat buttons below are correctly placed on line 1
 
 		caratUpCol := width/2 - 2
 		caratDownCol := caratUpCol + 2
@@ -7647,6 +7752,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		selectCtx, selectCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		exec.CommandContext(selectCtx, "tmux", "select-window", "-t", targetWindow).Run()
 		selectCancel()
+		// Optimistic: immediately flip active window so the next BroadcastRender
+		// (triggered by refreshCh) renders the TABBY header with the correct color.
+		c.SetActiveWindowOptimistic(targetWindow)
 
 		activeCtx, activeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		activeOut, activeErr := exec.CommandContext(activeCtx, "tmux", "display-message", "-p", "-t", targetWindow,
@@ -9397,7 +9505,6 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 
 	toggleGroupScript := c.getScriptPath("toggle_group_collapse.sh")
 	if toggleGroupScript != "" {
-		args = append(args, "", "", "")
 		if c.collapsedGroups[group.Name] {
 			expandCmd := fmt.Sprintf("run-shell '%s \"%s\" expand'", toggleGroupScript, group.Name)
 			args = append(args, "Expand Group", "e", expandCmd)
@@ -9407,15 +9514,19 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		}
 	}
 
+	// --- Group settings section ---
 	renameScript := c.getScriptPath("rename_group.sh")
 	colorScript := c.getScriptPath("set_group_color.sh")
 	markerScript := c.getScriptPath("set_group_marker.sh")
 	workingDirScript := c.getScriptPath("set_group_working_dir.sh")
+	newGroupScript := c.getScriptPath("new_group.sh")
 	deleteScript := c.getScriptPath("delete_group.sh")
-	if renameScript != "" || colorScript != "" || markerScript != "" || workingDirScript != "" || deleteScript != "" {
+
+	hasGroupSettings := renameScript != "" || colorScript != "" || markerScript != "" || workingDirScript != "" || newGroupScript != ""
+	if hasGroupSettings {
 		args = append(args, "", "", "")
-		args = append(args, "-Edit Group", "", "")
 	}
+
 	if renameScript != "" {
 		renameCmd := fmt.Sprintf(
 			"command-prompt -I '%s' -p 'New name:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
@@ -9423,11 +9534,11 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 			renameScript,
 			group.Name,
 		)
-		args = append(args, "  Rename", "r", renameCmd)
+		args = append(args, "Rename", "r", renameCmd)
 	}
 
 	if colorScript != "" {
-		args = append(args, "  -Change Color", "", "")
+		args = append(args, "-Change Color", "", "")
 		colorOptions := []struct {
 			name string
 			hex  string
@@ -9446,55 +9557,20 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		}
 		for _, color := range colorOptions {
 			setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", colorScript, group.Name, color.hex)
-			args = append(args, fmt.Sprintf("    %s", color.name), color.key, setColorCmd)
+			args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
 		}
 	}
 
 	canShowMarkerPicker := c.OnSendMenu != nil && !strings.HasPrefix(clientID, "header:")
-	if markerScript != "" || canShowMarkerPicker {
-		args = append(args, "  -Set Marker", "", "")
-	}
-	if markerScript != "" {
-		iconOptions := []struct {
-			name string
-			icon string
-			key  string
-		}{
-			{"Terminal", "", "1"},
-			{"Code", "", "2"},
-			{"Folder", "", "3"},
-			{"Git", "", "4"},
-			{"Bug", "", "5"},
-			{"Test", "", "6"},
-			{"Database", "", "7"},
-			{"Globe", "", "8"},
-			{"Star", "★", "s"},
-			{"Heart", "❤", "h"},
-			{"Fire", "🔥", "f"},
-			{"Rocket", "🚀", ""},
-			{"Lightning", "⚡", "l"},
-		}
-		for _, opt := range iconOptions {
-			setIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", markerScript, group.Name, opt.icon)
-			args = append(args, fmt.Sprintf("    %s %s", opt.icon, opt.name), opt.key, setIconCmd)
-		}
-		currentIcon := strings.TrimSpace(group.Theme.Icon)
-		promptIcon := fmt.Sprintf(
-			"command-prompt -I '%s' -p 'Icon:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
-			strings.ReplaceAll(currentIcon, "'", ""),
-			markerScript,
-			group.Name,
-		)
-		args = append(args, "    Prompt...", "i", promptIcon)
-		if currentIcon != "" {
-			removeIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"\\\"'", markerScript, group.Name)
-			args = append(args, "    Remove Icon", "0", removeIconCmd)
-		}
-	}
 	if canShowMarkerPicker {
 		groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
 		searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
-		args = append(args, "    Search...", "", searchCmd)
+		args = append(args, "Set Marker", "m", searchCmd)
+		currentIcon := strings.TrimSpace(group.Theme.Icon)
+		if currentIcon != "" && markerScript != "" {
+			removeIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"\\\"'", markerScript, group.Name)
+			args = append(args, "Remove Marker", "0", removeIconCmd)
+		}
 	}
 
 	if workingDirScript != "" {
@@ -9502,40 +9578,46 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		if currentWorkingDir == "" {
 			currentWorkingDir = "~"
 		}
-
 		setWorkingDirCmd := fmt.Sprintf(
 			"command-prompt -I '%s' -p 'Working directory:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
 			currentWorkingDir,
 			workingDirScript,
 			group.Name,
 		)
-		args = append(args, "  Set Working Directory", "w", setWorkingDirCmd)
+		args = append(args, "Set Working Directory", "w", setWorkingDirCmd)
+	}
+
+	if newGroupScript != "" {
+		newGroupCmd := fmt.Sprintf(
+			"command-prompt -p 'New group name:' \"run-shell '%s %%%%  '\"",
+			newGroupScript,
+		)
+		args = append(args, "Create New Group", "G", newGroupCmd)
+	}
+
+	// --- Destructive actions ---
+	hasDestructive := deleteScript != "" || len(group.Windows) > 0
+	if hasDestructive {
+		args = append(args, "", "", "")
 	}
 
 	if deleteScript != "" {
-		args = append(args, "", "", "")
 		deleteCmd := fmt.Sprintf(
 			"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s \\\"%s\\\"'\"",
 			group.Name,
 			deleteScript,
 			group.Name,
 		)
-		args = append(args, "  Delete Group", "d", deleteCmd)
+		args = append(args, "Delete Group", "d", deleteCmd)
 	}
 
 	// Close all windows in group (only if group has windows)
 	if len(group.Windows) > 0 {
-		// Separator
-		args = append(args, "", "", "")
-
-		// Build command to kill all windows in this group
 		var killCmds []string
 		for _, win := range group.Windows {
 			killCmds = append(killCmds, fmt.Sprintf("kill-window -t %s", win.ID))
 		}
 		killAllCmd := strings.Join(killCmds, " ; ")
-
-		// Use confirm-before for safety
 		confirmCmd := fmt.Sprintf(`confirm-before -p "Close all %d windows in %s? (y/n)" "%s"`,
 			len(group.Windows), group.Name, killAllCmd)
 		args = append(args, "Close All Windows", "x", confirmCmd)
@@ -10185,4 +10267,56 @@ func (c *Coordinator) GetGitStateHash() string {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 	return fmt.Sprintf("%s:%d:%d:%d:%v", c.gitBranch, c.gitDirty, c.gitAhead, c.gitBehind, c.isGitRepo)
+}
+
+// desaturateHex blends a hex color toward a target color by the given opacity.
+// opacity=1.0 means original color, opacity=0.0 means full target.
+// targetHex is the blend target (e.g. terminal background); if empty, uses a
+// luminance-based neutral.
+func desaturateHex(hexColor string, opacity float64, targetHex ...string) string {
+	if hexColor == "" {
+		return hexColor
+	}
+	hex := strings.TrimPrefix(hexColor, "#")
+	if len(hex) != 6 {
+		return hexColor
+	}
+	r, _ := strconv.ParseInt(hex[0:2], 16, 32)
+	g, _ := strconv.ParseInt(hex[2:4], 16, 32)
+	b, _ := strconv.ParseInt(hex[4:6], 16, 32)
+
+	var tR, tG, tB int
+	if len(targetHex) > 0 && targetHex[0] != "" {
+		th := strings.TrimPrefix(targetHex[0], "#")
+		if len(th) == 6 {
+			tr, _ := strconv.ParseInt(th[0:2], 16, 32)
+			tg, _ := strconv.ParseInt(th[2:4], 16, 32)
+			tb, _ := strconv.ParseInt(th[4:6], 16, 32)
+			tR, tG, tB = int(tr), int(tg), int(tb)
+		}
+	}
+	if tR == 0 && tG == 0 && tB == 0 && (len(targetHex) == 0 || targetHex[0] == "") {
+		lum := (int(r)*299 + int(g)*587 + int(b)*114) / 1000
+		if lum >= 128 {
+			tR, tG, tB = 200, 200, 200
+		} else {
+			tR, tG, tB = 48, 48, 48
+		}
+	}
+
+	inv := 1.0 - opacity
+	dr := int(math.Round(float64(r)*opacity + float64(tR)*inv))
+	dg := int(math.Round(float64(g)*opacity + float64(tG)*inv))
+	db := int(math.Round(float64(b)*opacity + float64(tB)*inv))
+
+	clamp := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		if v > 255 {
+			return 255
+		}
+		return v
+	}
+	return fmt.Sprintf("#%02x%02x%02x", clamp(dr), clamp(dg), clamp(db))
 }
