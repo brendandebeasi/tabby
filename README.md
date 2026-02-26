@@ -1,6 +1,14 @@
 # Tabby
 
-![Tabby screenshot](./screenshot.png)
+<p align="center">
+  <img src="./screenshots/desktop.png" width="70%" alt="Tabby desktop view"/>
+  <img src="./screenshots/mobile.PNG" width="25%" alt="Tabby mobile view"/>
+</p>
+
+<p align="center">
+  <img src="./screenshots/desktop2.png" width="48%" alt="Tabby sidebar with groups"/>
+  <img src="./screenshots/desktop3.png" width="48%" alt="Tabby context menus"/>
+</p>
 
 A modern tab manager for tmux with grouping, a clickable vertical sidebar, and deep linking for notifications.
 
