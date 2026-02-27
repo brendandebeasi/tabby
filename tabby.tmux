@@ -660,7 +660,7 @@ tmux bind-key H run-shell "$CURRENT_DIR/scripts/switch_to_horizontal.sh"
 tmux bind-key G command-prompt -p 'New group name:' "run-shell '$CURRENT_DIR/scripts/new_group.sh %%'"
 
 # Override kill-pane to save layout first (preserves pane ratios)
-tmux bind-key x run-shell "$KILL_PANE_SCRIPT"
+tmux bind-key x confirm-before -p 'Close pane? (y/n)' "run-shell '$KILL_PANE_SCRIPT'"
 
 # Keyboard shortcuts follow tmux conventions (prefix-based)
 # Standard tmux bindings preserved:

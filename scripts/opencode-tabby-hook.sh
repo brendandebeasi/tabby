@@ -2,10 +2,12 @@
 set -eu
 
 RAW_EVENT="${1:-}"
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)"
+PROJECT_NAME="${2:-}"
+SESSION_TITLE="${3:-}"
+NOTIFIER_MESSAGE="${4:-}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INDICATOR="$SCRIPT_DIR/set-tabby-indicator.sh"
-FOCUS_PANE="$SCRIPT_DIR/focus_pane.sh"
 LOG_FILE="/tmp/tabby-opencode-hook.log"
 
 # Use tmux from PATH — never hardcode a specific installation path
@@ -91,15 +93,52 @@ if [ -n "${TMUX_PANE:-}" ]; then
     TMUX_TARGET="${SESSION_NAME}:${WINDOW_INDEX}.${PANE_NUM}"
 fi
 
+
+# ── Query OpenCode DB for latest assistant message ─────────────────────────────
+OPENCODE_DB="$HOME/.local/share/opencode/opencode.db"
+get_last_assistant_text() {
+    local max_chars="${1:-200}"
+    if ! command -v sqlite3 &>/dev/null || [ ! -f "$OPENCODE_DB" ]; then
+        return
+    fi
+    sqlite3 "$OPENCODE_DB" "
+        SELECT substr(json_extract(p.data, '$.text'), 1, $max_chars)
+        FROM part p
+        JOIN message m ON p.message_id = m.id
+        WHERE m.session_id = (SELECT id FROM session ORDER BY time_updated DESC LIMIT 1)
+          AND json_extract(m.data, '$.role') = 'assistant'
+          AND json_extract(p.data, '$.type') = 'text'
+          AND length(json_extract(p.data, '$.text')) > 5
+        ORDER BY p.time_created DESC
+        LIMIT 1
+    " 2>/dev/null
+}
+
 # ── Send notification ─────────────────────────────────────────────────────
 send_notification() {
-    local title="$1"
-    local message="$2"
+    local fallback_message="$1"
 
     # Only notify if terminal-notifier is installed
     if ! command -v terminal-notifier &>/dev/null; then
         return
     fi
+
+    # Title: "projectName: sessionTitle" or fall back to window name
+    local title
+    if [ -n "$PROJECT_NAME" ] && [ -n "$SESSION_TITLE" ]; then
+        title="${PROJECT_NAME}: ${SESSION_TITLE}"
+    elif [ -n "$PROJECT_NAME" ]; then
+        title="$PROJECT_NAME"
+    else
+        title="OpenCode [${WINDOW_NAME:-opencode}]"
+    fi
+
+    # Body: last assistant message from DB, or notifier message, or fallback
+    # Strip markdown formatting (bold, italic, code, links) for clean notification text
+    local db_text
+    db_text=$(get_last_assistant_text 200)
+    db_text=$(echo "$db_text" | sed -E 's/\*\*([^*]+)\*\*/\1/g; s/\*([^*]+)\*/\1/g; s/`([^`]+)`/\1/g; s/\[([^]]+)\]\([^)]+\)/\1/g; s/^#+\s*//; s/^[-*]\s*//')
+    local message="${db_text:-${NOTIFIER_MESSAGE:-$fallback_message}}"
 
     local args=(
         -title "$title"
@@ -107,14 +146,6 @@ send_notification() {
         -sound default
         -group "opencode-${WINDOW_INDEX:-0}"
     )
-
-    if [ -n "$WINDOW_INDEX" ]; then
-        args+=(-subtitle "Window ${WINDOW_INDEX}:${PANE_NUM:-0}")
-    fi
-
-    if [ -n "$TMUX_TARGET" ]; then
-        args+=(-execute "$FOCUS_PANE $TMUX_TARGET")
-    fi
 
     terminal-notifier "${args[@]}" &>/dev/null &
 }
@@ -128,16 +159,12 @@ case "$EVENT" in
     complete|stop|done)
         "$INDICATOR" busy 0
         "$INDICATOR" input 1
-        send_notification \
-            "OpenCode [${WINDOW_NAME:-opencode}]" \
-            "Task complete — click to return"
+        send_notification "Task complete"
         ;;
     permission|question)
         "$INDICATOR" busy 0
         "$INDICATOR" input 1
-        send_notification \
-            "OpenCode [${WINDOW_NAME:-opencode}]" \
-            "Needs input — click to return"
+        send_notification "Needs input"
         ;;
     subagent_complete)
         "$INDICATOR" busy 0
@@ -147,9 +174,7 @@ case "$EVENT" in
     error|failed)
         "$INDICATOR" busy 0
         "$INDICATOR" bell 1
-        send_notification \
-            "OpenCode [${WINDOW_NAME:-opencode}]" \
-            "Error occurred — click to check"
+        send_notification "Error occurred"
         ;;
     *)
         # Unknown event — log but don't change state aggressively.
