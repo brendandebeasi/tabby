@@ -9748,7 +9748,11 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	// hooks from running ensure_sidebar.sh (which would race with our inline spawn).
 	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
 
-	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
+	// Create the window detached (-d) so tmux does NOT auto-select it.
+	// This prevents double after-select-window hook firing and eliminates
+	// the visual flicker where the terminal briefly shows intermediate
+	// window states during setup. We do a single select-window at the end.
+	args := []string{"new-window", "-d", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
 
 	// Add working directory if configured
 	if workingDir != "" {
