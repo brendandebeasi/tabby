@@ -4713,16 +4713,14 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		if isCollapsed && len(group.Windows) > 0 {
 			headerText += fmt.Sprintf(" (%d)", len(group.Windows))
 		}
-		// Icon is rendered separately with transparent bg (no group color behind emoji).
-		// The space between icon and name goes INSIDE headerText (with bg fill),
-		// not after the icon (which would create a transparent gap).
+		// Always add a space between prefix and group name for consistent alignment.
+		// Icon (if present) is included INSIDE the bg-filled area so backgrounds
+		// align across all groups regardless of icon width.
 		renderedIcon := ""
-		renderedIconW := 0
 		if icon != "" {
 			renderedIcon = icon
-			renderedIconW = runewidth.StringWidth(icon)
-			headerText = " " + headerText
 		}
+		headerText = " " + headerText
 
 		// Track group header line
 		groupStartLine := currentLine
@@ -4753,54 +4751,67 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			if hasWindows {
 				prefix := collapseStyle.Render(collapseIcon)
 				prefixW := runewidth.StringWidth(stripAnsi(prefix))
-				restW := width - prefixW - renderedIconW
+				restW := width - prefixW
 				if restW < 1 {
 					restW = 1
 				}
 
-				// Truncate header text to fit width (accounting for tree branch + collapse icon + icon)
-				headerMaxWidth := restW
-				if lipgloss.Width(headerText) > headerMaxWidth {
+				// Icon is included INSIDE the bg-filled area so backgrounds
+				// align consistently across groups regardless of icon width.
+				iconAndText := renderedIcon + headerStyle.Render(headerText)
+				iconAndTextW := runewidth.StringWidth(stripAnsi(iconAndText))
+				if iconAndTextW > restW {
+					renderedIconW := runewidth.StringWidth(stripAnsi(renderedIcon))
+					headerMaxW := restW - renderedIconW
+					if headerMaxW < 1 {
+						headerMaxW = 1
+					}
 					truncated := ""
 					for _, r := range headerText {
-						if lipgloss.Width(truncated+string(r)) > headerMaxWidth-1 {
+						if lipgloss.Width(truncated+string(r)) > headerMaxW-1 {
 							break
 						}
 						truncated += string(r)
 					}
 					headerText = truncated + "~"
+					iconAndText = renderedIcon + headerStyle.Render(headerText)
 				}
-				rest := headerStyle.Render(headerText)
 				if bg != "" {
-					rest = c.applyBackgroundFill(rest, bg, restW)
+					iconAndText = c.applyBackgroundFill(iconAndText, bg, restW)
 				} else {
-					rest = lipgloss.NewStyle().Width(restW).Render(rest)
+					iconAndText = lipgloss.NewStyle().Width(restW).Render(iconAndText)
 				}
-				s.WriteString(prefix + renderedIcon + rest + "\n")
+				s.WriteString(prefix + iconAndText + "\n")
 			} else {
 				// No windows - show header with group tree branch but no collapse icon
 				prefix := " "
-				prefixW := runewidth.StringWidth(stripAnsi(prefix))
-				restW := width - prefixW - renderedIconW
+				prefixW := runewidth.StringWidth(prefix)
+				restW := width - prefixW
 				if restW < 1 {
 					restW = 1
 				}
-				if lipgloss.Width(headerText) > restW {
+				iconAndText := renderedIcon + headerStyle.Render(headerText)
+				iconAndTextW := runewidth.StringWidth(stripAnsi(iconAndText))
+				if iconAndTextW > restW {
+					renderedIconW := runewidth.StringWidth(stripAnsi(renderedIcon))
+					headerMaxW := restW - renderedIconW
+					if headerMaxW < 1 {
+						headerMaxW = 1
+					}
 					truncated := ""
 					for _, r := range headerText {
-						if lipgloss.Width(truncated+string(r)) > restW-1 {
+						if lipgloss.Width(truncated+string(r)) > headerMaxW-1 {
 							break
 						}
 						truncated += string(r)
 					}
 					headerText = truncated + "~"
+					iconAndText = renderedIcon + headerStyle.Render(headerText)
 				}
-				headerContent := headerStyle.Render(headerText)
-				renderedHeader := prefix + renderedIcon + headerContent
 				if bg != "" {
-					renderedHeader = prefix + renderedIcon + c.applyBackgroundFill(headerContent, bg, restW)
+					iconAndText = c.applyBackgroundFill(iconAndText, bg, restW)
 				}
-				s.WriteString(renderedHeader + "\n")
+				s.WriteString(prefix + iconAndText + "\n")
 			}
 			currentLine++
 		}
@@ -9773,6 +9784,11 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		logEvent("NEW_WINDOW_RESULT err=%v out=%s", err, string(out))
 	}
 
+	// Signal to the refresh loop that a new window was just created.
+	// This prevents selectContentPaneInActiveWindow() from racing with
+	// our explicit focus management below.
+	lastNewWindowCreation = time.Now()
+
 	// Spawn sidebar renderer inline so the window is fully set up before
 	// any hooks fire. The daemon's spawnRenderersForNewWindows will see the
 	// renderer already exists and skip.
@@ -9807,9 +9823,11 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		selectContentPaneInWindow(newWindowID)
 	}
 
-	// Clear @tabby_spawning after a short delay so after-new-window hooks
-	// (which fire after our tmux commands complete) still see it as set.
-	exec.Command("tmux", "run-shell", "-b", "sleep 0.3; tmux set-option -gu @tabby_spawning 2>/dev/null || true").Run()
+	// Clear @tabby_spawning after a longer delay to cover the full hook lifecycle.
+	// Hooks (after-new-window, after-select-window) fire asynchronously and can
+	// trigger ensure_sidebar.sh / spawnRenderersForNewWindows — the guard must
+	// remain active long enough for those to see it.
+	exec.Command("tmux", "run-shell", "-b", "sleep 1.5; tmux set-option -gu @tabby_spawning 2>/dev/null || true").Run()
 
 	// Force immediate refresh so pane headers get correct colors/icons
 	// without waiting for the async USR1 signal

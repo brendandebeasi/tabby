@@ -30,6 +30,11 @@ var eventLog *log.Logger
 var inputLog *log.Logger
 var daemonStartTime time.Time
 
+// lastNewWindowCreation tracks when the coordinator last created a new window.
+// The refresh loop uses this to skip selectContentPaneInActiveWindow() calls
+// that would race with the new-window handler's own focus management.
+var lastNewWindowCreation time.Time
+
 // rotateLogFile rotates a log file if it exceeds maxBytes.
 // Keeps one .prev backup. Returns nil on success or if file is small enough.
 func rotateLogFile(path string, maxBytes int64) {
@@ -1522,7 +1527,7 @@ func main() {
 						doPaneLayoutOps()
 						t5 := time.Now()
 
-						if spawnedRenderer {
+						if spawnedRenderer && time.Since(lastNewWindowCreation) >= 2*time.Second {
 							selectContentPaneInActiveWindow()
 						}
 
@@ -1580,7 +1585,7 @@ func main() {
 					cleanupOrphanWindowsByTmux(*sessionID)
 					cleanupSidebarsForClosedWindows(server, windows)
 					doPaneLayoutOps()
-					if spawnedFallback {
+					if spawnedFallback && time.Since(lastNewWindowCreation) >= 2*time.Second {
 						selectContentPaneInActiveWindow()
 					}
 					// Persist current layouts to disk for restart recovery
