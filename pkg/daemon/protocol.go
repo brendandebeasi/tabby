@@ -19,6 +19,7 @@ const (
 	MsgMenu           MessageType = "menu"        // Daemon -> Renderer: show context menu
 	MsgMenuSelect     MessageType = "menu_select" // Renderer -> Daemon: menu item selected
 	MsgMarkerPicker   MessageType = "marker_picker"
+	MsgColorPicker    MessageType = "color_picker"
 	MsgPing           MessageType = "ping"
 	MsgPong           MessageType = "pong"
 )
@@ -171,6 +172,14 @@ type MarkerPickerPayload struct {
 	Scope   string                `json:"scope"`
 	Target  string                `json:"target"`
 	Options []MarkerOptionPayload `json:"options"`
+}
+
+// ColorPickerPayload contains data for the interactive HSL color picker modal
+type ColorPickerPayload struct {
+	Title        string `json:"title"`
+	Scope        string `json:"scope"`         // "window" or "group"
+	Target       string `json:"target"`        // window target or group name
+	CurrentColor string `json:"current_color"` // Current hex color (for initial position)
 }
 
 // runtimePrefix returns an optional prefix for runtime files.

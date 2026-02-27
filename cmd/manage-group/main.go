@@ -92,7 +92,9 @@ func addGroup(configPath, name string) error {
 		return err
 	}
 
-	newGroup := config.DefaultGroup(name)
+	// Use the current group count as index so each new group gets a unique color
+	// from the palette (blue, green, red, purple, orange, ...)
+	newGroup := config.DefaultGroupWithIndex(name, len(cfg.Groups))
 	if err := config.AddGroup(cfg, newGroup); err != nil {
 		return err
 	}
@@ -147,9 +149,17 @@ func setGroupColor(configPath, name, color string) error {
 		return config.ErrGroupNotFound
 	}
 
-	// Update colors - use the provided color as base
+	// Set the base color and clear all derived color fields.
+	// At render time, FindGroupThemeWithDefaults() -> AutoFillTheme() will
+	// properly derive active_bg, fg, active_fg, inactive_bg, inactive_fg
+	// from this base color. Previously darkenColor() was a stub that returned
+	// the same color, causing active/inactive tabs to look identical.
 	group.Theme.Bg = color
-	group.Theme.ActiveBg = darkenColor(color)
+	group.Theme.ActiveBg = ""
+	group.Theme.Fg = ""
+	group.Theme.ActiveFg = ""
+	group.Theme.InactiveBg = ""
+	group.Theme.InactiveFg = ""
 
 	return config.SaveConfig(configPath, cfg)
 }
@@ -167,11 +177,4 @@ func setGroupMarker(configPath, name, marker string) error {
 
 	group.Theme.Icon = marker
 	return config.SaveConfig(configPath, cfg)
-}
-
-// darkenColor returns a slightly darker version of the color for active state
-func darkenColor(hex string) string {
-	// Simple approach: just return the color as-is for now
-	// A proper implementation would parse and darken the color
-	return hex
 }

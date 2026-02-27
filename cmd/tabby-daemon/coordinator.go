@@ -222,6 +222,7 @@ type Coordinator struct {
 	// Context menu state (for in-renderer menus)
 	OnSendMenu         func(clientID string, menu *daemon.MenuPayload)
 	OnSendMarkerPicker func(clientID string, picker *daemon.MarkerPickerPayload)
+	OnSendColorPicker  func(clientID string, picker *daemon.ColorPickerPayload)
 	pendingMenus       map[string][]menuItemDef
 	pendingMenusMu     sync.Mutex
 
@@ -7676,6 +7677,8 @@ func (c *Coordinator) HandleInput(clientID string, input *daemon.InputPayload) b
 		return true
 	case "marker_picker":
 		return c.handleMarkerPickerInput(input)
+	case "color_picker":
+		return c.handleColorPickerInput(input)
 	}
 	return false
 }
@@ -7685,6 +7688,51 @@ func (c *Coordinator) handleMarkerPickerInput(input *daemon.InputPayload) bool {
 		return false
 	}
 	return c.applyMarkerSelection(input.PickerScope, input.PickerTarget, input.PickerValue)
+}
+
+func (c *Coordinator) handleColorPickerInput(input *daemon.InputPayload) bool {
+	if input.PickerAction != "apply" {
+		return false
+	}
+	return c.applyColorPickerSelection(input.PickerScope, input.PickerTarget, input.PickerValue)
+}
+
+func (c *Coordinator) applyColorPickerSelection(scope, target, hexColor string) bool {
+	hexColor = strings.TrimSpace(hexColor)
+	if hexColor == "" {
+		return false
+	}
+
+	if scope == "window" {
+		windowTarget := ":" + target
+		if c.sessionID != "" {
+			windowTarget = c.sessionID + ":" + target
+		}
+		exec.Command("tmux", "set-window-option", "-t", windowTarget, "@tabby_color", hexColor).Run()
+		return true
+	}
+
+	if scope == "group" {
+		colorScript := c.getScriptPath("set_group_color.sh")
+		if colorScript != "" {
+			exec.Command("bash", colorScript, target, hexColor).Run()
+		}
+		return true
+	}
+
+	return false
+}
+
+func (c *Coordinator) openColorPicker(clientID, scope, target, title, currentColor string) {
+	if c.OnSendColorPicker == nil {
+		return
+	}
+	c.OnSendColorPicker(clientID, &daemon.ColorPickerPayload{
+		Title:        title,
+		Scope:        scope,
+		Target:       target,
+		CurrentColor: currentColor,
+	})
 }
 
 // handleSemanticAction processes pre-resolved semantic actions from renderers
@@ -8238,6 +8286,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			// Last content pane - kill the whole window
 			exec.Command("tmux", "kill-window", "-t", windowID).Run()
 		} else {
+			saveLayoutBeforeKill(paneID)
 			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 		}
 		return true
@@ -8930,6 +8979,25 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 		return
 	}
 
+	if strings.HasPrefix(item.Command, "tabby-color-picker:") {
+		parts := strings.SplitN(item.Command, ":", 4)
+		if len(parts) >= 3 {
+			targetBytes, err := base64.StdEncoding.DecodeString(parts[2])
+			if err == nil {
+				title := "Pick Color"
+				if parts[1] == "group" {
+					title = "Pick Group Color"
+				}
+				currentColor := ""
+				if len(parts) == 4 {
+					currentColor = parts[3]
+				}
+				c.openColorPicker(clientID, parts[1], string(targetBytes), title, currentColor)
+			}
+		}
+		return
+	}
+
 	// Execute the tmux command via temp file (handles complex quoting correctly)
 	executeTmuxCommand(item.Command)
 }
@@ -9081,36 +9149,10 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	unlockCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_name_locked", win.Index)
 	args = append(args, "Unlock Name", "u", unlockCmd)
 
-	// Pin/Unpin option - pinned windows appear at the top of sidebar
-	if win.Pinned {
-		unpinCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_pinned", win.Index)
-		args = append(args, "Unpin from Top", "p", unpinCmd)
-	} else {
-		pinCmd := fmt.Sprintf("set-window-option -t :%d @tabby_pinned 1", win.Index)
-		args = append(args, "Pin to Top", "p", pinCmd)
-	}
-
-	// Collapse/Expand panes option (only for windows with multiple panes)
-	contentPaneCount := 0
-	for _, pane := range win.Panes {
-		if isAuxiliaryPane(pane) {
-			continue
-		}
-		contentPaneCount++
-	}
-	if contentPaneCount > 1 {
-		args = append(args, "", "", "") // Separator
-		if win.Collapsed {
-			expandCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_collapsed", win.Index)
-			args = append(args, "Expand Panes", "e", expandCmd)
-		} else {
-			collapseCmd := fmt.Sprintf("set-window-option -t :%d @tabby_collapsed 1", win.Index)
-			args = append(args, "Collapse Panes", "c", collapseCmd)
-		}
-	}
-
-	// Separator
+	// Separator before group/appearance section
 	args = append(args, "", "", "")
+
+	// --- Group & Appearance section (all window-group-related options together) ---
 
 	// Move to Group submenu
 	args = append(args, "-Move to Group", "", "")
@@ -9133,9 +9175,6 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		args = append(args, "  Remove from Group", "0", removeCmd)
 	}
 
-	// Separator
-	args = append(args, "", "", "")
-
 	// Set Color submenu
 	args = append(args, "-Set Tab Color", "", "")
 	colorOptions := []struct {
@@ -9154,48 +9193,63 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		{"Gray", "#7f8c8d", "a"},
 		{"Transparent", "transparent", "t"},
 	}
-	for _, color := range colorOptions {
-		setColorCmd := fmt.Sprintf("set-window-option -t %s @tabby_color '%s'", windowTarget, color.hex)
-		args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
+	if !c.config.Sidebar.HidePredefinedColors {
+		for _, color := range colorOptions {
+			setColorCmd := fmt.Sprintf("set-window-option -t %s @tabby_color '%s'", windowTarget, color.hex)
+			args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
+		}
 	}
+	colorTarget := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(win.Index)))
+	currentColor := win.CustomColor
+	colorPickerCmd := fmt.Sprintf("tabby-color-picker:window:%s:%s", colorTarget, currentColor)
+	args = append(args, "  Custom Color...", "h", colorPickerCmd)
+	customColorCmd := fmt.Sprintf("command-prompt -p 'Hex color (#rrggbb):' \"set-window-option -t %s @tabby_color '%%%%%%%%'\"", windowTarget)
+	args = append(args, "  Custom (Hex)...", "#", customColorCmd)
 	resetColorCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_color", windowTarget)
 	args = append(args, "  Reset to Default", "d", resetColorCmd)
 
-	// Set Icon submenu
-	args = append(args, "-Set Icon", "", "")
-	iconOptions := []struct {
-		name string
-		icon string
-		key  string
-	}{
-		{"Terminal", "", "1"},
-		{"Code", "", "2"},
-		{"Folder", "", "3"},
-		{"Git", "", "4"},
-		{"Bug", "", "5"},
-		{"Test", "", "6"},
-		{"Database", "", "7"},
-		{"Globe", "", "8"},
-		{"Star", "★", "s"},
-		{"Heart", "❤", "h"},
-		{"Fire", "🔥", "f"},
-		{"Rocket", "🚀", "r"},
-		{"Lightning", "⚡", "l"},
-	}
-	for _, opt := range iconOptions {
-		setIconCmd := fmt.Sprintf("set-window-option -t :%d @tabby_icon '%s'", win.Index, opt.icon)
-		args = append(args, fmt.Sprintf("  %s %s", opt.icon, opt.name), opt.key, setIconCmd)
-	}
+
+	// Set Marker — opens the searchable emoji/icon picker (same as group menu)
 	if !strings.HasPrefix(clientID, "header:") {
 		target := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(win.Index)))
 		searchCmd := fmt.Sprintf("tabby-marker-picker:window:%s", target)
-		args = append(args, "  Search...", "", searchCmd)
+		args = append(args, "Set Marker", "m", searchCmd)
+		// Show remove option only if a marker is currently set
+		if win.Icon != "" {
+			resetIconCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_icon", win.Index)
+			args = append(args, "Remove Marker", "0", resetIconCmd)
+		}
 	}
-	resetIconCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_icon", win.Index)
-	args = append(args, "  Remove Icon", "0", resetIconCmd)
 
-	// Separator
+	// Pin/Unpin option - pinned windows appear at the top of sidebar
+	if win.Pinned {
+		unpinCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_pinned", win.Index)
+		args = append(args, "Unpin from Top", "p", unpinCmd)
+	} else {
+		pinCmd := fmt.Sprintf("set-window-option -t :%d @tabby_pinned 1", win.Index)
+		args = append(args, "Pin to Top", "p", pinCmd)
+	}
+
+	// --- Window actions section ---
 	args = append(args, "", "", "")
+
+	// Collapse/Expand panes option (only for windows with multiple panes)
+	contentPaneCount := 0
+	for _, pane := range win.Panes {
+		if isAuxiliaryPane(pane) {
+			continue
+		}
+		contentPaneCount++
+	}
+	if contentPaneCount > 1 {
+		if win.Collapsed {
+			expandCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_collapsed", win.Index)
+			args = append(args, "Expand Panes", "e", expandCmd)
+		} else {
+			collapseCmd := fmt.Sprintf("set-window-option -t :%d @tabby_collapsed 1", win.Index)
+			args = append(args, "Collapse Panes", "c", collapseCmd)
+		}
+	}
 
 	// Split options - use active pane ID to avoid index issues with header panes
 	activePaneID := ""
@@ -9231,14 +9285,14 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		args = append(args, "Split Vertical -", "-", splitVCmd)
 	}
 
-	// Separator
+	// --- Utilities ---
 	args = append(args, "", "", "")
 
 	// Open in Finder
 	openFinderCmd := "run-shell 'open \"#{pane_current_path}\"'"
 	args = append(args, "Open in Finder", "o", openFinderCmd)
 
-	// Separator
+	// --- Destructive ---
 	args = append(args, "", "", "")
 
 	// Kill option
@@ -9423,8 +9477,10 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	// Separator
 	args = append(args, "", "", "")
 
-	// Close pane
-	args = append(args, "Close Pane", "x", fmt.Sprintf("kill-pane -t %s", pane.ID))
+	// Close pane (save layout first to preserve sibling ratios)
+	exe, _ := os.Executable()
+	killWrapper := filepath.Join(filepath.Dir(exe), "..", "scripts", "kill_pane_wrapper.sh")
+	args = append(args, "Close Pane", "x", fmt.Sprintf("run-shell '%s -t %s'", killWrapper, pane.ID))
 
 	c.executeOrSendMenu(clientID, args, pos)
 }
@@ -9555,10 +9611,21 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 			{"Gray", "#7f8c8d", "a"},
 			{"Transparent", "transparent", "t"},
 		}
-		for _, color := range colorOptions {
-			setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", colorScript, group.Name, color.hex)
-			args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
+		if !c.config.Sidebar.HidePredefinedColors {
+			for _, color := range colorOptions {
+				setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", colorScript, group.Name, color.hex)
+				args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
+			}
 		}
+		groupColorTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
+		groupCurrentColor := group.Theme.Bg
+		colorPickerCmd := fmt.Sprintf("tabby-color-picker:group:%s:%s", groupColorTarget, groupCurrentColor)
+		args = append(args, "  Custom Color...", "h", colorPickerCmd)
+		customColorCmd := fmt.Sprintf(
+			"command-prompt -p 'Hex color (#rrggbb):' \"run-shell '%s \\\"%s\\\" \\\"%%%%%%%%\\\"'\"",
+			colorScript, group.Name,
+		)
+		args = append(args, "  Custom (Hex)...", "#", customColorCmd)
 	}
 
 	canShowMarkerPicker := c.OnSendMenu != nil && !strings.HasPrefix(clientID, "header:")
@@ -9628,6 +9695,8 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 
 // createNewWindowInCurrentGroup creates a new window in the same group as the current window,
 // using the group's configured working_dir if available.
+// Sets @tabby_spawning to prevent hook-chain focus stealing, spawns the sidebar
+// renderer inline, and clears the guard asynchronously (matching new_window_with_group.sh).
 func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	logEvent("NEW_WINDOW_START client=%s", clientID)
 	c.stateMu.RLock()
@@ -9663,6 +9732,10 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	}
 
 	c.stateMu.RUnlock()
+
+	// Set @tabby_spawning guard to prevent after-new-window / after-select-window
+	// hooks from running ensure_sidebar.sh (which would race with our inline spawn).
+	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
 
 	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
 
@@ -9700,11 +9773,43 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		logEvent("NEW_WINDOW_RESULT err=%v out=%s", err, string(out))
 	}
 
+	// Spawn sidebar renderer inline so the window is fully set up before
+	// any hooks fire. The daemon's spawnRenderersForNewWindows will see the
+	// renderer already exists and skip.
+	if newWindowID != "" {
+		modeOut, _ := exec.Command("tmux", "show-options", "-gqv", "@tabby_sidebar").Output()
+		mode := strings.TrimSpace(string(modeOut))
+		if mode == "enabled" {
+			rendererBin := getRendererBin()
+			if rendererBin != "" {
+				widthStr := "25"
+				if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width").Output(); err == nil {
+					if w := strings.TrimSpace(string(out)); w != "" {
+						widthStr = w
+					}
+				}
+				// Get first pane in the new window for splitting
+				if panesOut, err := exec.Command("tmux", "list-panes", "-t", newWindowID, "-F", "#{pane_id}").Output(); err == nil {
+					lines := strings.Split(strings.TrimSpace(string(panesOut)), "\n")
+					if len(lines) > 0 && lines[0] != "" {
+						firstPane := lines[0]
+						cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s'", rendererBin, c.sessionID, newWindowID)
+						exec.Command("tmux", "split-window", "-d", "-t", firstPane, "-h", "-b", "-f", "-l", widthStr, cmdStr).Run()
+					}
+				}
+			}
+		}
+	}
+
 	if newWindowID != "" {
 		exec.Command("tmux", "select-window", "-t", newWindowID).Run()
 		// Select the content pane (not the sidebar) in the new window
 		selectContentPaneInWindow(newWindowID)
 	}
+
+	// Clear @tabby_spawning after a short delay so after-new-window hooks
+	// (which fire after our tmux commands complete) still see it as set.
+	exec.Command("tmux", "run-shell", "-b", "sleep 0.3; tmux set-option -gu @tabby_spawning 2>/dev/null || true").Run()
 
 	// Force immediate refresh so pane headers get correct colors/icons
 	// without waiting for the async USR1 signal

@@ -523,6 +523,24 @@ func (s *Server) SendMarkerPickerToClient(clientID string, picker *MarkerPickerP
 	s.sendMessage(conn, msg)
 }
 
+func (s *Server) SendColorPickerToClient(clientID string, picker *ColorPickerPayload) {
+	s.clientsMu.RLock()
+	client, ok := s.clients[clientID]
+	if !ok {
+		s.clientsMu.RUnlock()
+		return
+	}
+	conn := client.Conn
+	s.clientsMu.RUnlock()
+
+	msg := Message{
+		Type:     MsgColorPicker,
+		ClientID: clientID,
+		Payload:  picker,
+	}
+	s.sendMessage(conn, msg)
+}
+
 // colorProfileOrder defines the capability order (lowest to highest)
 var colorProfileOrder = map[string]int{
 	"Ascii":     0,

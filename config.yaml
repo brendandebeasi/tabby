@@ -82,6 +82,7 @@ sidebar:
   show_empty_groups: true
   close_button: false
   sort_by: "group"  # "group" or "index"
+  hide_predefined_colors: false  # Hide predefined color palette in context menus (keep Custom + Reset)
   debug: true  # Enable debug logging to /tmp/tabby-debug.log
   touch_mode: false  # Force touch mode on when true. For auto mode, set TABBY_TOUCH=auto.
   disable_large_mode: true

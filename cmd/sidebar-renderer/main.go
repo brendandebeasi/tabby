@@ -159,6 +159,15 @@ type rendererModel struct {
 	pickerScroll       int
 	pickerMouseDown    bool
 	pickerInputFocused bool
+
+	colorPickerShowing bool
+	colorPickerTitle   string
+	colorPickerScope   string
+	colorPickerTarget  string
+	colorPickerHue     int // 0-360
+	colorPickerSat     int // 0-100
+	colorPickerLit     int // 0-100
+	colorPickerFocus   int // 0=hue, 1=sat, 2=lit
 }
 
 // Message types
@@ -179,6 +188,10 @@ type menuMsg struct {
 
 type markerPickerMsg struct {
 	payload *daemon.MarkerPickerPayload
+}
+
+type colorPickerMsg struct {
+	payload *daemon.ColorPickerPayload
 }
 
 type tickMsg time.Time
@@ -312,6 +325,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case menuMsg:
 		m.pickerShowing = false
+		m.colorPickerShowing = false
 		m.menuShowing = true
 		m.menuTitle = msg.payload.Title
 		m.menuItems = msg.payload.Items
@@ -324,6 +338,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case markerPickerMsg:
 		m.menuShowing = false
+		m.colorPickerShowing = false
 		m.pickerShowing = true
 		m.pickerTitle = msg.payload.Title
 		m.pickerScope = msg.payload.Scope
@@ -335,6 +350,21 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerMouseDown = false
 		m.pickerInputFocused = true
 		m.pickerApplyFilter()
+		m.menuFocusSidebar()
+		return m, nil
+
+	case colorPickerMsg:
+		m.menuShowing = false
+		m.pickerShowing = false
+		m.colorPickerShowing = true
+		m.colorPickerTitle = msg.payload.Title
+		m.colorPickerScope = msg.payload.Scope
+		m.colorPickerTarget = msg.payload.Target
+		h, s, l := hexToHSL(msg.payload.CurrentColor)
+		m.colorPickerHue = h
+		m.colorPickerSat = s
+		m.colorPickerLit = l
+		m.colorPickerFocus = 0
 		m.menuFocusSidebar()
 		return m, nil
 
@@ -385,6 +415,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case tea.KeyMsg:
+		if m.colorPickerShowing {
+			return m.handleColorPickerKey(msg)
+		}
 		if m.pickerShowing {
 			return m.handlePickerKey(msg)
 		}
@@ -484,6 +517,10 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	if m.pickerShowing {
 		return m.handlePickerMouse(msg)
+	}
+
+	if m.colorPickerShowing {
+		return m.handleColorPickerMouse(msg)
 	}
 
 	// Menu mode: intercept all mouse events
@@ -1406,6 +1443,416 @@ func (m rendererModel) handlePickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func hueToRGB(p, q, t float64) float64 {
+	for t < 0 {
+		t += 1
+	}
+	for t > 1 {
+		t -= 1
+	}
+	if t < 1.0/6.0 {
+		return p + (q-p)*6*t
+	}
+	if t < 1.0/2.0 {
+		return q
+	}
+	if t < 2.0/3.0 {
+		return p + (q-p)*(2.0/3.0-t)*6
+	}
+	return p
+}
+
+func hslToHex(h, s, l int) string {
+	h = clampInt(h, 0, 360)
+	s = clampInt(s, 0, 100)
+	l = clampInt(l, 0, 100)
+
+	hf := float64(h%360) / 360.0
+	sf := float64(s) / 100.0
+	lf := float64(l) / 100.0
+
+	var r, g, b float64
+	if sf == 0 {
+		r, g, b = lf, lf, lf
+	} else {
+		var q float64
+		if lf < 0.5 {
+			q = lf * (1 + sf)
+		} else {
+			q = lf + sf - lf*sf
+		}
+		p := 2*lf - q
+		r = hueToRGB(p, q, hf+1.0/3.0)
+		g = hueToRGB(p, q, hf)
+		b = hueToRGB(p, q, hf-1.0/3.0)
+	}
+
+	ri := clampInt(int(r*255+0.5), 0, 255)
+	gi := clampInt(int(g*255+0.5), 0, 255)
+	bi := clampInt(int(b*255+0.5), 0, 255)
+	return fmt.Sprintf("#%02x%02x%02x", ri, gi, bi)
+}
+
+func hexToHSL(hex string) (int, int, int) {
+	defaultH, defaultS, defaultL := 180, 70, 50
+	clean := strings.TrimSpace(strings.TrimPrefix(hex, "#"))
+	if len(clean) == 3 {
+		clean = strings.Repeat(string(clean[0]), 2) + strings.Repeat(string(clean[1]), 2) + strings.Repeat(string(clean[2]), 2)
+	}
+	if len(clean) != 6 {
+		return defaultH, defaultS, defaultL
+	}
+
+	rv, errR := strconv.ParseInt(clean[0:2], 16, 64)
+	gv, errG := strconv.ParseInt(clean[2:4], 16, 64)
+	bv, errB := strconv.ParseInt(clean[4:6], 16, 64)
+	if errR != nil || errG != nil || errB != nil {
+		return defaultH, defaultS, defaultL
+	}
+
+	r := float64(rv) / 255.0
+	g := float64(gv) / 255.0
+	b := float64(bv) / 255.0
+
+	maxV := r
+	if g > maxV {
+		maxV = g
+	}
+	if b > maxV {
+		maxV = b
+	}
+	minV := r
+	if g < minV {
+		minV = g
+	}
+	if b < minV {
+		minV = b
+	}
+
+	l := (maxV + minV) / 2
+	h := 0.0
+	s := 0.0
+
+	if maxV != minV {
+		d := maxV - minV
+		if l > 0.5 {
+			s = d / (2 - maxV - minV)
+		} else {
+			s = d / (maxV + minV)
+		}
+
+		switch maxV {
+		case r:
+			h = (g - b) / d
+			if g < b {
+				h += 6
+			}
+		case g:
+			h = (b-r)/d + 2
+		case b:
+			h = (r-g)/d + 4
+		}
+		h /= 6
+	}
+
+	hInt := int(h*360 + 0.5)
+	if hInt == 360 {
+		hInt = 0
+	}
+	return hInt, clampInt(int(s*100+0.5), 0, 100), clampInt(int(l*100+0.5), 0, 100)
+}
+
+func (m *rendererModel) colorPickerDismiss(sendCancel bool) {
+	if sendCancel {
+		m.sendInput(&daemon.InputPayload{Type: "color_picker", PickerAction: "cancel"})
+	}
+	m.colorPickerShowing = false
+	m.menuRestoreFocus()
+}
+
+func (m *rendererModel) colorPickerApply() {
+	hex := hslToHex(m.colorPickerHue, m.colorPickerSat, m.colorPickerLit)
+	m.sendInput(&daemon.InputPayload{
+		Type:         "color_picker",
+		PickerAction: "apply",
+		PickerScope:  m.colorPickerScope,
+		PickerTarget: m.colorPickerTarget,
+		PickerValue:  hex,
+	})
+	m.colorPickerDismiss(false)
+}
+
+func (m *rendererModel) colorPickerAdjust(delta int) {
+	switch m.colorPickerFocus {
+	case 0:
+		m.colorPickerHue = clampInt(m.colorPickerHue+delta, 0, 360)
+	case 1:
+		m.colorPickerSat = clampInt(m.colorPickerSat+delta, 0, 100)
+	case 2:
+		m.colorPickerLit = clampInt(m.colorPickerLit+delta, 0, 100)
+	}
+}
+
+func (m rendererModel) colorPickerModalLayout() (startX, startY, modalW, modalH int) {
+	modalW = m.width - 6
+	if modalW > 76 {
+		modalW = 76
+	}
+	if modalW < 30 {
+		modalW = m.width
+	}
+	modalH = m.height - 4
+	if modalH > 20 {
+		modalH = 20
+	}
+	if modalH < 16 {
+		modalH = m.height
+	}
+	startX = (m.width - modalW) / 2
+	startY = (m.height - modalH) / 2
+	if startX < 0 {
+		startX = 0
+	}
+	if startY < 0 {
+		startY = 0
+	}
+	return
+}
+
+func (m rendererModel) colorPickerBarGeometry() (barX, barW, hueY, satY, litY int) {
+	startX, startY, modalW, _ := m.colorPickerModalLayout()
+	innerW := modalW - 4
+	if innerW < 10 {
+		innerW = 10
+	}
+	barX = startX + 2
+	barW = innerW
+	hueY = startY + 4
+	satY = startY + 7
+	litY = startY + 10
+	return
+}
+
+func sliderCursorIndex(value, maxVal, width int) int {
+	if width <= 1 || maxVal <= 0 {
+		return 0
+	}
+	idx := (value*(width-1) + maxVal/2) / maxVal
+	return clampInt(idx, 0, width-1)
+}
+
+func sliderValueAtPos(relX, width, maxVal int) int {
+	if width <= 1 || maxVal <= 0 {
+		return 0
+	}
+	if relX < 0 {
+		relX = 0
+	}
+	if relX >= width {
+		relX = width - 1
+	}
+	return clampInt((relX*maxVal+(width-1)/2)/(width-1), 0, maxVal)
+}
+
+func renderGradientBar(width, cursor, maxVal int, colorForValue func(int) string) string {
+	if width < 1 {
+		return ""
+	}
+	var b strings.Builder
+	for i := 0; i < width; i++ {
+		value := sliderValueAtPos(i, width, maxVal)
+		hex := colorForValue(value)
+		style := lipgloss.NewStyle().Background(lipgloss.Color(hex))
+		if i == cursor {
+			b.WriteString(style.Foreground(lipgloss.Color("#000000")).Bold(true).Render("█"))
+		} else {
+			b.WriteString(style.Render(" "))
+		}
+	}
+	return b.String()
+}
+
+func (m rendererModel) handleColorPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "escape", "q":
+		m.colorPickerDismiss(true)
+		return m, nil
+	case "enter":
+		m.colorPickerApply()
+		return m, nil
+	case "left", "h":
+		m.colorPickerAdjust(-5)
+		return m, nil
+	case "right", "l":
+		m.colorPickerAdjust(5)
+		return m, nil
+	case "shift+left", "shift+h":
+		m.colorPickerAdjust(-1)
+		return m, nil
+	case "shift+right", "shift+l":
+		m.colorPickerAdjust(1)
+		return m, nil
+	case "up", "k", "shift+tab", "backtab":
+		m.colorPickerFocus = (m.colorPickerFocus + 2) % 3
+		return m, nil
+	case "down", "j", "tab":
+		m.colorPickerFocus = (m.colorPickerFocus + 1) % 3
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m rendererModel) handleColorPickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	startX, startY, modalW, modalH := m.colorPickerModalLayout()
+	inModal := msg.X >= startX && msg.X < startX+modalW && msg.Y >= startY && msg.Y < startY+modalH
+	if msg.Action == tea.MouseActionPress && !inModal {
+		m.colorPickerDismiss(true)
+		return m, nil
+	}
+
+	if msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	if msg.Action != tea.MouseActionPress && msg.Action != tea.MouseActionMotion {
+		return m, nil
+	}
+
+	barX, barW, hueY, satY, litY := m.colorPickerBarGeometry()
+	if msg.Y != hueY && msg.Y != satY && msg.Y != litY {
+		return m, nil
+	}
+	relX := msg.X - barX
+	switch msg.Y {
+	case hueY:
+		m.colorPickerFocus = 0
+		m.colorPickerHue = sliderValueAtPos(relX, barW, 360)
+	case satY:
+		m.colorPickerFocus = 1
+		m.colorPickerSat = sliderValueAtPos(relX, barW, 100)
+	case litY:
+		m.colorPickerFocus = 2
+		m.colorPickerLit = sliderValueAtPos(relX, barW, 100)
+	}
+	return m, nil
+}
+
+func (m rendererModel) renderColorPickerModal() []string {
+	_, _, modalW, _ := m.colorPickerModalLayout()
+	innerW := modalW - 4
+	if innerW < 10 {
+		innerW = 10
+	}
+
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#666"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000"))
+	lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#000000"))
+	focusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2563eb")).Bold(true)
+
+	lines := make([]string, 0, 24)
+	title := m.colorPickerTitle
+	if strings.TrimSpace(title) == "" {
+		title = "Pick Color"
+	}
+	title = truncateToWidth(title, innerW)
+	titlePad := innerW - runewidth.StringWidth(title)
+	if titlePad < 0 {
+		titlePad = 0
+	}
+
+	lines = append(lines, borderStyle.Render("┌"+strings.Repeat("─", modalW-2)+"┐"))
+	lines = append(lines, borderStyle.Render("│ ")+titleStyle.Render(title)+strings.Repeat(" ", titlePad)+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+strings.Repeat(" ", innerW)+borderStyle.Render(" │"))
+
+	hLabel := fmt.Sprintf("Hue: %3d°", m.colorPickerHue)
+	sLabel := fmt.Sprintf("Saturation: %3d%%", m.colorPickerSat)
+	lLabel := fmt.Sprintf("Lightness: %3d%%", m.colorPickerLit)
+	if m.colorPickerFocus == 0 {
+		hLabel = focusStyle.Render(hLabel)
+	} else {
+		hLabel = lineStyle.Render(hLabel)
+	}
+	if m.colorPickerFocus == 1 {
+		sLabel = focusStyle.Render(sLabel)
+	} else {
+		sLabel = lineStyle.Render(sLabel)
+	}
+	if m.colorPickerFocus == 2 {
+		lLabel = focusStyle.Render(lLabel)
+	} else {
+		lLabel = lineStyle.Render(lLabel)
+	}
+
+	hueCursor := sliderCursorIndex(m.colorPickerHue, 360, innerW)
+	satCursor := sliderCursorIndex(m.colorPickerSat, 100, innerW)
+	litCursor := sliderCursorIndex(m.colorPickerLit, 100, innerW)
+
+	hueBar := renderGradientBar(innerW, hueCursor, 360, func(v int) string {
+		return hslToHex(v, 100, 50)
+	})
+	satBar := renderGradientBar(innerW, satCursor, 100, func(v int) string {
+		return hslToHex(m.colorPickerHue, v, 50)
+	})
+	litBar := renderGradientBar(innerW, litCursor, 100, func(v int) string {
+		return hslToHex(m.colorPickerHue, m.colorPickerSat, v)
+	})
+
+	lines = append(lines, borderStyle.Render("│ ")+hLabel+strings.Repeat(" ", max(0, innerW-runewidth.StringWidth(stripAnsi(hLabel))))+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+hueBar+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+strings.Repeat(" ", innerW)+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+sLabel+strings.Repeat(" ", max(0, innerW-runewidth.StringWidth(stripAnsi(sLabel))))+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+satBar+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+strings.Repeat(" ", innerW)+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+lLabel+strings.Repeat(" ", max(0, innerW-runewidth.StringWidth(stripAnsi(lLabel))))+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+litBar+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+strings.Repeat(" ", innerW)+borderStyle.Render(" │"))
+
+	previewHex := hslToHex(m.colorPickerHue, m.colorPickerSat, m.colorPickerLit)
+	previewSwatch := lipgloss.NewStyle().Background(lipgloss.Color(previewHex)).Render(strings.Repeat(" ", 8))
+	previewText := "Preview: " + previewSwatch + "  " + previewHex
+	previewPad := innerW - runewidth.StringWidth(stripAnsi(previewText))
+	if previewPad < 0 {
+		previewPad = 0
+	}
+	lines = append(lines, borderStyle.Render("│ ")+lineStyle.Render(previewText)+strings.Repeat(" ", previewPad)+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+strings.Repeat(" ", innerW)+borderStyle.Render(" │"))
+
+	lines = append(lines, borderStyle.Render("├"+strings.Repeat("─", modalW-2)+"┤"))
+	help1 := "←→: adjust  Shift+←→: fine  ↑↓/Tab: switch"
+	help2 := "Enter: apply  Esc: cancel"
+	help1 = truncateToWidth(help1, innerW)
+	help2 = truncateToWidth(help2, innerW)
+	help1Pad := innerW - runewidth.StringWidth(help1)
+	help2Pad := innerW - runewidth.StringWidth(help2)
+	if help1Pad < 0 {
+		help1Pad = 0
+	}
+	if help2Pad < 0 {
+		help2Pad = 0
+	}
+	lines = append(lines, borderStyle.Render("│ ")+lineStyle.Render(help1)+strings.Repeat(" ", help1Pad)+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+lineStyle.Render(help2)+strings.Repeat(" ", help2Pad)+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("└"+strings.Repeat("─", modalW-2)+"┘"))
+
+	return lines
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func (m rendererModel) renderPickerModal() []string {
 	_, _, modalW, _ := m.pickerModalLayout()
 	innerW := modalW - 4
@@ -1611,6 +2058,24 @@ func (m rendererModel) View() string {
 		}
 	}
 
+	if m.colorPickerShowing {
+		startX, startY, modalW, _ := m.colorPickerModalLayout()
+		pickerLines := m.renderColorPickerModal()
+		for i, pl := range pickerLines {
+			row := startY + i
+			if row < 0 || row >= len(visible) {
+				continue
+			}
+			left := strings.Repeat(" ", startX)
+			rightWidth := m.width - startX - modalW
+			if rightWidth < 0 {
+				rightWidth = 0
+			}
+			right := strings.Repeat(" ", rightWidth)
+			visible[row] = left + pl + right
+		}
+	}
+
 	return strings.Join(visible, "\n")
 }
 
@@ -1663,6 +2128,16 @@ func (m *rendererModel) receiveLoop() {
 				if json.Unmarshal(payloadBytes, &payload) == nil {
 					if globalProgram != nil {
 						globalProgram.Send(markerPickerMsg{payload: &payload})
+					}
+				}
+			}
+		case daemon.MsgColorPicker:
+			if msg.Payload != nil {
+				payloadBytes, _ := json.Marshal(msg.Payload)
+				var payload daemon.ColorPickerPayload
+				if json.Unmarshal(payloadBytes, &payload) == nil {
+					if globalProgram != nil {
+						globalProgram.Send(colorPickerMsg{payload: &payload})
 					}
 				}
 			}

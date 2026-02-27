@@ -192,6 +192,7 @@ type Window struct {
 	Pinned      bool   // Window is pinned to top of sidebar (set via @tabby_pinned option)
 	Icon        string // Custom icon/emoji for window (set via @tabby_icon option)
 	Panes       []Pane
+	Layout      string // Window layout string from tmux (e.g., "abc1,80x24,0,0{40x24,0,0,1,39x24,41,0,2}")
 }
 
 func ListWindows() ([]Window, error) {
@@ -203,7 +204,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}\x1f#{@tabby_pinned}\x1f#{@tabby_icon}")
+		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}\x1f#{@tabby_pinned}\x1f#{@tabby_icon}\x1f#{window_layout}")
 	cmd := exec.Command("tmux", args...)
 	out, err := cmd.Output()
 	if err != nil {
@@ -300,6 +301,11 @@ func ListWindows() ([]Window, error) {
 		if len(parts) >= 21 {
 			icon = strings.TrimSpace(parts[20])
 		}
+		// Window layout string
+		layout := ""
+		if len(parts) >= 22 {
+			layout = strings.TrimSpace(parts[21])
+		}
 		// Session ID safety net: skip windows that belong to a different session.
 		// tmux list-windows -t $SESSION can transiently return wrong-session windows.
 		if sessionTarget != "" && len(parts) >= 19 {
@@ -326,6 +332,7 @@ func ListWindows() ([]Window, error) {
 			SyncWidth:   syncWidth,
 			Pinned:      pinned,
 			Icon:        icon,
+			Layout:      layout,
 		})
 	}
 

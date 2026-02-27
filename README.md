@@ -705,6 +705,10 @@ To avoid duplicate notifications (your custom hook + Claude's default), add to `
 - Ensure you have tmux 3.2+ for proper Unicode support
 - Try adjusting terminal width or font size
 
+## Similar Projects
+
+- [cmux](https://github.com/manaflow-ai/cmux) — AI-powered tmux session manager with intelligent window organization
+
 ## Contributing
 
 Contributions welcome! Please:

@@ -303,6 +303,7 @@ type Sidebar struct {
 	IconStyle        string        `yaml:"icon_style"`         // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
 	Colors           SidebarColors `yaml:"colors"`             // Manual color overrides (applied on top of theme)
 	TouchButtons     TouchButtons  `yaml:"touch_buttons"`      // Touch mode button styling
+	HidePredefinedColors bool         `yaml:"hide_predefined_colors"` // Hide predefined color palette in context menus (keep Custom + Reset)
 }
 
 // TouchButtons configures colors for touch mode buttons

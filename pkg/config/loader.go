@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/brendandebeasi/tabby/pkg/colors"
 	"gopkg.in/yaml.v3"
 )
 
@@ -191,17 +192,23 @@ func FindGroup(cfg *Config, name string) *Group {
 	return nil
 }
 
-// DefaultGroup returns a new group with default theme colors
+// DefaultGroup returns a new group with default theme colors.
+// It uses the group index to pick a unique color from the palette.
 func DefaultGroup(name string) Group {
+	return DefaultGroupWithIndex(name, 0)
+}
+
+// DefaultGroupWithIndex returns a new group using the palette color at the given index.
+func DefaultGroupWithIndex(name string, groupIndex int) Group {
+	bg := colors.GetDefaultGroupColor(groupIndex)
 	return Group{
 		Name:    name,
 		Pattern: fmt.Sprintf("^%s\\|", name),
 		Theme: Theme{
-			Bg:       "#3498db",
-			Fg:       "#ecf0f1",
-			ActiveBg: "#2980b9",
-			ActiveFg: "#ffffff",
-			Icon:     "",
+			Bg:   bg,
+			Icon: "",
+			// Leave Fg, ActiveBg, ActiveFg, InactiveBg, InactiveFg empty
+			// so AutoFillTheme() derives them properly from the base color.
 		},
 	}
 }
@@ -247,6 +254,39 @@ func applyDefaults(cfg *Config) {
 	// Sidebar text defaults
 	if cfg.Sidebar.Colors.InactiveFg == "" {
 		cfg.Sidebar.Colors.InactiveFg = "#f2f2ee"
+	}
+
+	// Active indicator animation: blink pattern (5 visible + 1 blank frame).
+	// Only set if user hasn't configured frames at all — an empty YAML list
+	// (active_indicator_frames: []) is indistinguishable from missing, so
+	// this always fills the default when the slice is nil/empty.
+	if len(cfg.Sidebar.Colors.ActiveIndicatorFrames) == 0 {
+		cfg.Sidebar.Colors.ActiveIndicatorFrames = []string{"▶", "▶", "▶", "▶", "▶", " "}
+	}
+
+	// Disclosure icons
+	if cfg.Sidebar.Colors.DisclosureExpanded == "" {
+		cfg.Sidebar.Colors.DisclosureExpanded = "⊟"
+	}
+	if cfg.Sidebar.Colors.DisclosureCollapsed == "" {
+		cfg.Sidebar.Colors.DisclosureCollapsed = "⊞"
+	}
+
+	// Tree connector defaults
+	if cfg.Sidebar.Colors.TreeBranch == "" {
+		cfg.Sidebar.Colors.TreeBranch = "├─"
+	}
+	if cfg.Sidebar.Colors.TreeBranchLast == "" {
+		cfg.Sidebar.Colors.TreeBranchLast = "└─"
+	}
+	if cfg.Sidebar.Colors.TreeConnector == "" {
+		cfg.Sidebar.Colors.TreeConnector = "─"
+	}
+	if cfg.Sidebar.Colors.TreeConnectorPanes == "" {
+		cfg.Sidebar.Colors.TreeConnectorPanes = "┬"
+	}
+	if cfg.Sidebar.Colors.TreeContinue == "" {
+		cfg.Sidebar.Colors.TreeContinue = "│"
 	}
 
 	if cfg.Web.Host == "" {

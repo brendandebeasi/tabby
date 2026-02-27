@@ -94,60 +94,231 @@ if [ -n "${TMUX_PANE:-}" ]; then
 fi
 
 
-# ── Query OpenCode DB for latest assistant message ─────────────────────────────
+# ── Query OpenCode DB ─────────────────────────────────────────────────────
 OPENCODE_DB="$HOME/.local/share/opencode/opencode.db"
-get_last_assistant_text() {
-    local max_chars="${1:-200}"
+
+# Get the most recently updated session's ID and directory
+get_latest_session_info() {
     if ! command -v sqlite3 &>/dev/null || [ ! -f "$OPENCODE_DB" ]; then
         return
     fi
+    # Returns: session_id|directory
     sqlite3 "$OPENCODE_DB" "
-        SELECT substr(json_extract(p.data, '$.text'), 1, $max_chars)
+        SELECT id, directory FROM session ORDER BY time_updated DESC LIMIT 1
+    " 2>/dev/null
+}
+
+get_last_assistant_text() {
+    local session_id="${1:-}"
+    local max_chars="${2:-300}"
+    if ! command -v sqlite3 &>/dev/null || [ ! -f "$OPENCODE_DB" ]; then
+        return
+    fi
+    local where_clause
+    if [ -n "$session_id" ]; then
+        where_clause="WHERE m.session_id = '$session_id'"
+    else
+        where_clause="WHERE m.session_id = (SELECT id FROM session ORDER BY time_updated DESC LIMIT 1)"
+    fi
+    sqlite3 "$OPENCODE_DB" "
+        SELECT substr(json_extract(p.data, '\$.text'), 1, $max_chars)
         FROM part p
         JOIN message m ON p.message_id = m.id
-        WHERE m.session_id = (SELECT id FROM session ORDER BY time_updated DESC LIMIT 1)
-          AND json_extract(m.data, '$.role') = 'assistant'
-          AND json_extract(p.data, '$.type') = 'text'
-          AND length(json_extract(p.data, '$.text')) > 5
+        $where_clause
+          AND json_extract(m.data, '\$.role') = 'assistant'
+          AND json_extract(p.data, '\$.type') = 'text'
+          AND length(json_extract(p.data, '\$.text')) > 5
         ORDER BY p.time_created DESC
         LIMIT 1
     " 2>/dev/null
 }
 
+# Strip markdown formatting for clean notification text
+strip_markdown() {
+    sed -E 's/\*\*([^*]+)\*\*/\1/g; s/\*([^*]+)\*/\1/g; s/`([^`]+)`/\1/g; s/\[([^]]+)\]\([^)]+\)/\1/g; s/^#+\s*//; s/^[-*]\s*//' | head -c 300
+}
+
 # ── Send notification ─────────────────────────────────────────────────────
+OPENCODE_BUNDLE_ID="ai.opencode.desktop"
+EMOJI_RENDERER="$TABBY_DIR/bin/emoji-to-png"
+EMOJI_CACHE_DIR="/tmp/tabby-emoji-cache"
+TABBY_CONFIG="$HOME/.config/tabby/config.yaml"
+
+# Get the emoji icon for the current window's group from tabby config.
+# First tries matching WINDOW_NAME against group patterns (e.g. "SD|foo" matches ^SD\|).
+# Falls back to matching PROJECT_NAME against group names (e.g. "StudioDome" matches name).
+get_group_emoji() {
+    local window_name="${1:-}"
+    local project_name="${2:-}"
+    [ ! -f "$TABBY_CONFIG" ] && return
+    [ -z "$window_name" ] && [ -z "$project_name" ] && return
+
+    # Parse groups from YAML config: extract name, pattern, and icon
+    local raw_icon
+    raw_icon=$(awk -v wname="$window_name" -v pname="$project_name" '
+        /^groups:/ { in_groups=1; next }
+        in_groups && /^[^ ]/ { exit }
+        in_groups && /- name:/ {
+            gsub(/.*- name: */, ""); gsub(/"/, "")
+            current_name = $0
+        }
+        in_groups && /pattern:/ {
+            gsub(/.*pattern: */, ""); gsub(/"/, ""); gsub(/^\^/, "")
+            current_pattern = $0
+        }
+        in_groups && /icon:/ {
+            gsub(/.*icon: */, ""); gsub(/"/, "")
+            icon = $0
+            if (current_pattern == ".*") {
+                fallback = icon
+            } else if (wname != "" && wname ~ current_pattern) {
+                print icon; exit
+            } else if (pname != "" && tolower(pname) == tolower(current_name)) {
+                print icon; exit
+            }
+        }
+        END { if (fallback) print fallback }
+    ' "$TABBY_CONFIG" 2>/dev/null)
+    [ -z "$raw_icon" ] && return
+
+    # Decode YAML unicode escapes (\U0001F30E → 🌎)
+    # macOS system bash (3.2) doesn't support \U in printf '%b',
+    # so fall back to python3 if printf didn't actually decode.
+    local decoded
+    decoded=$(printf '%b' "$raw_icon")
+    if [[ "$decoded" == *'\U'* ]]; then
+        decoded=$(python3 -c "import sys; sys.stdout.write(\"$raw_icon\")" 2>/dev/null) || decoded="$raw_icon"
+    fi
+    printf '%s' "$decoded"
+}
+
+# Render an emoji to a cached PNG image for notification thumbnails.
+# Returns the path to the PNG file.
+get_emoji_image() {
+    local emoji="${1:-}"
+    [ -z "$emoji" ] && return
+    [ ! -x "$EMOJI_RENDERER" ] && return
+
+    mkdir -p "$EMOJI_CACHE_DIR"
+
+    # Use a hash of the emoji as filename to handle any unicode
+    local hash
+    hash=$(printf '%s' "$emoji" | md5 -q 2>/dev/null || printf '%s' "$emoji" | md5sum 2>/dev/null | cut -d' ' -f1)
+    local png_path="$EMOJI_CACHE_DIR/${hash}.png"
+
+    # Only render if not already cached
+    if [ ! -f "$png_path" ]; then
+        "$EMOJI_RENDERER" "$emoji" "$png_path" 256 2>/dev/null || return
+    fi
+
+    echo "$png_path"
+}
+
 send_notification() {
     local fallback_message="$1"
+    local event_type="${2:-complete}"
 
-    # Only notify if terminal-notifier is installed
-    if ! command -v terminal-notifier &>/dev/null; then
+    # Prefer growlrrr (custom icon support), fall back to terminal-notifier
+    local use_growlrrr=false
+    if command -v growlrrr &>/dev/null; then
+        use_growlrrr=true
+    elif ! command -v terminal-notifier &>/dev/null; then
         return
     fi
 
-    # Title: "projectName: sessionTitle" or fall back to window name
+    # Look up latest session from DB for deep-linking and rich content
+    local session_info session_id session_dir
+    session_info=$(get_latest_session_info)
+    session_id=$(echo "$session_info" | cut -d'|' -f1)
+    session_dir=$(echo "$session_info" | cut -d'|' -f2)
+
+    # Title: project name (concise, like a chat app)
     local title
-    if [ -n "$PROJECT_NAME" ] && [ -n "$SESSION_TITLE" ]; then
-        title="${PROJECT_NAME}: ${SESSION_TITLE}"
-    elif [ -n "$PROJECT_NAME" ]; then
+    if [ -n "$PROJECT_NAME" ]; then
         title="$PROJECT_NAME"
     else
-        title="OpenCode [${WINDOW_NAME:-opencode}]"
+        title="OpenCode"
     fi
 
-    # Body: last assistant message from DB, or notifier message, or fallback
-    # Strip markdown formatting (bold, italic, code, links) for clean notification text
+    # Subtitle: session title (what the agent was working on)
+    local subtitle=""
+    if [ -n "$SESSION_TITLE" ]; then
+        subtitle="$SESSION_TITLE"
+    fi
+
+    # Body: last assistant message from DB, stripped of markdown
     local db_text
-    db_text=$(get_last_assistant_text 200)
-    db_text=$(echo "$db_text" | sed -E 's/\*\*([^*]+)\*\*/\1/g; s/\*([^*]+)\*/\1/g; s/`([^`]+)`/\1/g; s/\[([^]]+)\]\([^)]+\)/\1/g; s/^#+\s*//; s/^[-*]\s*//')
+    db_text=$(get_last_assistant_text "$session_id" 300 | strip_markdown)
     local message="${db_text:-${NOTIFIER_MESSAGE:-$fallback_message}}"
 
-    local args=(
-        -title "$title"
-        -message "$message"
-        -sound default
-        -group "opencode-${WINDOW_INDEX:-0}"
-    )
+    # Build deep-link URL: opencode://open-project?directory={dir}
+    local open_url=""
+    if [ -n "$session_dir" ]; then
+        open_url="opencode://open-project?directory=${session_dir}"
+    fi
 
-    terminal-notifier "${args[@]}" &>/dev/null &
+    # Group by session to replace stale notifications (not window index)
+    local group_id="opencode-${session_id:-${WINDOW_INDEX:-0}}"
+
+    # Resolve group emoji → cached PNG for notification thumbnail
+    local emoji_image=""
+    local group_emoji
+    group_emoji=$(get_group_emoji "$WINDOW_NAME" "$PROJECT_NAME")
+    if [ -n "$group_emoji" ]; then
+        emoji_image=$(get_emoji_image "$group_emoji")
+    fi
+
+    printf "%s notification: title=%s subtitle=%s group=%s open=%s emoji=%s\n" \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$title" "$subtitle" "$group_id" "$open_url" "${group_emoji:-none}" >> "$LOG_FILE"
+
+    if $use_growlrrr; then
+        local args=(
+            send
+            --appId OpenCode
+            --title "$title"
+            --subtitle "$subtitle"
+            --threadId "$group_id"
+        )
+
+        if [ -n "$open_url" ]; then
+            args+=(--open "$open_url")
+        fi
+
+        if [ -n "$emoji_image" ] && [ -f "$emoji_image" ]; then
+            args+=(--image "$emoji_image")
+        fi
+
+        case "$event_type" in
+            complete|permission|question)
+                args+=(--sound default)
+                ;;
+        esac
+
+        args+=("$message")
+        growlrrr "${args[@]}" &>/dev/null &
+    else
+        # Fallback: terminal-notifier (no custom icon, but still rich content)
+        local args=(
+            -title "$title"
+            -message "$message"
+            -sender "$OPENCODE_BUNDLE_ID"
+            -group "$group_id"
+        )
+        if [ -n "$subtitle" ]; then
+            args+=(-subtitle "$subtitle")
+        fi
+        if [ -n "$open_url" ]; then
+            args+=(-open "$open_url")
+        else
+            args+=(-activate "$OPENCODE_BUNDLE_ID")
+        fi
+        case "$event_type" in
+            complete|permission|question)
+                args+=(-sound default)
+                ;;
+        esac
+        terminal-notifier "${args[@]}" &>/dev/null &
+    fi
 }
 
 # ── Set indicators + notify ───────────────────────────────────────────────
@@ -159,12 +330,12 @@ case "$EVENT" in
     complete|stop|done)
         "$INDICATOR" busy 0
         "$INDICATOR" input 1
-        send_notification "Task complete"
+        send_notification "Task complete" "complete"
         ;;
     permission|question)
         "$INDICATOR" busy 0
         "$INDICATOR" input 1
-        send_notification "Needs input"
+        send_notification "Needs input" "permission"
         ;;
     subagent_complete)
         "$INDICATOR" busy 0
@@ -174,7 +345,7 @@ case "$EVENT" in
     error|failed)
         "$INDICATOR" busy 0
         "$INDICATOR" bell 1
-        send_notification "Error occurred"
+        send_notification "Error occurred" "error"
         ;;
     *)
         # Unknown event — log but don't change state aggressively.

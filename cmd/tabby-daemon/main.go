@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -19,6 +20,7 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/perf"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
@@ -236,6 +238,62 @@ func getPaneHeaderBin() string {
 	}
 	dir := filepath.Dir(exe)
 	return filepath.Join(dir, "pane-header")
+}
+
+// saveLayoutBeforeKill saves the current window layout for a pane's window
+// so that preserve_pane_ratios.sh can restore it after the kill.
+// This MUST be called before any kill-pane to preserve sibling pane ratios.
+func saveLayoutBeforeKill(paneID string) {
+	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}\x1f#{window_layout}").Output()
+	if err != nil {
+		return
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "\x1f", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return
+	}
+	exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_layout_%s", parts[0]), parts[1]).Run()
+}
+
+// layoutStatePath returns the path to the persistent layout state file.
+func layoutStatePath() string {
+	return paths.StatePath("pane_layouts.json")
+}
+
+// saveLayoutsToDisk persists all current window layouts to disk.
+// Called periodically to survive daemon restarts.
+func saveLayoutsToDisk(windows []tmux.Window) {
+	layouts := make(map[string]string)
+	for _, win := range windows {
+		if win.Layout != "" {
+			layouts[win.ID] = win.Layout
+		}
+	}
+	if len(layouts) == 0 {
+		return
+	}
+	data, err := json.Marshal(layouts)
+	if err != nil {
+		return
+	}
+	paths.EnsureStateDir()
+	os.WriteFile(layoutStatePath(), data, 0644)
+}
+
+// restoreLayoutsFromDisk loads saved layouts and sets them as tmux options
+// so that preserve_pane_ratios.sh can use them after header spawning.
+func restoreLayoutsFromDisk() {
+	data, err := os.ReadFile(layoutStatePath())
+	if err != nil {
+		return
+	}
+	var layouts map[string]string
+	if err := json.Unmarshal(data, &layouts); err != nil {
+		return
+	}
+	for windowID, layout := range layouts {
+		exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_layout_%s", windowID), layout).Run()
+	}
 }
 
 // spawnRenderersForNewWindows checks for windows without renderers and spawns them.
@@ -538,6 +596,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			}
 			for _, extraPane := range headerPanes[1:] {
 				logEvent("HEADER_DEDUP target=%s kill=%s", target, extraPane)
+				saveLayoutBeforeKill(extraPane)
 				exec.Command("tmux", "kill-pane", "-t", extraPane).Run()
 			}
 		}
@@ -776,6 +835,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		// Kill if headers disabled globally
 		if !headersEnabled {
 			logEvent("CLEANUP_HEADER pane=%s reason=disabled", hdr.paneID)
+			saveLayoutBeforeKill(hdr.paneID)
 			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
@@ -783,6 +843,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 
 		if hdr.target != "" && !keepHeader[hdr.paneID] {
 			logEvent("CLEANUP_HEADER pane=%s target=%s reason=duplicate_target", hdr.paneID, hdr.target)
+			saveLayoutBeforeKill(hdr.paneID)
 			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
@@ -802,6 +863,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		}
 		if !contentPaneExists[hdr.target] {
 			logEvent("CLEANUP_HEADER pane=%s target=%s reason=target_gone", hdr.paneID, hdr.target)
+			saveLayoutBeforeKill(hdr.paneID)
 			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
@@ -811,6 +873,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		if targetDims, ok := contentPaneDimensions[hdr.target]; ok {
 			if hdr.width != targetDims.width {
 				logEvent("CLEANUP_HEADER pane=%s target=%s reason=width_mismatch header_w=%d target_w=%d", hdr.paneID, hdr.target, hdr.width, targetDims.width)
+				saveLayoutBeforeKill(hdr.paneID)
 				exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 				killed = true
 				continue
@@ -882,6 +945,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 		// Check if tmux considers the pane dead
 		if paneDead == "1" {
 			logEvent("DEAD_PANE pane=%s cmd=%s window=%s -- killing dead pane", paneID, cmd, windowID)
+			saveLayoutBeforeKill(paneID)
 			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 
 			// Respawn sidebar renderer if it was a sidebar
@@ -910,6 +974,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 			// Process is dead but tmux hasn't noticed yet
 			logEvent("ZOMBIE_PANE pane=%s pid=%d cmd=%s window=%s -- process dead, killing pane",
 				paneID, pid, cmd, windowID)
+			saveLayoutBeforeKill(paneID)
 			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 
 			if isSidebar {
@@ -1138,6 +1203,11 @@ func main() {
 	// Save current window and pane for focus restoration after setup
 	saveFocusState(*sessionID)
 
+	// Restore saved pane layouts from previous daemon session.
+	// This must happen before pane headers are spawned so the layout
+	// can be preserved through the header spawn/cleanup cycle.
+	restoreLayoutsFromDisk()
+
 	// Create coordinator for centralized rendering
 	coordinator := NewCoordinator(*sessionID)
 
@@ -1240,6 +1310,9 @@ func main() {
 	}
 	coordinator.OnSendMarkerPicker = func(clientID string, picker *daemon.MarkerPickerPayload) {
 		server.SendMarkerPickerToClient(clientID, picker)
+	}
+	coordinator.OnSendColorPicker = func(clientID string, picker *daemon.ColorPickerPayload) {
+		server.SendColorPickerToClient(clientID, picker)
 	}
 
 	// Register SIGUSR1 handler BEFORE server.Start() creates the socket.
@@ -1401,13 +1474,20 @@ func main() {
 			}
 		}
 
+		// Debounce signal_refresh: if we just finished a full refresh cycle,
+		// skip the heavy spawn/cleanup work and only do the fast path
+		// (RefreshWindows + BroadcastRender). This prevents feedback loops
+		// where spawn/cleanup tmux ops trigger hooks that send more USR1 signals.
+		var lastFullRefresh time.Time
+		fullRefreshCooldown := 300 * time.Millisecond
+
 		for {
 			// Record heartbeat at each loop iteration for deadlock detection
 			recordHeartbeat()
 
 			select {
 			case <-refreshCh:
-				ok := runLoopTask("signal_refresh", 8*time.Second, func() {
+				ok := runLoopTask("signal_refresh", 20*time.Second, func() {
 					start := time.Now()
 					logEvent("SIGNAL_REFRESH session=%s", *sessionID)
 
@@ -1422,37 +1502,50 @@ func main() {
 					server.BroadcastRender()
 					t1b := time.Now()
 
-					windows := coordinator.GetWindows()
-					spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows)
-					t2 := time.Now()
+					// Heavy ops (spawn/cleanup/layout) only if enough time has
+					// passed since the last full refresh. This breaks the feedback
+					// loop: doPaneLayoutOps triggers tmux hooks → USR1 → signal_refresh
+					// → doPaneLayoutOps again. With debounce, rapid signals only do
+					// the fast path above (RefreshWindows + BroadcastRender).
+					if time.Since(lastFullRefresh) >= fullRefreshCooldown {
+						windows := coordinator.GetWindows()
+						spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows)
+						t2 := time.Now()
 
-					cleanupOrphanedSidebars(windows)
-					cleanupOrphanWindowsByTmux(*sessionID)
-					t3 := time.Now()
+						cleanupOrphanedSidebars(windows)
+						cleanupOrphanWindowsByTmux(*sessionID)
+						t3 := time.Now()
 
-					cleanupSidebarsForClosedWindows(server, windows)
-					t4 := time.Now()
+						cleanupSidebarsForClosedWindows(server, windows)
+						t4 := time.Now()
 
-					doPaneLayoutOps()
-					t5 := time.Now()
+						doPaneLayoutOps()
+						t5 := time.Now()
 
-					if spawnedRenderer {
-						selectContentPaneInActiveWindow()
+						if spawnedRenderer {
+							selectContentPaneInActiveWindow()
+						}
+
+						currentHash := coordinator.GetWindowsHash()
+						if currentHash != lastWindowsHash {
+							updateHeaderBorderStyles(coordinator)
+						}
+
+						// Second broadcast only if structure changed (new/removed renderers)
+						structureChanged := spawnedRenderer || currentHash != lastWindowsHash
+						if structureChanged {
+							syncClientSizesFromTmux(server)
+							server.BroadcastRender()
+						}
+						lastWindowsHash = currentHash
+						lastFullRefresh = time.Now()
+
+						debugLog.Printf("PERF: RefreshWindows=%v EarlyRender=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v TOTAL=%v",
+							t1.Sub(start), t1b.Sub(t1), t2.Sub(t1b), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t5.Sub(start))
+					} else {
+						debugLog.Printf("PERF: RefreshWindows=%v EarlyRender=%v (fast-path, heavy ops skipped)",
+							t1.Sub(start), t1b.Sub(t1))
 					}
-
-					currentHash := coordinator.GetWindowsHash()
-					if currentHash != lastWindowsHash {
-						updateHeaderBorderStyles(coordinator)
-					}
-
-					// Second broadcast only if structure changed (new/removed renderers)
-					structureChanged := spawnedRenderer || currentHash != lastWindowsHash
-					if structureChanged {
-						syncClientSizesFromTmux(server)
-						server.BroadcastRender()
-					}
-					t6 := time.Now()
-					lastWindowsHash = currentHash
 
 					// Drain stale USR1 signals our tmux commands generated via hooks
 					drainCount := 0
@@ -1468,9 +1561,6 @@ func main() {
 					if drainCount > 0 {
 						logEvent("DRAIN_STALE count=%d", drainCount)
 					}
-
-					debugLog.Printf("PERF: RefreshWindows=%v EarlyRender=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v LateRender=%v TOTAL=%v",
-						t1.Sub(start), t1b.Sub(t1), t2.Sub(t1b), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t6.Sub(t5), t6.Sub(start))
 				})
 				if !ok {
 					return
@@ -1493,6 +1583,8 @@ func main() {
 					if spawnedFallback {
 						selectContentPaneInActiveWindow()
 					}
+					// Persist current layouts to disk for restart recovery
+					saveLayoutsToDisk(windows)
 				})
 			case <-watchdogTicker.C:
 				ok := runLoopTask("watchdog", 6*time.Second, func() {

@@ -558,7 +558,7 @@ tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_SIDEBAR_SCRIPT #{sess
 # Note: uses after-kill-pane (not pane-exited which doesn't exist in tmux 3.6+).
 PRESERVE_RATIOS_SCRIPT="$CURRENT_DIR/scripts/preserve_pane_ratios.sh"
 chmod +x "$PRESERVE_RATIOS_SCRIPT"
-tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_SCRIPT'; run-shell -b '$SIGNAL_SIDEBAR_SCRIPT; $EXIT_IF_NO_MAIN_WINDOWS_SCRIPT; $STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_SCRIPT \"#{window_id}\"'; run-shell -b '$SIGNAL_SIDEBAR_SCRIPT; $EXIT_IF_NO_MAIN_WINDOWS_SCRIPT; $STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'; run-shell '$STABILIZE_CLIENT_RESIZE_SCRIPT \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
