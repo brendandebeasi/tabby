@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"math"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +23,7 @@ import (
 	kemoji "github.com/kenshaw/emoji"
 	zone "github.com/lrstanley/bubblezone"
 	"github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 	"github.com/muesli/termenv"
 
 	"github.com/brendandebeasi/tabby/pkg/colors"
@@ -2731,7 +2732,7 @@ func (c *Coordinator) UpdatePetState() bool {
 		thoughtSpeed = 3
 	}
 	if c.pet.AnimFrame%thoughtSpeed == 0 {
-		thoughtWidth := runewidth.StringWidth(c.pet.LastThought)
+		thoughtWidth := uniseg.StringWidth(c.pet.LastThought)
 		maxThoughtWidth := width - 4
 		if thoughtWidth > maxThoughtWidth {
 			c.pet.ThoughtScroll++
@@ -3671,7 +3672,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 
 			// Calculate visual width by stripping ANSI codes
 			plainLine := stripAnsi(line)
-			visualWidth := runewidth.StringWidth(plainLine)
+			visualWidth := uniseg.StringWidth(plainLine)
 
 			// Build new line: original content + padding + button
 			targetCol := width - btnWidth
@@ -3779,7 +3780,7 @@ func abbreviatePath(path string, maxWidth int) string {
 	}
 
 	// If already short enough, return as-is
-	if runewidth.StringWidth(path) <= maxWidth {
+	if uniseg.StringWidth(path) <= maxWidth {
 		return path
 	}
 
@@ -3809,7 +3810,7 @@ func abbreviatePath(path string, maxWidth int) string {
 		if i > 0 {
 			testPath = result + ".../" + strings.Join(components, "/")
 		}
-		if runewidth.StringWidth(testPath) > maxWidth {
+		if uniseg.StringWidth(testPath) > maxWidth {
 			// Too long, use previous iteration
 			if len(components) == 1 {
 				// Even one component is too long, truncate it
@@ -3930,7 +3931,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		buttonsStr += collapseBtn + "   "
 	}
 	buttonsStr += splitVBtn + "   " + splitHBtn + "   " + closeBtn + "  "
-	buttonsWidth := runewidth.StringWidth(buttonsStr)
+	buttonsWidth := uniseg.StringWidth(buttonsStr)
 
 	// Find the specific pane this header belongs to
 	var foundPane *tmux.Pane
@@ -3990,7 +3991,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 
 		// Calculate how much space we have for the path after the base label
-		baseWidth := runewidth.StringWidth(labelText)
+		baseWidth := uniseg.StringWidth(labelText)
 		pathMaxWidth := availWidth - baseWidth - 1 // 1 for space before path
 
 		if pathMaxWidth > 8 { // Only add path if we have reasonable space (at least 8 chars)
@@ -4008,7 +4009,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 
 	// Truncate label if needed (shouldn't be necessary with our path abbreviation, but just in case)
-	if runewidth.StringWidth(labelText) > availWidth {
+	if uniseg.StringWidth(labelText) > availWidth {
 		labelText = runewidth.Truncate(labelText, availWidth, "~")
 	}
 
@@ -4034,8 +4035,8 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		groupAccent = lipgloss.NewStyle().SetString("▇").Foreground(lipgloss.Color(groupColor)).String()
 	}
 
-	groupAccentWidth := runewidth.StringWidth(stripAnsi(groupAccent))
-	labelWidth := runewidth.StringWidth(labelText)
+	groupAccentWidth := uniseg.StringWidth(stripAnsi(groupAccent))
+	labelWidth := uniseg.StringWidth(labelText)
 	renderedLabel := segStyle.Render(labelText)
 	currentCol := groupAccentWidth + 1 + labelWidth
 	btnAreaStart := width - buttonsWidth
@@ -4538,7 +4539,7 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 		maxNameWidth = 3
 	}
 
-	nameWidth := runewidth.StringWidth(headerText)
+	nameWidth := uniseg.StringWidth(headerText)
 	if nameWidth > maxNameWidth {
 		truncated := ""
 		w := 0
@@ -4551,7 +4552,7 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 			w += rw
 		}
 		headerText = truncated + "~"
-		nameWidth = runewidth.StringWidth(headerText)
+		nameWidth = uniseg.StringWidth(headerText)
 	}
 
 	// Row style applies bg color across the full width
@@ -4750,7 +4751,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			}
 			if hasWindows {
 				prefix := collapseStyle.Render(collapseIcon)
-				prefixW := runewidth.StringWidth(stripAnsi(prefix))
+				prefixW := uniseg.StringWidth(stripAnsi(prefix))
 				restW := width - prefixW
 				if restW < 1 {
 					restW = 1
@@ -4759,9 +4760,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				// Icon is included INSIDE the bg-filled area so backgrounds
 				// align consistently across groups regardless of icon width.
 				iconAndText := renderedIcon + headerStyle.Render(headerText)
-				iconAndTextW := runewidth.StringWidth(stripAnsi(iconAndText))
+				iconAndTextW := uniseg.StringWidth(stripAnsi(iconAndText))
 				if iconAndTextW > restW {
-					renderedIconW := runewidth.StringWidth(stripAnsi(renderedIcon))
+					renderedIconW := uniseg.StringWidth(stripAnsi(renderedIcon))
 					headerMaxW := restW - renderedIconW
 					if headerMaxW < 1 {
 						headerMaxW = 1
@@ -4785,15 +4786,15 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			} else {
 				// No windows - show header with group tree branch but no collapse icon
 				prefix := " "
-				prefixW := runewidth.StringWidth(prefix)
+				prefixW := uniseg.StringWidth(prefix)
 				restW := width - prefixW
 				if restW < 1 {
 					restW = 1
 				}
 				iconAndText := renderedIcon + headerStyle.Render(headerText)
-				iconAndTextW := runewidth.StringWidth(stripAnsi(iconAndText))
+				iconAndTextW := uniseg.StringWidth(stripAnsi(iconAndText))
 				if iconAndTextW > restW {
-					renderedIconW := runewidth.StringWidth(stripAnsi(renderedIcon))
+					renderedIconW := uniseg.StringWidth(stripAnsi(renderedIcon))
 					headerMaxW := restW - renderedIconW
 					if headerMaxW < 1 {
 						headerMaxW = 1
@@ -4836,7 +4837,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					Target:    group.Name,
 				})
 			} else {
-				iconWidth := runewidth.StringWidth(stripAnsi(collapseStyle.Render(collapseIcon)))
+				iconWidth := uniseg.StringWidth(stripAnsi(collapseStyle.Render(collapseIcon)))
 				if iconWidth < 1 {
 					iconWidth = 1
 				}
@@ -5121,7 +5122,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 				// Apply bg color from start of name to the right edge of the sidebar
 				prefixPlain := stripAnsi(prefix)
-				prefixWidth := runewidth.StringWidth(prefixPlain)
+				prefixWidth := uniseg.StringWidth(prefixPlain)
 				contentWidth := width - prefixWidth
 				if contentWidth < 0 {
 					contentWidth = 0
@@ -5135,7 +5136,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					// Re-inject bg after any ANSI resets so bg persists through style changes
 					contentRendered = strings.ReplaceAll(contentRendered, resetEsc, resetEsc+bgEsc)
 					contentPlain := stripAnsi(contentRendered)
-					contentVisualWidth := runewidth.StringWidth(contentPlain)
+					contentVisualWidth := uniseg.StringWidth(contentPlain)
 					pad := contentWidth - contentVisualWidth
 					if pad < 0 {
 						pad = 0
@@ -5325,7 +5326,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 					// Apply bg color from start of pane name to right edge
 					panePrefixPlain := stripAnsi(panePrefix)
-					panePrefixW := runewidth.StringWidth(panePrefixPlain)
+					panePrefixW := uniseg.StringWidth(panePrefixPlain)
 					paneContentW := width - panePrefixW
 					if paneContentW < 0 {
 						paneContentW = 0
@@ -5337,7 +5338,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						resetEsc := "\x1b[0m"
 						paneContent = strings.ReplaceAll(paneContent, resetEsc, resetEsc+bgEsc)
 						paneContentPlain := stripAnsi(paneContent)
-						paneContentVisualW := runewidth.StringWidth(paneContentPlain)
+						paneContentVisualW := uniseg.StringWidth(paneContentPlain)
 						panePad := paneContentW - paneContentVisualW
 						if panePad < 0 {
 							panePad = 0
@@ -6507,7 +6508,7 @@ func constrainWidgetWidth(content string, maxWidth int) string {
 	for i, line := range lines {
 		// Strip ANSI codes for width calculation (but keep them in output)
 		stripped := stripAnsi(line)
-		lineWidth := runewidth.StringWidth(stripped)
+		lineWidth := uniseg.StringWidth(stripped)
 
 		if lineWidth > maxWidth {
 			if !hadOverflow {
@@ -6561,7 +6562,7 @@ func stripAnsi(s string) string {
 
 // clampSpriteX clamps a position so the sprite fits within the given width
 func clampSpriteX(x int, sprite string, maxWidth int) int {
-	spriteWidth := runewidth.StringWidth(sprite)
+	spriteWidth := uniseg.StringWidth(sprite)
 	if spriteWidth < 1 {
 		spriteWidth = 1
 	}
@@ -6628,7 +6629,7 @@ func colorStatusBar(bar string, value int) string {
 // Fills remaining space with the filler character
 func buildSpriteRow(sprites map[int]string, filler string, totalWidth int) string {
 	var builder strings.Builder
-	fillerWidth := runewidth.StringWidth(filler)
+	fillerWidth := uniseg.StringWidth(filler)
 	if fillerWidth < 1 {
 		fillerWidth = 1
 	}
@@ -6636,7 +6637,7 @@ func buildSpriteRow(sprites map[int]string, filler string, totalWidth int) strin
 	col := 0
 	for col < totalWidth {
 		if sprite, hasSprite := sprites[col]; hasSprite {
-			spriteWidth := runewidth.StringWidth(sprite)
+			spriteWidth := uniseg.StringWidth(sprite)
 			if spriteWidth < 1 {
 				spriteWidth = 1
 			}
@@ -6799,7 +6800,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
 	}
 	renderDivider := func() string {
-		dividerWidth := runewidth.StringWidth(divider)
+		dividerWidth := uniseg.StringWidth(divider)
 		if dividerWidth > 0 {
 			repeatCount := (width - 1) / dividerWidth
 			if repeatCount < 1 {
@@ -6859,7 +6860,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	if maxThoughtWidth < 5 {
 		maxThoughtWidth = 5
 	}
-	thoughtWidth := runewidth.StringWidth(thought)
+	thoughtWidth := uniseg.StringWidth(thought)
 	displayThought := thought
 	if thoughtWidth > maxThoughtWidth {
 		scrollText := thought + "   " + thought
@@ -6961,7 +6962,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 			if dividerFg != "" {
 				dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
 			}
-			divWidth := runewidth.StringWidth(petCfg.DividerBottom)
+			divWidth := uniseg.StringWidth(petCfg.DividerBottom)
 			if divWidth > 0 {
 				repeatCount := (width - 1) / divWidth
 				if repeatCount < 1 {
@@ -7014,7 +7015,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		highAirSprites[foodX] = sprites.Food
 	}
 	highAirLine := buildAirRow(highAirSprites, safePlayWidth)
-	highAirWidth := runewidth.StringWidth(highAirLine)
+	highAirWidth := uniseg.StringWidth(highAirLine)
 	coordinatorDebugLog.Printf("High air: sprites=%v, line=%q (len=%d, runewidth=%d)", highAirSprites, highAirLine, len(highAirLine), highAirWidth)
 	if highAirWidth != safePlayWidth {
 		coordinatorDebugLog.Printf("WARNING: High air row width mismatch! expected=%d, actual=%d", safePlayWidth, highAirWidth)
@@ -7040,7 +7041,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 		lowAirSprites[foodX] = sprites.Food
 	}
 	lowAirLine := buildAirRow(lowAirSprites, safePlayWidth)
-	lowAirWidth := runewidth.StringWidth(lowAirLine)
+	lowAirWidth := uniseg.StringWidth(lowAirLine)
 	coordinatorDebugLog.Printf("Low air: sprites=%v, line=%q (len=%d, runewidth=%d)", lowAirSprites, lowAirLine, len(lowAirLine), lowAirWidth)
 	if lowAirWidth != safePlayWidth {
 		coordinatorDebugLog.Printf("WARNING: Low air row width mismatch! expected=%d, actual=%d", safePlayWidth, lowAirWidth)
@@ -7055,7 +7056,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	if len(sprites.Ground) > 0 {
 		groundChar = sprites.Ground
 	}
-	groundCharWidth := runewidth.StringWidth(groundChar)
+	groundCharWidth := uniseg.StringWidth(groundChar)
 	if groundCharWidth < 1 {
 		groundCharWidth = 1
 	}
@@ -7104,7 +7105,7 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	// Build the ground row using helper
 	c.petLayout.GroundLine = currentLine
 	groundContent := buildSpriteRow(groundSprites, groundChar, safePlayWidth)
-	actualWidth := runewidth.StringWidth(groundContent)
+	actualWidth := uniseg.StringWidth(groundContent)
 	coordinatorDebugLog.Printf("Ground: width=%d, content=%q (len=%d bytes, runewidth=%d)",
 		safePlayWidth, groundContent, len(groundContent), actualWidth)
 	if actualWidth != safePlayWidth {
@@ -7244,8 +7245,8 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 		if idx < 0 {
 			return 0, 0, false
 		}
-		start := runewidth.StringWidth(line[:idx])
-		end := start + runewidth.StringWidth(token)
+		start := uniseg.StringWidth(line[:idx])
+		end := start + uniseg.StringWidth(token)
 		return start, end, true
 	}
 	clickedToken := func(line, token string) bool {
@@ -7351,7 +7352,7 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			}
 		}
 		if firstTokenStart == -1 {
-			firstTokenStart = runewidth.StringWidth(line2)
+			firstTokenStart = uniseg.StringWidth(line2)
 		}
 		if clickX >= 0 && clickX < firstTokenStart {
 			coordinatorDebugLog.Printf("Debug bar: trg clicked, triggering thought")
@@ -7474,7 +7475,7 @@ func (c *Coordinator) renderPetTouchButtons(width int, sprites petSprites) strin
 			// Format: emoji  label, manually padded to fit width
 			content := fmt.Sprintf("%s  %s", btn.emoji, btn.label)
 			// Calculate visual width (emoji is 2 cols, spaces are 1 col each)
-			contentWidth := runewidth.StringWidth(content)
+			contentWidth := uniseg.StringWidth(content)
 			// Add padding to reach target width (account for background color padding)
 			targetWidth := width - 2 // Leave 1 char margin on each side
 			if targetWidth < contentWidth {
@@ -8640,7 +8641,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 	if c.pet.IsDead {
 		catSprite = sprites.Dead
 	}
-	catWidth := runewidth.StringWidth(catSprite)
+	catWidth := uniseg.StringWidth(catSprite)
 	if catWidth < 1 {
 		catWidth = 1
 	}
@@ -8648,7 +8649,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 	// Check if clicking on sleeping cat (💤 at position 0 on ground)
 	// When sleeping, the cat is represented by 💤 in bottom left corner
 	if c.pet.State == "sleeping" && petY == 0 {
-		zzzWidth := runewidth.StringWidth("💤")
+		zzzWidth := uniseg.StringWidth("💤")
 		if zzzWidth < 1 {
 			zzzWidth = 2
 		}
@@ -8690,7 +8691,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 
 	// Check if clicking on poop (only on ground)
 	if petY == 0 {
-		poopWidth := runewidth.StringWidth(sprites.Poop)
+		poopWidth := uniseg.StringWidth(sprites.Poop)
 		if poopWidth < 1 {
 			poopWidth = 1
 		}
@@ -8716,7 +8717,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 
 	// Check if clicking on mouse - help the pet catch it!
 	if c.pet.MousePos.X >= 0 && petY == 0 {
-		mouseWidth := runewidth.StringWidth(sprites.Mouse)
+		mouseWidth := uniseg.StringWidth(sprites.Mouse)
 		if mouseWidth < 1 {
 			mouseWidth = 1
 		}
@@ -8753,7 +8754,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 
 	// Check if clicking on yarn (account for sprite width)
 	// Use clamped position to match what's rendered on screen
-	yarnWidth := runewidth.StringWidth(sprites.Yarn)
+	yarnWidth := uniseg.StringWidth(sprites.Yarn)
 	if yarnWidth < 1 {
 		yarnWidth = 1
 	}
@@ -9218,7 +9219,6 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	args = append(args, "  Custom (Hex)...", "#", customColorCmd)
 	resetColorCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_color", windowTarget)
 	args = append(args, "  Reset to Default", "d", resetColorCmd)
-
 
 	// Set Marker — opens the searchable emoji/icon picker (same as group menu)
 	if !strings.HasPrefix(clientID, "header:") {
@@ -9712,11 +9712,11 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	logEvent("NEW_WINDOW_START client=%s", clientID)
 	c.stateMu.RLock()
 
+	// Find which group the current window belongs to
 	windowID := clientID
 	if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
-		activeWindowID := strings.TrimSpace(string(out))
-		if activeWindowID != "" {
-			windowID = activeWindowID
+		if id := strings.TrimSpace(string(out)); id != "" {
+			windowID = id
 		}
 	}
 
@@ -9733,7 +9733,7 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		}
 	}
 
-	// Look up working directory for this group
+	// Look up working directory from config
 	var workingDir string
 	for _, cfgGroup := range c.config.Groups {
 		if cfgGroup.Name == currentGroup && cfgGroup.WorkingDir != "" {
@@ -9744,19 +9744,9 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 
 	c.stateMu.RUnlock()
 
-	// Set @tabby_spawning guard to prevent after-new-window / after-select-window
-	// hooks from running ensure_sidebar.sh (which would race with our inline spawn).
-	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
-
-	// Create the window detached (-d) so tmux does NOT auto-select it.
-	// This prevents double after-select-window hook firing and eliminates
-	// the visual flicker where the terminal briefly shows intermediate
-	// window states during setup. We do a single select-window at the end.
-	args := []string{"new-window", "-d", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
-
-	// Add working directory if configured
+	// Build new-window command
+	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
 	if workingDir != "" {
-		// Expand ~ to home directory
 		if strings.HasPrefix(workingDir, "~/") {
 			if home, err := os.UserHomeDir(); err == nil {
 				workingDir = filepath.Join(home, workingDir[2:])
@@ -9765,77 +9755,29 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		args = append(args, "-c", workingDir)
 	}
 
-	logEvent("NEW_WINDOW_CMD args=%v group=%s workdir=%s", args, currentGroup, workingDir)
-
-	newWindowID := ""
-
+	// Set pending group for optimistic UI before the window exists
 	if currentGroup != "" && currentGroup != "Default" {
-		// Set pending group for optimistic UI
 		c.stateMu.Lock()
 		c.pendingNewWindowGroup = currentGroup
 		c.pendingNewWindowTime = time.Now()
 		c.stateMu.Unlock()
-
-		out, err := exec.Command("tmux", args...).CombinedOutput()
-		newWindowID = strings.TrimSpace(string(out))
-		logEvent("NEW_WINDOW_RESULT err=%v out=%s", err, string(out))
-		if newWindowID != "" {
-			exec.Command("tmux", "set-window-option", "-t", newWindowID, "@tabby_group", currentGroup).Run()
-		}
-	} else {
-		out, err := exec.Command("tmux", args...).CombinedOutput()
-		newWindowID = strings.TrimSpace(string(out))
-		logEvent("NEW_WINDOW_RESULT err=%v out=%s", err, string(out))
 	}
 
-	// Signal to the refresh loop that a new window was just created.
-	// This prevents selectContentPaneInActiveWindow() from racing with
-	// our explicit focus management below.
+	// Create window. tmux auto-selects it — user gets immediate focus.
+	out, err := exec.Command("tmux", args...).CombinedOutput()
+	newWindowID := strings.TrimSpace(string(out))
+	logEvent("NEW_WINDOW_RESULT id=%s err=%v", newWindowID, err)
+
+	// Assign group
+	if newWindowID != "" && currentGroup != "" && currentGroup != "Default" {
+		exec.Command("tmux", "set-window-option", "-t", newWindowID, "@tabby_group", currentGroup).Run()
+	}
+
+	// Safety: tell the refresh loop not to call selectContentPaneInActiveWindow
+	// for a couple seconds (it's harmless but let's not risk it).
 	lastNewWindowCreation = time.Now()
 
-	// Spawn sidebar renderer inline so the window is fully set up before
-	// any hooks fire. The daemon's spawnRenderersForNewWindows will see the
-	// renderer already exists and skip.
-	if newWindowID != "" {
-		modeOut, _ := exec.Command("tmux", "show-options", "-gqv", "@tabby_sidebar").Output()
-		mode := strings.TrimSpace(string(modeOut))
-		if mode == "enabled" {
-			rendererBin := getRendererBin()
-			if rendererBin != "" {
-				widthStr := "25"
-				if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width").Output(); err == nil {
-					if w := strings.TrimSpace(string(out)); w != "" {
-						widthStr = w
-					}
-				}
-				// Get first pane in the new window for splitting
-				if panesOut, err := exec.Command("tmux", "list-panes", "-t", newWindowID, "-F", "#{pane_id}").Output(); err == nil {
-					lines := strings.Split(strings.TrimSpace(string(panesOut)), "\n")
-					if len(lines) > 0 && lines[0] != "" {
-						firstPane := lines[0]
-						cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s'", rendererBin, c.sessionID, newWindowID)
-						exec.Command("tmux", "split-window", "-d", "-t", firstPane, "-h", "-b", "-f", "-l", widthStr, cmdStr).Run()
-					}
-				}
-			}
-		}
-	}
-
-	if newWindowID != "" {
-		exec.Command("tmux", "select-window", "-t", newWindowID).Run()
-		// Select the content pane (not the sidebar) in the new window
-		selectContentPaneInWindow(newWindowID)
-	}
-
-	// Clear @tabby_spawning after a longer delay to cover the full hook lifecycle.
-	// Hooks (after-new-window, after-select-window) fire asynchronously and can
-	// trigger ensure_sidebar.sh / spawnRenderersForNewWindows — the guard must
-	// remain active long enough for those to see it.
-	exec.Command("tmux", "run-shell", "-b", "sleep 1.5; tmux set-option -gu @tabby_spawning 2>/dev/null || true").Run()
-
-	// Force immediate refresh so pane headers get correct colors/icons
-	// without waiting for the async USR1 signal
-	c.RefreshWindows()
+	// That's it. Hooks handle sidebar renderer spawning and daemon refresh.
 }
 
 // showIndicatorContextMenu displays the context menu for window indicators (busy, bell, etc.)
@@ -10174,13 +10116,20 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 		return content
 	}
 
-	lines := strings.Split(content, "\n")
-
-	// ANSI escape code for background color
-	r, g, b := hexToRGB(bgColor)
-	bgEsc := fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+	// Use lipgloss to generate a profile-aware background escape sequence
+	// rather than hardcoding TrueColor (\x1b[48;2;R;G;Bm). This lets
+	// 256-color clients (e.g. Mosh) receive the correct escape format.
+	bgStyle := lipgloss.NewStyle().Background(lipgloss.Color(bgColor))
+	// Render a null-byte probe to extract just the opening escape sequence.
+	rendered := bgStyle.Render("\x00")
+	parts := strings.SplitN(rendered, "\x00", 2)
+	bgEsc := ""
+	if len(parts) >= 1 {
+		bgEsc = parts[0]
+	}
 	resetEsc := "\x1b[0m"
 
+	lines := strings.Split(content, "\n")
 	for i, line := range lines {
 		// Re-inject bg escape after any ANSI resets within the line
 		// This ensures the background persists even when styles are reset mid-line
@@ -10188,7 +10137,7 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 
 		// Get visual width of line (stripping ANSI codes)
 		plainLine := stripAnsi(line)
-		visualWidth := runewidth.StringWidth(plainLine)
+		visualWidth := uniseg.StringWidth(plainLine)
 
 		// Calculate padding needed
 		padding := ""
@@ -10197,7 +10146,6 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 		}
 
 		// Wrap entire line: bg color prefix + content + padding + reset
-		// This ensures the background fills from start to end
 		lines[i] = bgEsc + line + padding + resetEsc
 	}
 
@@ -10253,20 +10201,15 @@ func findWindowByTarget(windows []tmux.Window, target string) *tmux.Window {
 // in the currently active window, ensuring focus goes to a content pane rather
 // than a sidebar or pane-header.
 func selectContentPaneInActiveWindow() {
-	out, err := exec.Command("tmux", "list-panes",
-		"-F", "#{pane_id}\x1f#{pane_current_command}").Output()
+	windowIDOut, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
 	if err != nil {
 		return
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "\x1f", 2)
-		if len(parts) == 2 {
-			if !isAuxiliaryPaneCommand(parts[1]) {
-				exec.Command("tmux", "select-pane", "-t", parts[0]).Run()
-				return
-			}
-		}
+	windowID := strings.TrimSpace(string(windowIDOut))
+	if windowID == "" {
+		return
 	}
+	selectContentPaneInWindow(windowID)
 }
 
 // selectContentPaneInWindow selects the first non-auxiliary pane in the given window.

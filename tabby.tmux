@@ -54,22 +54,17 @@ tmux bind-key '%' split-window -h -c "#{pane_current_path}"
 tmux bind-key '|' split-window -h -c "#{pane_current_path}"
 tmux bind-key '-' split-window -v -c "#{pane_current_path}"
 
-# Create script to capture current window's group, create new window,
-# spawn sidebar, and restore focus — all synchronously in one shot.
+# Create script to capture current window group/path before new-window.
 NEW_WINDOW_SCRIPT="$CURRENT_DIR/scripts/new_window_with_group.sh"
 cat > "$NEW_WINDOW_SCRIPT" << SCRIPT_EOF
 #!/usr/bin/env bash
-set -eu
-
-PLUGIN_DIR="$CURRENT_DIR"
-RENDERER_BIN="\$PLUGIN_DIR/bin/sidebar-renderer"
+set -u
 
 tmux set-option -g @tabby_spawning 1 2>/dev/null || true
-# NOTE: @tabby_spawning is cleared at the end of this script via
-# 'tmux run-shell -b' which schedules an independent background
-# process that survives after run-shell teardown.  The EXIT trap
-# approach (cleanup &) does NOT work because tmux kills bg
-# processes when the run-shell context exits.
+
+LOG="/tmp/tabby-focus.log"
+TS=\$(date +%s 2>/dev/null || echo "")
+printf "%s new_window start win=%s pane=%s\n" "\$TS" "\$(tmux display-message -p '#{window_id}' 2>/dev/null || echo '')" "\$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo '')" >> "\$LOG"
 
 SAVED_GROUP=\$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
 SAVED_PATH=\$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
@@ -79,72 +74,45 @@ if [ -z "\$SAVED_GROUP" ]; then
 fi
 
 if [ -z "\$SAVED_PATH" ]; then
-    SAVED_PATH=\$(tmux display-message -p "#{pane_current_path}")
+    SAVED_PATH=\$(tmux display-message -p "#{pane_current_path}" 2>/dev/null || echo "")
 fi
 
-# Capture the current window's prompt icon and pane colors so we can pre-set
-# them on the new window BEFORE the shell starts (the daemon's USR1 refresh
-# is async and would arrive too late for the initial prompt render).
-SAVED_ICON=\$(tmux show-option -wqv @tabby_prompt_icon 2>/dev/null || echo "")
-SAVED_PANE_ACTIVE=\$(tmux show-option -wqv @tabby_pane_active 2>/dev/null || echo "")
-SAVED_PANE_INACTIVE=\$(tmux show-option -wqv @tabby_pane_inactive 2>/dev/null || echo "")
-NEW_WINDOW_ID=\$(tmux new-window -P -F "#{window_id}" -c "\$SAVED_PATH" 2>/dev/null || true)
+if [ -n "\$SAVED_PATH" ]; then
+    NEW_WINDOW_ID=\$(tmux new-window -P -F "#{window_id}" -c "\$SAVED_PATH" 2>/dev/null || true)
+else
+    NEW_WINDOW_ID=\$(tmux new-window -P -F "#{window_id}" 2>/dev/null || true)
+fi
+
 NEW_WINDOW_ID=\$(printf "%s" "\$NEW_WINDOW_ID" | tr -d '\r\n')
 
 if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_GROUP" ] && [ "\$SAVED_GROUP" != "Default" ]; then
     tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_group "\$SAVED_GROUP" 2>/dev/null || true
 fi
 
-# Pre-set prompt icon and pane colors on the new window so the shell sees
-# them immediately (same group = same icon/colors; daemon will correct later
-# if they differ).
-if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_ICON" ]; then
-    tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_prompt_icon "\$SAVED_ICON" 2>/dev/null || true
-fi
-if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_PANE_ACTIVE" ]; then
-    tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_pane_active "\$SAVED_PANE_ACTIVE" 2>/dev/null || true
-fi
-if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_PANE_INACTIVE" ]; then
-    tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_pane_inactive "\$SAVED_PANE_INACTIVE" 2>/dev/null || true
-fi
-# Spawn sidebar renderer directly so the window is fully set up before
-# any hooks fire.  The daemon will see the renderer already exists and skip.
-MODE=\$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
-if [ "\$MODE" = "enabled" ] && [ -n "\$NEW_WINDOW_ID" ] && [ -x "\$RENDERER_BIN" ]; then
-    SESSION_ID=\$(tmux display-message -p '#{session_id}')
-    SIDEBAR_WIDTH=\$(tmux show-option -gqv @tabby_sidebar_width 2>/dev/null || echo "25")
-    [ -z "\$SIDEBAR_WIDTH" ] && SIDEBAR_WIDTH=25
-    FIRST_PANE=\$(tmux list-panes -t "\$NEW_WINDOW_ID" -F "#{pane_id}" 2>/dev/null | head -1)
-    if [ -n "\$FIRST_PANE" ]; then
-        DEBUG_FLAG=""
-        [ "\${TABBY_DEBUG:-}" = "1" ] && DEBUG_FLAG="-debug"
-        tmux split-window -d -t "\$FIRST_PANE" -h -b -f -l "\$SIDEBAR_WIDTH" \\
-            "exec '\$RENDERER_BIN' -session '\$SESSION_ID' -window '\$NEW_WINDOW_ID' \$DEBUG_FLAG" 2>/dev/null || true
-    fi
-fi
-
-# Ensure the new window has focus (tmux new-window usually does this,
-# but sidebar spawn + hooks can steal it)
 if [ -n "\$NEW_WINDOW_ID" ]; then
-    tmux select-window -t "\$NEW_WINDOW_ID" 2>/dev/null || true
-    # Select the content pane (not the sidebar) — sidebar is spawned with -b
-    # so it is pane index 0; the content pane is the last pane in the window.
-    CONTENT_PANE=\$(tmux list-panes -t "\$NEW_WINDOW_ID" -F '#{pane_id}' 2>/dev/null | tail -1)
-    [ -n "\$CONTENT_PANE" ] && tmux select-pane -t "\$CONTENT_PANE" 2>/dev/null || true
+    tmux set-option -g @tabby_new_window_id "\$NEW_WINDOW_ID" 2>/dev/null || true
+    TS=\$(date +%s 2>/dev/null || echo "")
+    printf "%s new_window id=%s\n" "\$TS" "\$NEW_WINDOW_ID" >> "\$LOG"
+    tmux run-shell -b "$CURRENT_DIR/scripts/focus_new_window.sh \$NEW_WINDOW_ID"
 fi
 
 tmux set-option -gu @tabby_new_window_group 2>/dev/null || true
 tmux set-option -gu @tabby_new_window_path 2>/dev/null || true
 
-# Clear @tabby_spawning after a short delay so after-new-window hooks
-# (which fire after this script exits) still see it as set.
-# Uses 'run-shell -b' which spawns an independent tmux-managed process
-# that survives after this script's run-shell context exits.
-tmux run-shell -b 'sleep 0.3; tmux set-option -gu @tabby_spawning 2>/dev/null || true'
+# Clear spawning flag immediately (no more 1.5s delay)
+tmux set-option -gu @tabby_spawning 2>/dev/null || true
 
-# Single signal to daemon for rendering update
+# Signal daemon AFTER flag is cleared so it can spawn immediately
 PID_FILE="/tmp/tabby-daemon-\$(tmux display-message -p '#{session_id}').pid"
 [ -f "\$PID_FILE" ] && kill -USR1 "\$(cat "\$PID_FILE")" 2>/dev/null || true
+
+TS=\$(date +%s 2>/dev/null || echo "")
+printf "%s new_window end win=%s pane=%s\n" "\$TS" "\$(tmux display-message -p '#{window_id}' 2>/dev/null || echo '')" "\$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo '')" >> "\$LOG"
+
+exit 0
+
+exit 0
+
 SCRIPT_EOF
 chmod +x "$NEW_WINDOW_SCRIPT"
 

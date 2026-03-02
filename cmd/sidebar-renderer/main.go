@@ -2277,8 +2277,10 @@ func main() {
 	debugLog.Printf("Starting renderer for session %s", *sessionID)
 	crashLog.Printf("Renderer started for window %s, session %s", *windowID, *sessionID)
 
-	// Force TrueColor mode for accurate theme rendering
-	lipgloss.SetColorProfile(termenv.TrueColor)
+	// Auto-detect color profile so Mosh clients (which don't forward COLORTERM)
+	// get 256-color instead of TrueColor sequences that Mosh can't handle cleanly.
+	// Modern terminals set COLORTERM=truecolor via SSH so they still get TrueColor.
+	lipgloss.SetColorProfile(termenv.NewOutput(os.Stdout).ColorProfile())
 
 	// Get our own pane ID for focus management (context menu keyboard input)
 	sidebarPane := os.Getenv("TMUX_PANE")

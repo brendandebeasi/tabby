@@ -1104,6 +1104,22 @@ func restoreFocusState() {
 	}
 }
 
+func shouldRestoreFocus() bool {
+	out, err := exec.Command("tmux", "display-message", "-p", "#{pane_current_command}").Output()
+	if err != nil {
+		return false
+	}
+	cmd := strings.ToLower(strings.TrimSpace(string(out)))
+	if cmd == "" {
+		return false
+	}
+	return strings.Contains(cmd, "sidebar") ||
+		strings.Contains(cmd, "renderer") ||
+		strings.Contains(cmd, "pane-header") ||
+		strings.Contains(cmd, "tabbar") ||
+		strings.Contains(cmd, "pane-bar")
+}
+
 // syncClientSizesFromTmux updates all client widths/heights from actual tmux pane sizes
 // This ensures background sidebars get correct dimensions on resize events
 func syncClientSizesFromTmux(server *daemon.Server) {
@@ -1365,8 +1381,10 @@ func main() {
 	// Restore focus after daemon initialization completes
 	// Wait for renderers to spawn and settle before restoring focus
 	go func() {
-		time.Sleep(1500 * time.Millisecond)
-		restoreFocusState()
+		time.Sleep(300 * time.Millisecond)
+		if shouldRestoreFocus() {
+			restoreFocusState()
+		}
 	}()
 
 	// Start coordinator refresh loops with change detection
@@ -1527,7 +1545,7 @@ func main() {
 						doPaneLayoutOps()
 						t5 := time.Now()
 
-						if spawnedRenderer && time.Since(lastNewWindowCreation) >= 2*time.Second {
+						if spawnedRenderer && shouldRestoreFocus() {
 							selectContentPaneInActiveWindow()
 						}
 
@@ -1562,7 +1580,7 @@ func main() {
 							goto drained
 						}
 					}
-				 drained:
+				drained:
 					if drainCount > 0 {
 						logEvent("DRAIN_STALE count=%d", drainCount)
 					}
@@ -1585,7 +1603,7 @@ func main() {
 					cleanupOrphanWindowsByTmux(*sessionID)
 					cleanupSidebarsForClosedWindows(server, windows)
 					doPaneLayoutOps()
-					if spawnedFallback && time.Since(lastNewWindowCreation) >= 2*time.Second {
+					if spawnedFallback && shouldRestoreFocus() {
 						selectContentPaneInActiveWindow()
 					}
 					// Persist current layouts to disk for restart recovery
