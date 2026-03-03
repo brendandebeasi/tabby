@@ -274,8 +274,13 @@ fi
 # Inactive pane dimming: handled by bin/cycle-pane binary (--dim-only flag)
 # Applied on plugin load and after pane cycling. Skips utility panes.
 CYCLE_PANE_BIN="$CURRENT_DIR/bin/cycle-pane"
-tmux set-option -g window-style "default"
-tmux set-option -g window-active-style "default"
+# Reset global window styles so the daemon's applyThemeToTmux() takes effect.
+# NOTE: We use -ug (unset global) rather than setting to "default" because
+# the string "default" resolves to bg=8 (terminal-native), which may not
+# match the theme. Unsetting lets tmux use its built-in default until the
+# daemon sets the proper themed global style.
+tmux set-option -ug window-style
+tmux set-option -ug window-active-style
 if [ -x "$CYCLE_PANE_BIN" ]; then
     "$CYCLE_PANE_BIN" --dim-only
 fi

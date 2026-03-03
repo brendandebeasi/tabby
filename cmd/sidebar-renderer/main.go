@@ -2310,6 +2310,18 @@ func main() {
 		}
 	}()
 
+	// Absorb SIGUSR1 so it doesn't trigger Go's default goroutine stack dump
+	// to stderr, which would corrupt the Bubble Tea terminal output.
+	// Scripts like new_group.sh and delete_group.sh broadcast USR1 to sidebar
+	// processes; the daemon handles config reload, so we just ignore it here.
+	usr1Ch := make(chan os.Signal, 1)
+	signal.Notify(usr1Ch, syscall.SIGUSR1)
+	go func() {
+		for range usr1Ch {
+			// no-op: daemon pushes updated render payloads
+		}
+	}()
+
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

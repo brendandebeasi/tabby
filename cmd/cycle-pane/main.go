@@ -109,7 +109,22 @@ func cyclePane(content []paneInfo) {
 // then sets per-pane background on inactive content panes AND their headers.
 // Uses set-option -p (not select-pane -P) to avoid triggering after-select-pane hook.
 // Sidebar/tabbar/pane-bar panes are never touched.
+// isSpawning returns true when the daemon is actively splitting panes to create
+// 1-line header panes. During this window, pane data is stale and applying
+// dim styles can race with the daemon's own style-setting.
+func isSpawning() bool {
+	out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
 func applyDim() {
+	if isSpawning() {
+		return
+	}
+
 	cfgPath := config.DefaultConfigPath()
 	cfg, err := config.LoadConfig(cfgPath)
 	if err != nil {
@@ -122,7 +137,7 @@ func applyDim() {
 		// Dim disabled — clear any leftover styles and dim flags
 		for _, p := range panes {
 			if !isSkip(p.command) {
-				setPaneStyle(p.id, "default")
+				unsetPaneStyle(p.id)
 			}
 			if !isUtility(p.command) {
 				clearPaneDimFlag(p.id)
@@ -176,11 +191,11 @@ func applyDim() {
 
 		// Content pane: set window-style AND dim flag
 		if active {
-			setPaneStyle(p.id, "default")
+			unsetPaneStyle(p.id)
 			setPaneDimFlag(p.id, false)
 		} else {
 			if dimBG == "" {
-				setPaneStyle(p.id, "default")
+				unsetPaneStyle(p.id)
 			} else {
 				setPaneStyle(p.id, fmt.Sprintf("bg=%s", dimBG))
 			}
@@ -195,6 +210,15 @@ func applyDim() {
 // This does NOT trigger after-select-pane hook (unlike select-pane -P).
 func setPaneStyle(paneID, style string) {
 	_ = exec.Command("tmux", "set-option", "-p", "-t", paneID, "window-style", style).Run()
+}
+
+// unsetPaneStyle removes the per-pane window-style override so the pane
+// inherits the global window-style. This is critically different from
+// setPaneStyle(id, "default") — "default" creates an explicit pane-level
+// entry that resolves to bg=8 (terminal native), blocking global inheritance.
+// Using -u removes the entry entirely, letting tmux walk up to the global.
+func unsetPaneStyle(paneID string) {
+	_ = exec.Command("tmux", "set-option", "-p", "-u", "-t", paneID, "window-style").Run()
 }
 
 // setPaneDimFlag marks a content pane as dimmed or active.

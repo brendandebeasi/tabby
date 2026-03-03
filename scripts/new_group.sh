@@ -22,7 +22,8 @@ if ! "$PLUGIN_DIR/bin/manage-group" add "$NAME" 2>/tmp/tabby-error.log; then
 fi
 rm -f /tmp/tabby-error.log
 
-# Signal all sidebars to reload config (no message needed - group appears in sidebar)
-for pid in $(tmux list-panes -a -F '#{pane_current_command}|#{pane_pid}' | grep '^sidebar' | cut -d'|' -f2); do
-    kill -USR1 "$pid" 2>/dev/null
-done
+# Signal daemon to reload config immediately
+DAEMON_PID=$(tmux show-option -gqv @tabby_daemon_pid 2>/dev/null)
+if [ -n "$DAEMON_PID" ]; then
+    kill -USR1 "$DAEMON_PID" 2>/dev/null || true
+fi
