@@ -122,6 +122,10 @@ TABBY_USE_RENDERER=1 /Users/b/git/tabby/scripts/toggle_sidebar_daemon.sh
 | `scripts/dev-status.sh` | Fresh/stale runtime verification |
 | `scripts/dev-reload.sh` | Rebuild + restart workflow (opt-in) |
 | `tabby.tmux` | Hooks, keybindings, mode setup |
+| `scripts/focus_pane.sh` | Deep link: activate terminal + navigate to pane |
+| `scripts/set-tabby-indicator.sh` | Set sidebar indicators (busy, bell, input) |
+| `scripts/opencode-tabby-hook.sh` | Built-in OpenCode notification hook |
+| `scripts/ensure_sidebar.sh` | Sidebar recovery + `@tabby_spawning` guard |
 
 ## Testing and Verification
 
@@ -154,3 +158,16 @@ bash tests/e2e/run_e2e.sh window_close_removes
 - tmux 3.2+
 - Bubble Tea
 - Lipgloss
+
+## Notification Hooks
+
+Tabby supports deep-link notifications for both Claude Code and OpenCode.
+Hook scripts use `focus_pane.sh` for click-to-navigate and `set-tabby-indicator.sh`
+for sidebar activity indicators.
+
+- CC hooks live outside the repo (e.g. `~/scripts/claude-stop-notify.sh`), wired via `~/.claude/settings.json`
+- OC hook is built-in at `scripts/opencode-tabby-hook.sh`, wired via `~/.config/opencode/opencode-notifier.json`
+- Both prefer growlrrr (emoji icon thumbnails) with terminal-notifier fallback
+- Hook scripts must use `TMUX_PANE` env var (not `tmux display-message -p`) to get the originating pane
+
+See README.md "macOS Notifications with Deep Links" for full setup and examples.
