@@ -137,6 +137,13 @@ pane_header:
   custom_border: true
   handle_icon: "..."
   draggable: true
+  collapse_expanded_icon: "▾"
+  collapse_collapsed_icon: "▸"
+  resize_horizontal_grow_icon: ">"
+  resize_horizontal_shrink_icon: "<"
+  resize_vertical_grow_icon: "↓"
+  resize_vertical_shrink_icon: "↑"
+  resize_separator: "¦"
 
 # Prompt styling (for rename dialogs, etc.)
 prompt:

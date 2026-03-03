@@ -233,6 +233,33 @@ func applyDefaults(cfg *Config) {
 		cfg.Indicators.Last.Icon = "-"
 		cfg.Indicators.Last.Color = "#3498db"
 	}
+	if cfg.PaneHeader.ResizeGrowIcon == "" {
+		cfg.PaneHeader.ResizeGrowIcon = ">"
+	}
+	if cfg.PaneHeader.ResizeShrinkIcon == "" {
+		cfg.PaneHeader.ResizeShrinkIcon = "<"
+	}
+	if cfg.PaneHeader.ResizeHorizontalGrowIcon == "" {
+		cfg.PaneHeader.ResizeHorizontalGrowIcon = ">"
+	}
+	if cfg.PaneHeader.ResizeHorizontalShrinkIcon == "" {
+		cfg.PaneHeader.ResizeHorizontalShrinkIcon = "<"
+	}
+	if cfg.PaneHeader.ResizeVerticalGrowIcon == "" {
+		cfg.PaneHeader.ResizeVerticalGrowIcon = "↓"
+	}
+	if cfg.PaneHeader.ResizeVerticalShrinkIcon == "" {
+		cfg.PaneHeader.ResizeVerticalShrinkIcon = "↑"
+	}
+	if cfg.PaneHeader.ResizeSeparator == "" {
+		cfg.PaneHeader.ResizeSeparator = "¦"
+	}
+	if cfg.PaneHeader.CollapseExpandedIcon == "" {
+		cfg.PaneHeader.CollapseExpandedIcon = "▾"
+	}
+	if cfg.PaneHeader.CollapseCollapsedIcon == "" {
+		cfg.PaneHeader.CollapseCollapsedIcon = "▸"
+	}
 	// Note: PaneHeader.CustomBorder defaults (HandleColor, HandleIcon, Draggable)
 	// are applied at render time in coordinator.go since we can't distinguish
 	// between unset and false for Draggable in YAML.

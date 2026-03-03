@@ -47,6 +47,11 @@ tabby-daemon
 tabby-web-bridge
 test-renderer
 pane-header
+cycle-pane
+manage-group
+
+# Compiled zsh scripts
+*.zwc
 
 # Web
 web/node_modules/

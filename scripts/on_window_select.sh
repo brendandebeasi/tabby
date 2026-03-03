@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Handler for window selection - signal daemon and update border color
 
-if [ "$(tmux show-option -gqv @tabby_spawning 2>/dev/null)" = "1" ]; then
+LOG="/tmp/tabby-focus.log"
+TS=$(date +%s 2>/dev/null || echo "")
+SPAWNING=$(tmux show-option -gqv @tabby_spawning 2>/dev/null || echo "")
+printf "%s after-select-window win=%s pane=%s spawning=%s\n" "$TS" "$(tmux display-message -p '#{window_id}' 2>/dev/null || echo '')" "$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo '')" "$SPAWNING" >> "$LOG"
+if [ "$SPAWNING" = "1" ]; then
     exit 0
 fi
 

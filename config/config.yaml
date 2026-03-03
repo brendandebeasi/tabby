@@ -1,0 +1,238 @@
+# Tabby Demo Config -- Feature Showcase
+# Used by scripts/demo.sh for screenshots and asciinema recordings.
+# Isolated from the user's real config at ~/.config/tabby/config.yaml.
+#
+# This config enables ALL visual features so the demo shows everything tabby
+# can do: groups, widgets, pane headers, indicators, touch buttons, tree view.
+# Styling matches the main config (characters, colors, indicators).
+
+position: top
+height: 2
+
+terminal_title:
+  enabled: true
+  format: "tabby-demo #{window_index} #{window_name}"
+
+style:
+  rounded: true
+  separator_left: ""
+  separator_right: ""
+
+overflow:
+  mode: scroll
+  indicator: ">"
+
+# --- Groups: 4 visually distinct groups + Default catch-all ---
+groups:
+  - name: "Frontend"
+    pattern: "^FE\\|"
+    theme:
+      bg: "#3498db"
+      active_bg: "#2471a3"
+      icon: "\U0001F310"
+      active_indicator_bg: "#d7827e"
+
+  - name: "Backend"
+    pattern: "^BE\\|"
+    theme:
+      bg: "#8e44ad"
+      active_bg: "#6c3483"
+      icon: "\U0001F5A5"
+      active_indicator_bg: "#d7827e"
+
+  - name: "Docs"
+    pattern: "^DC\\|"
+    theme:
+      bg: "#27ae60"
+      active_bg: "#1e8449"
+      icon: "\U0001F4D6"
+      active_indicator_bg: "#d7827e"
+
+  - name: "Infra"
+    pattern: "^IF\\|"
+    theme:
+      bg: "#d35400"
+      active_bg: "#a04000"
+      icon: "\U0001F433"
+      active_indicator_bg: "#d7827e"
+
+  - name: "Default"
+    pattern: ".*"
+    theme:
+      bg: "#56949f"
+      active_bg: "#286983"
+      icon: ""
+      active_indicator_bg: "#d7827e"
+
+# --- Keybindings ---
+bindings:
+  toggle_sidebar: "prefix + Tab"
+  next_tab: "prefix + n"
+  prev_tab: "prefix + p"
+
+# --- Sidebar ---
+sidebar:
+  header:
+    text: "TABBY"
+    height: 3
+    padding_bottom: 1
+    active_color: true
+    fg: "auto"
+    bg: "auto"
+  pane_headers: true
+  new_tab_button: false
+  new_group_button: false
+  close_button: false
+  show_empty_groups: true
+  sort_by: "group"
+  debug: false
+  touch_mode: false
+  disable_large_mode: true
+  line_height: 0
+  theme: dark
+  icon_style: "emoji"
+  colors:
+    inactive_fg: "#f0f0f0"
+    pane_fg: "#f5f5f5"
+    disclosure_expanded: "\u229F"
+    disclosure_collapsed: "\u229E"
+    active_indicator_frames:
+      - "\u25B6"
+      - "\u25B6"
+      - "\u25B6"
+      - "\u25B6"
+      - "\u25B6"
+      - " "
+    active_indicator_fg: "#000000"
+    active_indicator_bg: "transparent"
+    tree_branch: "\u251C\u2500"
+    tree_branch_last: "\u2514\u2500"
+    tree_connector: "\u2500"
+    tree_connector_panes: "\u252C"
+    tree_continue: "\u2502"
+
+# --- Pane headers ---
+pane_header:
+  active_fg: "#ffffff"
+  inactive_fg: "#ffffff"
+  border_from_tab: true
+  auto_border: false
+  dim_inactive: true
+  dim_opacity: 0.6
+  border_lines: heavy
+  custom_border: true
+  handle_icon: "..."
+  draggable: true
+  terminal_bg: "#1a1a2e"
+
+# --- Prompt styling ---
+prompt:
+  fg: ""
+  bg: ""
+  bold: true
+
+# --- Indicators ---
+indicators:
+  activity:
+    enabled: false
+    icon: "!"
+    color: "#000000"
+  bell:
+    enabled: true
+    icon: "\u25C6"
+    color: "#000000"
+    bg: "#ffff00"
+  silence:
+    enabled: true
+    icon: "\u25CB"
+    color: "#000000"
+  busy:
+    enabled: true
+    icon: "\u25D0"
+    color: "#ff0000"
+    frames:
+      - "\u25D0"
+      - "\u25D3"
+      - "\u25D1"
+      - "\u25D2"
+  input:
+    enabled: true
+    icon: "?"
+    color: "#6a1b9a"
+    frames:
+      - "?"
+      - "?"
+
+# --- Widgets ---
+widgets:
+  clock:
+    enabled: true
+    format: "15:04:05"
+    show_date: true
+    date_format: "Mon Jan 2"
+    position: bottom
+    pin: true
+    priority: 100
+    divider: "\u2500"
+    divider_fg: "#444444"
+    margin_top: 1
+    margin_bottom: 0
+    padding_top: 0
+    padding_bottom: 0
+
+  stats:
+    enabled: true
+    style: "emoji"
+    show_cpu: true
+    show_memory: true
+    show_battery: true
+    bar_style: "block"
+    bar_width: 5
+    cpu_fg: "#aaaaaa"
+    memory_fg: "#aaaaaa"
+    battery_fg: "#aaaaaa"
+    divider: "\u2500"
+    divider_fg: "#444444"
+    margin_top: 0
+    margin_bot: 0
+    padding_top: 0
+    padding_bot: 0
+
+  pet:
+    enabled: true
+    name: "Pixel"
+    style: "emoji"
+    rows: 2
+    thoughts: true
+    thought_interval: 30
+    thought_speed: 3
+    position: bottom
+    pin: true
+    priority: 50
+    hunger_decay: 9999
+    poop_chance: 0
+    action_chance: 30
+    can_die: false
+    touch_buttons: false
+    debug_bar: true
+    adventure_enabled: true
+    adventure_chance: 10
+    divider: "\u2500"
+    divider_fg: "#444444"
+    margin_top: 0
+    margin_bottom: 0
+    padding_top: 0
+    padding_bottom: 0
+
+  git:
+    enabled: false
+
+  session:
+    enabled: false
+
+# --- Busy detection ---
+busy_detection:
+  ai_tools:
+    - opencode
+    - claude
+  idle_timeout: 5

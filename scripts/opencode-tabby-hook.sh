@@ -251,9 +251,14 @@ send_notification() {
     db_text=$(get_last_assistant_text "$session_id" 300 | strip_markdown)
     local message="${db_text:-${NOTIFIER_MESSAGE:-$fallback_message}}"
 
-    # Build deep-link URL: opencode://open-project?directory={dir}
+    # Deep-link strategy:
+    # 1. If we have tmux context → focus_pane.sh to jump to the correct pane (CLI mode)
+    # 2. Otherwise → opencode:// URL scheme to open the desktop app
+    local focus_cmd=""
     local open_url=""
-    if [ -n "$session_dir" ]; then
+    if [ -n "$TMUX_TARGET" ]; then
+        focus_cmd="$TABBY_DIR/scripts/focus_pane.sh $TMUX_TARGET"
+    elif [ -n "$session_dir" ]; then
         open_url="opencode://open-project?directory=${session_dir}"
     fi
 
@@ -268,8 +273,8 @@ send_notification() {
         emoji_image=$(get_emoji_image "$group_emoji")
     fi
 
-    printf "%s notification: title=%s subtitle=%s group=%s open=%s emoji=%s\n" \
-        "$(date '+%Y-%m-%d %H:%M:%S')" "$title" "$subtitle" "$group_id" "$open_url" "${group_emoji:-none}" >> "$LOG_FILE"
+    printf "%s notification: title=%s subtitle=%s group=%s focus=%s open=%s emoji=%s\n" \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$title" "$subtitle" "$group_id" "${focus_cmd:-none}" "${open_url:-none}" "${group_emoji:-none}" >> "$LOG_FILE"
 
     if $use_growlrrr; then
         local args=(
@@ -280,7 +285,9 @@ send_notification() {
             --threadId "$group_id"
         )
 
-        if [ -n "$open_url" ]; then
+        if [ -n "$focus_cmd" ]; then
+            args+=(--execute "$focus_cmd")
+        elif [ -n "$open_url" ]; then
             args+=(--open "$open_url")
         fi
 
@@ -307,7 +314,9 @@ send_notification() {
         if [ -n "$subtitle" ]; then
             args+=(-subtitle "$subtitle")
         fi
-        if [ -n "$open_url" ]; then
+        if [ -n "$focus_cmd" ]; then
+            args+=(-execute "$focus_cmd")
+        elif [ -n "$open_url" ]; then
             args+=(-open "$open_url")
         else
             args+=(-activate "$OPENCODE_BUNDLE_ID")
