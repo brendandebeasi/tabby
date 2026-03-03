@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"sort"
@@ -168,6 +169,9 @@ type rendererModel struct {
 	colorPickerSat     int // 0-100
 	colorPickerLit     int // 0-100
 	colorPickerFocus   int // 0=hue, 1=sat, 2=lit
+	// Daemon auto-restart: track consecutive disconnects
+	reconnectAttempts       int
+	daemonRestartTriggered  bool
 }
 
 // Message types
@@ -264,6 +268,8 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.conn = msg.conn
 		m.clientID = msg.clientID
 		m.connected = true
+		m.reconnectAttempts = 0
+		m.daemonRestartTriggered = false
 		debugLog.Printf("Connected as %s", m.clientID)
 		if inputLog != nil && isInputLogEnabled() {
 			inputLog.Printf("CONNECTED client=%s", m.clientID)
@@ -298,14 +304,39 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mouseDownValid = false
 		m.longPressActive = false
 		m.mouseDownTime = time.Time{}
+		m.reconnectAttempts++
 		// Close old connection to clean up resources
 		if m.conn != nil {
 			m.conn.Close()
 			m.conn = nil
 		}
-		debugLog.Printf("Disconnected from daemon, will retry in 1s")
+		debugLog.Printf("Disconnected from daemon, attempt %d, will retry in 1s", m.reconnectAttempts)
 		if inputLog != nil && isInputLogEnabled() {
-			inputLog.Printf("DISCONNECTED")
+			inputLog.Printf("DISCONNECTED attempt=%d", m.reconnectAttempts)
+		}
+		// After 5 consecutive disconnects (~5s), trigger daemon restart
+		// ensure_sidebar.sh checks if daemon is alive and restarts if dead
+		if m.reconnectAttempts >= 5 && !m.daemonRestartTriggered {
+			m.daemonRestartTriggered = true
+			debugLog.Printf("Daemon appears dead after %d reconnect attempts, triggering restart", m.reconnectAttempts)
+			go func() {
+				scriptDir := filepath.Dir(os.Args[0])
+				scriptPath := filepath.Join(scriptDir, "..", "scripts", "ensure_sidebar.sh")
+				if _, err := os.Stat(scriptPath); err != nil {
+					// Fallback: try relative to CURRENT_DIR (tabby plugin root)
+					if home, err := os.UserHomeDir(); err == nil {
+						scriptPath = filepath.Join(home, ".tmux", "plugins", "tabby", "scripts", "ensure_sidebar.sh")
+					}
+				}
+				debugLog.Printf("Running ensure_sidebar.sh: %s", scriptPath)
+				cmd := exec.Command("bash", scriptPath)
+				cmd.Env = append(os.Environ(), fmt.Sprintf("TMUX_PANE=%s", os.Getenv("TMUX_PANE")))
+				if out, err := cmd.CombinedOutput(); err != nil {
+					debugLog.Printf("ensure_sidebar.sh failed: %v: %s", err, string(out))
+				} else {
+					debugLog.Printf("ensure_sidebar.sh succeeded")
+				}
+			}()
 		}
 		// Try to reconnect after a delay
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -1496,6 +1497,12 @@ func main() {
 	go func() {
 		defer recoverAndLog("refresh-loop")
 
+		// consecutiveStalls tracks how many times each task has stalled in a row.
+		// A single stall is forgiven (tmux can hang momentarily under load).
+		// After maxConsecutiveStalls, the daemon self-terminates.
+		consecutiveStalls := map[string]int{}
+		const maxConsecutiveStalls = 3
+
 		runLoopTask := func(task string, timeout time.Duration, fn func()) bool {
 			done := make(chan struct{})
 			go func() {
@@ -1505,19 +1512,37 @@ func main() {
 
 			select {
 			case <-done:
+				// Success: reset stall counter for this task
+				if consecutiveStalls[task] > 0 {
+					logEvent("LOOP_RECOVERED task=%s after_stalls=%d", task, consecutiveStalls[task])
+				}
+				consecutiveStalls[task] = 0
 				return true
 			case <-time.After(timeout):
 				uptime := time.Since(daemonStartTime).Truncate(time.Second)
-				logEvent("LOOP_STALL task=%s timeout_ms=%d uptime=%s clients=%d", task, timeout.Milliseconds(), uptime, server.ClientCount())
+				consecutiveStalls[task]++
+				stalls := consecutiveStalls[task]
+				logEvent("LOOP_STALL task=%s timeout_ms=%d uptime=%s clients=%d consecutive=%d/%d",
+					task, timeout.Milliseconds(), uptime, server.ClientCount(), stalls, maxConsecutiveStalls)
 				if crashLog != nil {
-					crashLog.Printf("LOOP_STALL task=%s timeout=%v uptime=%s clients=%d", task, timeout, uptime, server.ClientCount())
+					crashLog.Printf("LOOP_STALL task=%s timeout=%v uptime=%s clients=%d consecutive=%d/%d",
+						task, timeout, uptime, server.ClientCount(), stalls, maxConsecutiveStalls)
 					crashLog.Printf("LOOP_STALL stack:\n%s", debug.Stack())
 				}
-				select {
-				case sigCh <- syscall.SIGTERM:
-				default:
+				if stalls >= maxConsecutiveStalls {
+					logEvent("LOOP_FATAL task=%s reason=max_consecutive_stalls stalls=%d", task, stalls)
+					if crashLog != nil {
+						crashLog.Printf("LOOP_FATAL: %d consecutive stalls for %s, self-terminating", stalls, task)
+					}
+					select {
+					case sigCh <- syscall.SIGTERM:
+					default:
+					}
+					return false
 				}
-				return false
+				// Non-fatal: skip this iteration, retry on next tick
+				logEvent("LOOP_SKIP_DEGRADED task=%s stalls=%d (will retry next tick)", task, stalls)
+				return true
 			}
 		}
 
@@ -1558,7 +1583,9 @@ func main() {
 
 		// Helper to get current active window ID (cached, updated on events)
 		updateActiveWindow := func() {
-			if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
 				activeWindowID = strings.TrimSpace(string(out))
 			}
 		}

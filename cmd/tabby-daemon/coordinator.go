@@ -1110,13 +1110,21 @@ func (c *Coordinator) RefreshWindows() {
 	}
 
 	touchModeOverride := ""
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_touch_mode").Output(); err == nil {
-		touchModeOverride = strings.TrimSpace(string(out))
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if out, err := exec.CommandContext(ctx, "tmux", "show-option", "-gqv", "@tabby_touch_mode").Output(); err == nil {
+			touchModeOverride = strings.TrimSpace(string(out))
+		}
+		cancel()
 	}
 
 	prefixModeRaw := ""
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_prefix_mode").Output(); err == nil {
-		prefixModeRaw = strings.TrimSpace(string(out))
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if out, err := exec.CommandContext(ctx, "tmux", "show-option", "-gqv", "@tabby_prefix_mode").Output(); err == nil {
+			prefixModeRaw = strings.TrimSpace(string(out))
+		}
+		cancel()
 	}
 
 	c.stateMu.Lock()

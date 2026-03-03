@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,24 @@ import (
 
 	"github.com/brendandebeasi/tabby/pkg/perf"
 )
+
+// tmuxCmdTimeout is the per-command timeout for tmux operations.
+// If a single tmux command hangs longer than this, it's killed.
+// This prevents one stuck tmux call from blocking the entire daemon event loop.
+const tmuxCmdTimeout = 5 * time.Second
+
+// tmuxOutput runs a tmux command with a timeout and returns its stdout.
+// Returns an error if the command fails or the timeout expires.
+func tmuxOutput(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	out, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("tmux %s: timed out after %v", args[0], tmuxCmdTimeout)
+	}
+	return out, err
+}
 
 // ansiEscapeRegex matches ANSI escape sequences including:
 // - Standard CSI sequences: \x1b[...m (colors, styles)
@@ -205,8 +224,7 @@ func ListWindows() ([]Window, error) {
 	}
 	args = append(args, "-F",
 		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}\x1f#{@tabby_pinned}\x1f#{@tabby_icon}\x1f#{window_layout}")
-	cmd := exec.Command("tmux", args...)
-	out, err := cmd.Output()
+	out, err := tmuxOutput(args...)
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
 	}
@@ -348,9 +366,8 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 	if sessionTarget != "" {
 		windowTarget = fmt.Sprintf("%s:%d", sessionTarget, windowIndex)
 	}
-	cmd := exec.Command("tmux", "list-panes", "-t", windowTarget, "-F",
+	out, err := tmuxOutput("list-panes", "-t", windowTarget, "-F",
 		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_dead}")
-	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
@@ -472,8 +489,7 @@ func ListAllPanes() (map[int][]Pane, error) {
 	}
 	args = append(args, "-F",
 		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_width}\x1f#{pane_height}")
-	cmd := exec.Command("tmux", args...)
-	out, err := cmd.Output()
+	out, err := tmuxOutput(args...)
 	if err != nil {
 		return nil, err
 	}
