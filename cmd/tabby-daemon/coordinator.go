@@ -3333,6 +3333,117 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	}
 }
 
+// RunWidthSync checks all connected sidebar clients and resizes any whose width
+// doesn't match the global target. Called from the main event loop (not the render path)
+// to avoid blocking BroadcastRender with tmux subprocess calls.
+func (c *Coordinator) RunWidthSync(activeWindowID string) {
+	if c.sidebarCollapsed {
+		return
+	}
+
+	// Snapshot client widths
+	c.clientWidthsMu.RLock()
+	clientSnapshot := make(map[string]int, len(c.clientWidths))
+	for id, w := range c.clientWidths {
+		clientSnapshot[id] = w
+	}
+	c.clientWidthsMu.RUnlock()
+
+	if len(clientSnapshot) == 0 {
+		return
+	}
+
+	// Read per-window SyncWidth settings under stateMu BEFORE acquiring widthSyncMu
+	// (lock ordering: stateMu -> widthSyncMu)
+	syncSettings := make(map[string]bool)
+	c.stateMu.RLock()
+	for i := range c.windows {
+		syncSettings[c.windows[i].ID] = c.windows[i].SyncWidth
+	}
+	c.stateMu.RUnlock()
+
+	trackLock("widthSyncMu", "RunWidthSync")
+	c.widthSyncMu.Lock()
+
+	// Detect active window change
+	justBecameActive := activeWindowID != "" && c.lastActiveWindowID != activeWindowID
+	if justBecameActive {
+		coordinatorDebugLog.Printf("Width sync: active window changed to %s", activeWindowID)
+		c.lastActiveWindowID = activeWindowID
+	}
+
+	// Debounce: ignore resize events within 500ms of our last sync
+	sinceLast := time.Since(c.lastWidthSync)
+	if sinceLast < 500*time.Millisecond {
+		untrackLock("widthSyncMu")
+		c.widthSyncMu.Unlock()
+		return
+	}
+
+	// Build list of panes to resize (compute under lock, execute after unlock)
+	type resizeOp struct {
+		clientID    string
+		targetWidth int
+	}
+	var ops []resizeOp
+
+	for clientID, currentWidth := range clientSnapshot {
+		// Skip header clients
+		if strings.HasPrefix(clientID, "header:") {
+			continue
+		}
+
+		// Check per-window sync opt-out
+		if !syncSettings[clientID] {
+			continue
+		}
+
+		if c.globalWidth == 0 {
+			c.globalWidth = currentWidth
+		}
+
+		// If sidebar got squeezed or stretched to extreme values, restore to global
+		if (currentWidth < 10 || currentWidth > 80) && c.globalWidth >= 10 && c.globalWidth <= 80 {
+			coordinatorDebugLog.Printf("Width sync: %s out of bounds (%d), restoring to global %d", clientID, currentWidth, c.globalWidth)
+			targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth)
+			ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
+			continue
+		}
+
+		targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth)
+		if currentWidth != targetWidth {
+			coordinatorDebugLog.Printf("Width sync: window=%s current=%d target=%d", clientID, currentWidth, targetWidth)
+			ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
+		}
+	}
+
+	if len(ops) > 0 {
+		c.lastWidthSync = time.Now()
+	}
+
+	untrackLock("widthSyncMu")
+	c.widthSyncMu.Unlock()
+
+	// Execute tmux resize operations AFTER releasing all locks
+	for _, op := range ops {
+		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", op.clientID, "-F", "#{pane_id} #{pane_current_command}").Output()
+		listCancel()
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			parts := strings.Split(line, " ")
+			if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+				resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", op.targetWidth)).Run()
+				resizeCancel()
+				break
+			}
+		}
+	}
+}
+
 func (c *Coordinator) persistSidebarWidthProfile(windowID string, width int) {
 	if windowID == "" || width < 10 {
 		return
@@ -3512,7 +3623,9 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		height = 24
 	}
 
-	c.handleWidthSync(clientID, width)
+
+	// NOTE: Width sync has been moved off the render path to prevent deadlocks.
+	// It now runs from the main event loop via RunWidthSync().
 
 	// If sidebar is collapsed, render minimal expand button only
 	if c.sidebarCollapsed {

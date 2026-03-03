@@ -1629,6 +1629,8 @@ func main() {
 					syncClientSizesFromTmux(server)
 					server.BroadcastRender()
 					t1b := time.Now()
+					// Width sync runs off the render path to prevent deadlocks
+					coordinator.RunWidthSync(activeWindowID)
 
 					// Heavy ops (spawn/cleanup/layout) only if enough time has
 					// passed since the last full refresh. This breaks the feedback
@@ -1709,6 +1711,8 @@ func main() {
 					_ = spawnedFallback
 					// Persist current layouts to disk for restart recovery
 					saveLayoutsToDisk(windows)
+					// Width sync as fallback for missed events
+					coordinator.RunWidthSync(activeWindowID)
 				})
 			case <-watchdogTicker.C:
 				ok := runLoopTask("watchdog", 6*time.Second, func() {
