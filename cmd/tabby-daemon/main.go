@@ -448,6 +448,19 @@ func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Windo
 
 // cleanupOrphanedSidebars closes sidebar panes in windows where all other panes were closed
 func cleanupOrphanedSidebars(windows []tmux.Window) {
+	// Skip cleanup during new window creation to prevent killing windows
+	// whose content pane hasn't been detected yet (race condition).
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
+		if strings.TrimSpace(string(out)) == "1" {
+			return
+		}
+	}
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output(); err == nil {
+		if strings.TrimSpace(string(out)) != "" {
+			return
+		}
+	}
+
 	for _, win := range windows {
 		windowID := win.ID
 		if windowID == "" {

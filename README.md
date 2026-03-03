@@ -21,11 +21,9 @@ A modern tab manager for tmux with grouping, a clickable vertical sidebar, and d
 - [Usage](#usage)
 - [Configuration](#configuration)
 - [Tab Grouping](#tab-grouping)
-- [Tab Overflow](#tab-overflow)
 - [Development](#development)
 - [Tabby Web (Local-Only)](#tabby-web-local-only)
 - [macOS Notifications with Deep Links](#macos-notifications-with-deep-links)
-- [Known Limitations](#known-limitations)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [License](#license)
@@ -64,7 +62,6 @@ terminal-notifier -title "Build Done" -message "Click to return" \
 - **Vertical sidebar** - clickable, persistent across windows with collapse/expand
 - **Window grouping** - color-coded project organization with working directories
 - **Deep link navigation** - click notifications to jump to exact pane
-- **Horizontal tab bar** - alternative mode with overflow scrolling
 - **Automatic window naming** - shows running command, locks on manual rename
 - **Activity indicators** - bell, activity, silence, busy, and input alerts
 - **Mouse support** - click, right-click menus, middle-click close
@@ -128,9 +125,6 @@ Tabby follows standard tmux keybindings. All standard tmux shortcuts work as exp
 |-----|--------|
 | `prefix + Tab` | Toggle vertical sidebar |
 | `prefix + G` | Create new group |
-| `prefix + M` | Toggle mode |
-| `prefix + V` | Switch to vertical mode |
-| `prefix + H` | Switch to horizontal mode |
 | `Ctrl + <` or `Alt + <` | Collapse/expand sidebar |
 
 When the sidebar is focused, press `m` to open the marker picker for the active window.
@@ -166,8 +160,6 @@ When the sidebar is focused, press `m` to open the marker picker for the active 
   - Set working directory
   - Delete group
   - Close all windows in group
-
-Note: Horizontal tabs have limited mouse support due to tmux status bar limitations.
 
 ### Sidebar Position and Mode
 
@@ -244,9 +236,6 @@ This approach doesn't require SSH config changes and won't interfere with other 
 Edit `~/.config/tabby/config.yaml`:
 
 ```yaml
-# Tab bar position: top, bottom, or off
-position: top
-
 # Tab grouping rules (first match wins)
 groups:
   - name: "Frontend"
@@ -303,11 +292,6 @@ indicators:
     color: "#ffffff"
     bg: "#9b59b6"  # Purple - needs attention
     frames: ["?", "?"]  # Can add blinking: ["?", " "]
-
-# Tab overflow behavior
-overflow:
-  mode: scroll     # scroll or truncate
-  indicator: "›"   # Character shown when tabs overflow
 
 # Vertical sidebar settings
 sidebar:
@@ -420,13 +404,6 @@ tmux set-option -p -t %123 @tabby_pane_title "My Pane"
 tmux set-option -p -t %123 -u @tabby_pane_title
 ```
 
-## Tab Overflow
-
-When you have many windows, tabs automatically scroll to keep the active window visible:
-- `›` indicator shows hidden tabs on left/right
-- Active window is centered when possible
-- Smooth scrolling as you switch windows
-
 ## Development
 
 ### Building from Source
@@ -503,7 +480,6 @@ tabby/
 │   ├── tabby-daemon/    # Session coordinator + render payloads
 │   ├── sidebar-renderer/ # Per-window sidebar TUI client
 │   ├── pane-header/     # Per-pane header TUI client
-│   ├── tabbar/          # Horizontal tabbar TUI
 │   └── render-status/   # Native tmux status rendering helpers
 ├── pkg/
 │   ├── config/         # Configuration loading
@@ -521,12 +497,18 @@ tabby/
 
 ## macOS Notifications with Deep Links
 
-Tabby includes a helper script for creating notifications that deep-link back to specific tmux windows/panes. When clicked, the notification brings your terminal to the foreground and navigates to the target location.
+Tabby includes helper scripts for creating notifications that deep-link back to specific tmux windows/panes. When clicked, the notification brings your terminal to the foreground and navigates to the target location.
+
+Works with both **Claude Code** and **OpenCode** out of the box.
 
 ### Requirements
 
-1. Install terminal-notifier via Homebrew:
+1. Install a notification tool via Homebrew:
 ```bash
+# Recommended: growlrrr (supports custom emoji icons as thumbnails)
+brew install growlrrr
+
+# Alternative: terminal-notifier (basic notifications)
 brew install terminal-notifier
 ```
 
@@ -566,7 +548,7 @@ terminal-notifier -title "Task Done" -message "Click to return" \
 
 ### Integration with Claude Code
 
-Claude Code hooks run as subprocesses, so you need to capture the correct pane - not the currently focused one. The key is using the `TMUX_PANE` environment variable with `tmux display-message -t`.
+Claude Code hooks run as subprocesses, so you need to capture the correct pane — not the currently focused one. The key is using the `TMUX_PANE` environment variable with `tmux display-message -t`.
 
 **Important:** Using `tmux display-message -p` (without `-t`) returns the *currently focused* pane, which may have changed while Claude was working. Using `-t "$TMUX_PANE"` queries the *specific pane* where the hook originated.
 
@@ -577,6 +559,21 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tabby-dir>/scripts/set-tabby-indicator.sh busy 1"
+          },
+          {
+            "type": "command",
+            "command": "<tabby-dir>/scripts/set-tabby-indicator.sh input 0"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
@@ -603,13 +600,24 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
+Notification scripts should:
+- Read hook JSON from stdin (`jq -r '.transcript_path'` for transcript)
+- Use `TMUX_PANE` env var to query the originating pane (not current focus)
+- Call `focus_pane.sh` for click-to-navigate deep links
+- Set tabby indicators (`set-tabby-indicator.sh busy 0`, `bell 1`, etc.)
+- Use growlrrr with `--image` for emoji group icon thumbnails
+
+See the [example hook scripts](https://github.com/brendandebeasi/tabby/blob/main/README.md#example-hook-script) or use the built-in OpenCode hook as a reference.
+
 #### Example Hook Script
 
 ```bash
 #!/usr/bin/env bash
-# claude-stop-notify.sh - Notification with deep link to correct pane
+# claude-stop-notify.sh — Rich notification with emoji icons + deep linking
+set -u
 
 TABBY_DIR="${HOME}/.tmux/plugins/tabby"
+INDICATOR="$TABBY_DIR/scripts/set-tabby-indicator.sh"
 
 # Read hook JSON from stdin (Claude provides session info)
 HOOK_JSON=$(cat)
@@ -620,22 +628,9 @@ TRANSCRIPT_PATH=$(echo "$HOOK_JSON" | jq -r '.transcript_path // empty')
 if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then
     WINDOW_NAME=$(tmux display-message -t "$TMUX_PANE" -p '#W')
     TMUX_TARGET=$(tmux display-message -t "$TMUX_PANE" -p '#{session_name}:#{window_index}.#{pane_index}')
-    WINDOW_INDEX=$(tmux display-message -t "$TMUX_PANE" -p '#I')
-    PANE_NUM=$(tmux display-message -t "$TMUX_PANE" -p '#P')
-elif [[ -n "${TMUX:-}" ]]; then
-    # Fallback (shouldn't happen in normal tmux usage)
-    WINDOW_NAME=$(tmux display-message -p '#W')
-    TMUX_TARGET=$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}')
-    WINDOW_INDEX=$(tmux display-message -p '#I')
-    PANE_NUM=$(tmux display-message -p '#P')
-else
-    WINDOW_NAME="no-tmux"
-    TMUX_TARGET=""
-    WINDOW_INDEX="?"
-    PANE_NUM="0"
 fi
 
-# Extract Claude's last message from transcript (optional)
+# Extract last assistant message from transcript
 MESSAGE="Session complete"
 if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
     LAST_MSG=$(tac "$TRANSCRIPT_PATH" | grep -m1 '"type":"assistant"' | jq -r '
@@ -645,50 +640,78 @@ if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
         elif type == "string" then .
         else empty end
     ' 2>/dev/null)
-    if [[ -n "$LAST_MSG" && "$LAST_MSG" != "null" ]]; then
-        MESSAGE=$(echo "$LAST_MSG" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-200)
-    fi
+    [[ -n "$LAST_MSG" && "$LAST_MSG" != "null" ]] && \
+        MESSAGE=$(echo "$LAST_MSG" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-300)
 fi
 
-# Send notification with click-to-focus
-if [[ -n "$TMUX_TARGET" ]]; then
-    terminal-notifier \
-        -title "Claude [$WINDOW_NAME]" \
-        -subtitle "Window ${WINDOW_INDEX}:${PANE_NUM}" \
-        -message "$MESSAGE" \
-        -sound default \
-        -group "claude-${WINDOW_INDEX}" \
-        -execute "$TABBY_DIR/scripts/focus_pane.sh $TMUX_TARGET"
-else
-    terminal-notifier \
-        -title "Claude" \
-        -message "$MESSAGE" \
-        -sound default
+# Send notification with click-to-focus (growlrrr preferred, terminal-notifier fallback)
+if command -v growlrrr &>/dev/null; then
+    growlrrr send --appId ClaudeCode --title "$WINDOW_NAME" \
+        --subtitle "Task complete" --sound default \
+        --execute "$TABBY_DIR/scripts/focus_pane.sh $TMUX_TARGET" \
+        "$MESSAGE" &>/dev/null &
+elif command -v terminal-notifier &>/dev/null; then
+    terminal-notifier -title "$WINDOW_NAME" -message "$MESSAGE" \
+        -sound default -execute "$TABBY_DIR/scripts/focus_pane.sh $TMUX_TARGET" &>/dev/null &
 fi
+
+# Set tabby indicators
+"$INDICATOR" busy 0
+"$INDICATOR" bell 1
 ```
 
-#### Notification Persistence
+### Integration with OpenCode
+
+Tabby includes a built-in OpenCode hook at `scripts/opencode-tabby-hook.sh`. It supports:
+- All OpenCode events (complete, permission, question, error, start)
+- Emoji group icon thumbnails via growlrrr
+- SQLite-based message extraction from OpenCode's database
+- Process tree walking to find the correct `TMUX_PANE`
+- Tabby sidebar indicators (busy, input, bell)
+
+#### OpenCode Notifier Configuration
+
+Create `~/.config/opencode/opencode-notifier.json`:
+
+```json
+{
+  "sound": false,
+  "notification": false,
+  "command": {
+    "enabled": true,
+    "path": "<tabby-dir>/scripts/opencode-tabby-hook.sh",
+    "args": ["{event}", "{projectName}", "{sessionTitle}", "{message}"],
+    "minDuration": 0
+  },
+  "events": {
+    "complete": { "sound": false, "notification": false },
+    "permission": { "sound": false, "notification": false },
+    "error": { "sound": false, "notification": false }
+  }
+}
+```
+
+Set `sound` and `notification` to `false` in the notifier config since the hook script handles notifications directly via growlrrr/terminal-notifier.
+
+### Notification Persistence
 
 By default, macOS banner notifications disappear after ~5 seconds. To make them persist until clicked:
 
-1. Open **System Settings** -> **Notifications** -> **terminal-notifier**
+1. Open **System Settings** → **Notifications** → **terminal-notifier** (or **growlrrr**)
 2. Change notification style from **Banners** to **Alerts**
 
-#### Disabling Claude's Built-in Notifications
+### Disabling Built-in Notifications
 
-To avoid duplicate notifications (your custom hook + Claude's default), add to `~/.claude.json`:
+To avoid duplicate notifications when using custom hooks:
 
+**Claude Code** — add to `~/.claude/settings.json`:
 ```json
 {
   "preferredNotifChannel": "none"
 }
 ```
 
-## Known Limitations
-
-1. **Horizontal tabs are not clickable** - This is a tmux limitation. Custom status formats don't support mouse events. Use keyboard shortcuts or the vertical sidebar for mouse support.
-
-2. **[x] and [+] buttons are visual only** - These buttons appear in horizontal mode but aren't functional. Use keyboard shortcuts instead.
+**OpenCode** — set `sound` and `notification` to `false` in `opencode-notifier.json` (shown above).
 
 ## Troubleshooting
 
@@ -700,10 +723,6 @@ To avoid duplicate notifications (your custom hook + Claude's default), add to `
 ### Sidebar not toggling
 - Verify the toggle key binding: `tmux list-keys | grep toggle_sidebar`
 - Check if the sidebar binary is running: `ps aux | grep sidebar`
-
-### Tab overflow not working
-- Ensure you have tmux 3.2+ for proper Unicode support
-- Try adjusting terminal width or font size
 
 ## Similar Projects
 

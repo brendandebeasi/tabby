@@ -132,10 +132,8 @@ fi
 tmux set-option -gu @tabby_new_window_group 2>/dev/null || true
 tmux set-option -gu @tabby_new_window_path 2>/dev/null || true
 
-# Clear spawning flag immediately (no more 1.5s delay)
-tmux set-option -gu @tabby_spawning 2>/dev/null || true
-
-# Signal daemon AFTER flag is cleared so it can spawn immediately
+# Signal daemon so it can spawn renderers for the new window.
+# Keep @tabby_spawning=1 so daemon cleanup skips this window.
 PID_FILE="/tmp/tabby-daemon-\$(tmux display-message -p '#{session_id}').pid"
 [ -f "\$PID_FILE" ] && kill -USR1 "\$(cat "\$PID_FILE")" 2>/dev/null || true
 
@@ -151,9 +149,14 @@ if [ -n "\$NEW_WINDOW_ID" ]; then
     [ -n "\$CONTENT_PANE" ] && tmux select-pane -t "\$CONTENT_PANE" 2>/dev/null || true
     tmux set-option -g @tabby_last_window "\$NEW_WINDOW_ID" 2>/dev/null || true
     [ -n "\$CONTENT_PANE" ] && tmux set-option -g @tabby_last_pane "\$CONTENT_PANE" 2>/dev/null || true
+
+    # Clear spawning flag AFTER second focus attempt so daemon cleanup
+    # cannot steal focus or kill the new window during the sleep+refocus.
+    tmux set-option -gu @tabby_spawning 2>/dev/null || true
     ( sleep 1.2; PENDING=\$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo ""); [ "\$PENDING" = "\$NEW_WINDOW_ID" ] && tmux set-option -gu @tabby_new_window_id 2>/dev/null || true ) >/dev/null 2>&1 &
 fi
-
+# Safety: ensure spawning flag is always cleared (even if NEW_WINDOW_ID was empty)
+tmux set-option -gu @tabby_spawning 2>/dev/null || true
 TS=\$(date +%s 2>/dev/null || echo "")
 printf "%s new_window end win=%s pane=%s\n" "\$TS" "\$(tmux display-message -p '#{window_id}' 2>/dev/null || echo '')" "\$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo '')" >> "\$LOG"
 

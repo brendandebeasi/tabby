@@ -6,7 +6,7 @@
 #
 # SETUP (zsh - add to ~/.zshrc):
 #
-#   source ~/.tmux/plugins/tmux-tabs/scripts/tabby-prompt.sh
+#   source ~/.tmux/plugins/tabby/scripts/tabby-prompt.sh
 #   PROMPT='$(tabby_prompt_prefix)%~ %# '
 #
 # CONFIGURATION (set before sourcing, or export in ~/.zshrc):
