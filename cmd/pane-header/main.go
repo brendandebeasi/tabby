@@ -480,12 +480,8 @@ func (m rendererModel) View() string {
 		return ""
 	}
 
-	bgStyle := lipgloss.NewStyle()
-	if m.terminalBg != "" {
-		bgStyle = bgStyle.Background(lipgloss.Color(m.terminalBg))
-	} else if m.sidebarBg != "" {
-		bgStyle = bgStyle.Background(lipgloss.Color(m.sidebarBg))
-	}
+	// NOTE: Background color is already applied by the daemon in applyBackgroundFill().
+	// Do NOT re-apply it here, as that causes double-wrapping of escape sequences.
 
 	lines := strings.Split(m.content, "\n")
 	var visible []string
@@ -496,11 +492,7 @@ func (m rendererModel) View() string {
 		if lineWidth < m.width {
 			line += strings.Repeat(" ", m.width-lineWidth)
 		}
-		if m.terminalBg != "" || m.sidebarBg != "" {
-			visible = append(visible, bgStyle.Render(line))
-		} else {
-			visible = append(visible, line)
-		}
+		visible = append(visible, line)
 	}
 
 	return strings.Join(visible, "\n")
