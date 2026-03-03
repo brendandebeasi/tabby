@@ -23,8 +23,8 @@ import (
 	kemoji "github.com/kenshaw/emoji"
 	zone "github.com/lrstanley/bubblezone"
 	"github.com/mattn/go-runewidth"
-	"github.com/rivo/uniseg"
 	"github.com/muesli/termenv"
+	"github.com/rivo/uniseg"
 
 	"github.com/brendandebeasi/tabby/pkg/colors"
 	"github.com/brendandebeasi/tabby/pkg/config"
@@ -204,10 +204,6 @@ type Coordinator struct {
 	// Session info
 	sessionID string
 	baseIndex int
-
-	// Pending group for next new window (for optimistic UI)
-	pendingNewWindowGroup string
-	pendingNewWindowTime  time.Time
 
 	// Process tree caching
 	lastProcessCheck  time.Time
@@ -1132,31 +1128,6 @@ func (c *Coordinator) RefreshWindows() {
 
 	// Note: collapsed groups state is managed in-memory and synced to tmux options
 	// We don't reload here to avoid race conditions with toggle_group action
-
-	// Track old window IDs to detect new windows
-	oldWindowIDs := make(map[string]bool)
-	for _, w := range c.windows {
-		oldWindowIDs[w.ID] = true
-	}
-
-	// Check for pending group assignment (optimistic UI for new windows in groups)
-	if c.pendingNewWindowGroup != "" && time.Since(c.pendingNewWindowTime) < 5*time.Second {
-		for i := range windows {
-			// Find new window without a group
-			if !oldWindowIDs[windows[i].ID] && windows[i].Group == "" {
-				// Assign the pending group
-				windows[i].Group = c.pendingNewWindowGroup
-				// Also set it in tmux so it persists
-				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_group", c.pendingNewWindowGroup).Run()
-				// Clear pending
-				c.pendingNewWindowGroup = ""
-				break
-			}
-		}
-	} else if c.pendingNewWindowGroup != "" {
-		// Pending group expired, clear it
-		c.pendingNewWindowGroup = ""
-	}
 
 	c.windows = windows
 
@@ -3918,19 +3889,64 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			}
 		}
 		if isCollapsed {
-			collapseBtn = "▶"
+			collapseBtn = c.config.PaneHeader.CollapseCollapsedIcon
 		} else {
-			collapseBtn = "▼"
+			collapseBtn = c.config.PaneHeader.CollapseExpandedIcon
 		}
 	}
 	splitVBtn := "│"
 	splitHBtn := "─"
+	if contentPaneCount > 1 && collapseBtn == "" {
+		collapseBtn = "▾"
+		if isCollapsed {
+			collapseBtn = "▸"
+		}
+	}
+	isVerticalStack := c.isVerticalStackedPane(foundWindow, paneID)
+	growBtn := c.config.PaneHeader.ResizeGrowIcon
+	shrinkBtn := c.config.PaneHeader.ResizeShrinkIcon
+	if isVerticalStack {
+		if c.config.PaneHeader.ResizeVerticalGrowIcon != "" {
+			growBtn = c.config.PaneHeader.ResizeVerticalGrowIcon
+		}
+		if c.config.PaneHeader.ResizeVerticalShrinkIcon != "" {
+			shrinkBtn = c.config.PaneHeader.ResizeVerticalShrinkIcon
+		}
+		if growBtn == "" {
+			growBtn = "↓"
+		}
+		if shrinkBtn == "" {
+			shrinkBtn = "↑"
+		}
+	} else {
+		if c.config.PaneHeader.ResizeHorizontalGrowIcon != "" {
+			growBtn = c.config.PaneHeader.ResizeHorizontalGrowIcon
+		}
+		if c.config.PaneHeader.ResizeHorizontalShrinkIcon != "" {
+			shrinkBtn = c.config.PaneHeader.ResizeHorizontalShrinkIcon
+		}
+		if growBtn == "" {
+			growBtn = ">"
+		}
+		if shrinkBtn == "" {
+			shrinkBtn = "<"
+		}
+	}
+	resizeSep := c.config.PaneHeader.ResizeSeparator
+	if resizeSep == "" {
+		resizeSep = "¦"
+	}
 	closeBtn := "×"
+	showResizeButtons := contentPaneCount > 1
 	buttonsStr := "  "
 	if collapseBtn != "" {
 		buttonsStr += collapseBtn + "   "
 	}
-	buttonsStr += splitVBtn + "   " + splitHBtn + "   " + closeBtn + "  "
+	buttonsStr += splitVBtn + "   " + splitHBtn + "   "
+	if showResizeButtons {
+		buttonsStr += resizeSep + "   " + growBtn + "   " + shrinkBtn + "   "
+	}
+	buttonsStr += closeBtn + "  "
 	buttonsWidth := uniseg.StringWidth(buttonsStr)
 
 	// Find the specific pane this header belongs to
@@ -4061,13 +4077,26 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 
 	if collapseBtn != "" {
-		// Button string: "  ▼   │   ─   ×  "
-		// Positions:      0-1 2-5 6-9 10-13 14-16
-		// Each button region is 4 chars wide (icon + 3 spaces), collapse has 2 leading spaces
-		collapseEnd := btnAreaStart + 6 // "  ▼   " = 6 chars
-		splitVEnd := collapseEnd + 4    // "│   " = 4 chars
-		splitHEnd := splitVEnd + 4      // "─   " = 4 chars
-		// Collapse targets individual pane, not whole window
+		collapseEnd := btnAreaStart + 6
+		splitVEnd := collapseEnd + 4
+		splitHEnd := splitVEnd + 4
+		cursor := splitHEnd
+		if showResizeButtons {
+			cursor += 4
+			growEnd := cursor + 4
+			shrinkEnd := growEnd + 4
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: growEnd,
+				Action: "pane_grow", Target: paneID,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: growEnd, EndCol: shrinkEnd,
+				Action: "pane_shrink", Target: paneID,
+			})
+			cursor = shrinkEnd
+		}
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: btnAreaStart, EndCol: collapseEnd,
@@ -4085,15 +4114,29 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		})
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
-			StartCol: splitHEnd, EndCol: width,
+			StartCol: cursor, EndCol: width,
 			Action: "header_close", Target: paneID,
 		})
 	} else {
-		// Button string: "  │   ─   ×  "
-		// Positions:      0-1 2-5 6-9 10-12
-		// Each button region is 4 chars wide (icon + 3 spaces), with 2 leading spaces
-		splitVEnd := btnAreaStart + 6 // "  │   " = 6 chars
-		splitHEnd := splitVEnd + 4    // "─   " = 4 chars
+		splitVEnd := btnAreaStart + 6
+		splitHEnd := splitVEnd + 4
+		cursor := splitHEnd
+		if showResizeButtons {
+			cursor += 4
+			growEnd := cursor + 4
+			shrinkEnd := growEnd + 4
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: growEnd,
+				Action: "pane_grow", Target: paneID,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: growEnd, EndCol: shrinkEnd,
+				Action: "pane_shrink", Target: paneID,
+			})
+			cursor = shrinkEnd
+		}
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: btnAreaStart, EndCol: splitVEnd,
@@ -4106,7 +4149,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		})
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
-			StartCol: splitHEnd, EndCol: width,
+			StartCol: cursor, EndCol: width,
 			Action: "header_close", Target: paneID,
 		})
 	}
@@ -4752,7 +4795,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			if hasWindows {
 				prefix := collapseStyle.Render(collapseIcon)
 				prefixW := uniseg.StringWidth(stripAnsi(prefix))
-				restW := width - prefixW
+				menuBtnW := 2 // " ⋮"
+				restW := width - prefixW - menuBtnW
 				if restW < 1 {
 					restW = 1
 				}
@@ -4782,12 +4826,19 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				} else {
 					iconAndText = lipgloss.NewStyle().Width(restW).Render(iconAndText)
 				}
-				s.WriteString(prefix + iconAndText + "\n")
+
+				// Render hamburger menu button with matching background
+				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
+				if bg != "" {
+					menuBtn = c.applyBackgroundFill(menuBtn, bg, menuBtnW)
+				}
+				s.WriteString(prefix + iconAndText + menuBtn + "\n")
 			} else {
 				// No windows - show header with group tree branch but no collapse icon
 				prefix := " "
 				prefixW := uniseg.StringWidth(prefix)
-				restW := width - prefixW
+				menuBtnW := 2 // " ⋮"
+				restW := width - prefixW - menuBtnW
 				if restW < 1 {
 					restW = 1
 				}
@@ -4812,7 +4863,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if bg != "" {
 					iconAndText = c.applyBackgroundFill(iconAndText, bg, restW)
 				}
-				s.WriteString(prefix + iconAndText + "\n")
+
+				// Render hamburger menu button with matching background
+				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
+				if bg != "" {
+					menuBtn = c.applyBackgroundFill(menuBtn, bg, menuBtnW)
+				}
+				s.WriteString(prefix + iconAndText + menuBtn + "\n")
 			}
 			currentLine++
 		}
@@ -4832,8 +4889,16 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					StartLine: groupStartLine,
 					EndLine:   currentLine - 1,
 					StartCol:  3,
-					EndCol:    0,
+					EndCol:    width - 2,
 					Action:    "group_header",
+					Target:    group.Name,
+				})
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: groupStartLine,
+					EndLine:   currentLine - 1,
+					StartCol:  width - 2,
+					EndCol:    0,
+					Action:    "group_menu",
 					Target:    group.Name,
 				})
 			} else {
@@ -4853,8 +4918,16 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					StartLine: groupStartLine,
 					EndLine:   currentLine - 1,
 					StartCol:  iconWidth,
-					EndCol:    0,
+					EndCol:    width - 2,
 					Action:    "group_header",
+					Target:    group.Name,
+				})
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: groupStartLine,
+					EndLine:   currentLine - 1,
+					StartCol:  width - 2,
+					EndCol:    0,
+					Action:    "group_menu",
 					Target:    group.Name,
 				})
 			}
@@ -4862,7 +4935,17 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: groupStartLine,
 				EndLine:   currentLine - 1,
+				StartCol:  0,
+				EndCol:    width - 2,
 				Action:    "group_header",
+				Target:    group.Name,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: groupStartLine,
+				EndLine:   currentLine - 1,
+				StartCol:  width - 2,
+				EndCol:    0,
+				Action:    "group_menu",
 				Target:    group.Name,
 			})
 		}
@@ -5014,7 +5097,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			// Calculate widths
 			// All windows: indicator(1) + branch first char(1) + [collapse icon or branch second char](1) = 3
 			prefixWidth := 3
-			windowContentWidth := width - prefixWidth
+			menuBtnW := 2 // " ⋮"
+			windowContentWidth := width - prefixWidth - menuBtnW
 
 			// Truncate if needed
 			contentText := baseContent
@@ -5120,10 +5204,10 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					content = contentText
 				}
 
-				// Apply bg color from start of name to the right edge of the sidebar
+				// Apply bg color from start of name to the right edge (minus menu button)
 				prefixPlain := stripAnsi(prefix)
 				prefixWidth := uniseg.StringWidth(prefixPlain)
-				contentWidth := width - prefixWidth
+				contentWidth := width - prefixWidth - menuBtnW
 				if contentWidth < 0 {
 					contentWidth = 0
 				}
@@ -5144,14 +5228,20 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					contentRendered = bgEsc + contentRendered + strings.Repeat(" ", pad) + resetEsc
 				}
 
-				s.WriteString(prefix + contentRendered + "\n")
+				// Render hamburger menu button with matching background
+				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
+				if bgColor != "" {
+					menuBtn = c.applyBackgroundFill(menuBtn, bgColor, menuBtnW)
+				}
+				s.WriteString(prefix + contentRendered + menuBtn + "\n")
 				currentLine++
 			}
 
 			// Record window region(s) for click handling
-			// For windows with panes, split into two click regions:
+			// For windows with panes, split into three click regions:
 			// 1. Left area (indicator + tree branch + collapse icon) -> toggle_panes
-			// 2. Right area (window name) -> select_window
+			// 2. Middle area (window name) -> select_window
+			// 3. Right area (menu button) -> window_menu
 			if hasPanes {
 				collapseColEnd := 5 // covers indicator(1) + tree(2) + icon(1) + space(1)
 				regions = append(regions, daemon.ClickableRegion{
@@ -5166,15 +5256,33 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					StartLine: windowStartLine,
 					EndLine:   currentLine - 1,
 					StartCol:  collapseColEnd,
-					EndCol:    0, // full width from here
+					EndCol:    width - 2,
 					Action:    "select_window",
+					Target:    win.ID,
+				})
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: windowStartLine,
+					EndLine:   currentLine - 1,
+					StartCol:  width - 2,
+					EndCol:    0,
+					Action:    "window_menu",
 					Target:    win.ID,
 				})
 			} else {
 				regions = append(regions, daemon.ClickableRegion{
 					StartLine: windowStartLine,
 					EndLine:   currentLine - 1,
+					StartCol:  0,
+					EndCol:    width - 2,
 					Action:    "select_window",
+					Target:    win.ID,
+				})
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: windowStartLine,
+					EndLine:   currentLine - 1,
+					StartCol:  width - 2,
+					EndCol:    0,
+					Action:    "window_menu",
 					Target:    win.ID,
 				})
 			}
@@ -5234,7 +5342,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
 
 					paneIndentWidth := 5
-					paneContentWidth := width - paneIndentWidth
+					paneMenuW := 2
+					paneContentWidth := width - paneIndentWidth - paneMenuW
 
 					// Truncate using proper rune width (handles Unicode/emoji)
 					if lipgloss.Width(paneText) > paneContentWidth {
@@ -5324,10 +5433,10 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						paneContent = paneStyle.Render(paneText)
 					}
 
-					// Apply bg color from start of pane name to right edge
+					// Apply bg color from start of pane name to right edge (minus buttons)
 					panePrefixPlain := stripAnsi(panePrefix)
 					panePrefixW := uniseg.StringWidth(panePrefixPlain)
-					paneContentW := width - panePrefixW
+					paneContentW := width - panePrefixW - paneMenuW
 					if paneContentW < 0 {
 						paneContentW = 0
 					}
@@ -5346,7 +5455,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						paneContent = bgEsc + paneContent + strings.Repeat(" ", panePad) + resetEsc
 					}
 
-					s.WriteString(panePrefix + paneContent + "\n")
+					var paneBtns string
+					menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
+					paneBtns = menuBtn
+					if paneLineBg != "" {
+						paneBtns = c.applyBackgroundFill(paneBtns, paneLineBg, paneMenuW)
+					}
+					s.WriteString(panePrefix + paneContent + paneBtns + "\n")
 					currentLine++
 
 					// Touch mode: bottom padding for pane (2 lines total: content + pad)
@@ -5366,14 +5481,24 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						currentLine++
 					}
 
-					// Record pane region for click handling
 					regions = append(regions, daemon.ClickableRegion{
 						StartLine: paneStartLine,
 						EndLine:   currentLine - 1,
+						StartCol:  0,
+						EndCol:    width - 2,
 						Action:    "select_pane",
 						Target:    pane.ID,
 					})
+					regions = append(regions, daemon.ClickableRegion{
+						StartLine: paneStartLine,
+						EndLine:   currentLine - 1,
+						StartCol:  width - 2,
+						EndCol:    0,
+						Action:    "pane_menu",
+						Target:    pane.ID,
+					})
 				}
+
 			}
 
 		}
@@ -8274,12 +8399,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "header_close":
-		// Check if this is the last content pane in the window before killing
 		paneID := input.ResolvedTarget
 		winIDOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}").Output()
 		windowID := strings.TrimSpace(string(winIDOut))
 
-		// Count content panes in this window
 		contentCount := 0
 		if windowID != "" {
 			listOut, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}:#{pane_current_command}").Output()
@@ -8295,7 +8418,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 
 		if contentCount <= 1 && windowID != "" {
-			// Last content pane - kill the whole window
 			exec.Command("tmux", "kill-window", "-t", windowID).Run()
 		} else {
 			saveLayoutBeforeKill(paneID)
@@ -8320,11 +8442,67 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	case "header_carat_up":
 		exec.Command("tmux", "resize-pane", "-t", input.ResolvedTarget, "-U", "5").Run()
-		return false
+		exec.Command("tmux", "select-pane", "-t", input.ResolvedTarget).Run()
+		c.RefreshWindows()
+		return true
 
 	case "header_carat_down":
 		exec.Command("tmux", "resize-pane", "-t", input.ResolvedTarget, "-D", "5").Run()
-		return false
+		exec.Command("tmux", "select-pane", "-t", input.ResolvedTarget).Run()
+		c.RefreshWindows()
+		return true
+
+	case "group_menu":
+		// Hamburger menu on group header -> show group context menu
+		pos := menuPosition{PaneID: input.PaneID, X: input.MouseX, Y: input.MouseY}
+		c.showGroupContextMenu(clientID, input.ResolvedTarget, pos)
+		return true
+
+	case "window_menu":
+		// Hamburger menu on window row -> show window context menu
+		pos := menuPosition{PaneID: input.PaneID, X: input.MouseX, Y: input.MouseY}
+		c.showWindowContextMenu(clientID, input.ResolvedTarget, pos)
+		return true
+
+	case "pane_menu":
+		// Hamburger menu on pane row -> show pane context menu
+		pos := menuPosition{PaneID: input.PaneID, X: input.MouseX, Y: input.MouseY}
+		c.showPaneContextMenu(clientID, input.ResolvedTarget, pos)
+		return true
+
+	case "pane_grow", "pane_shrink":
+		// Resize pane: direction depends on split orientation
+		paneID := input.ResolvedTarget
+		c.stateMu.RLock()
+		var targetWin *tmux.Window
+		for i := range c.windows {
+			for _, p := range c.windows[i].Panes {
+				if p.ID == paneID {
+					targetWin = &c.windows[i]
+					break
+				}
+			}
+			if targetWin != nil {
+				break
+			}
+		}
+		c.stateMu.RUnlock()
+		if targetWin != nil && c.isVerticalStackedPane(targetWin, paneID) {
+			if input.ResolvedAction == "pane_grow" {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-D", "5").Run()
+			} else {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-U", "5").Run()
+			}
+		} else {
+			if input.ResolvedAction == "pane_grow" {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-R", "5").Run()
+			} else {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-L", "5").Run()
+			}
+		}
+		exec.Command("tmux", "select-pane", "-t", paneID).Run()
+		c.RefreshWindows()
+		return true
 
 	case "sidebar_toggle_position":
 		// Toggle sidebar position between left and right
@@ -9116,16 +9294,16 @@ func (c *Coordinator) handleRightClick(clientID string, input *daemon.InputPaylo
 		}
 	}
 	switch input.ResolvedAction {
-	case "select_window", "toggle_panes":
+	case "select_window", "toggle_panes", "window_menu":
 		// If clicking on far left (X < 2), show indicator menu; otherwise show window menu
-		if input.MouseX < 2 {
+		if input.ResolvedAction != "window_menu" && input.MouseX < 2 {
 			c.showIndicatorContextMenu(clientID, input.ResolvedTarget, pos)
 		} else {
 			c.showWindowContextMenu(clientID, input.ResolvedTarget, pos)
 		}
-	case "select_pane":
+	case "select_pane", "pane_menu", "pane_grow", "pane_shrink":
 		c.showPaneContextMenu(clientID, input.ResolvedTarget, pos)
-	case "toggle_group", "group_header":
+	case "toggle_group", "group_header", "group_menu":
 		c.showGroupContextMenu(clientID, input.ResolvedTarget, pos)
 	case "sidebar_header_area", "sidebar_settings":
 		c.showSidebarSettingsMenu(clientID, pos)
@@ -9306,8 +9484,9 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	// --- Destructive ---
 	args = append(args, "", "", "")
 
-	// Kill option
-	killCmd := fmt.Sprintf("kill-window -t :%d", win.Index)
+	exe, _ := os.Executable()
+	killWindowScript := filepath.Join(filepath.Dir(exe), "..", "scripts", "kill_window.sh")
+	killCmd := fmt.Sprintf("run-shell '%s %d'", killWindowScript, win.Index)
 	args = append(args, "Kill", "k", killCmd)
 
 	c.executeOrSendMenu(clientID, args, pos)
@@ -9549,8 +9728,6 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	pathEsc := strings.ReplaceAll(newWindowPath, "'", "'\"'\"'")
 	if newWindowScript != "" {
 		if group.Name != "Default" {
-			c.pendingNewWindowGroup = group.Name
-			c.pendingNewWindowTime = time.Now()
 			newWindowCmd := fmt.Sprintf("set-option -g @tabby_new_window_group '%s' ; set-option -g @tabby_new_window_path '%s' ; run-shell '%s'", groupEsc, pathEsc, newWindowScript)
 			args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
 		} else {
@@ -9560,8 +9737,6 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	} else {
 		dirArg := fmt.Sprintf("'%s'", pathEsc)
 		if group.Name != "Default" {
-			c.pendingNewWindowGroup = group.Name
-			c.pendingNewWindowTime = time.Now()
 			newWindowCmd := fmt.Sprintf("new-window -c %s ; set-window-option @tabby_group '%s'", dirArg, groupEsc)
 			args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
 		} else {
@@ -9755,15 +9930,8 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		args = append(args, "-c", workingDir)
 	}
 
-	// Set pending group for optimistic UI before the window exists
-	if currentGroup != "" && currentGroup != "Default" {
-		c.stateMu.Lock()
-		c.pendingNewWindowGroup = currentGroup
-		c.pendingNewWindowTime = time.Now()
-		c.stateMu.Unlock()
-	}
-
-	// Create window. tmux auto-selects it — user gets immediate focus.
+	// Create window detached so no tmux auto-focus races with hook chain.
+	args = append(args, "-d")
 	out, err := exec.Command("tmux", args...).CombinedOutput()
 	newWindowID := strings.TrimSpace(string(out))
 	logEvent("NEW_WINDOW_RESULT id=%s err=%v", newWindowID, err)
@@ -9771,6 +9939,33 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	// Assign group
 	if newWindowID != "" && currentGroup != "" && currentGroup != "Default" {
 		exec.Command("tmux", "set-window-option", "-t", newWindowID, "@tabby_group", currentGroup).Run()
+	}
+
+	// Explicitly switch the client that was viewing the source window to the new one.
+	// The daemon has no client context so tmux won't auto-focus for us.
+	// #{window_id} in list-clients context gives the ID of the client's current window.
+	if newWindowID != "" {
+		clientTTY := ""
+		rawClients := ""
+		if ttyOut, err2 := exec.Command("tmux", "list-clients", "-F",
+			"#{client_tty}|#{window_id}").Output(); err2 == nil {
+			rawClients = strings.TrimSpace(string(ttyOut))
+			for _, line := range strings.Split(rawClients, "\n") {
+				parts := strings.SplitN(strings.TrimSpace(line), "|", 2)
+				if len(parts) == 2 && strings.TrimSpace(parts[1]) == clientID {
+					clientTTY = strings.TrimSpace(parts[0])
+					break
+				}
+			}
+		}
+		logEvent("NEW_WINDOW_FOCUS clientID=%s newWindowID=%s clientTTY=%s clients=%q",
+			clientID, newWindowID, clientTTY, rawClients)
+		if clientTTY != "" {
+			exec.Command("tmux", "switch-client", "-c", clientTTY, "-t", newWindowID).Run()
+		} else {
+			// Fallback: no client matched — select globally (best effort)
+			exec.Command("tmux", "select-window", "-t", newWindowID).Run()
+		}
 	}
 
 	// Safety: tell the refresh loop not to call selectContentPaneInActiveWindow
@@ -10201,6 +10396,10 @@ func findWindowByTarget(windows []tmux.Window, target string) *tmux.Window {
 // in the currently active window, ensuring focus goes to a content pane rather
 // than a sidebar or pane-header.
 func selectContentPaneInActiveWindow() {
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_enable_focus_repair").Output(); err != nil || strings.TrimSpace(string(out)) != "1" {
+		return
+	}
+
 	windowIDOut, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
 	if err != nil {
 		return

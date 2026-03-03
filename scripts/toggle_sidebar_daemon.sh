@@ -80,6 +80,21 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
     restart_daemon_if_unresponsive
 fi
 
+# If state says "enabled" but the daemon is no longer running, treat it as a restart:
+# clean up any lingering system panes and fall through to the ENABLE path.
+if [ "$CURRENT_STATE" = "enabled" ]; then
+    DAEMON_PID=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
+    if [ -z "$DAEMON_PID" ] || ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+        CURRENT_STATE="disabled"
+        tmux set-option @tabby_sidebar "disabled" 2>/dev/null || true
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            pane_id=$(echo "$line" | cut -d'|' -f2)
+            tmux kill-pane -t "$pane_id" 2>/dev/null || true
+        done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabby-daemon|pane-header)" || true)
+    fi
+fi
+
 if [ "$CURRENT_STATE" = "enabled" ]; then
     # === DISABLE SIDEBARS ===
 
@@ -239,7 +254,7 @@ tmux set -g mouse off 2>/dev/null || true
 sleep 0.1
 tmux set -g mouse on 2>/dev/null || true
 
-# Force refresh all clients individually to fix focus issues
+# Refresh status bar for all clients
 for client_tty in $(tmux list-clients -F "#{client_tty}" 2>/dev/null); do
     tmux refresh-client -t "$client_tty" -S 2>/dev/null || true
 done

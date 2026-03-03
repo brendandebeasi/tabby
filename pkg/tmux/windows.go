@@ -349,7 +349,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		windowTarget = fmt.Sprintf("%s:%d", sessionTarget, windowIndex)
 	}
 	cmd := exec.Command("tmux", "list-panes", "-t", windowTarget, "-F",
-		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}")
+		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_dead}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -379,8 +379,11 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		// Check for exact matches and also suffix matches (for path-qualified commands)
 		cmd := parts[3]
 		startCommand := ""
-		if len(parts) >= 12 {
-			startCommand = parts[11]
+		if len(parts) >= 13 {
+			startCommand = parts[12]
+		}
+		if len(parts) >= 14 && parts[13] == "1" {
+			continue
 		}
 		if isSidebarCommand(cmd) || isSidebarCommand(startCommand) {
 			continue

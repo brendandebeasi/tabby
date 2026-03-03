@@ -179,10 +179,14 @@ func applyDim() {
 			setPaneStyle(p.id, "default")
 			setPaneDimFlag(p.id, false)
 		} else {
-			setPaneStyle(p.id, fmt.Sprintf("bg=%s", dimBG))
+			if dimBG == "" {
+				setPaneStyle(p.id, "default")
+			} else {
+				setPaneStyle(p.id, fmt.Sprintf("bg=%s", dimBG))
+			}
 			setPaneDimFlag(p.id, true)
 		}
-}
+	}
 	// Dim borders: active = full color, inactive = desaturated
 	applyBorderDim(cfg)
 }
@@ -210,7 +214,7 @@ func clearPaneDimFlag(paneID string) {
 
 func computeDimBG(terminalBG string, opacity float64) string {
 	if terminalBG == "" {
-		terminalBG = "#1a1b26"
+		return ""
 	}
 	tbR, tbG, tbB := parseHex(terminalBG)
 	lum := (tbR*299 + tbG*587 + tbB*114) / 1000

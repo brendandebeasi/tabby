@@ -262,12 +262,21 @@ type PaneHeader struct {
 	DimInactive    bool    `yaml:"dim_inactive"`     // Enable dimming of inactive panes (default: false)
 	DimOpacity     float64 `yaml:"dim_opacity"`      // Opacity for dimmed panes 0.0-1.0 (default: 0.7)
 	// Custom border settings - render our own border instead of tmux's
-	CustomBorder bool   `yaml:"custom_border"` // Enable custom border rendering (default: false)
-	HandleColor  string `yaml:"handle_color"`  // Drag handle color (default: #666666)
-	HandleIcon   string `yaml:"handle_icon"`   // Drag handle icon (default: "⋯")
-	Draggable    bool   `yaml:"draggable"`     // Allow drag-to-resize via custom border (default: true)
-	LargeMode    bool   `yaml:"large_mode"`
-	TerminalBg   string `yaml:"terminal_bg"` // Terminal background color for hiding borders (default: #000000)
+	CustomBorder               bool   `yaml:"custom_border"` // Enable custom border rendering (default: false)
+	HandleColor                string `yaml:"handle_color"`  // Drag handle color (default: #666666)
+	HandleIcon                 string `yaml:"handle_icon"`   // Drag handle icon (default: "⋯")
+	Draggable                  bool   `yaml:"draggable"`     // Allow drag-to-resize via custom border (default: true)
+	CollapseExpandedIcon       string `yaml:"collapse_expanded_icon"`
+	CollapseCollapsedIcon      string `yaml:"collapse_collapsed_icon"`
+	ResizeGrowIcon             string `yaml:"resize_grow_icon"`
+	ResizeShrinkIcon           string `yaml:"resize_shrink_icon"`
+	ResizeHorizontalGrowIcon   string `yaml:"resize_horizontal_grow_icon"`
+	ResizeHorizontalShrinkIcon string `yaml:"resize_horizontal_shrink_icon"`
+	ResizeVerticalGrowIcon     string `yaml:"resize_vertical_grow_icon"`
+	ResizeVerticalShrinkIcon   string `yaml:"resize_vertical_shrink_icon"`
+	ResizeSeparator            string `yaml:"resize_separator"`
+	LargeMode                  bool   `yaml:"large_mode"`
+	TerminalBg                 string `yaml:"terminal_bg"` // Terminal background color for hiding borders (default: #000000)
 }
 
 type SidebarHeader struct {
@@ -282,28 +291,28 @@ type SidebarHeader struct {
 }
 
 type Sidebar struct {
-	Position         string        `yaml:"position"`     // "left" (default) or "right"
-	Mode             string        `yaml:"mode"`         // "full" (default) or "partial"
-	Header           SidebarHeader `yaml:"header"`       // Sidebar header configuration
-	PaneHeaders      bool          `yaml:"pane_headers"` // Enable clickable overlay pane headers
-	NewTabButton     bool          `yaml:"new_tab_button"`
-	CloseButton      bool          `yaml:"close_button"`
-	NewGroupButton   bool          `yaml:"new_group_button"`
-	ShowEmptyGroups  bool          `yaml:"show_empty_groups"`
-	SortBy           string        `yaml:"sort_by"`
-	Debug            bool          `yaml:"debug"`              // Enable debug logging to /tmp/tabby-debug.log
-	TouchMode        bool          `yaml:"touch_mode"`         // Larger tap targets for mobile/touch
-	DisableLargeMode bool          `yaml:"disable_large_mode"` // Disable large touch-mode UI entirely
-	LineHeight       int           `yaml:"line_height"`        // Extra blank lines between items (0=compact, 1+=spaced)
-	ActionZone       string        `yaml:"action_zone"`        // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
-	ActionPriority   int           `yaml:"action_priority"`    // Priority within zone (default: 90)
-	PrefixMode       bool          `yaml:"prefix_mode"`        // Flat window list with group prefixes (SD| NAME) instead of hierarchy
-	Theme            string        `yaml:"theme"`              // Color theme: rose-pine-dawn, catppuccin-mocha, dracula, nord, etc.
-	ThemeMode        string        `yaml:"theme_mode"`         // Theme detection: "auto" (default), "dark", or "light" (deprecated, use theme)
-	IconStyle        string        `yaml:"icon_style"`         // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
-	Colors           SidebarColors `yaml:"colors"`             // Manual color overrides (applied on top of theme)
-	TouchButtons     TouchButtons  `yaml:"touch_buttons"`      // Touch mode button styling
-	HidePredefinedColors bool         `yaml:"hide_predefined_colors"` // Hide predefined color palette in context menus (keep Custom + Reset)
+	Position             string        `yaml:"position"`     // "left" (default) or "right"
+	Mode                 string        `yaml:"mode"`         // "full" (default) or "partial"
+	Header               SidebarHeader `yaml:"header"`       // Sidebar header configuration
+	PaneHeaders          bool          `yaml:"pane_headers"` // Enable clickable overlay pane headers
+	NewTabButton         bool          `yaml:"new_tab_button"`
+	CloseButton          bool          `yaml:"close_button"`
+	NewGroupButton       bool          `yaml:"new_group_button"`
+	ShowEmptyGroups      bool          `yaml:"show_empty_groups"`
+	SortBy               string        `yaml:"sort_by"`
+	Debug                bool          `yaml:"debug"`                  // Enable debug logging to /tmp/tabby-debug.log
+	TouchMode            bool          `yaml:"touch_mode"`             // Larger tap targets for mobile/touch
+	DisableLargeMode     bool          `yaml:"disable_large_mode"`     // Disable large touch-mode UI entirely
+	LineHeight           int           `yaml:"line_height"`            // Extra blank lines between items (0=compact, 1+=spaced)
+	ActionZone           string        `yaml:"action_zone"`            // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
+	ActionPriority       int           `yaml:"action_priority"`        // Priority within zone (default: 90)
+	PrefixMode           bool          `yaml:"prefix_mode"`            // Flat window list with group prefixes (SD| NAME) instead of hierarchy
+	Theme                string        `yaml:"theme"`                  // Color theme: rose-pine-dawn, catppuccin-mocha, dracula, nord, etc.
+	ThemeMode            string        `yaml:"theme_mode"`             // Theme detection: "auto" (default), "dark", or "light" (deprecated, use theme)
+	IconStyle            string        `yaml:"icon_style"`             // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
+	Colors               SidebarColors `yaml:"colors"`                 // Manual color overrides (applied on top of theme)
+	TouchButtons         TouchButtons  `yaml:"touch_buttons"`          // Touch mode button styling
+	HidePredefinedColors bool          `yaml:"hide_predefined_colors"` // Hide predefined color palette in context menus (keep Custom + Reset)
 }
 
 // TouchButtons configures colors for touch mode buttons

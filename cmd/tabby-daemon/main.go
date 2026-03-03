@@ -351,21 +351,31 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		// Live check: query tmux directly for ANY sidebar/renderer pane in this window.
 		// The cached win.Panes has sidebar panes filtered out by ListWindowsWithPanes,
 		// so we must ask tmux directly. This also catches renderers from other daemons.
+		// Dead system panes (from a crashed daemon) are killed here so focus can escape them.
 		hasRenderer := false
 		if rawOut, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
-			"#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
+			"#{pane_id}\x1f#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
 			for _, rawLine := range strings.Split(strings.TrimSpace(string(rawOut)), "\n") {
 				if rawLine == "" {
 					continue
 				}
-				rawParts := strings.SplitN(rawLine, "\x1f", 2)
-				curCmd := rawParts[0]
-				startCmd := ""
-				if len(rawParts) >= 2 {
-					startCmd = rawParts[1]
+				rawParts := strings.SplitN(rawLine, "\x1f", 4)
+				if len(rawParts) < 4 {
+					continue
 				}
-				if strings.Contains(curCmd, "sidebar") || strings.Contains(curCmd, "renderer") ||
-					strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") {
+				paneID := rawParts[0]
+				dead := rawParts[1] == "1"
+				curCmd := rawParts[2]
+				startCmd := rawParts[3]
+				isSystem := strings.Contains(curCmd, "sidebar") || strings.Contains(curCmd, "renderer") ||
+					strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer")
+				if dead && isSystem {
+					// Kill dead system panes so tmux moves focus to the content pane
+					logEvent("CLEANUP_DEAD_SYSTEM_PANE window=%s pane=%s cmd=%s", windowID, paneID, curCmd)
+					exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+					continue
+				}
+				if !dead && isSystem {
 					hasRenderer = true
 					break
 				}
@@ -439,38 +449,53 @@ func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Windo
 func cleanupOrphanedSidebars(windows []tmux.Window) {
 	for _, win := range windows {
 		windowID := win.ID
-		var sidebarPaneID string
-		nonSidebarCount := 0
+		if windowID == "" {
+			continue
+		}
 
-		for _, p := range win.Panes {
-			cmd := p.Command
-			startCmd := p.StartCommand
+		paneOut, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+			"#{pane_id}\x1f#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+		if err != nil {
+			continue
+		}
 
-			// Check if this is a system pane
-			isSystem := strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") ||
-				strings.Contains(cmd, "tabby") || strings.Contains(cmd, "pane-header") ||
-				strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") ||
-				strings.Contains(startCmd, "tabby") || strings.Contains(startCmd, "pane-header")
+		hasSidebar := false
+		nonSystemLive := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "\x1f", 4)
+			if len(parts) < 4 {
+				continue
+			}
+			dead := parts[1] == "1"
+			cmd := parts[2]
+			startCmd := parts[3]
 
-			if isSystem {
-				// We only care about the sidebar specifically for cleanup, but generic "system" check is safer
-				// Actually, we want to close the window if ONLY system panes remain.
-				// If we have multiple headers + sidebar but no content, we should close.
-				// So we track the main sidebar pane ID to kill it (which usually closes the window if it's the last one)
-				// Or we can just kill the window if count is 0.
-				if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") {
-					sidebarPaneID = p.ID
-				}
-			} else {
-				nonSidebarCount++
+			if strings.Contains(cmd, "sidebar") || strings.Contains(startCmd, "sidebar") ||
+				strings.Contains(cmd, "renderer") || strings.Contains(startCmd, "renderer") {
+				hasSidebar = true
+			}
+			if dead {
+				continue
+			}
+			if !paneIsSystemPane(cmd, startCmd) {
+				nonSystemLive++
 			}
 		}
 
-		// If only system panes remain (and at least one is a sidebar/renderer), close the sidebar pane
-		if nonSidebarCount == 0 && sidebarPaneID != "" {
-			logEvent("CLEANUP_ORPHAN_SIDEBAR window=%s pane=%s -- only sidebar remains", windowID, sidebarPaneID)
-			debugLog.Printf("Window %s has only sidebar pane, closing it", windowID)
-			exec.Command("tmux", "kill-pane", "-t", sidebarPaneID).Run()
+		if hasSidebar && nonSystemLive == 0 {
+			currentWindow := ""
+			if curOut, curErr := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); curErr == nil {
+				currentWindow = strings.TrimSpace(string(curOut))
+			}
+			if currentWindow == windowID {
+				exec.Command("tmux", "last-window").Run()
+			}
+			logEvent("CLEANUP_ORPHAN_SIDEBAR_WINDOW window=%s", windowID)
+			debugLog.Printf("Window %s has only system panes, closing window", windowID)
+			exec.Command("tmux", "kill-window", "-t", windowID).Run()
 		}
 	}
 }
@@ -484,30 +509,52 @@ func paneIsSystemPane(cmd string, startCmd string) bool {
 		strings.Contains(startCmd, "tabbar") || strings.Contains(startCmd, "pane-bar")
 }
 
+var orphanWindowFirstSeen = map[string]time.Time{}
+
 func cleanupOrphanWindowsByTmux(sessionID string) {
 	if sessionID == "" {
 		return
+	}
+
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_enable_orphan_window_kill").Output(); err != nil || strings.TrimSpace(string(out)) != "1" {
+		return
+	}
+
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
+		if strings.TrimSpace(string(out)) == "1" {
+			return
+		}
+	}
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output(); err == nil {
+		if strings.TrimSpace(string(out)) != "" {
+			return
+		}
 	}
 
 	out, err := exec.Command("tmux", "list-windows", "-t", sessionID, "-F", "#{window_id}").Output()
 	if err != nil {
 		return
 	}
+	now := time.Now()
+	seen := make(map[string]bool)
 
 	for _, rawWid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		windowID := strings.TrimSpace(rawWid)
 		if windowID == "" {
 			continue
 		}
+		seen[windowID] = true
 
 		paneOut, paneErr := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
 			"#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
 		if paneErr != nil {
+			delete(orphanWindowFirstSeen, windowID)
 			continue
 		}
 
 		lines := strings.Split(strings.TrimSpace(string(paneOut)), "\n")
 		if len(lines) == 0 || (len(lines) == 1 && strings.TrimSpace(lines[0]) == "") {
+			delete(orphanWindowFirstSeen, windowID)
 			continue
 		}
 
@@ -535,16 +582,69 @@ func cleanupOrphanWindowsByTmux(sessionID string) {
 			}
 		}
 
-		if hasSidebar && nonSystemLive == 0 {
-			currentWindow := ""
-			if curOut, curErr := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); curErr == nil {
-				currentWindow = strings.TrimSpace(string(curOut))
+		if !(hasSidebar && nonSystemLive == 0) {
+			delete(orphanWindowFirstSeen, windowID)
+			continue
+		}
+
+		firstSeen, ok := orphanWindowFirstSeen[windowID]
+		if !ok {
+			orphanWindowFirstSeen[windowID] = now
+			continue
+		}
+		if now.Sub(firstSeen) < 5*time.Second {
+			continue
+		}
+
+		confirmOut, confirmErr := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+			"#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+		if confirmErr != nil {
+			delete(orphanWindowFirstSeen, windowID)
+			continue
+		}
+		confirmHasSidebar := false
+		confirmNonSystemLive := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(confirmOut)), "\n") {
+			if line == "" {
+				continue
 			}
-			if currentWindow == windowID {
-				exec.Command("tmux", "last-window").Run()
+			parts := strings.SplitN(line, "\x1f", 3)
+			if len(parts) < 3 {
+				continue
 			}
-			logEvent("CLEANUP_ORPHAN_WINDOW window=%s source=daemon_fallback", windowID)
-			exec.Command("tmux", "kill-window", "-t", windowID).Run()
+			dead := parts[0] == "1"
+			cmd := parts[1]
+			startCmd := parts[2]
+			if strings.Contains(cmd, "sidebar") || strings.Contains(startCmd, "sidebar") {
+				confirmHasSidebar = true
+			}
+			if dead {
+				continue
+			}
+			if !paneIsSystemPane(cmd, startCmd) {
+				confirmNonSystemLive++
+			}
+		}
+		if !(confirmHasSidebar && confirmNonSystemLive == 0) {
+			delete(orphanWindowFirstSeen, windowID)
+			continue
+		}
+
+		currentWindow := ""
+		if curOut, curErr := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); curErr == nil {
+			currentWindow = strings.TrimSpace(string(curOut))
+		}
+		if currentWindow == windowID {
+			exec.Command("tmux", "last-window").Run()
+		}
+		logEvent("CLEANUP_ORPHAN_WINDOW window=%s source=daemon_fallback", windowID)
+		exec.Command("tmux", "kill-window", "-t", windowID).Run()
+		delete(orphanWindowFirstSeen, windowID)
+	}
+
+	for wid := range orphanWindowFirstSeen {
+		if !seen[wid] {
+			delete(orphanWindowFirstSeen, wid)
 		}
 	}
 }
@@ -1078,6 +1178,11 @@ func saveFocusState(sessionID string) {
 
 // restoreFocusState restores the previously saved window and pane focus
 func restoreFocusState() {
+	newWindowOut, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output()
+	if strings.TrimSpace(string(newWindowOut)) != "" {
+		return
+	}
+
 	// Get saved window and pane
 	windowOut, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_last_window").Output()
 	if err != nil {
@@ -1545,9 +1650,7 @@ func main() {
 						doPaneLayoutOps()
 						t5 := time.Now()
 
-						if spawnedRenderer && shouldRestoreFocus() {
-							selectContentPaneInActiveWindow()
-						}
+						_ = spawnedRenderer
 
 						currentHash := coordinator.GetWindowsHash()
 						if currentHash != lastWindowsHash {
@@ -1603,9 +1706,7 @@ func main() {
 					cleanupOrphanWindowsByTmux(*sessionID)
 					cleanupSidebarsForClosedWindows(server, windows)
 					doPaneLayoutOps()
-					if spawnedFallback && shouldRestoreFocus() {
-						selectContentPaneInActiveWindow()
-					}
+					_ = spawnedFallback
 					// Persist current layouts to disk for restart recovery
 					saveLayoutsToDisk(windows)
 				})
