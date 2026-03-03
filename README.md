@@ -713,6 +713,10 @@ To avoid duplicate notifications when using custom hooks:
 
 **OpenCode** — set `sound` and `notification` to `false` in `opencode-notifier.json` (shown above).
 
+## Known Limitations
+
+1. **Mosh does not support mouse events** — Mosh strips mouse escape sequences, so sidebar clicks, right-click context menus, and middle-click close will not work over mosh connections. Keyboard navigation works normally. If you need mouse support, use SSH directly instead of mosh.
+
 ## Troubleshooting
 
 ### Tabs not appearing
