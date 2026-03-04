@@ -11,6 +11,30 @@ DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
 DAEMON_EVENTS_LOG="/tmp/tabby-daemon-${SESSION_ID}-events.log"
 
+# --- Concurrency guard: prevent overlapping toggles (run-shell -b can fire multiple) ---
+TOGGLE_LOCK="/tmp/tabby-toggle-${SESSION_ID}.lock"
+if ! mkdir "$TOGGLE_LOCK" 2>/dev/null; then
+    # Another toggle is already running — bail out silently
+    exit 0
+fi
+trap 'rmdir "$TOGGLE_LOCK" 2>/dev/null || true' EXIT
+
+# --- Global timeout: kill this script if it takes too long (prevents zombie blocking) ---
+( sleep 15 && kill $$ 2>/dev/null ) &
+TIMEOUT_PID=$!
+trap 'rmdir "$TOGGLE_LOCK" 2>/dev/null || true; kill $TIMEOUT_PID 2>/dev/null || true' EXIT
+
+reset_mouse_escape_sequences() {
+    # BubbleTea enables terminal mouse tracking via escape sequences (1003h, 1006h).
+    # If a renderer is killed before BubbleTea restores the terminal, these sequences
+    # leak to the client TTY, causing permanent input loss until detach+reattach.
+    # Fix: write disable sequences directly to each client TTY after killing renderers.
+    for client_tty in $(tmux list-clients -F "#{client_tty}" 2>/dev/null); do
+        [ -w "$client_tty" ] || continue
+        printf '\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1006l\033[?1015l' > "$client_tty" 2>/dev/null || true
+    done
+}
+
 restart_daemon_if_unresponsive() {
     if [ ! -f "$DAEMON_PID_FILE" ] || [ ! -S "$DAEMON_SOCK" ]; then
         return
@@ -124,6 +148,8 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
     # Wait for renderers to cleanup gracefully
     sleep 0.5
 
+    reset_mouse_escape_sequences
+
     # Now kill the panes
     while IFS= read -r line; do
         [ -z "$line" ] && continue
@@ -131,8 +157,6 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
         tmux kill-pane -t "$pane_id" 2>/dev/null || true
     done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabby-daemon|pane-header)" || true)
 
-    # Force reset tmux's mouse state by toggling it off/on
-    # This clears any corrupted internal mouse tracking state
     tmux set -g mouse off 2>/dev/null || true
     sleep 0.1
     tmux set -g mouse on 2>/dev/null || true
@@ -164,6 +188,8 @@ else
 
     # Wait for cleanup
     sleep 0.5
+
+    reset_mouse_escape_sequences
 
     # Now kill the panes
     while IFS= read -r line; do
@@ -204,14 +230,15 @@ else
     DAEMON_PID=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
     tmux set-option -g @tabby_daemon_pid "$DAEMON_PID"
 
-    # Set up tmux hooks to notify daemon of resize events (sends SIGUSR1)
-    # These ensure background sidebars update when layouts change
-    # Use tmux option to get PID dynamically (survives daemon restarts)
-    # NOTE: Do NOT add after-select-window hook - it causes feedback loops when
-    # clicking select_window in sidebar (click -> tmux select-window -> hook -> SIGUSR1)
+    # Restore tmux hooks to match what tabby.tmux originally sets.
+    # The disable path removes these, so we must put back the full versions
+    # (not just USR1-only stubs) to keep resize_sidebar + ensure_sidebar working.
+    RESIZE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/resize_sidebar.sh"
+    ENSURE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/ensure_sidebar.sh"
+    STATUS_GUARD_SCRIPT="$CURRENT_DIR/scripts/status_guard.sh"
     tmux set-hook -g after-resize-pane 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     tmux set-hook -g after-resize-window 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
-    tmux set-hook -g client-resized 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
+    tmux set-hook -g client-resized "run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
     # The daemon handles spawning sidebar renderers and pane headers
     # via its windowCheckTicker loop. Just wait briefly for it to spawn them.

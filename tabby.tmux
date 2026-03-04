@@ -622,7 +622,7 @@ TOGGLE_KEY=$(grep "toggle_sidebar:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{pr
 KEY=${TOGGLE_KEY##*+ }
 if [ -z "$KEY" ]; then KEY="Tab"; fi
 
-tmux bind-key "$KEY" run-shell "$CURRENT_DIR/scripts/toggle_sidebar.sh"
+tmux bind-key "$KEY" run-shell -b "$CURRENT_DIR/scripts/toggle_sidebar.sh"
 
 normalize_global_key() {
 	local key="$1"
