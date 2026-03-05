@@ -170,8 +170,8 @@ type rendererModel struct {
 	colorPickerLit     int // 0-100
 	colorPickerFocus   int // 0=hue, 1=sat, 2=lit
 	// Daemon auto-restart: track consecutive disconnects
-	reconnectAttempts       int
-	daemonRestartTriggered  bool
+	reconnectAttempts      int
+	daemonRestartTriggered bool
 }
 
 // Message types
@@ -2313,6 +2313,17 @@ func main() {
 	// Modern terminals set COLORTERM=truecolor via SSH so they still get TrueColor.
 	lipgloss.SetColorProfile(termenv.NewOutput(os.Stdout).ColorProfile())
 
+	resetTerminal := func() {
+		fmt.Print("\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?1015l")
+		fmt.Print("\033[?1049l")
+		fmt.Print("\033[?2004l")
+		fmt.Print("\033[0m\033[?25h")
+		os.Stdout.Sync()
+	}
+
+	resetTerminal()
+	defer resetTerminal()
+
 	// Get our own pane ID for focus management (context menu keyboard input)
 	sidebarPane := os.Getenv("TMUX_PANE")
 	if sidebarPane == "" {
@@ -2336,9 +2347,12 @@ func main() {
 	go func() {
 		defer recoverAndLog("signal-handler")
 		<-sigCh
+		resetTerminal()
 		if p != nil {
 			p.Send(tea.Quit())
 		}
+		time.Sleep(100 * time.Millisecond)
+		resetTerminal()
 	}()
 
 	// Absorb SIGUSR1 so it doesn't trigger Go's default goroutine stack dump
@@ -2355,8 +2369,10 @@ func main() {
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		resetTerminal()
 		os.Exit(1)
 	}
+	resetTerminal()
 }
 
 // Helper to convert string to int
