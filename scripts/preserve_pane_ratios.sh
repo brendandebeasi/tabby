@@ -9,6 +9,14 @@
 WINDOW_ID="${1:-$(tmux display-message -p '#{window_id}' 2>/dev/null)}"
 [ -z "$WINDOW_ID" ] && exit 0
 
+# Daemon-managed system pane cleanup (header/sidebar) sets a one-shot skip flag
+# so ratio restore doesn't corrupt mixed split layouts.
+SKIP_ONCE=$(tmux show-option -gqv "@tabby_skip_preserve_${WINDOW_ID}" 2>/dev/null || true)
+if [ "$SKIP_ONCE" = "1" ]; then
+	tmux set-option -g "@tabby_skip_preserve_${WINDOW_ID}" "0" 2>/dev/null || true
+	exit 0
+fi
+
 # Check if we have a saved layout for this window
 SAVED_LAYOUT=$(tmux show-option -gqv "@tabby_layout_${WINDOW_ID}" 2>/dev/null)
 [ -z "$SAVED_LAYOUT" ] && exit 0

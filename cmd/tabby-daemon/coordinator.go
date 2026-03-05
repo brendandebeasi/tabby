@@ -3631,7 +3631,6 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		height = 24
 	}
 
-
 	// NOTE: Width sync has been moved off the render path to prevent deadlocks.
 	// It now runs from the main event loop via RunWidthSync().
 
@@ -4023,35 +4022,33 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			collapseBtn = "▸"
 		}
 	}
-	isVerticalStack := c.isVerticalStackedPane(foundWindow, paneID)
-	growBtn := c.config.PaneHeader.ResizeGrowIcon
-	shrinkBtn := c.config.PaneHeader.ResizeShrinkIcon
-	if isVerticalStack {
-		if c.config.PaneHeader.ResizeVerticalGrowIcon != "" {
-			growBtn = c.config.PaneHeader.ResizeVerticalGrowIcon
-		}
-		if c.config.PaneHeader.ResizeVerticalShrinkIcon != "" {
-			shrinkBtn = c.config.PaneHeader.ResizeVerticalShrinkIcon
-		}
-		if growBtn == "" {
-			growBtn = "↓"
-		}
-		if shrinkBtn == "" {
-			shrinkBtn = "↑"
-		}
-	} else {
-		if c.config.PaneHeader.ResizeHorizontalGrowIcon != "" {
-			growBtn = c.config.PaneHeader.ResizeHorizontalGrowIcon
-		}
-		if c.config.PaneHeader.ResizeHorizontalShrinkIcon != "" {
-			shrinkBtn = c.config.PaneHeader.ResizeHorizontalShrinkIcon
-		}
-		if growBtn == "" {
-			growBtn = ">"
-		}
-		if shrinkBtn == "" {
-			shrinkBtn = "<"
-		}
+	vGrowBtn := c.config.PaneHeader.ResizeVerticalGrowIcon
+	if vGrowBtn == "" {
+		vGrowBtn = c.config.PaneHeader.ResizeGrowIcon
+	}
+	if vGrowBtn == "" {
+		vGrowBtn = "↓"
+	}
+	vShrinkBtn := c.config.PaneHeader.ResizeVerticalShrinkIcon
+	if vShrinkBtn == "" {
+		vShrinkBtn = c.config.PaneHeader.ResizeShrinkIcon
+	}
+	if vShrinkBtn == "" {
+		vShrinkBtn = "↑"
+	}
+	hGrowBtn := c.config.PaneHeader.ResizeHorizontalGrowIcon
+	if hGrowBtn == "" {
+		hGrowBtn = c.config.PaneHeader.ResizeGrowIcon
+	}
+	if hGrowBtn == "" {
+		hGrowBtn = ">"
+	}
+	hShrinkBtn := c.config.PaneHeader.ResizeHorizontalShrinkIcon
+	if hShrinkBtn == "" {
+		hShrinkBtn = c.config.PaneHeader.ResizeShrinkIcon
+	}
+	if hShrinkBtn == "" {
+		hShrinkBtn = "<"
 	}
 	resizeSep := c.config.PaneHeader.ResizeSeparator
 	if resizeSep == "" {
@@ -4065,7 +4062,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 	buttonsStr += splitVBtn + "   " + splitHBtn + "   "
 	if showResizeButtons {
-		buttonsStr += resizeSep + "   " + growBtn + "   " + shrinkBtn + "   "
+		buttonsStr += resizeSep + "   " + vGrowBtn + "   " + vShrinkBtn + "   " + hGrowBtn + "   " + hShrinkBtn + "   "
 	}
 	buttonsStr += closeBtn + "  "
 	buttonsWidth := uniseg.StringWidth(buttonsStr)
@@ -4167,7 +4164,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	// Build rendered line and click regions
 	var regions []daemon.ClickableRegion
 
-	groupAccent := " "
+	groupAccent := ""
 	if groupColor != "" {
 		groupAccent = lipgloss.NewStyle().SetString("▇").Foreground(lipgloss.Color(groupColor)).String()
 	}
@@ -4204,19 +4201,31 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		cursor := splitHEnd
 		if showResizeButtons {
 			cursor += 4
-			growEnd := cursor + 4
-			shrinkEnd := growEnd + 4
+			vGrowEnd := cursor + 4
+			vShrinkEnd := vGrowEnd + 4
+			hGrowEnd := vShrinkEnd + 4
+			hShrinkEnd := hGrowEnd + 4
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
-				StartCol: cursor, EndCol: growEnd,
-				Action: "pane_grow", Target: paneID,
+				StartCol: cursor, EndCol: vGrowEnd,
+				Action: "pane_grow_v", Target: paneID,
 			})
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
-				StartCol: growEnd, EndCol: shrinkEnd,
-				Action: "pane_shrink", Target: paneID,
+				StartCol: vGrowEnd, EndCol: vShrinkEnd,
+				Action: "pane_shrink_v", Target: paneID,
 			})
-			cursor = shrinkEnd
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: vShrinkEnd, EndCol: hGrowEnd,
+				Action: "pane_grow_h", Target: paneID,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: hGrowEnd, EndCol: hShrinkEnd,
+				Action: "pane_shrink_h", Target: paneID,
+			})
+			cursor = hShrinkEnd
 		}
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
@@ -4244,19 +4253,31 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		cursor := splitHEnd
 		if showResizeButtons {
 			cursor += 4
-			growEnd := cursor + 4
-			shrinkEnd := growEnd + 4
+			vGrowEnd := cursor + 4
+			vShrinkEnd := vGrowEnd + 4
+			hGrowEnd := vShrinkEnd + 4
+			hShrinkEnd := hGrowEnd + 4
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
-				StartCol: cursor, EndCol: growEnd,
-				Action: "pane_grow", Target: paneID,
+				StartCol: cursor, EndCol: vGrowEnd,
+				Action: "pane_grow_v", Target: paneID,
 			})
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
-				StartCol: growEnd, EndCol: shrinkEnd,
-				Action: "pane_shrink", Target: paneID,
+				StartCol: vGrowEnd, EndCol: vShrinkEnd,
+				Action: "pane_shrink_v", Target: paneID,
 			})
-			cursor = shrinkEnd
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: vShrinkEnd, EndCol: hGrowEnd,
+				Action: "pane_grow_h", Target: paneID,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: hGrowEnd, EndCol: hShrinkEnd,
+				Action: "pane_shrink_h", Target: paneID,
+			})
+			cursor = hShrinkEnd
 		}
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
@@ -8591,36 +8612,52 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.showPaneContextMenu(clientID, input.ResolvedTarget, pos)
 		return true
 
-	case "pane_grow", "pane_shrink":
-		// Resize pane: direction depends on split orientation
+	case "pane_grow", "pane_shrink", "pane_grow_v", "pane_shrink_v", "pane_grow_h", "pane_shrink_h":
 		paneID := input.ResolvedTarget
-		c.stateMu.RLock()
-		var targetWin *tmux.Window
-		for i := range c.windows {
-			for _, p := range c.windows[i].Panes {
-				if p.ID == paneID {
-					targetWin = &c.windows[i]
+		action := input.ResolvedAction
+
+		if action == "pane_grow" || action == "pane_shrink" {
+			// Backward compatibility: legacy actions use inferred dominant split axis.
+			c.stateMu.RLock()
+			var targetWin *tmux.Window
+			for i := range c.windows {
+				for _, p := range c.windows[i].Panes {
+					if p.ID == paneID {
+						targetWin = &c.windows[i]
+						break
+					}
+				}
+				if targetWin != nil {
 					break
 				}
 			}
-			if targetWin != nil {
-				break
+			c.stateMu.RUnlock()
+			if targetWin != nil && c.isVerticalStackedPane(targetWin, paneID) {
+				if action == "pane_grow" {
+					action = "pane_grow_v"
+				} else {
+					action = "pane_shrink_v"
+				}
+			} else {
+				if action == "pane_grow" {
+					action = "pane_grow_h"
+				} else {
+					action = "pane_shrink_h"
+				}
 			}
 		}
-		c.stateMu.RUnlock()
-		if targetWin != nil && c.isVerticalStackedPane(targetWin, paneID) {
-			if input.ResolvedAction == "pane_grow" {
-				exec.Command("tmux", "resize-pane", "-t", paneID, "-D", "5").Run()
-			} else {
-				exec.Command("tmux", "resize-pane", "-t", paneID, "-U", "5").Run()
-			}
-		} else {
-			if input.ResolvedAction == "pane_grow" {
-				exec.Command("tmux", "resize-pane", "-t", paneID, "-R", "5").Run()
-			} else {
-				exec.Command("tmux", "resize-pane", "-t", paneID, "-L", "5").Run()
-			}
+
+		switch action {
+		case "pane_grow_v":
+			exec.Command("tmux", "resize-pane", "-t", paneID, "-D", "5").Run()
+		case "pane_shrink_v":
+			exec.Command("tmux", "resize-pane", "-t", paneID, "-U", "5").Run()
+		case "pane_grow_h":
+			exec.Command("tmux", "resize-pane", "-t", paneID, "-R", "5").Run()
+		case "pane_shrink_h":
+			exec.Command("tmux", "resize-pane", "-t", paneID, "-L", "5").Run()
 		}
+
 		exec.Command("tmux", "select-pane", "-t", paneID).Run()
 		c.RefreshWindows()
 		return true

@@ -248,7 +248,7 @@ func getPaneHeaderBin() string {
 
 // saveLayoutBeforeKill saves the current window layout for a pane's window
 // so that preserve_pane_ratios.sh can restore it after the kill.
-// This MUST be called before any kill-pane to preserve sibling pane ratios.
+// This MUST be called before user/content-pane kill-pane operations.
 func saveLayoutBeforeKill(paneID string) {
 	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}\x1f#{window_layout}").Output()
 	if err != nil {
@@ -259,6 +259,21 @@ func saveLayoutBeforeKill(paneID string) {
 		return
 	}
 	exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_layout_%s", parts[0]), parts[1]).Run()
+}
+
+// markSkipPreserveForWindow tells preserve_pane_ratios.sh to skip exactly once
+// for a specific window. Use this for daemon-managed system-pane cleanup
+// (headers/sidebar) where restoring a saved layout can corrupt mixed splits.
+func markSkipPreserveForWindow(paneID string) {
+	windowOut, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}").Output()
+	if err != nil {
+		return
+	}
+	windowID := strings.TrimSpace(string(windowOut))
+	if windowID == "" {
+		return
+	}
+	exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_skip_preserve_%s", windowID), "1").Run()
 }
 
 // layoutStatePath returns the path to the persistent layout state file.
@@ -715,7 +730,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			}
 			for _, extraPane := range headerPanes[1:] {
 				logEvent("HEADER_DEDUP target=%s kill=%s", target, extraPane)
-				saveLayoutBeforeKill(extraPane)
+				markSkipPreserveForWindow(extraPane)
 				exec.Command("tmux", "kill-pane", "-t", extraPane).Run()
 			}
 		}
@@ -954,7 +969,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		// Kill if headers disabled globally
 		if !headersEnabled {
 			logEvent("CLEANUP_HEADER pane=%s reason=disabled", hdr.paneID)
-			saveLayoutBeforeKill(hdr.paneID)
+			markSkipPreserveForWindow(hdr.paneID)
 			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
@@ -962,7 +977,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 
 		if hdr.target != "" && !keepHeader[hdr.paneID] {
 			logEvent("CLEANUP_HEADER pane=%s target=%s reason=duplicate_target", hdr.paneID, hdr.target)
-			saveLayoutBeforeKill(hdr.paneID)
+			markSkipPreserveForWindow(hdr.paneID)
 			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
@@ -982,7 +997,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		}
 		if !contentPaneExists[hdr.target] {
 			logEvent("CLEANUP_HEADER pane=%s target=%s reason=target_gone", hdr.paneID, hdr.target)
-			saveLayoutBeforeKill(hdr.paneID)
+			markSkipPreserveForWindow(hdr.paneID)
 			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
@@ -992,7 +1007,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		if targetDims, ok := contentPaneDimensions[hdr.target]; ok {
 			if hdr.width != targetDims.width {
 				logEvent("CLEANUP_HEADER pane=%s target=%s reason=width_mismatch header_w=%d target_w=%d", hdr.paneID, hdr.target, hdr.width, targetDims.width)
-				saveLayoutBeforeKill(hdr.paneID)
+				markSkipPreserveForWindow(hdr.paneID)
 				exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 				killed = true
 				continue
@@ -1064,7 +1079,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 		// Check if tmux considers the pane dead
 		if paneDead == "1" {
 			logEvent("DEAD_PANE pane=%s cmd=%s window=%s -- killing dead pane", paneID, cmd, windowID)
-			saveLayoutBeforeKill(paneID)
+			markSkipPreserveForWindow(paneID)
 			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 
 			// Respawn sidebar renderer if it was a sidebar
@@ -1093,7 +1108,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 			// Process is dead but tmux hasn't noticed yet
 			logEvent("ZOMBIE_PANE pane=%s pid=%d cmd=%s window=%s -- process dead, killing pane",
 				paneID, pid, cmd, windowID)
-			saveLayoutBeforeKill(paneID)
+			markSkipPreserveForWindow(paneID)
 			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 
 			if isSidebar {

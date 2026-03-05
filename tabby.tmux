@@ -48,11 +48,14 @@ tmux set-option -g bell-action other  # Flag bells from non-active windows
 tmux set-option -g window-size largest
 tmux set-option -g aggressive-resize on
 
-# New panes/windows open in the current pane's directory
-tmux bind-key '"' split-window -v -c "#{pane_current_path}"
-tmux bind-key '%' split-window -h -c "#{pane_current_path}"
-tmux bind-key '|' split-window -h -c "#{pane_current_path}"
-tmux bind-key '-' split-window -v -c "#{pane_current_path}"
+# New panes/windows open in the current content pane's directory.
+# If focus is on a pane-header utility pane, split the underlying content pane.
+SPLIT_FROM_CONTENT_SCRIPT="$CURRENT_DIR/scripts/split_from_content_pane.sh"
+chmod +x "$SPLIT_FROM_CONTENT_SCRIPT"
+tmux bind-key '"' run-shell "$SPLIT_FROM_CONTENT_SCRIPT v"
+tmux bind-key '%' run-shell "$SPLIT_FROM_CONTENT_SCRIPT h"
+tmux bind-key '|' run-shell "$SPLIT_FROM_CONTENT_SCRIPT h"
+tmux bind-key '-' run-shell "$SPLIT_FROM_CONTENT_SCRIPT v"
 
 # Create script to capture current window group/path before new-window.
 NEW_WINDOW_SCRIPT="$CURRENT_DIR/scripts/new_window_with_group.sh"

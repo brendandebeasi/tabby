@@ -56,6 +56,7 @@ type Pane struct {
 	AIInput      bool   // AI tool in this pane is waiting for user input
 	Remote       bool   // Pane is running a remote connection (ssh, mosh, etc.)
 	Top          int    // Y position of pane in window layout (for visual ordering)
+	Left         int    // X position of pane in window layout (for visual ordering)
 	Width        int    // Pane width
 	Height       int    // Pane height
 	CurrentPath  string // Current working directory of pane
@@ -367,7 +368,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		windowTarget = fmt.Sprintf("%s:%d", sessionTarget, windowIndex)
 	}
 	out, err := tmuxOutput("list-panes", "-t", windowTarget, "-F",
-		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_dead}")
+		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_left}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_dead}")
 	if err != nil {
 		return nil, err
 	}
@@ -396,10 +397,10 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		// Check for exact matches and also suffix matches (for path-qualified commands)
 		cmd := parts[3]
 		startCommand := ""
-		if len(parts) >= 13 {
-			startCommand = parts[12]
+		if len(parts) >= 14 {
+			startCommand = parts[13]
 		}
-		if len(parts) >= 14 && parts[13] == "1" {
+		if len(parts) >= 15 && parts[14] == "1" {
 			continue
 		}
 		if isSidebarCommand(cmd) || isSidebarCommand(startCommand) {
@@ -437,9 +438,14 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 			top, _ = strconv.Atoi(parts[8])
 		}
 
-		currentPath := ""
+		left := 0
 		if len(parts) >= 10 {
-			currentPath = parts[9]
+			left, _ = strconv.Atoi(parts[9])
+		}
+
+		currentPath := ""
+		if len(parts) >= 11 {
+			currentPath = parts[10]
 		}
 
 		panePID := 0
@@ -463,6 +469,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 			Busy:         busy,
 			Remote:       isRemote,
 			Top:          top,
+			Left:         left,
 			CurrentPath:  currentPath,
 			LastActivity: lastActivityTS,
 			PID:          panePID,
@@ -488,7 +495,7 @@ func ListAllPanes() (map[int][]Pane, error) {
 		args = append(args, "-a")
 	}
 	args = append(args, "-F",
-		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_width}\x1f#{pane_height}")
+		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_left}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_width}\x1f#{pane_height}")
 	out, err := tmuxOutput(args...)
 	if err != nil {
 		return nil, err
@@ -520,8 +527,8 @@ func ListAllPanes() (map[int][]Pane, error) {
 		// Skip sidebar/tabbar/daemon panes by command name
 		cmd := parts[4]
 		startCommand := ""
-		if len(parts) >= 14 {
-			startCommand = parts[13]
+		if len(parts) >= 15 {
+			startCommand = parts[14]
 		}
 		if isSidebarCommand(cmd) || isSidebarCommand(startCommand) {
 			continue
@@ -556,9 +563,14 @@ func ListAllPanes() (map[int][]Pane, error) {
 			top, _ = strconv.Atoi(parts[9])
 		}
 
-		currentPath := ""
+		left := 0
 		if len(parts) >= 11 {
-			currentPath = parts[10]
+			left, _ = strconv.Atoi(parts[10])
+		}
+
+		currentPath := ""
+		if len(parts) >= 12 {
+			currentPath = parts[11]
 		}
 
 		panePID := 0
@@ -567,13 +579,13 @@ func ListAllPanes() (map[int][]Pane, error) {
 		}
 
 		width := 0
-		if len(parts) >= 15 {
-			width, _ = strconv.Atoi(parts[14])
+		if len(parts) >= 16 {
+			width, _ = strconv.Atoi(parts[15])
 		}
 
 		height := 0
-		if len(parts) >= 16 {
-			height, _ = strconv.Atoi(parts[15])
+		if len(parts) >= 17 {
+			height, _ = strconv.Atoi(parts[16])
 		}
 
 		pane := Pane{
@@ -587,14 +599,15 @@ func ListAllPanes() (map[int][]Pane, error) {
 			Busy:         busy,
 			Remote:       isRemote,
 			Top:          top,
+			Left:         left,
 			Width:        width,
 			Height:       height,
 			CurrentPath:  currentPath,
 			LastActivity: lastActivityTS,
 			PID:          panePID,
 		}
-		if len(parts) >= 12 {
-			collapsedVal := strings.TrimSpace(parts[11])
+		if len(parts) >= 13 {
+			collapsedVal := strings.TrimSpace(parts[12])
 			if collapsedVal == "1" || collapsedVal == "true" {
 				pane.Collapsed = true
 			}
@@ -647,12 +660,20 @@ func ListWindowsWithPanes() ([]Window, error) {
 		windows[i].Panes = filtered
 	}
 
-	// Sort panes by visual position (top to bottom) and re-index sequentially.
+	// Sort panes by visual position and re-index sequentially.
 	// tmux list-panes returns panes in creation order, not visual order.
-	// Using pane_top ensures numbering matches the top-to-bottom layout.
+	// Use top, then left for mixed split trees where multiple panes share the same top row.
 	for i := range windows {
 		sort.Slice(windows[i].Panes, func(a, b int) bool {
-			return windows[i].Panes[a].Top < windows[i].Panes[b].Top
+			pa := windows[i].Panes[a]
+			pb := windows[i].Panes[b]
+			if pa.Top != pb.Top {
+				return pa.Top < pb.Top
+			}
+			if pa.Left != pb.Left {
+				return pa.Left < pb.Left
+			}
+			return pa.ID < pb.ID
 		})
 		for j := range windows[i].Panes {
 			windows[i].Panes[j].Index = j
