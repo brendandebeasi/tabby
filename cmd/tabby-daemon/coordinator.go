@@ -4065,6 +4065,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 	showMenuButton := compactMode
 	showInlineControls := !compactMode
+
 	showInlineCollapse := collapseBtn != "" && showInlineControls
 	showInlineSplits := showInlineControls
 	showResizeButtons := contentPaneCount > 1 && showInlineControls
@@ -4136,10 +4137,17 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		labelText = windowIcon + " " + labelText
 	}
 
+	// Compute group accent early so we can account for its width in layout calculations
+	groupAccent := ""
+	if groupColor != "" {
+		groupAccent = lipgloss.NewStyle().SetString("▇").Foreground(lipgloss.Color(groupColor)).String()
+	}
+	groupAccentWidth := uniseg.StringWidth(stripAnsi(groupAccent))
+
 	// Add current path if available
 	if foundPane.CurrentPath != "" {
 		// Available width for the label
-		availWidth := width - 1 - buttonsWidth // 1 for leading space
+		availWidth := width - groupAccentWidth - 1 - buttonsWidth // groupAccent + leading space
 		if availWidth < 4 {
 			availWidth = 4
 		}
@@ -4157,7 +4165,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 
 	// Available width for the label
-	availWidth := width - 1 - buttonsWidth // 1 for leading space
+	availWidth := width - groupAccentWidth - 1 - buttonsWidth // groupAccent + leading space
 	if availWidth < 4 {
 		availWidth = 4
 	}
@@ -4184,12 +4192,6 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	// Build rendered line and click regions
 	var regions []daemon.ClickableRegion
 
-	groupAccent := ""
-	if groupColor != "" {
-		groupAccent = lipgloss.NewStyle().SetString("▇").Foreground(lipgloss.Color(groupColor)).String()
-	}
-
-	groupAccentWidth := uniseg.StringWidth(stripAnsi(groupAccent))
 	labelWidth := uniseg.StringWidth(labelText)
 	renderedLabel := segStyle.Render(labelText)
 	currentCol := groupAccentWidth + 1 + labelWidth
