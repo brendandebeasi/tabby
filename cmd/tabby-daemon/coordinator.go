@@ -226,6 +226,8 @@ type Coordinator struct {
 	lastWindowSelect   map[string]time.Time
 	lastWindowByClient map[string]time.Time
 	lastWindowSelectMu sync.Mutex
+	lastPaneMenuOpen   map[string]time.Time
+	lastPaneMenuOpenMu sync.Mutex
 
 	// Background theme detector (deprecated, kept for fallback)
 	bgDetector *colors.BackgroundDetector
@@ -659,6 +661,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		pendingMenus:       make(map[string][]menuItemDef),
 		lastWindowSelect:   make(map[string]time.Time),
 		lastWindowByClient: make(map[string]time.Time),
+		lastPaneMenuOpen:   make(map[string]time.Time),
 		prevPaneBusy:       make(map[string]bool),
 		prevPaneTitle:      make(map[string]string),
 		aiBellUntil:        make(map[int]int64),
@@ -4054,17 +4057,34 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	if resizeSep == "" {
 		resizeSep = "¦"
 	}
+	menuBtn := "≡"
 	closeBtn := "×"
-	showResizeButtons := contentPaneCount > 1
+	compactMode := width <= 120
+	if compactMode {
+		menuBtn = "| - x"
+	}
+	showMenuButton := compactMode
+	showInlineControls := !compactMode
+	showInlineCollapse := collapseBtn != "" && showInlineControls
+	showInlineSplits := showInlineControls
+	showResizeButtons := contentPaneCount > 1 && showInlineControls
+	showInlineClose := showInlineControls
 	buttonsStr := "  "
-	if collapseBtn != "" {
+	if showMenuButton {
+		buttonsStr += menuBtn + "   "
+	}
+	if showInlineCollapse {
 		buttonsStr += collapseBtn + "   "
 	}
-	buttonsStr += splitVBtn + "   " + splitHBtn + "   "
+	if showInlineSplits {
+		buttonsStr += splitVBtn + "   " + splitHBtn + "   "
+	}
 	if showResizeButtons {
 		buttonsStr += resizeSep + "   " + vGrowBtn + "   " + vShrinkBtn + "   " + hGrowBtn + "   " + hShrinkBtn + "   "
 	}
-	buttonsStr += closeBtn + "  "
+	if showInlineClose {
+		buttonsStr += closeBtn + "  "
+	}
 	buttonsWidth := uniseg.StringWidth(buttonsStr)
 
 	// Find the specific pane this header belongs to
@@ -4194,101 +4214,70 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		line = fullLineStyle.Render(line)
 	}
 
-	if collapseBtn != "" {
-		collapseEnd := btnAreaStart + 6
-		splitVEnd := collapseEnd + 4
-		splitHEnd := splitVEnd + 4
-		cursor := splitHEnd
-		if showResizeButtons {
-			cursor += 4
-			vGrowEnd := cursor + 4
-			vShrinkEnd := vGrowEnd + 4
-			hGrowEnd := vShrinkEnd + 4
-			hShrinkEnd := hGrowEnd + 4
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 0,
-				StartCol: cursor, EndCol: vGrowEnd,
-				Action: "pane_grow_v", Target: paneID,
-			})
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 0,
-				StartCol: vGrowEnd, EndCol: vShrinkEnd,
-				Action: "pane_shrink_v", Target: paneID,
-			})
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 0,
-				StartCol: vShrinkEnd, EndCol: hGrowEnd,
-				Action: "pane_grow_h", Target: paneID,
-			})
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 0,
-				StartCol: hGrowEnd, EndCol: hShrinkEnd,
-				Action: "pane_shrink_h", Target: paneID,
-			})
-			cursor = hShrinkEnd
-		}
+	cursor := btnAreaStart
+	if showMenuButton {
+		menuEnd := cursor + uniseg.StringWidth(menuBtn)
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
-			StartCol: btnAreaStart, EndCol: collapseEnd,
+			StartCol: cursor, EndCol: menuEnd,
+			Action: "pane_menu", Target: paneID,
+		})
+		cursor = menuEnd + 3
+	}
+	if showInlineCollapse {
+		collapseEnd := cursor + 4
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 0,
+			StartCol: cursor, EndCol: collapseEnd,
 			Action: "toggle_pane_collapse", Target: paneID,
 		})
+		cursor = collapseEnd
+	}
+	if showInlineSplits {
+		splitVEnd := cursor + 4
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
-			StartCol: collapseEnd, EndCol: splitVEnd,
+			StartCol: cursor, EndCol: splitVEnd,
 			Action: "header_split_v", Target: paneID,
 		})
+		cursor = splitVEnd
+		splitHEnd := cursor + 4
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
-			StartCol: splitVEnd, EndCol: splitHEnd,
+			StartCol: cursor, EndCol: splitHEnd,
 			Action: "header_split_h", Target: paneID,
 		})
+		cursor = splitHEnd
+	}
+	if showResizeButtons {
+		cursor += 4
+		vGrowEnd := cursor + 4
+		vShrinkEnd := vGrowEnd + 4
+		hGrowEnd := vShrinkEnd + 4
+		hShrinkEnd := hGrowEnd + 4
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
-			StartCol: cursor, EndCol: width,
-			Action: "header_close", Target: paneID,
-		})
-	} else {
-		splitVEnd := btnAreaStart + 6
-		splitHEnd := splitVEnd + 4
-		cursor := splitHEnd
-		if showResizeButtons {
-			cursor += 4
-			vGrowEnd := cursor + 4
-			vShrinkEnd := vGrowEnd + 4
-			hGrowEnd := vShrinkEnd + 4
-			hShrinkEnd := hGrowEnd + 4
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 0,
-				StartCol: cursor, EndCol: vGrowEnd,
-				Action: "pane_grow_v", Target: paneID,
-			})
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 0,
-				StartCol: vGrowEnd, EndCol: vShrinkEnd,
-				Action: "pane_shrink_v", Target: paneID,
-			})
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 0,
-				StartCol: vShrinkEnd, EndCol: hGrowEnd,
-				Action: "pane_grow_h", Target: paneID,
-			})
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 0,
-				StartCol: hGrowEnd, EndCol: hShrinkEnd,
-				Action: "pane_shrink_h", Target: paneID,
-			})
-			cursor = hShrinkEnd
-		}
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 0,
-			StartCol: btnAreaStart, EndCol: splitVEnd,
-			Action: "header_split_v", Target: paneID,
+			StartCol: cursor, EndCol: vGrowEnd,
+			Action: "pane_grow_v", Target: paneID,
 		})
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
-			StartCol: splitVEnd, EndCol: splitHEnd,
-			Action: "header_split_h", Target: paneID,
+			StartCol: vGrowEnd, EndCol: vShrinkEnd,
+			Action: "pane_shrink_v", Target: paneID,
 		})
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 0,
+			StartCol: vShrinkEnd, EndCol: hGrowEnd,
+			Action: "pane_grow_h", Target: paneID,
+		})
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 0,
+			StartCol: hGrowEnd, EndCol: hShrinkEnd,
+			Action: "pane_shrink_h", Target: paneID,
+		})
+		cursor = hShrinkEnd
+	}
+	if showInlineClose {
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: cursor, EndCol: width,
@@ -4296,11 +4285,14 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		})
 	}
 
-	// Full header area for right-click context menu (targets this pane)
-	regions = append(regions, daemon.ClickableRegion{
-		StartLine: 0, EndLine: 0,
-		Action: "header_context", Target: paneID,
-	})
+	// Full header area context menu region for non-compact mode only.
+	// In compact mode, keep menu opening scoped to the unified menu button.
+	if !compactMode {
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 0,
+			Action: "header_context", Target: paneID,
+		})
+	}
 
 	if c.config.PaneHeader.LargeMode {
 		caratUp := "▲"
@@ -8542,29 +8534,15 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	case "header_close":
 		paneID := input.ResolvedTarget
-		winIDOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}").Output()
-		windowID := strings.TrimSpace(string(winIDOut))
-
-		contentCount := 0
-		if windowID != "" {
-			listOut, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}:#{pane_current_command}").Output()
-			for _, line := range strings.Split(strings.TrimSpace(string(listOut)), "\n") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) < 2 {
-					continue
-				}
-				if !isAuxiliaryPaneCommand(parts[1]) {
-					contentCount++
-				}
-			}
+		killWrapper := c.getScriptPath("kill_pane_wrapper.sh")
+		if killWrapper != "" {
+			exec.Command("tmux", "run-shell", fmt.Sprintf("'%s' -t %s", killWrapper, paneID)).Run()
+			return true
 		}
 
-		if contentCount <= 1 && windowID != "" {
-			exec.Command("tmux", "kill-window", "-t", windowID).Run()
-		} else {
-			saveLayoutBeforeKill(paneID)
-			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
-		}
+		// Fallback: preserve layout then close pane directly.
+		saveLayoutBeforeKill(paneID)
+		exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 		return true
 
 	case "header_select_pane":
@@ -8607,8 +8585,27 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "pane_menu":
-		// Hamburger menu on pane row -> show pane context menu
+		// Debounce header-triggered menu opens to avoid press/release reopen flashes.
+		if strings.HasPrefix(clientID, "header:") {
+			key := clientID + "|" + input.ResolvedTarget
+			now := time.Now()
+			c.lastPaneMenuOpenMu.Lock()
+			last := c.lastPaneMenuOpen[key]
+			if now.Sub(last) < 900*time.Millisecond {
+				c.lastPaneMenuOpenMu.Unlock()
+				return true
+			}
+			c.lastPaneMenuOpen[key] = now
+			c.lastPaneMenuOpenMu.Unlock()
+		}
+
+		// Header panes have BubbleTea mouse capture which intercepts clicks
+		// that should dismiss the menu. Target the content pane instead so
+		// tmux properly handles click-outside and Esc dismissal.
 		pos := menuPosition{PaneID: input.PaneID, X: input.MouseX, Y: input.MouseY}
+		if strings.HasPrefix(clientID, "header:") {
+			pos = menuPosition{PaneID: input.ResolvedTarget}
+		}
 		c.showPaneContextMenu(clientID, input.ResolvedTarget, pos)
 		return true
 
@@ -9723,11 +9720,12 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 		paneLabel = pane.Title
 	}
 
-	args := append([]string{
-		"display-menu",
-		"-O",
-		"-T", fmt.Sprintf("Pane %d.%d: %s", windowIdx, pane.Index, paneLabel),
-	}, pos.args()...)
+	menuArgs := []string{"display-menu"}
+	if pos.PaneID != "" {
+		menuArgs = append(menuArgs, "-M")
+	}
+	menuArgs = append(menuArgs, "-T", fmt.Sprintf("Pane %d.%d: %s", windowIdx, pane.Index, paneLabel))
+	args := append(menuArgs, pos.args()...)
 
 	// Rename option
 	currentTitle := pane.LockedTitle
@@ -9760,11 +9758,33 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	args = append(args, "", "", "")
 
 	// Split options
-	if !c.isVerticalStackedPane(window, pane.ID) {
-		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
-		splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
-		args = append(args, "Split Horizontal |", "|", splitHCmd)
-		args = append(args, "Split Vertical -", "-", splitVCmd)
+	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
+	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
+	args = append(args, "Split Horizontal |", "|", splitHCmd)
+	args = append(args, "Split Vertical -", "-", splitVCmd)
+
+	contentCount := 0
+	for _, p := range window.Panes {
+		if !isAuxiliaryPane(p) {
+			contentCount++
+		}
+	}
+	if contentCount > 1 {
+		collapseScript := c.getScriptPath("toggle_pane_collapse.sh")
+		if collapseScript != "" {
+			args = append(args, "", "", "")
+			collapsedVal, _ := exec.Command("tmux", "show-options", "-pqv", "-t", pane.ID, "@tabby_pane_collapsed").Output()
+			collapseLabel := "Collapse Pane"
+			if strings.TrimSpace(string(collapsedVal)) == "1" {
+				collapseLabel = "Expand Pane"
+			}
+			args = append(args, collapseLabel, "c", fmt.Sprintf("run-shell '%s -t %s'", collapseScript, pane.ID))
+		}
+		args = append(args, "", "", "")
+		args = append(args, "Resize Down", "j", fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; resize-pane -D 5", windowIdx, pane.ID))
+		args = append(args, "Resize Up", "k", fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; resize-pane -U 5", windowIdx, pane.ID))
+		args = append(args, "Resize Right", "l", fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; resize-pane -R 5", windowIdx, pane.ID))
+		args = append(args, "Resize Left", "h", fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; resize-pane -L 5", windowIdx, pane.ID))
 	}
 
 	// Separator

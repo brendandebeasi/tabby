@@ -857,14 +857,14 @@ func paneTargetFromStartCmd(startCmd string) string {
 // cleanupOrphanedHeaders removes header panes that are disabled or orphaned
 // (target pane no longer exists).
 func cleanupOrphanedHeaders(customBorder bool) {
-	// Get all panes with start command, width, height, and window ID
-	// Scoped to our session with -t to avoid cross-session interference
+	// Get all panes with geometry, start command, and window ID.
+	// Scoped to our session with -t to avoid cross-session interference.
 	listArgs := []string{"list-panes", "-s"}
 	if *sessionID != "" {
 		listArgs = append(listArgs, "-t", *sessionID)
 	}
 	listArgs = append(listArgs, "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_width}\x1f#{pane_start_command}\x1f#{pane_height}\x1f#{window_id}")
+		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_width}\x1f#{pane_start_command}\x1f#{pane_height}\x1f#{pane_top}\x1f#{pane_left}\x1f#{window_id}")
 	out, err := exec.Command("tmux", listArgs...).Output()
 	if err != nil {
 		return
@@ -877,24 +877,23 @@ func cleanupOrphanedHeaders(customBorder bool) {
 	// Build a set of content pane IDs and track their dimensions
 	// Check both current and start commands to handle race condition after split-window
 	contentPaneExists := make(map[string]bool)
-	contentPaneDimensions := make(map[string]struct{ width, height int })
+	contentPaneDimensions := make(map[string]struct{ width, height, top, left int })
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x1f", 6)
-		if len(parts) < 4 {
+		parts := strings.SplitN(line, "\x1f", 8)
+		if len(parts) < 8 {
 			continue
 		}
 		paneID := parts[0]
 		curCmd := parts[1]
 		widthStr := parts[2]
 		startCmd := parts[3]
-		heightStr := ""
-		if len(parts) >= 5 {
-			heightStr = parts[4]
-		}
+		heightStr := parts[4]
+		topStr := parts[5]
+		leftStr := parts[6]
 		isSystem := strings.Contains(curCmd, "pane-header") || strings.Contains(curCmd, "sidebar") ||
 			strings.Contains(curCmd, "renderer") || strings.Contains(curCmd, "tabby") ||
 			strings.Contains(startCmd, "pane-header") || strings.Contains(startCmd, "sidebar") ||
@@ -903,7 +902,9 @@ func cleanupOrphanedHeaders(customBorder bool) {
 			contentPaneExists[paneID] = true
 			width, _ := strconv.Atoi(widthStr)
 			height, _ := strconv.Atoi(heightStr)
-			contentPaneDimensions[paneID] = struct{ width, height int }{width, height}
+			top, _ := strconv.Atoi(topStr)
+			left, _ := strconv.Atoi(leftStr)
+			contentPaneDimensions[paneID] = struct{ width, height, top, left int }{width, height, top, left}
 		}
 	}
 
@@ -914,6 +915,8 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		target   string
 		width    int
 		height   int
+		top      int
+		left     int
 	}
 	var headers []headerInfo
 
@@ -922,8 +925,8 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x1f", 6)
-		if len(parts) < 4 {
+		parts := strings.SplitN(line, "\x1f", 8)
+		if len(parts) < 8 {
 			continue
 		}
 		curCmd := parts[1]
@@ -933,18 +936,14 @@ func cleanupOrphanedHeaders(customBorder bool) {
 			continue
 		}
 		w, _ := strconv.Atoi(widthStr)
-		h := 0
-		if len(parts) >= 5 {
-			h, _ = strconv.Atoi(parts[4])
-		}
-		winID := ""
-		if len(parts) >= 6 {
-			winID = parts[5]
-		}
+		h, _ := strconv.Atoi(parts[4])
+		top, _ := strconv.Atoi(parts[5])
+		left, _ := strconv.Atoi(parts[6])
+		winID := parts[7]
 		target := paneTargetFromStartCmd(startCmd)
 		headers = append(headers, headerInfo{
 			paneID: parts[0], windowID: winID,
-			target: target, width: w, height: h,
+			target: target, width: w, height: h, top: top, left: left,
 		})
 	}
 
@@ -1003,10 +1002,25 @@ func cleanupOrphanedHeaders(customBorder bool) {
 			continue
 		}
 
-		// Kill if header width doesn't match target pane width (happens after horizontal splits)
+		// Kill if header geometry doesn't match its target pane.
+		// Valid header must match target width/left and sit above target top.
 		if targetDims, ok := contentPaneDimensions[hdr.target]; ok {
 			if hdr.width != targetDims.width {
 				logEvent("CLEANUP_HEADER pane=%s target=%s reason=width_mismatch header_w=%d target_w=%d", hdr.paneID, hdr.target, hdr.width, targetDims.width)
+				markSkipPreserveForWindow(hdr.paneID)
+				exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+				killed = true
+				continue
+			}
+			if hdr.left != targetDims.left {
+				logEvent("CLEANUP_HEADER pane=%s target=%s reason=left_mismatch header_left=%d target_left=%d", hdr.paneID, hdr.target, hdr.left, targetDims.left)
+				markSkipPreserveForWindow(hdr.paneID)
+				exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+				killed = true
+				continue
+			}
+			if hdr.top >= targetDims.top {
+				logEvent("CLEANUP_HEADER pane=%s target=%s reason=not_above_target header_top=%d target_top=%d", hdr.paneID, hdr.target, hdr.top, targetDims.top)
 				markSkipPreserveForWindow(hdr.paneID)
 				exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 				killed = true

@@ -739,7 +739,7 @@ tmux bind-key -n M-h previous-window
 tmux bind-key -n M-l next-window
 tmux bind-key -n M-n run-shell "$NEW_WINDOW_SCRIPT '#{client_tty}'"
 tmux bind-key -n M-N run-shell "$NEW_WINDOW_SCRIPT '#{client_tty}'"
-tmux bind-key -n M-x run-shell "$KILL_PANE_SCRIPT"
+tmux unbind-key -n M-x 2>/dev/null || true
 tmux bind-key -n M-q display-panes
 tmux bind-key -n M-0 select-window -t :0
 tmux bind-key -n M-1 select-window -t :1

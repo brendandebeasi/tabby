@@ -25,6 +25,44 @@ SAVED_LAYOUT=$(tmux show-option -gqv "@tabby_layout_${WINDOW_ID}" 2>/dev/null)
 PANE_COUNT=$(tmux list-panes -t "$WINDOW_ID" 2>/dev/null | wc -l | tr -d ' ')
 [ "$PANE_COUNT" -le 1 ] && exit 0
 
+# NEW: Detect orphaned header panes before restoring layout
+# If a header pane exists but its target pane is gone, skip restore
+# to avoid creating a ghost-split state.
+#
+# Get all panes with their commands and window ID
+PANES_OUTPUT=$(tmux list-panes -t "$WINDOW_ID" -F '#{pane_id}|#{pane_current_command}|#{pane_start_command}' 2>/dev/null)
+
+# Build set of content pane IDs (non-system panes)
+declare -A CONTENT_PANES
+while IFS='|' read -r pane_id cur_cmd start_cmd; do
+	# Check if this is a system pane (header, sidebar, renderer, etc.)
+	if [[ ! "$cur_cmd" =~ (pane-header|sidebar|renderer|tabbar|pane-bar|tabby-daemon) ]] && \
+	   [[ ! "$start_cmd" =~ (pane-header|sidebar|renderer|tabbar|pane-bar|tabby-daemon) ]]; then
+		CONTENT_PANES["$pane_id"]=1
+	fi
+done <<< "$PANES_OUTPUT"
+
+# Check for orphaned headers
+SKIP_RESTORE=0
+while IFS='|' read -r pane_id cur_cmd start_cmd; do
+	# Is this a header pane?
+	if [[ "$cur_cmd" =~ pane-header ]] || [[ "$start_cmd" =~ pane-header ]]; then
+		# Extract target pane from start command (format: pane-header -t %123)
+		target_pane=$(echo "$start_cmd" | grep -oP '(?<=-t\s)\S+' || true)
+		
+		# If target pane doesn't exist in our content panes, skip restore
+		if [ -n "$target_pane" ] && [ -z "${CONTENT_PANES[$target_pane]:-}" ]; then
+			SKIP_RESTORE=1
+			break
+		fi
+	fi
+done <<< "$PANES_OUTPUT"
+
+# If orphaned header detected, skip layout restore
+if [ "$SKIP_RESTORE" = "1" ]; then
+	exit 0
+fi
+
 # Apply the saved layout (may fail if pane count changed too much, that's fine).
 # tmux select-layout intelligently redistributes space even with fewer panes.
 tmux select-layout -t "$WINDOW_ID" "$SAVED_LAYOUT" 2>/dev/null || true
