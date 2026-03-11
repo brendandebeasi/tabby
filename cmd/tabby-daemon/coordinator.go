@@ -1742,8 +1742,21 @@ func (c *Coordinator) applyThemeToTmux() {
 		exec.Command("tmux", "set-option", "-g", "pane-active-border-style", activeStyle).Run()
 	}
 
-	// Apply border line style if configured
-	if c.config.PaneHeader.BorderLines != "" {
+	// With overlay pane headers enabled, tmux border lines add an extra visual row
+	// between header and content that looks like a duplicate/non-functional header.
+	// Prefer runtime tmux option as source of truth, with config as fallback.
+	paneHeadersEnabled := c.config.Sidebar.PaneHeaders
+	if out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output(); err == nil {
+		paneHeadersEnabled = strings.TrimSpace(string(out)) == "on"
+	}
+	if paneHeadersEnabled && !c.config.PaneHeader.CustomBorder {
+		exec.Command("tmux", "set-option", "-g", "pane-border-lines", "simple").Run()
+		if c.config.PaneHeader.TerminalBg != "" {
+			style := fmt.Sprintf("fg=%s,bg=%s", c.config.PaneHeader.TerminalBg, c.config.PaneHeader.TerminalBg)
+			exec.Command("tmux", "set-option", "-g", "pane-border-style", style).Run()
+			exec.Command("tmux", "set-option", "-g", "pane-active-border-style", style).Run()
+		}
+	} else if c.config.PaneHeader.BorderLines != "" {
 		exec.Command("tmux", "set-option", "-g", "pane-border-lines", c.config.PaneHeader.BorderLines).Run()
 	}
 
@@ -4058,10 +4071,13 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		resizeSep = "¦"
 	}
 	menuBtn := "≡"
+	compactSplitVBtn := "|"
+	compactSplitHBtn := "-"
+	compactCloseBtn := "x"
 	closeBtn := "×"
 	compactMode := width <= 120
 	if compactMode {
-		menuBtn = "| - x"
+		menuBtn = compactSplitVBtn + " " + compactSplitHBtn + " " + compactCloseBtn
 	}
 	showMenuButton := compactMode
 	showInlineControls := !compactMode
@@ -4216,15 +4232,43 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		line = fullLineStyle.Render(line)
 	}
 
-	cursor := btnAreaStart
+	// buttonsStr always begins with "  " (2 spaces); skip past them so regions
+	// align with the actual button characters.
+	cursor := btnAreaStart + 2
 	if showMenuButton {
-		menuEnd := cursor + uniseg.StringWidth(menuBtn)
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 0,
-			StartCol: cursor, EndCol: menuEnd,
-			Action: "pane_menu", Target: paneID,
-		})
-		cursor = menuEnd + 3
+		if compactMode {
+			splitVEnd := cursor + uniseg.StringWidth(compactSplitVBtn) + 1
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: splitVEnd,
+				// "|" looks like a vertical divider → side-by-side panes → split-window -h
+				Action: "header_split_h", Target: paneID,
+			})
+
+			splitHEnd := splitVEnd + uniseg.StringWidth(compactSplitHBtn) + 1
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: splitVEnd, EndCol: splitHEnd,
+				// "-" looks like a horizontal divider → stacked panes → split-window -v
+				Action: "header_split_v", Target: paneID,
+			})
+
+			closeEnd := splitHEnd + uniseg.StringWidth(compactCloseBtn)
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: splitHEnd, EndCol: closeEnd,
+				Action: "header_close", Target: paneID,
+			})
+			cursor = closeEnd + 3
+		} else {
+			menuEnd := cursor + uniseg.StringWidth(menuBtn)
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: menuEnd,
+				Action: "pane_menu", Target: paneID,
+			})
+			cursor = menuEnd + 3
+		}
 	}
 	if showInlineCollapse {
 		collapseEnd := cursor + 4
@@ -4240,14 +4284,16 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: cursor, EndCol: splitVEnd,
-			Action: "header_split_v", Target: paneID,
+			// "│" = vertical divider icon → side-by-side panes → split-window -h
+			Action: "header_split_h", Target: paneID,
 		})
 		cursor = splitVEnd
 		splitHEnd := cursor + 4
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: cursor, EndCol: splitHEnd,
-			Action: "header_split_h", Target: paneID,
+			// "─" = horizontal divider icon → stacked panes → split-window -v
+			Action: "header_split_v", Target: paneID,
 		})
 		cursor = splitHEnd
 	}
@@ -8521,7 +8567,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if panePath == "" {
 			panePath = "~"
 		}
-		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath).Run()
+		exec.Command("tmux", "split-window", "-v", "-t", input.ResolvedTarget, "-c", panePath).Run()
 		return true
 
 	case "header_split_h":
@@ -8531,7 +8577,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if panePath2 == "" {
 			panePath2 = "~"
 		}
-		exec.Command("tmux", "split-window", "-v", "-t", input.ResolvedTarget, "-c", panePath2).Run()
+		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath2).Run()
 		return true
 
 	case "header_close":
@@ -9625,10 +9671,10 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		splitTarget = activePaneID
 	}
 	if !c.isVerticalStackedPane(win, activePaneID) {
-		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", win.Index, splitTarget)
 		splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", win.Index, splitTarget)
-		args = append(args, "Split Horizontal |", "|", splitHCmd)
-		args = append(args, "Split Vertical -", "-", splitVCmd)
+		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", win.Index, splitTarget)
+		args = append(args, "Split Vertical |", "|", splitVCmd)
+		args = append(args, "Split Horizontal -", "-", splitHCmd)
 	}
 
 	// --- Utilities ---
@@ -9760,10 +9806,10 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	args = append(args, "", "", "")
 
 	// Split options
-	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
 	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
-	args = append(args, "Split Horizontal |", "|", splitHCmd)
-	args = append(args, "Split Vertical -", "-", splitVCmd)
+	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
+	args = append(args, "Split Vertical |", "|", splitVCmd)
+	args = append(args, "Split Horizontal -", "-", splitHCmd)
 
 	contentCount := 0
 	for _, p := range window.Panes {

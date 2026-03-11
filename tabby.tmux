@@ -264,15 +264,27 @@ PANE_HEADERS=${PANE_HEADERS:-false}
 if [[ "$PANE_HEADERS" == "true" ]]; then
     tmux set-option -g pane-border-status off
     tmux set-option -g @tabby_pane_headers on
+    # Keep separator lines minimal and make borders visually blend into the
+    # terminal background so they don't look like a second non-interactive header.
+    if [[ "$CUSTOM_BORDER" != "true" ]]; then
+        tmux set-option -g pane-border-lines simple
+        if [ -n "$TERMINAL_BG" ]; then
+            tmux set-option -g pane-border-style "fg=$TERMINAL_BG,bg=$TERMINAL_BG"
+            tmux set-option -g pane-active-border-style "fg=$TERMINAL_BG,bg=$TERMINAL_BG"
+        else
+            tmux set-option -g pane-border-style "fg=default,bg=default"
+            tmux set-option -g pane-active-border-style "fg=default,bg=default"
+        fi
+    fi
 else
     tmux set-option -g pane-border-status top
+    tmux set-option -g pane-border-lines "$BORDER_LINES"
 fi
 
 # Pane border styling - colored headers with info
-tmux set-option -g pane-border-lines "$BORDER_LINES"
 # When custom_border is enabled, borders are hidden (set earlier)
 # Otherwise, use the same color for both to prevent half/half on shared edges
-if [[ "$CUSTOM_BORDER" != "true" ]]; then
+if [[ "$CUSTOM_BORDER" != "true" && "$PANE_HEADERS" != "true" ]]; then
     tmux set-option -g pane-border-style "fg=$PANE_ACTIVE_BG"
     tmux set-option -g pane-active-border-style "fg=$PANE_ACTIVE_BG"
 fi
@@ -323,10 +335,24 @@ cat > "$CLICK_HANDLER_SCRIPT" << 'SCRIPT_EOF'
 PANE_ID="$1"
 MOUSE_X="$2"
 MOUSE_Y="$3"
+PANE_LEFT="$4"
+PANE_TOP="$5"
+
+# Convert window-absolute mouse coordinates to pane-local coordinates.
+# BubbleTea hit testing uses local pane coordinates.
+LOCAL_X=$((MOUSE_X - PANE_LEFT))
+LOCAL_Y=$((MOUSE_Y - PANE_TOP))
+
+if [ "$LOCAL_X" -lt 0 ]; then
+    LOCAL_X=0
+fi
+if [ "$LOCAL_Y" -lt 0 ]; then
+    LOCAL_Y=0
+fi
 
 # Store click position for pane-header to read on focus gain
-tmux set-option -g @tabby_last_click_x "$MOUSE_X"
-tmux set-option -g @tabby_last_click_y "$MOUSE_Y"
+tmux set-option -g @tabby_last_click_x "$LOCAL_X"
+tmux set-option -g @tabby_last_click_y "$LOCAL_Y"
 tmux set-option -g @tabby_last_click_pane "$PANE_ID"
 
 tmux select-pane -t "$PANE_ID"
@@ -341,14 +367,14 @@ tmux bind-key -T root MouseDown1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M -t =" \
         "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
-		    \"run-shell -b '$CLICK_HANDLER_SCRIPT \\\"#{pane_id}\\\" \\\"#{mouse_x}\\\" \\\"#{mouse_y}\\\"'\" \
+		    \"select-pane -t = ; send-keys -M -t =\" \
             \"select-pane -t = ; send-keys -M -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 
 tmux bind-key -T root MouseUp1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M -t =" \
         "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
-		    \"\" \
+		    \"send-keys -M -t =\" \
             \"select-pane -t = ; send-keys -M -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 
 tmux unbind-key -T root MouseUp3Pane 2>/dev/null || true

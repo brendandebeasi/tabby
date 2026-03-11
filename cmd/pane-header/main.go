@@ -80,6 +80,7 @@ type rendererModel struct {
 	sequenceNum uint64
 	sidebarBg   string
 	terminalBg  string
+	isTouchMode bool
 
 	// The header pane's own tmux pane ID (for menu positioning)
 	headerPaneID string
@@ -197,6 +198,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sequenceNum = msg.payload.SequenceNum
 		m.sidebarBg = msg.payload.SidebarBg
 		m.terminalBg = msg.payload.TerminalBg
+		m.isTouchMode = msg.payload.IsTouchMode
 		return m, nil
 
 	case tickMsg:
@@ -246,13 +248,8 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.FocusMsg:
-		// When the header pane gains focus (user clicked on it), read the stored
-		// mouse position and process the click. This is the PRIMARY mechanism for
-		// handling clicks on unfocused headers - the shell script stores the click
-		// position and selects this pane, triggering FocusMsg.
-		if m.connected {
-			return m.handleFocusGain()
-		}
+		// Click handling uses direct mouse forwarding from tmux bindings.
+		// Keep focus events as no-ops.
 		return m, nil
 
 	case tea.BlurMsg:
@@ -326,6 +323,12 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			button = tea.MouseButtonRight
 		}
 		if button == tea.MouseButtonLeft {
+			if !m.isTouchMode {
+				m.longPressActive = false
+				m.skipNextRelease = false
+				return m, nil
+			}
+
 			timeSinceLastClick := time.Since(m.lastTapTime)
 			clickDx := absInt(msg.X - m.lastTapPos.X)
 			clickDy := absInt(msg.Y - m.lastTapPos.Y)
@@ -354,6 +357,21 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.longPressActive = false
 			m.mouseDownTime = time.Time{}
 			return m, nil
+		}
+
+		if !m.isTouchMode {
+			m.longPressActive = false
+			if m.mouseDownTime.IsZero() {
+				return m, nil
+			}
+			elapsed := time.Since(m.mouseDownTime)
+			dx := msg.X - m.mouseDownPos.X
+			dy := msg.Y - m.mouseDownPos.Y
+			m.mouseDownTime = time.Time{}
+			if elapsed > 0 && (absInt(dx) > 5 || absInt(dy) > 2) {
+				return m, nil
+			}
+			return m.processMouseClick(m.mouseDownPos.X, m.mouseDownPos.Y, tea.MouseButtonLeft, false)
 		}
 
 		wasLongPressActive := m.longPressActive

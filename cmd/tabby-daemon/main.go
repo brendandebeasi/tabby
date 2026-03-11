@@ -1005,6 +1005,17 @@ func cleanupOrphanedHeaders(customBorder bool) {
 		// Kill if header geometry doesn't match its target pane.
 		// Valid header must match target width/left and sit above target top.
 		if targetDims, ok := contentPaneDimensions[hdr.target]; ok {
+			// If a target pane shrinks below usable height, remove its header pane.
+			// Keeping a header above a 1-2 line pane creates the appearance of
+			// duplicate/non-functional header bars and leaves split controls unusable.
+			if targetDims.height < 3 {
+				logEvent("CLEANUP_HEADER pane=%s target=%s reason=target_too_short target_h=%d", hdr.paneID, hdr.target, targetDims.height)
+				markSkipPreserveForWindow(hdr.paneID)
+				exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+				killed = true
+				continue
+			}
+
 			if hdr.width != targetDims.width {
 				logEvent("CLEANUP_HEADER pane=%s target=%s reason=width_mismatch header_w=%d target_w=%d", hdr.paneID, hdr.target, hdr.width, targetDims.width)
 				markSkipPreserveForWindow(hdr.paneID)
