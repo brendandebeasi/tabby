@@ -8602,8 +8602,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Save collapse state to tmux options
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_collapsed", "1").Run()
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_previous_width", fmt.Sprintf("%d", currentWidth)).Run()
-		// Resize ALL sidebar panes to minimal width
-		go syncAllSidebarWidths(1)
+		// Resize ALL sidebar panes to minimal width (synchronous to prevent race with rapid toggle)
+		syncAllSidebarWidths(1)
 		coordinatorDebugLog.Printf("Sidebar collapsed: saved width=%d, syncing all to 1", currentWidth)
 		return true // Trigger re-render to show collapsed ">" content
 
