@@ -1964,15 +1964,14 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 	return args
 }
 
-// GetWindowsHash returns a hash of current window state for change detection
+// GetWindowsHash returns a hash of current window state for change detection.
+// Uses the already-cached c.windows to avoid an extra tmux round-trip after RefreshWindows().
 func (c *Coordinator) GetWindowsHash() string {
-	windows, err := tmux.ListWindowsWithPanes()
-	if err != nil {
-		return ""
-	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 	// Simple hash: count + window IDs + active states + pane active states + indicators
-	hash := fmt.Sprintf("%d", len(windows))
-	for _, w := range windows {
+	hash := fmt.Sprintf("%d", len(c.windows))
+	for _, w := range c.windows {
 		// Include window state and indicators
 		hash += fmt.Sprintf(":%s:%v:%d:%v:%v:%v:%v:%v:%v:%s:%s:%v",
 			w.ID, w.Active, len(w.Panes),

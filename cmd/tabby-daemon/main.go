@@ -1608,8 +1608,8 @@ func main() {
 			}
 		}
 
-		refreshTicker := time.NewTicker(5 * time.Second)          // Window list poll (fallback, less frequent now)
-		windowCheckTicker := time.NewTicker(2 * time.Second)      // Spawn/cleanup poll (fallback)
+		refreshTicker := time.NewTicker(30 * time.Second)         // Window list poll (fallback, signal_refresh handles real-time)
+		windowCheckTicker := time.NewTicker(10 * time.Second)     // Spawn/cleanup poll (fallback)
 		animationTicker := time.NewTicker(100 * time.Millisecond) // Combined spinner + pet animation (was two separate tickers)
 		gitTicker := time.NewTicker(5 * time.Second)              // Git status
 		watchdogTicker := time.NewTicker(5 * time.Second)         // Watchdog: check renderer health
@@ -1766,10 +1766,9 @@ func main() {
 				// Window check is a polling task — stalls are non-fatal (skip and retry next tick)
 				runLoopTaskNonFatal("window_check", 8*time.Second, func() {
 					logEvent("WINDOW_CHECK_TICK")
-					// Update active window in case user switched windows without triggering refresh
-					updateActiveWindow()
-					// Refresh windows first to get latest state for fallback ops
-					coordinator.RefreshWindows()
+					// Use cached window state — signal_refresh keeps it fresh via USR1.
+					// Calling RefreshWindows() here added a redundant ListWindowsWithPanes()
+					// tmux round-trip that caused lock contention and task stalls under load.
 					windows := coordinator.GetWindows()
 
 					spawnedFallback := spawnRenderersForNewWindows(server, *sessionID, windows)
