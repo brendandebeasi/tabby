@@ -75,4 +75,3 @@ todos.md
 
 # Runtime-generated helper scripts
 scripts/apply_new_window_group.sh
-scripts/new_window_with_group.sh

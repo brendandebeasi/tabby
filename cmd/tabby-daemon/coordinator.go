@@ -10217,8 +10217,7 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 
 	c.stateMu.RUnlock()
 
-	// Build new-window command
-	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
+	args := []string{"new-window", "-d", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
 	if workingDir != "" {
 		if strings.HasPrefix(workingDir, "~/") {
 			if home, err := os.UserHomeDir(); err == nil {
@@ -10228,21 +10227,19 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		args = append(args, "-c", workingDir)
 	}
 
-	// Create window detached so no tmux auto-focus races with hook chain.
-	args = append(args, "-d")
 	out, err := exec.Command("tmux", args...).CombinedOutput()
 	newWindowID := strings.TrimSpace(string(out))
 	logEvent("NEW_WINDOW_RESULT id=%s err=%v", newWindowID, err)
 
-	// Assign group
 	if newWindowID != "" && currentGroup != "" && currentGroup != "Default" {
 		exec.Command("tmux", "set-window-option", "-t", newWindowID, "@tabby_group", currentGroup).Run()
 	}
 
-	// Explicitly switch the client that was viewing the source window to the new one.
-	// The daemon has no client context so tmux won't auto-focus for us.
-	// #{window_id} in list-clients context gives the ID of the client's current window.
 	if newWindowID != "" {
+		// Set @tabby_new_window_id so daemon cleanup/focus-repair skips this
+		// window while the renderer spawns (same guard the shell script uses).
+		exec.Command("tmux", "set-option", "-g", "@tabby_new_window_id", newWindowID).Run()
+
 		clientTTY := ""
 		rawClients := ""
 		if ttyOut, err2 := exec.Command("tmux", "list-clients", "-F",
@@ -10261,16 +10258,20 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		if clientTTY != "" {
 			exec.Command("tmux", "switch-client", "-c", clientTTY, "-t", newWindowID).Run()
 		} else {
-			// Fallback: no client matched — select globally (best effort)
 			exec.Command("tmux", "select-window", "-t", newWindowID).Run()
 		}
+
+		go func(id string) {
+			time.Sleep(1200 * time.Millisecond)
+			if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output(); err == nil {
+				if strings.TrimSpace(string(out)) == id {
+					exec.Command("tmux", "set-option", "-gu", "@tabby_new_window_id").Run()
+				}
+			}
+		}(newWindowID)
 	}
 
-	// Safety: tell the refresh loop not to call selectContentPaneInActiveWindow
-	// for a couple seconds (it's harmless but let's not risk it).
 	lastNewWindowCreation = time.Now()
-
-	// That's it. Hooks handle sidebar renderer spawning and daemon refresh.
 }
 
 // showIndicatorContextMenu displays the context menu for window indicators (busy, bell, etc.)
