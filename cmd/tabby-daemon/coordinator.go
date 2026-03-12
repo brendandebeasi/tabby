@@ -1131,7 +1131,6 @@ func (c *Coordinator) RefreshWindows() {
 	}
 
 	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
 
 	if newCfg != nil {
 		c.config = newCfg
@@ -1157,8 +1156,18 @@ func (c *Coordinator) RefreshWindows() {
 		c.config.Sidebar.PrefixMode = (prefixModeRaw == "1" || prefixModeRaw == "true")
 	}
 
-	// Update pane header colors to match group themes
-	c.updatePaneHeaderColors()
+	// Build pane header color args while holding the lock (read-only access to state).
+	// The actual tmux exec happens AFTER unlock to avoid holding stateMu during
+	// slow external calls which causes LOOP_STALL and daemon termination.
+	colorArgs := c.buildPaneHeaderColorArgs()
+	c.stateMu.Unlock()
+
+	// Run the tmux set-option commands outside the lock with a timeout.
+	if len(colorArgs) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		exec.CommandContext(ctx, "tmux", colorArgs...).Run()
+	}
 }
 
 // SetActiveWindowOptimistic flips the Active flag on c.windows so the next
@@ -1824,7 +1833,9 @@ func (c *Coordinator) ApplyThemeToPane(paneID string) {
 	}
 }
 
-func (c *Coordinator) updatePaneHeaderColors() {
+// buildPaneHeaderColorArgs builds the tmux set-option args for pane header colors.
+// Called under stateMu; returns the args without executing (caller runs tmux outside the lock).
+func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 	grouped := c.grouped
 	autoBorder := c.config.PaneHeader.AutoBorder
 	borderFromTab := c.config.PaneHeader.BorderFromTab
@@ -1842,67 +1853,95 @@ func (c *Coordinator) updatePaneHeaderColors() {
 	if promptFallbackIcon == "" {
 		promptFallbackIcon = "•"
 	}
-	{
-		var args []string
-		for _, group := range grouped {
-			baseBg := group.Theme.Bg
-			for _, win := range group.Windows {
-				tabBg := baseBg
-				if win.CustomColor != "" {
-					tabBg = win.CustomColor
+	var args []string
+	for _, group := range grouped {
+		baseBg := group.Theme.Bg
+		for _, win := range group.Windows {
+			tabBg := baseBg
+			if win.CustomColor != "" {
+				tabBg = win.CustomColor
+			}
+			// Border fg: config > group fg > same as bg (solid color bar)
+			baseFg := configBorderFg
+			if baseFg == "" {
+				baseFg = group.Theme.Fg
+			}
+			if baseFg == "" {
+				baseFg = tabBg
+			}
+			if len(args) > 0 {
+				args = append(args, ";")
+			}
+			args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", tabBg)
+			args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", tabBg)
+			// Shell prompt integration: store effective icon per window
+			if shellIntegration {
+				effectiveIcon := group.Theme.Icon
+				if win.Icon != "" {
+					effectiveIcon = win.Icon
 				}
-				// Border fg: config > group fg > same as bg (solid color bar)
-				baseFg := configBorderFg
-				if baseFg == "" {
-					baseFg = group.Theme.Fg
+				if effectiveIcon == "" {
+					effectiveIcon = promptFallbackIcon
 				}
-				if baseFg == "" {
-					baseFg = tabBg
-				}
-				if len(args) > 0 {
-					args = append(args, ";")
-				}
-				args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", tabBg)
-				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", tabBg)
-				// Shell prompt integration: store effective icon per window
-				if shellIntegration {
-					effectiveIcon := group.Theme.Icon
-					if win.Icon != "" {
-						effectiveIcon = win.Icon
-					}
-					if effectiveIcon == "" {
-						effectiveIcon = promptFallbackIcon
-					}
-					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_prompt_icon", effectiveIcon)
-				}
+				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_prompt_icon", effectiveIcon)
+			}
 
-				if autoBorder || borderFromTab {
-					// Border fg = tab's text color, border bg = tab's bg color
-					bFg := baseFg
-					bBg := tabBg
+			if autoBorder || borderFromTab {
+				// Border fg = tab's text color, border bg = tab's bg color
+				bFg := baseFg
+				bBg := tabBg
 
-					// Active border: config overrides > tab colors
-					aFg := activeBorderFg
-					if aFg == "" {
-						aFg = bFg
-					}
-					aBg := activeBorderBg
-					if aBg == "" {
-						aBg = bBg
-					}
-					activeStyle := buildBorderStyle(aFg, aBg)
-					if activeStyle == "" {
-						activeStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
-					}
-					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
-						"pane-active-border-style", activeStyle)
+				// Active border: config overrides > tab colors
+				aFg := activeBorderFg
+				if aFg == "" {
+					aFg = bFg
+				}
+				aBg := activeBorderBg
+				if aBg == "" {
+					aBg = bBg
+				}
+				activeStyle := buildBorderStyle(aFg, aBg)
+				if activeStyle == "" {
+					activeStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
+				}
+				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
+					"pane-active-border-style", activeStyle)
 
-					// Inactive border: desaturate when dim_inactive is enabled
-					iFg := bFg
+				// Inactive border: desaturate when dim_inactive is enabled
+				iFg := bFg
+				iBg := borderBg
+				if iBg == "" {
+					iBg = bBg
+				}
+				if c.config.PaneHeader.DimInactive {
+					opacity := c.config.PaneHeader.DimOpacity
+					if opacity <= 0 || opacity > 1 {
+						opacity = 0.6
+					}
+					tBg := c.config.PaneHeader.TerminalBg
+					iFg = desaturateHex(iFg, opacity, tBg)
+					iBg = desaturateHex(iBg, opacity, tBg)
+				}
+				inactiveStyle := buildBorderStyle(iFg, iBg)
+				if inactiveStyle == "" {
+					inactiveStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
+				}
+				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
+					"pane-border-style", inactiveStyle)
+			}
+
+			if autoBorder {
+				bFg := baseFg
+				bBg := tabBg
+				for _, p := range win.Panes {
+					if isAuxiliaryPane(p) {
+						continue
+					}
 					iBg := borderBg
 					if iBg == "" {
 						iBg = bBg
 					}
+					iFg := bFg
 					if c.config.PaneHeader.DimInactive {
 						opacity := c.config.PaneHeader.DimOpacity
 						if opacity <= 0 || opacity > 1 {
@@ -1916,45 +1955,13 @@ func (c *Coordinator) updatePaneHeaderColors() {
 					if inactiveStyle == "" {
 						inactiveStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
 					}
-					args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
+					args = append(args, ";", "set-option", "-p", "-t", p.ID,
 						"pane-border-style", inactiveStyle)
-				}
-
-				if autoBorder {
-					bFg := baseFg
-					bBg := tabBg
-					for _, p := range win.Panes {
-						if isAuxiliaryPane(p) {
-							continue
-						}
-						iBg := borderBg
-						if iBg == "" {
-							iBg = bBg
-						}
-						iFg := bFg
-						if c.config.PaneHeader.DimInactive {
-							opacity := c.config.PaneHeader.DimOpacity
-							if opacity <= 0 || opacity > 1 {
-								opacity = 0.6
-							}
-							tBg := c.config.PaneHeader.TerminalBg
-							iFg = desaturateHex(iFg, opacity, tBg)
-							iBg = desaturateHex(iBg, opacity, tBg)
-						}
-						inactiveStyle := buildBorderStyle(iFg, iBg)
-						if inactiveStyle == "" {
-							inactiveStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
-						}
-						args = append(args, ";", "set-option", "-p", "-t", p.ID,
-							"pane-border-style", inactiveStyle)
-					}
 				}
 			}
 		}
-		if len(args) > 0 {
-			exec.Command("tmux", args...).Run()
-		}
 	}
+	return args
 }
 
 // GetWindowsHash returns a hash of current window state for change detection
@@ -4030,8 +4037,8 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			collapseBtn = c.config.PaneHeader.CollapseExpandedIcon
 		}
 	}
-	splitVBtn := "│"
-	splitHBtn := "─"
+	splitVBtn := "|"
+	splitHBtn := "-"
 	if contentPaneCount > 1 && collapseBtn == "" {
 		collapseBtn = "▾"
 		if isCollapsed {
@@ -4057,14 +4064,14 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		hGrowBtn = c.config.PaneHeader.ResizeGrowIcon
 	}
 	if hGrowBtn == "" {
-		hGrowBtn = ">"
+		hGrowBtn = "→"
 	}
 	hShrinkBtn := c.config.PaneHeader.ResizeHorizontalShrinkIcon
 	if hShrinkBtn == "" {
 		hShrinkBtn = c.config.PaneHeader.ResizeShrinkIcon
 	}
 	if hShrinkBtn == "" {
-		hShrinkBtn = "<"
+		hShrinkBtn = "←"
 	}
 	resizeSep := c.config.PaneHeader.ResizeSeparator
 	if resizeSep == "" {
@@ -4077,7 +4084,12 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	closeBtn := "×"
 	compactMode := width <= 120
 	if compactMode {
-		menuBtn = compactSplitVBtn + " " + compactSplitHBtn + " " + compactCloseBtn
+		// In compact mode show | - x; add collapse button when multiple panes exist
+		if contentPaneCount > 1 && collapseBtn != "" {
+			menuBtn = collapseBtn + " " + compactSplitVBtn + " " + compactSplitHBtn + " " + compactCloseBtn
+		} else {
+			menuBtn = compactSplitVBtn + " " + compactSplitHBtn + " " + compactCloseBtn
+		}
 	}
 	showMenuButton := compactMode
 	showInlineControls := !compactMode
@@ -4091,13 +4103,13 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		buttonsStr += menuBtn + "   "
 	}
 	if showInlineCollapse {
-		buttonsStr += collapseBtn + "   "
+		buttonsStr += collapseBtn + " "
 	}
 	if showInlineSplits {
-		buttonsStr += splitVBtn + "   " + splitHBtn + "   "
+		buttonsStr += splitVBtn + " " + splitHBtn + " "
 	}
 	if showResizeButtons {
-		buttonsStr += resizeSep + "   " + vGrowBtn + "   " + vShrinkBtn + "   " + hGrowBtn + "   " + hShrinkBtn + "   "
+		buttonsStr += resizeSep + " " + vGrowBtn + " " + vShrinkBtn + " " + hGrowBtn + " " + hShrinkBtn + " "
 	}
 	if showInlineClose {
 		buttonsStr += closeBtn + "  "
@@ -4237,22 +4249,30 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	cursor := btnAreaStart + 2
 	if showMenuButton {
 		if compactMode {
+			// Optional collapse button (when multi-pane)
+			if contentPaneCount > 1 && collapseBtn != "" {
+				collapseEnd := cursor + uniseg.StringWidth(collapseBtn) + 1
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: 0, EndLine: 0,
+					StartCol: cursor, EndCol: collapseEnd,
+					Action: "toggle_pane_collapse", Target: paneID,
+				})
+				cursor = collapseEnd
+			}
 			splitVEnd := cursor + uniseg.StringWidth(compactSplitVBtn) + 1
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
 				StartCol: cursor, EndCol: splitVEnd,
-				// "|" looks like a vertical divider → side-by-side panes → split-window -h
+				// "|" = vertical divider → side-by-side panes → split-window -h
 				Action: "header_split_h", Target: paneID,
 			})
-
 			splitHEnd := splitVEnd + uniseg.StringWidth(compactSplitHBtn) + 1
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
 				StartCol: splitVEnd, EndCol: splitHEnd,
-				// "-" looks like a horizontal divider → stacked panes → split-window -v
+				// "-" = horizontal divider → stacked panes → split-window -v
 				Action: "header_split_v", Target: paneID,
 			})
-
 			closeEnd := splitHEnd + uniseg.StringWidth(compactCloseBtn)
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
@@ -4270,8 +4290,9 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			cursor = menuEnd + 3
 		}
 	}
+	// Non-compact inline buttons use 1-space separators → each slot is 2 wide.
 	if showInlineCollapse {
-		collapseEnd := cursor + 4
+		collapseEnd := cursor + 2
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: cursor, EndCol: collapseEnd,
@@ -4280,29 +4301,29 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		cursor = collapseEnd
 	}
 	if showInlineSplits {
-		splitVEnd := cursor + 4
+		splitVEnd := cursor + 2
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: cursor, EndCol: splitVEnd,
-			// "│" = vertical divider icon → side-by-side panes → split-window -h
+			// "|" = vertical divider → side-by-side panes → split-window -h
 			Action: "header_split_h", Target: paneID,
 		})
 		cursor = splitVEnd
-		splitHEnd := cursor + 4
+		splitHEnd := cursor + 2
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: cursor, EndCol: splitHEnd,
-			// "─" = horizontal divider icon → stacked panes → split-window -v
+			// "-" = horizontal divider → stacked panes → split-window -v
 			Action: "header_split_v", Target: paneID,
 		})
 		cursor = splitHEnd
 	}
 	if showResizeButtons {
-		cursor += 4
-		vGrowEnd := cursor + 4
-		vShrinkEnd := vGrowEnd + 4
-		hGrowEnd := vShrinkEnd + 4
-		hShrinkEnd := hGrowEnd + 4
+		cursor += 2
+		vGrowEnd := cursor + 2
+		vShrinkEnd := vGrowEnd + 2
+		hGrowEnd := vShrinkEnd + 2
+		hShrinkEnd := hGrowEnd + 2
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: cursor, EndCol: vGrowEnd,
@@ -8700,7 +8721,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		case "pane_grow_h":
 			exec.Command("tmux", "resize-pane", "-t", paneID, "-R", "5").Run()
 		case "pane_shrink_h":
-			exec.Command("tmux", "resize-pane", "-t", paneID, "-L", "5").Run()
+			// -L 5 expands the left wall (no-op when left wall is at the terminal edge).
+			// Use absolute width to reliably shrink regardless of which side the pane is on.
+			wOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_width}").Output()
+			if w, err := strconv.Atoi(strings.TrimSpace(string(wOut))); err == nil && w > 10 {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-x", fmt.Sprintf("%d", w-5)).Run()
+			}
 		}
 
 		exec.Command("tmux", "select-pane", "-t", paneID).Run()

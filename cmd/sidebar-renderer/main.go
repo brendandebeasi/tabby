@@ -583,7 +583,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.Button == tea.MouseButtonWheelDown {
-		maxScroll := m.totalLines - m.height
+		maxScroll := m.totalLines - (m.height - m.pinnedHeight)
 		if maxScroll < 0 {
 			maxScroll = 0
 		}

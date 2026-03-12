@@ -380,6 +380,17 @@ tmux bind-key -T root MouseUp1Pane \
 tmux unbind-key -T root MouseUp3Pane 2>/dev/null || true
 tmux bind-key -T root MouseUp3Pane send-keys -M -t =
 
+# Scroll wheel: pass events directly to sidebar (mouse_any_flag is evaluated on the
+# active pane, not the pane under the mouse, so sidebar never gets the default passthrough).
+tmux bind-key -T root WheelUpPane \
+    if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
+        "send-keys -M -t =" \
+        "if-shell -F -t = '#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}' { send-keys -M } { copy-mode -e }"
+tmux bind-key -T root WheelDownPane \
+    if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
+        "send-keys -M -t =" \
+        "if-shell -F -t = '#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}' { send-keys -M } { send-keys -M }"
+
 # Enable focus events
 tmux set-option -g focus-events on
 
