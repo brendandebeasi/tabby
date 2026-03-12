@@ -3982,6 +3982,41 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 	}
 
+	// Find the specific pane this header belongs to
+	var foundPane *tmux.Pane
+	for i := range foundWindow.Panes {
+		if foundWindow.Panes[i].ID == paneID {
+			foundPane = &foundWindow.Panes[i]
+			break
+		}
+	}
+	if foundPane == nil {
+		blankLine := strings.Repeat(" ", width)
+		return &daemon.RenderPayload{
+			Content:    blankLine,
+			Width:      width,
+			Height:     1,
+			TotalLines: 1,
+		}
+	}
+
+	// Detect which resize directions apply to this pane based on neighbors
+	canResizeH := false // horizontal neighbors (side by side) -> left/right (←→)
+	canResizeV := false // vertical neighbors (stacked) -> up/down (↑↓)
+	for _, op := range foundWindow.Panes {
+		if isAuxiliaryPane(op) || op.ID == foundPane.ID {
+			continue
+		}
+		// Horizontal neighbor: vertical ranges overlap -> panes are side by side
+		if max(foundPane.Top, op.Top) < min(foundPane.Top+foundPane.Height, op.Top+op.Height) {
+			canResizeH = true
+		}
+		// Vertical neighbor: horizontal ranges overlap -> panes are stacked
+		if max(foundPane.Left, op.Left) < min(foundPane.Left+foundPane.Width, op.Left+op.Width) {
+			canResizeV = true
+		}
+	}
+
 	headerColors := c.GetHeaderColorsForPane(paneID)
 	headerBg := headerColors.Bg
 	headerFg := headerColors.Fg
@@ -4081,7 +4116,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	compactSplitHBtn := "-"
 	compactCloseBtn := "x"
 	closeBtn := "×"
-	compactMode := width <= 120
+	compactMode := width <= 40
 	if compactMode {
 		// In compact mode show | - x; add collapse button when multiple panes exist
 		if contentPaneCount > 1 && collapseBtn != "" {
@@ -4095,43 +4130,32 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	showInlineCollapse := collapseBtn != "" && showInlineControls
 	showInlineSplits := showInlineControls
-	showResizeButtons := contentPaneCount > 1 && showInlineControls
+	showVerticalResize := contentPaneCount > 1 && showInlineControls && canResizeV
+	showHorizontalResize := contentPaneCount > 1 && showInlineControls && canResizeH
 	showInlineClose := showInlineControls
 	buttonsStr := "  "
 	if showMenuButton {
 		buttonsStr += menuBtn + "   "
 	}
 	if showInlineCollapse {
-		buttonsStr += collapseBtn + " "
+		buttonsStr += collapseBtn + "  "
 	}
 	if showInlineSplits {
-		buttonsStr += splitVBtn + " " + splitHBtn + " "
+		buttonsStr += splitVBtn + " " + splitHBtn + "  "
 	}
-	if showResizeButtons {
-		buttonsStr += resizeSep + " " + vGrowBtn + " " + vShrinkBtn + " " + hGrowBtn + " " + hShrinkBtn + " "
+	if showVerticalResize || showHorizontalResize {
+		if showVerticalResize {
+			buttonsStr += vGrowBtn + " " + vShrinkBtn + " "
+		}
+		if showHorizontalResize {
+			buttonsStr += hGrowBtn + " " + hShrinkBtn + " "
+		}
+		buttonsStr += " "
 	}
 	if showInlineClose {
 		buttonsStr += closeBtn + "  "
 	}
 	buttonsWidth := uniseg.StringWidth(buttonsStr)
-
-	// Find the specific pane this header belongs to
-	var foundPane *tmux.Pane
-	for i := range foundWindow.Panes {
-		if foundWindow.Panes[i].ID == paneID {
-			foundPane = &foundWindow.Panes[i]
-			break
-		}
-	}
-	if foundPane == nil {
-		blankLine := strings.Repeat(" ", width)
-		return &daemon.RenderPayload{
-			Content:    blankLine,
-			Width:      width,
-			Height:     1,
-			TotalLines: 1,
-		}
-	}
 
 	// Build label for this pane: "win.pane command [path]"
 	// Use visual position (matching sidebar order) instead of tmux index
@@ -4289,7 +4313,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			cursor = menuEnd + 3
 		}
 	}
-	// Non-compact inline buttons use 1-space separators → each slot is 2 wide.
+	// Non-compact inline buttons: 1 space within groups, 2 spaces between groups.
 	if showInlineCollapse {
 		collapseEnd := cursor + 2
 		regions = append(regions, daemon.ClickableRegion{
@@ -4297,7 +4321,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			StartCol: cursor, EndCol: collapseEnd,
 			Action: "toggle_pane_collapse", Target: paneID,
 		})
-		cursor = collapseEnd
+		cursor = collapseEnd + 1 // extra space for group gap
 	}
 	if showInlineSplits {
 		splitVEnd := cursor + 2
@@ -4315,35 +4339,41 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			// "-" = horizontal divider → stacked panes → split-window -v
 			Action: "header_split_v", Target: paneID,
 		})
-		cursor = splitHEnd
+		cursor = splitHEnd + 1 // extra space for group gap
 	}
-	if showResizeButtons {
-		cursor += 2
-		vGrowEnd := cursor + 2
-		vShrinkEnd := vGrowEnd + 2
-		hGrowEnd := vShrinkEnd + 2
-		hShrinkEnd := hGrowEnd + 2
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 0,
-			StartCol: cursor, EndCol: vGrowEnd,
-			Action: "pane_grow_v", Target: paneID,
-		})
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 0,
-			StartCol: vGrowEnd, EndCol: vShrinkEnd,
-			Action: "pane_shrink_v", Target: paneID,
-		})
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 0,
-			StartCol: vShrinkEnd, EndCol: hGrowEnd,
-			Action: "pane_grow_h", Target: paneID,
-		})
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 0,
-			StartCol: hGrowEnd, EndCol: hShrinkEnd,
-			Action: "pane_shrink_h", Target: paneID,
-		})
-		cursor = hShrinkEnd
+	if showVerticalResize || showHorizontalResize {
+		// no separator — group gap already added after splits
+		if showVerticalResize {
+			vGrowEnd := cursor + 2
+			vShrinkEnd := vGrowEnd + 2
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: vGrowEnd,
+				Action: "pane_grow_v", Target: paneID,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: vGrowEnd, EndCol: vShrinkEnd,
+				Action: "pane_shrink_v", Target: paneID,
+			})
+			cursor = vShrinkEnd
+		}
+		if showHorizontalResize {
+			hGrowEnd := cursor + 2
+			hShrinkEnd := hGrowEnd + 2
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: hGrowEnd,
+				Action: "pane_grow_h", Target: paneID,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: hGrowEnd, EndCol: hShrinkEnd,
+				Action: "pane_shrink_h", Target: paneID,
+			})
+			cursor = hShrinkEnd
+		}
+		cursor += 2 // extra space for group gap before close
 	}
 	if showInlineClose {
 		regions = append(regions, daemon.ClickableRegion{
@@ -5517,6 +5547,14 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 
 				numPanes := len(contentPanes)
+				// Suppress non-AI busy icons when an AI pane is actively working
+				anyAIBusyA := false
+				for _, p := range contentPanes {
+					if p.AIBusy {
+						anyAIBusyA = true
+						break
+					}
+				}
 				for pi, pane := range contentPanes {
 					isLastPane := pi == numPanes-1
 					paneStartLine := currentLine
@@ -5582,8 +5620,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						} else {
 							paneAlertIcon = alertStyle.Render(inputIcon)
 						}
-					} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) {
-						// Non-AI pane with foreground process
+					} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) && !anyAIBusyA {
+						// Non-AI pane with foreground process; suppress when AI is busy in same window
 						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
 						busyFrames := c.getBusyFrames()
 						paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
@@ -6045,6 +6083,14 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			}
 
 			numPanes := len(contentPanes)
+			// Suppress non-AI busy icons when an AI pane is actively working
+			anyAIBusyB := false
+			for _, p := range contentPanes {
+				if p.AIBusy {
+					anyAIBusyB = true
+					break
+				}
+			}
 			for pi, pane := range contentPanes {
 				isLastPane := pi == numPanes-1
 				paneStartLine := currentLine
@@ -6109,7 +6155,8 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					} else {
 						paneAlertIcon = alertStyle.Render(inputIcon)
 					}
-				} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) {
+				} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) && !anyAIBusyB {
+					// Non-AI pane with foreground process; suppress when AI is busy in same window
 					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
 					busyFrames := c.getBusyFrames()
 					paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])

@@ -39,16 +39,16 @@ credentials.json
 *.so
 *.dylib
 
-# Local binaries
-input-logger
-mousetest
-sidebar-renderer
-tabby-daemon
-tabby-web-bridge
-test-renderer
-pane-header
-cycle-pane
-manage-group
+# Local binaries (anchored to root to avoid matching source directories)
+/input-logger
+/mousetest
+/sidebar-renderer
+/tabby-daemon
+/tabby-web-bridge
+/test-renderer
+/pane-header
+/cycle-pane
+/manage-group
 
 # Compiled zsh scripts
 *.zwc

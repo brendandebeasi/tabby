@@ -24,12 +24,8 @@ CONFIG_FILE="$TABBY_CONFIG_FILE"
 TERMINAL_APP=$(grep -E '^\s*terminal_app:' "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/.*terminal_app:\s*//' | tr -d '"'"'"' ' || echo "")
 
 echo "  TERMINAL_APP from config: '$TERMINAL_APP'" >> "$LOG"
-if [ -z "$TERMINAL_APP" ]; then
-    echo "Error: terminal_app not configured in config.yaml" >> "$LOG"
-    echo "Error: terminal_app not configured in config.yaml"
-    echo "Add: terminal_app: Ghostty  (or iTerm, Terminal, Alacritty, kitty, WezTerm)"
-    exit 1
-fi
+# terminal_app is optional — tmux navigation works without it;
+# app activation is skipped if not configured.
 
 # Parse target: [session:]window[.pane]
 if [[ "$TARGET" == *":"* ]]; then
@@ -74,24 +70,28 @@ $TMUX_CMD select-pane -t "$PANE_TARGET" 2>>"$LOG" || echo "  select-pane failed"
 # Small delay to ensure tmux has processed the window/pane switch
 sleep 0.1
 
-# Signal all sidebars in the session to refresh
-# Use tmux list-panes to find sidebar processes directly (more reliable than PID files)
-echo "  Signaling all sidebars in session $SESSION" >> "$LOG"
-SIGNALED=0
-while IFS='|' read -r cmd pid; do
-    if [ "$cmd" = "sidebar" ] && [ -n "$pid" ]; then
-        echo "    Sending SIGUSR1 to sidebar PID $pid" >> "$LOG"
-        kill -USR1 "$pid" 2>/dev/null && ((SIGNALED++)) || true
+# Signal the tabby daemon to refresh (daemon-mode architecture)
+SESSION_ID=$($TMUX_CMD display-message -t "$SESSION" -p '#{session_id}' 2>/dev/null || true)
+if [ -n "$SESSION_ID" ]; then
+    DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
+    if [ -f "$DAEMON_PID_FILE" ]; then
+        DAEMON_PID=$(cat "$DAEMON_PID_FILE" 2>/dev/null || true)
+        if [ -n "$DAEMON_PID" ]; then
+            kill -USR1 "$DAEMON_PID" 2>/dev/null && echo "  Signaled daemon PID $DAEMON_PID" >> "$LOG" || true
+        fi
     fi
-done < <($TMUX_CMD list-panes -s -t "$SESSION" -F '#{pane_current_command}|#{pane_pid}' 2>/dev/null)
-echo "  Signaled $SIGNALED sidebar(s)" >> "$LOG"
+fi
 
 # Also refresh the status bar (for horizontal mode)
 $TMUX_CMD refresh-client -t "$SESSION" -S 2>/dev/null || true
 echo "  Refreshed tmux client status bar" >> "$LOG"
 
-# Bring terminal to foreground using AppleScript
-# For Ghostty: try to raise the specific window containing our tmux session
+# Bring terminal to foreground using AppleScript (skip if not configured)
+if [ -z "$TERMINAL_APP" ]; then
+    echo "  No terminal_app configured — skipping activation" >> "$LOG"
+    echo "  Done" >> "$LOG"
+    exit 0
+fi
 echo "  Activating $TERMINAL_APP (raising correct window)" >> "$LOG"
 if [ "$TERMINAL_APP" = "Ghostty" ]; then
     # Ghostty doesn't expose AppleScript windows directly, but System Events can

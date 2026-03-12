@@ -175,6 +175,15 @@ else
     echo "enabled" > "$SIDEBAR_STATE_FILE"
     tmux set-option @tabby_sidebar "enabled"
 
+    # Snapshot saved pane layouts before system panes are killed/re-spawned.
+    # after-split-window will overwrite @tabby_layout_* when new system panes are
+    # added, so we preserve them here for restoration after spawn completes.
+    while IFS= read -r window_id; do
+        [ -z "$window_id" ] && continue
+        saved=$(tmux show-option -gqv "@tabby_layout_${window_id}" 2>/dev/null || true)
+        [ -n "$saved" ] && tmux set-option -g "@tabby_restore_layout_${window_id}" "$saved" 2>/dev/null || true
+    done < <(tmux list-windows -F "#{window_id}" 2>/dev/null || true)
+
     # Close any existing sidebar/renderer panes first (gracefully with SIGTERM)
     while IFS= read -r line; do
         [ -z "$line" ] && continue
@@ -243,6 +252,17 @@ else
     # The daemon handles spawning sidebar renderers and pane headers
     # via its windowCheckTicker loop. Just wait briefly for it to spawn them.
     sleep 1
+
+    # Restore content pane layouts — re-spawning system panes disrupts saved ratios.
+    while IFS= read -r window_id; do
+        [ -z "$window_id" ] && continue
+        restore_layout=$(tmux show-option -gqv "@tabby_restore_layout_${window_id}" 2>/dev/null || true)
+        if [ -n "$restore_layout" ]; then
+            tmux select-layout -t "$window_id" "$restore_layout" 2>/dev/null || true
+            tmux set-option -g "@tabby_layout_${window_id}" "$restore_layout" 2>/dev/null || true
+            tmux set-option -gu "@tabby_restore_layout_${window_id}" 2>/dev/null || true
+        fi
+    done < <(tmux list-windows -F "#{window_id}" 2>/dev/null || true)
 
     # Get all windows
     WINDOWS=$(tmux list-windows -F "#{window_id}")
