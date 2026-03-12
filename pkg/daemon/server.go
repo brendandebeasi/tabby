@@ -481,7 +481,15 @@ func (s *Server) UpdateClientSize(clientID string, width, height int) {
 	if client, ok := s.clients[clientID]; ok {
 		client.Width = width
 		client.Height = height
-		// Clear content hash to force re-render
+		client.lastContentHash = 0
+	}
+}
+
+func (s *Server) UpdateClientWidth(clientID string, width int) {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	if client, ok := s.clients[clientID]; ok {
+		client.Width = width
 		client.lastContentHash = 0
 	}
 }

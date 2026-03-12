@@ -216,6 +216,10 @@ type Coordinator struct {
 	hookPaneBusyIdleAt map[string]int64  // pane ID → unix timestamp when hook-busy but process looks idle
 	aiBellUntil        map[int]int64     // window index → unix timestamp when bell expires (window-level)
 
+	// Callback to sync sidebar client widths in the server's client map
+	// Called during expand_sidebar to update server-side Width before BroadcastRender
+	OnSyncSidebarClientWidths func(newWidth int)
+
 	// Context menu state (for in-renderer menus)
 	OnSendMenu         func(clientID string, menu *daemon.MenuPayload)
 	OnSendMarkerPicker func(clientID string, picker *daemon.MarkerPickerPayload)
@@ -8601,26 +8605,25 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Resize ALL sidebar panes to minimal width
 		go syncAllSidebarWidths(1)
 		coordinatorDebugLog.Printf("Sidebar collapsed: saved width=%d, syncing all to 1", currentWidth)
-		return false
+		return true // Trigger re-render to show collapsed ">" content
 
 	case "expand_sidebar":
-		// Expand sidebar back to previous width
 		c.sidebarCollapsed = false
 		newWidth := c.sidebarPreviousWidth
 		if newWidth < 15 {
-			newWidth = 25 // Default if no previous width
+			newWidth = 25
 		}
-		// Save collapse state to tmux options
 		exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_collapsed").Run()
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
-		// Sync all sidebar panes back to normal width
-		go syncAllSidebarWidths(newWidth)
-		// Update client width tracking
+		syncAllSidebarWidths(newWidth)
 		c.clientWidthsMu.Lock()
 		c.clientWidths[clientID] = newWidth
 		c.clientWidthsMu.Unlock()
+		if c.OnSyncSidebarClientWidths != nil {
+			c.OnSyncSidebarClientWidths(newWidth)
+		}
 		coordinatorDebugLog.Printf("Sidebar expanded: restoring width=%d, syncing all", newWidth)
-		return false
+		return true
 
 	case "sidebar_settings":
 		// Show sidebar settings context menu

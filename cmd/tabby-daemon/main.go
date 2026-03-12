@@ -1483,6 +1483,13 @@ func main() {
 	coordinator.OnSendColorPicker = func(clientID string, picker *daemon.ColorPickerPayload) {
 		server.SendColorPickerToClient(clientID, picker)
 	}
+	coordinator.OnSyncSidebarClientWidths = func(newWidth int) {
+		for _, id := range server.GetAllClientIDs() {
+			if !strings.HasPrefix(id, "header:") {
+				server.UpdateClientWidth(id, newWidth)
+			}
+		}
+	}
 
 	// Register SIGUSR1 handler BEFORE server.Start() creates the socket.
 	// ensure_sidebar.sh sends USR1 the moment it detects the socket, so the
