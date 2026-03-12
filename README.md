@@ -24,6 +24,7 @@ A modern tab manager for tmux with grouping, a clickable vertical sidebar, and d
 - [Development](#development)
 - [Tabby Web (Local-Only)](#tabby-web-local-only)
 - [macOS Notifications with Deep Links](#macos-notifications-with-deep-links)
+- [Session Persistence (tmux-resurrect)](#session-persistence-tmux-resurrect)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [License](#license)
@@ -712,6 +713,56 @@ To avoid duplicate notifications when using custom hooks:
 ```
 
 **OpenCode** — set `sound` and `notification` to `false` in `opencode-notifier.json` (shown above).
+
+## Session Persistence (tmux-resurrect)
+
+Tabby integrates with [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) so your sessions survive tmux server restarts and reboots. When resurrect is installed, Tabby automatically:
+
+- **On save** (`prefix + Ctrl-s`): Strips Tabby utility panes (sidebar, pane headers, tabbar) from the save file so they don't create zombie shell panes on restore.
+- **On restore** (`prefix + Ctrl-r`): Cleans stale runtime state, kills leftover processes, and re-initializes the sidebar/tabbar based on your saved mode.
+
+### Setup
+
+Install tmux-resurrect via [TPM](https://github.com/tmux-plugins/tpm):
+
+```bash
+# Add to ~/.tmux.conf (before the Tabby plugin line)
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+```
+
+Then `prefix + I` to install, or `tmux source ~/.tmux.conf` to reload. That's it — Tabby detects resurrect and wires the hooks automatically.
+
+### What Gets Saved and Restored
+
+| Preserved by resurrect | Restored by Tabby |
+|---|---|
+| Window layout and names | Sidebar / tabbar UI |
+| Pane working directories | Pane headers |
+| Running programs (vim, etc.) | Daemon process |
+| Global options (`@tabby_sidebar` mode) | Mouse state cleanup |
+| Window groups and custom colors | Runtime files |
+
+### Manual Installation (without TPM)
+
+```bash
+git clone https://github.com/tmux-plugins/tmux-resurrect ~/.tmux/plugins/tmux-resurrect
+```
+
+Add to `~/.tmux.conf` (before Tabby's `run-shell` line):
+```bash
+run-shell ~/.tmux/plugins/tmux-resurrect/resurrect.tmux
+```
+
+### Hook Coexistence
+
+Tabby only sets the resurrect hook options if they are unset or already owned by Tabby. If you have custom resurrect hooks configured, Tabby will not override them. To use both, chain them in a wrapper script:
+
+```bash
+#!/usr/bin/env bash
+# my-resurrect-restore-wrapper.sh
+/path/to/your/custom-hook.sh
+~/.tmux/plugins/tabby/scripts/resurrect_restore_hook.sh
+```
 
 ## Known Limitations
 

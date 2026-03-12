@@ -126,6 +126,8 @@ TABBY_USE_RENDERER=1 /Users/b/git/tabby/scripts/toggle_sidebar_daemon.sh
 | `scripts/set-tabby-indicator.sh` | Set sidebar indicators (busy, bell, input) |
 | `scripts/opencode-tabby-hook.sh` | Built-in OpenCode notification hook |
 | `scripts/ensure_sidebar.sh` | Sidebar recovery + `@tabby_spawning` guard |
+| `scripts/resurrect_save_hook.sh` | tmux-resurrect post-save: strips Tabby panes from save file |
+| `scripts/resurrect_restore_hook.sh` | tmux-resurrect post-restore: cleans state + re-inits Tabby |
 
 ## Testing and Verification
 

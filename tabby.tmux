@@ -653,6 +653,21 @@ tmux set-hook -g session-created "run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_
 # (RESIZE_SIDEBAR_SCRIPT already defined above for window-unlinked hook)
 tmux set-hook -g client-resized "run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
+# tmux-resurrect integration (options are inert if resurrect is not installed)
+RESURRECT_SAVE_HOOK="$CURRENT_DIR/scripts/resurrect_save_hook.sh"
+RESURRECT_RESTORE_HOOK="$CURRENT_DIR/scripts/resurrect_restore_hook.sh"
+chmod +x "$RESURRECT_SAVE_HOOK" "$RESURRECT_RESTORE_HOOK"
+
+EXISTING_SAVE_HOOK=$(tmux show-option -gqv @resurrect-hook-post-save-layout 2>/dev/null || echo "")
+if [ -z "$EXISTING_SAVE_HOOK" ] || echo "$EXISTING_SAVE_HOOK" | grep -q "tabby"; then
+    tmux set-option -g @resurrect-hook-post-save-layout "$RESURRECT_SAVE_HOOK"
+fi
+
+EXISTING_RESTORE_HOOK=$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null || echo "")
+if [ -z "$EXISTING_RESTORE_HOOK" ] || echo "$EXISTING_RESTORE_HOOK" | grep -q "tabby"; then
+    tmux set-option -g @resurrect-hook-post-restore-all "$RESURRECT_RESTORE_HOOK"
+fi
+
 # Keep tmux native chooser shortcuts available
 tmux bind-key w choose-tree -Zw
 tmux bind-key s choose-tree -Zs
