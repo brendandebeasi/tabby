@@ -127,6 +127,7 @@ Tabby follows standard tmux keybindings. All standard tmux shortcuts work as exp
 | `prefix + Tab` | Toggle vertical sidebar |
 | `prefix + G` | Create new group |
 | `Ctrl + <` or `Alt + <` | Collapse/expand sidebar |
+| `Cmd + Shift + \` | Collapse/expand sidebar (requires [terminal config](#sidebar-collapse-shortcut)) |
 
 When the sidebar is focused, press `m` to open the marker picker for the active window.
 
@@ -186,6 +187,59 @@ The sidebar can be collapsed to maximize screen space:
 - **Collapsed state**: Shows `>` down the entire height - click anywhere to expand
 
 When collapsed, the sidebar takes only 2 characters of width. When expanded, it restores to your configured width.
+
+#### Sidebar Collapse Shortcut
+
+Tabby includes `scripts/toggle_sidebar_collapse.sh` which collapses or expands the sidebar without killing the daemon. Unlike `prefix + Tab` (which fully toggles the sidebar on/off), this keeps the daemon running and just shrinks/restores the sidebar pane.
+
+The script is bound in tmux to `Ctrl+Shift+\` using CSI u encoding:
+
+```bash
+# Already configured by tabby.tmux — add to ~/.tmux.conf if needed:
+bind-key -n 'C-S-\' run-shell -b '/path/to/tabby/scripts/toggle_sidebar_collapse.sh'
+```
+
+**Requires `extended-keys`** in your tmux.conf (tmux 3.2+):
+```bash
+set -g extended-keys on
+set -sa terminal-features 'xterm*:extkeys'
+```
+
+To use `Cmd+Shift+\` as the trigger, your terminal must send the CSI u sequence `\x1b[92;6u` (which tmux decodes as `Ctrl+Shift+\`). Configuration varies by terminal:
+
+**Ghostty** — add to `~/.config/ghostty/config`:
+```
+super+shift+backslash=text:\x1b[92;6u
+```
+
+On macOS, `Cmd+Shift+\` is bound to "Show All Tabs" by default. Disable it:
+```bash
+defaults write com.mitchellh.ghostty NSUserKeyEquivalents -dict-add "Show All Tabs" '\0'
+# Restart Ghostty after running this
+```
+
+**Blink Shell (iPad)** — add to your keyboard configuration (`kb.json`):
+```json
+{
+  "keys": "cmd+shift+\\",
+  "action": "hex",
+  "value": "1b5b39323b3675"
+}
+```
+
+The hex value `1b5b39323b3675` is the byte representation of `\x1b[92;6u`.
+
+**iTerm2** — add a key mapping in Preferences → Profiles → Keys:
+- Shortcut: `⌘⇧\`
+- Action: Send Escape Sequence
+- Value: `[92;6u`
+
+**Kitty** — add to `~/.config/kitty/kitty.conf`:
+```
+map cmd+shift+backslash send_text all \x1b[92;6u
+```
+
+**Other terminals** — any terminal that can send arbitrary escape sequences will work. Map `Cmd+Shift+\` (or your preferred shortcut) to send the bytes `\x1b[92;6u` (ESC `[` `9` `2` `;` `6` `u`).
 
 ### SSH Bell Notifications
 
