@@ -29,4 +29,11 @@ else
   exit 1
 fi
 
+if grep -q '"args": \["{event}", "{projectName}", "{sessionTitle}", "{message}", "{sessionId}"\]' "$SETUP_HOOKS"; then
+  echo "✓ OpenCode notifier passes event, message, and session context"
+else
+  echo "✗ OpenCode notifier config missing session/message args"
+  exit 1
+fi
+
 echo "=== AI hooks wiring test passed ==="

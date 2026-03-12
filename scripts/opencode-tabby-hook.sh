@@ -5,6 +5,7 @@ RAW_EVENT="${1:-}"
 PROJECT_NAME="${2:-}"
 SESSION_TITLE="${3:-}"
 NOTIFIER_MESSAGE="${4:-}"
+SESSION_ID_ARG="${5:-}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INDICATOR="$SCRIPT_DIR/set-tabby-indicator.sh"
@@ -105,6 +106,16 @@ get_latest_session_info() {
     # Returns: session_id|directory
     sqlite3 "$OPENCODE_DB" "
         SELECT id, directory FROM session ORDER BY time_updated DESC LIMIT 1
+    " 2>/dev/null
+}
+
+get_session_info_by_id() {
+    local session_id="${1:-}"
+    if [ -z "$session_id" ] || ! command -v sqlite3 &>/dev/null || [ ! -f "$OPENCODE_DB" ]; then
+        return
+    fi
+    sqlite3 "$OPENCODE_DB" "
+        SELECT id, directory FROM session WHERE id = '$session_id' LIMIT 1
     " 2>/dev/null
 }
 
@@ -226,9 +237,13 @@ send_notification() {
         return
     fi
 
-    # Look up latest session from DB for deep-linking and rich content
     local session_info session_id session_dir
-    session_info=$(get_latest_session_info)
+    if [ -n "$SESSION_ID_ARG" ]; then
+        session_info=$(get_session_info_by_id "$SESSION_ID_ARG")
+    fi
+    if [ -z "$session_info" ]; then
+        session_info=$(get_latest_session_info)
+    fi
     session_id=$(echo "$session_info" | cut -d'|' -f1)
     session_dir=$(echo "$session_info" | cut -d'|' -f2)
 
@@ -247,9 +262,11 @@ send_notification() {
     fi
 
     # Body: last assistant message from DB, stripped of markdown
-    local db_text
-    db_text=$(get_last_assistant_text "$session_id" 300 | strip_markdown)
-    local message="${db_text:-${NOTIFIER_MESSAGE:-$fallback_message}}"
+    local db_text=""
+    if [ -n "$session_id" ]; then
+        db_text=$(get_last_assistant_text "$session_id" 300 | strip_markdown)
+    fi
+    local message="${NOTIFIER_MESSAGE:-${db_text:-$fallback_message}}"
 
     # Deep-link strategy:
     # 1. If we have tmux context → focus_pane.sh to jump to the correct pane (CLI mode)
@@ -263,7 +280,7 @@ send_notification() {
     fi
 
     # Group by session to replace stale notifications (not window index)
-    local group_id="opencode-${session_id:-${WINDOW_INDEX:-0}}"
+    local group_id="opencode-${session_id:-${SESSION_ID_ARG:-${WINDOW_INDEX:-0}}}"
 
     # Resolve group emoji → cached PNG for notification thumbnail
     local emoji_image=""

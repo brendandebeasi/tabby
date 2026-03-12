@@ -410,7 +410,7 @@ else:
   "command": {
     "enabled": true,
     "path": "$wrapper",
-    "args": ["{event}"],
+    "args": ["{event}", "{projectName}", "{sessionTitle}", "{message}", "{sessionId}"],
     "minDuration": 0
   },
   "events": {
