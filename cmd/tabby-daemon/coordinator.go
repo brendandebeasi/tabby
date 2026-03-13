@@ -8599,12 +8599,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		currentWidth := c.getClientWidth(clientID)
 		c.sidebarPreviousWidth = currentWidth
 		c.sidebarCollapsed = true
-		// Save collapse state to tmux options
-		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_collapsed", "1").Run()
-		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_previous_width", fmt.Sprintf("%d", currentWidth)).Run()
-		// Resize ALL sidebar panes to minimal width (synchronous to prevent race with rapid toggle)
+		// Save collapse state to tmux options (async — doesn't affect visual result)
+		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_collapsed", "1").Run()
+		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_previous_width", fmt.Sprintf("%d", currentWidth)).Run()
+		// Resize synchronously to prevent race with rapid expand
 		syncAllSidebarWidths(1)
-		coordinatorDebugLog.Printf("Sidebar collapsed: saved width=%d, syncing all to 1", currentWidth)
+		coordinatorDebugLog.Printf("Sidebar collapsed: saved width=%d, synced all to 1", currentWidth)
 		return true // Trigger re-render to show collapsed ">" content
 
 	case "expand_sidebar":
@@ -8613,8 +8613,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if newWidth < 15 {
 			newWidth = 25
 		}
-		exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_collapsed").Run()
-		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
+		// Save expand state to tmux options (async — doesn't affect visual result)
+		go exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_collapsed").Run()
+		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
+		// Resize synchronously to prevent race with rapid collapse
 		syncAllSidebarWidths(newWidth)
 		c.clientWidthsMu.Lock()
 		c.clientWidths[clientID] = newWidth
@@ -8622,7 +8624,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if c.OnSyncSidebarClientWidths != nil {
 			c.OnSyncSidebarClientWidths(newWidth)
 		}
-		coordinatorDebugLog.Printf("Sidebar expanded: restoring width=%d, syncing all", newWidth)
+		coordinatorDebugLog.Printf("Sidebar expanded: restoring width=%d, synced all", newWidth)
 		return true
 
 	case "sidebar_settings":
