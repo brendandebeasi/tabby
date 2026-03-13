@@ -191,7 +191,6 @@ type Coordinator struct {
 	// Sidebar collapse state
 	sidebarCollapsed     bool
 	sidebarPreviousWidth int
-	sidebarCollapseMu    sync.Mutex
 
 	// Touch mode runtime override ("", "1", "0")
 	touchModeOverride string
@@ -8604,8 +8603,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return c.handleSemanticAction(clientID, input)
 
 	case "collapse_sidebar":
-		c.sidebarCollapseMu.Lock()
-		defer c.sidebarCollapseMu.Unlock()
 		currentWidth := c.getClientWidth(clientID)
 		c.sidebarPreviousWidth = currentWidth
 		c.sidebarCollapsed = true
@@ -8616,8 +8613,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "expand_sidebar":
-		c.sidebarCollapseMu.Lock()
-		defer c.sidebarCollapseMu.Unlock()
 		c.sidebarCollapsed = false
 		newWidth := c.sidebarPreviousWidth
 		if newWidth < 15 {
