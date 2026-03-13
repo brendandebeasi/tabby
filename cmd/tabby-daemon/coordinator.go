@@ -8147,9 +8147,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	// Custom pet widget click detection (bypasses BubbleZone)
 	// Uses tracked line positions from renderPetWidget for precise hit testing
-	// Note: We try this for ALL clicks if pet is enabled - handlePetWidgetClick will
-	// check if the click is actually within the pet widget bounds
-	if c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.Pin {
+	// Only run for actual mouse clicks (Button is set), not programmatic actions
+	// sent via socket (e.g. toggle_collapse_sidebar from keybinding scripts)
+	if c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.Pin && input.Button != "" {
 		if handled := c.handlePetWidgetClick(clientID, input); handled {
 			return false // Pet actions don't need window refresh
 		}

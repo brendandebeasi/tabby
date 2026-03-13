@@ -283,7 +283,7 @@ func (s *Server) handleClient(conn net.Conn) {
 				var input InputPayload
 				if json.Unmarshal(payloadBytes, &input) == nil {
 					if s.DebugLog != nil {
-						s.DebugLog("SOCKET_INPUT client=%s type=%s btn=%s action=%s", clientID, input.Type, input.Button, input.Action)
+						s.DebugLog("SOCKET_INPUT client=%s type=%s btn=%s action=%s resolved=%s", clientID, input.Type, input.Button, input.Action, input.ResolvedAction)
 					}
 					if s.OnInput != nil {
 						// Recover from panics in input handler to avoid killing client goroutine

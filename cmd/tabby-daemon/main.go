@@ -1422,7 +1422,7 @@ func main() {
 
 	// Set up input callback with panic recovery
 	server.OnInput = func(clientID string, input *daemon.InputPayload) {
-		logEvent("INPUT_START client=%s type=%s btn=%s action=%s x=%d y=%d", clientID, input.Type, input.Button, input.Action, input.MouseX, input.MouseY)
+		logEvent("INPUT_START client=%s type=%s btn=%s action=%s resolved=%s x=%d y=%d", clientID, input.Type, input.Button, input.Action, input.ResolvedAction, input.MouseX, input.MouseY)
 		defer func() {
 			if r := recover(); r != nil {
 				debugLog.Printf("PANIC in OnInput handler (client=%s): %v", clientID, r)
