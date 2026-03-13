@@ -64,6 +64,28 @@ func SetCoordinatorDebugLog(logger *log.Logger) {
 	coordinatorDebugLog = logger
 }
 
+// tmuxCmdTimeout is the default timeout for bare tmux commands in the coordinator.
+// This prevents indefinite hangs during macOS sleep/wake or tmux server stalls.
+const tmuxCmdTimeout = 5 * time.Second
+
+// tmuxRun executes a tmux command with a timeout. Fire-and-forget.
+func tmuxRun(args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "tmux", args...).Run()
+}
+
+// tmuxOutputCtx executes a tmux command with a timeout and returns stdout.
+func tmuxOutputCtx(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("tmux %s: timed out after %v", args[0], tmuxCmdTimeout)
+	}
+	return out, err
+}
+
 // StartDeadlockWatchdog starts a goroutine that monitors for deadlocks
 func StartDeadlockWatchdog() {
 	deadlockWatchdog = true
@@ -3483,7 +3505,7 @@ func (c *Coordinator) persistSidebarWidthProfile(windowID string, width int) {
 		return
 	}
 
-	windowWidthOut, err := exec.Command("tmux", "display-message", "-p", "-t", windowID, "#{window_width}").Output()
+	windowWidthOut, err := tmuxOutputCtx("display-message", "-p", "-t", windowID, "#{window_width}")
 	if err != nil {
 		return
 	}
@@ -3493,14 +3515,14 @@ func (c *Coordinator) persistSidebarWidthProfile(windowID string, width int) {
 	}
 
 	mobileMax := 110
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_window_cols").Output(); err == nil {
+	if out, err := tmuxOutputCtx("show-option", "-gqv", "@tabby_sidebar_mobile_max_window_cols"); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 60 {
 			mobileMax = v
 		}
 	}
 
 	tabletMax := 170
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_tablet_max_window_cols").Output(); err == nil {
+	if out, err := tmuxOutputCtx("show-option", "-gqv", "@tabby_sidebar_tablet_max_window_cols"); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= mobileMax {
 			tabletMax = v
 		}
@@ -3512,7 +3534,7 @@ func (c *Coordinator) persistSidebarWidthProfile(windowID string, width int) {
 	} else if windowWidth <= tabletMax {
 		opt = "@tabby_sidebar_width_tablet"
 	}
-	exec.Command("tmux", "set-option", "-gq", opt, fmt.Sprintf("%d", width)).Run()
+	tmuxRun("set-option", "-gq", opt, fmt.Sprintf("%d", width))
 }
 
 func (c *Coordinator) isLikelyAutoConstrainedSidebarWidth(windowID string, currentWidth int) bool {
@@ -4579,28 +4601,23 @@ func syncOtherSidebarWidths(newWidth int, skipWindowID string) {
 // If skipWindowID is non-empty, skips the sidebar in that window.
 // Respects @tabby_sync_width window option (default true).
 func syncSidebarWidthsExcept(newWidth int, skipWindowID string) {
-	// Query panes with their window ID and sync setting
-	out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}|#{window_id}|#{?@tabby_sync_width,#{@tabby_sync_width},1}|#{pane_current_command}").Output()
+	out, err := tmuxOutputCtx("list-panes", "-a", "-F", "#{pane_id}|#{window_id}|#{?@tabby_sync_width,#{@tabby_sync_width},1}|#{pane_current_command}")
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.Split(line, "|")
-		// Check for "sidebar" prefix - tmux truncates pane_current_command to ~15 chars
-		// so "sidebar-renderer" may appear as "sidebar-rendere"
 		if len(parts) >= 4 && strings.HasPrefix(parts[3], "sidebar") {
 			paneID := parts[0]
 			windowID := parts[1]
 			syncSetting := parts[2]
 
-			// Skip the specified window (if any)
 			if skipWindowID != "" && windowID == skipWindowID {
 				continue
 			}
 
-			// Only resize if sync is enabled (1/true) or default (1)
 			if syncSetting == "1" || syncSetting == "true" {
-				exec.Command("tmux", "resize-pane", "-t", paneID, "-x", fmt.Sprintf("%d", newWidth)).Run()
+				tmuxRun("resize-pane", "-t", paneID, "-x", fmt.Sprintf("%d", newWidth))
 			}
 		}
 	}

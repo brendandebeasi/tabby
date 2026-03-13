@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -1576,7 +1577,9 @@ func main() {
 				if crashLog != nil {
 					crashLog.Printf("LOOP_STALL task=%s timeout=%v uptime=%s clients=%d consecutive=%d/%d",
 						task, timeout, uptime, server.ClientCount(), stalls, maxConsecutiveStalls)
-					crashLog.Printf("LOOP_STALL stack:\n%s", debug.Stack())
+					buf := make([]byte, 64*1024)
+					n := runtime.Stack(buf, true)
+					crashLog.Printf("LOOP_STALL all goroutines:\n%s", buf[:n])
 				}
 				if stalls >= maxConsecutiveStalls {
 					logEvent("LOOP_FATAL task=%s reason=max_consecutive_stalls stalls=%d", task, stalls)
