@@ -191,6 +191,7 @@ type Coordinator struct {
 	// Sidebar collapse state
 	sidebarCollapsed     bool
 	sidebarPreviousWidth int
+	sidebarCollapseMu    sync.Mutex
 
 	// Touch mode runtime override ("", "1", "0")
 	touchModeOverride string
@@ -8594,29 +8595,36 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		coordinatorDebugLog.Printf("Sidebar grow: %d -> %d (syncing all)", currentWidth, newWidth)
 		return false
 
+	case "toggle_collapse_sidebar":
+		if c.sidebarCollapsed {
+			input.ResolvedAction = "expand_sidebar"
+		} else {
+			input.ResolvedAction = "collapse_sidebar"
+		}
+		return c.handleSemanticAction(clientID, input)
+
 	case "collapse_sidebar":
-		// Collapse sidebar to minimal width (1 col)
+		c.sidebarCollapseMu.Lock()
+		defer c.sidebarCollapseMu.Unlock()
 		currentWidth := c.getClientWidth(clientID)
 		c.sidebarPreviousWidth = currentWidth
 		c.sidebarCollapsed = true
-		// Save collapse state to tmux options (async — doesn't affect visual result)
-		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_collapsed", "1").Run()
+		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_collapsed", "1").Run()
 		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_previous_width", fmt.Sprintf("%d", currentWidth)).Run()
-		// Resize synchronously to prevent race with rapid expand
 		syncAllSidebarWidths(1)
 		coordinatorDebugLog.Printf("Sidebar collapsed: saved width=%d, synced all to 1", currentWidth)
-		return true // Trigger re-render to show collapsed ">" content
+		return true
 
 	case "expand_sidebar":
+		c.sidebarCollapseMu.Lock()
+		defer c.sidebarCollapseMu.Unlock()
 		c.sidebarCollapsed = false
 		newWidth := c.sidebarPreviousWidth
 		if newWidth < 15 {
 			newWidth = 25
 		}
-		// Save expand state to tmux options (async — doesn't affect visual result)
-		go exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_collapsed").Run()
+		exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_collapsed").Run()
 		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
-		// Resize synchronously to prevent race with rapid collapse
 		syncAllSidebarWidths(newWidth)
 		c.clientWidthsMu.Lock()
 		c.clientWidths[clientID] = newWidth
