@@ -71,6 +71,7 @@ if [ -z "$SIDEBAR_MODE" ]; then SIDEBAR_MODE="full"; fi
 
 DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
 RENDERER_BIN="$CURRENT_DIR/bin/sidebar-renderer"
+WATCHDOG_SCRIPT="$CURRENT_DIR/scripts/watchdog_daemon.sh"
 
 if [ "$MODE" = "enabled" ]; then
 	tmux set-option -g status off
@@ -99,9 +100,9 @@ if [ "$MODE" = "enabled" ]; then
     if [ "$DAEMON_RUNNING" = "false" ]; then
         rm -f "$DAEMON_SOCK" "$DAEMON_PID_FILE"
         if [ "${TABBY_DEBUG:-}" = "1" ]; then
-            "$DAEMON_BIN" -session "$SESSION_ID" -debug &
+            "$WATCHDOG_SCRIPT" -session "$SESSION_ID" -debug &
         else
-            "$DAEMON_BIN" -session "$SESSION_ID" &
+            "$WATCHDOG_SCRIPT" -session "$SESSION_ID" &
         fi
         # Wait for socket
         for i in $(seq 1 20); do

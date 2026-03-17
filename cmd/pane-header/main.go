@@ -125,15 +125,18 @@ func connectCmd() tea.Cmd {
 	return func() tea.Msg {
 		sockPath := daemon.SocketPath(*sessionID)
 
-		// Try connecting with retry
 		var conn net.Conn
 		var err error
-		for i := 0; i < 10; i++ {
+		delay := 5 * time.Millisecond
+		for i := 0; i < 12; i++ {
 			conn, err = net.Dial("unix", sockPath)
 			if err == nil {
 				break
 			}
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(delay)
+			if delay < 200*time.Millisecond {
+				delay *= 2
+			}
 		}
 		if err != nil {
 			debugLog.Printf("Failed to connect to daemon: %v", err)
@@ -498,22 +501,15 @@ func (m rendererModel) View() string {
 		return ""
 	}
 
-	// NOTE: Background color is already applied by the daemon in applyBackgroundFill().
-	// Do NOT re-apply it here, as that causes double-wrapping of escape sequences.
-
-	lines := strings.Split(m.content, "\n")
-	var visible []string
-	for i := 0; i < m.height && i < len(lines); i++ {
-		line := lines[i]
-		// Pad line to full width if shorter
-		lineWidth := runewidth.StringWidth(stripAnsi(line))
-		if lineWidth < m.width {
-			line += strings.Repeat(" ", m.width-lineWidth)
-		}
-		visible = append(visible, line)
+	line := m.content
+	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
+		line = line[:idx]
 	}
-
-	return strings.Join(visible, "\n")
+	lineWidth := runewidth.StringWidth(stripAnsi(line))
+	if lineWidth < m.width {
+		line += strings.Repeat(" ", m.width-lineWidth)
+	}
+	return line
 }
 
 // receiveLoop reads messages from the daemon
@@ -662,17 +658,11 @@ func main() {
 
 	// Reset terminal state before starting to clean up any stale modes
 	resetTerminal := func() {
-		// Disable ALL mouse tracking modes comprehensively
-		// 1000=basic mouse tracking, 1002=button motion, 1003=any motion (cell motion)
-		// 1004=focus events, 1005=UTF-8 encoding, 1006=SGR encoding, 1015=URXVT encoding
-		fmt.Print("\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?1015l")
-		// Exit alternate screen buffer if active
-		fmt.Print("\033[?1049l")
-		// Disable bracketed paste mode
-		fmt.Print("\033[?2004l")
-		// Reset to normal mode and show cursor
-		fmt.Print("\033[0m\033[?25h")
-		// Flush output
+		os.Stdout.WriteString(
+			"\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?1015l" +
+				"\033[?1049l" +
+				"\033[?2004l" +
+				"\033[0m\033[?25h")
 		os.Stdout.Sync()
 	}
 

@@ -193,6 +193,17 @@ case "$INDICATOR" in
             fi
         fi
         ;;
+    crash)
+        if [ "$VALUE" = "1" ]; then
+            if [ -n "$CLAUDE_WIN" ]; then
+                tmux set-option -t ":$CLAUDE_WIN" -w @tabby_crash 1 2>/dev/null
+            fi
+        else
+            if [ -n "$CLAUDE_WIN" ]; then
+                tmux set-option -t ":$CLAUDE_WIN" -wu @tabby_crash 2>/dev/null
+            fi
+        fi
+        ;;
 esac
 
 # Signal the daemon to refresh immediately (USR1 triggers instant re-render)

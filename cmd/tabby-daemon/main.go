@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1417,9 +1418,13 @@ func main() {
 
 	refreshCh := make(chan struct{}, 10)
 
+	// Ignore SIGPIPE — daemon runs backgrounded and stdout/stderr may become broken pipes
+	signal.Ignore(syscall.SIGPIPE)
+
 	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	var selfTerminating atomic.Bool
 
 	// Set up input callback with panic recovery
 	server.OnInput = func(clientID string, input *daemon.InputPayload) {
@@ -1586,6 +1591,7 @@ func main() {
 					if crashLog != nil {
 						crashLog.Printf("LOOP_FATAL: %d consecutive stalls for %s, self-terminating", stalls, task)
 					}
+					selfTerminating.Store(true)
 					select {
 					case sigCh <- syscall.SIGTERM:
 					default:
@@ -1921,6 +1927,14 @@ func main() {
 	debugLog.Printf("Shutting down daemon (signal=%v, uptime=%s)", sig, uptime)
 	logEvent("DAEMON_STOP session=%s pid=%d signal=%v uptime=%s clients=%d", *sessionID, os.Getpid(), sig, uptime, server.ClientCount())
 	crashLog.Printf("Daemon stopped: signal=%v pid=%d uptime=%s clients=%d", sig, os.Getpid(), uptime, server.ClientCount())
+
+	// Write clean-stop sentinel so the watchdog knows this was intentional.
+	// Skip if self-terminating due to LOOP_FATAL — that's a crash, not a clean stop.
+	if !selfTerminating.Load() {
+		sentinelPath := daemon.RuntimePath(*sessionID, ".clean-stop")
+		os.WriteFile(sentinelPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)
+	}
+
 	close(heartbeatDone)
 	server.Stop()
 }

@@ -447,14 +447,14 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.colorPickerShowing {
-			return m.handleColorPickerKey(msg)
+			return (&m).handleColorPickerKey(msg)
 		}
 		if m.pickerShowing {
-			return m.handlePickerKey(msg)
+			return (&m).handlePickerKey(msg)
 		}
 		// Menu mode: intercept all keys
 		if m.menuShowing {
-			return m.handleMenuKey(msg)
+			return (&m).handleMenuKey(msg)
 		}
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -496,7 +496,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		return m.handleMouse(msg)
+		return (&m).handleMouse(msg)
 
 	case longPressMsg:
 		// Long-press timer fired - check if still valid (allow some tolerance for touch)
@@ -541,9 +541,9 @@ func abs(x int) int {
 }
 
 // handleMouse processes mouse events with long-press detection for iOS/mobile
-func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m *rendererModel) handleMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 	if !m.connected {
-		return m, nil
+		return *m, nil
 	}
 
 	if m.pickerShowing {
@@ -580,7 +580,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.scrollY--
 			m.sendViewportUpdate()
 		}
-		return m, nil
+		return *m, nil
 	}
 	if msg.Button == tea.MouseButtonWheelDown {
 		maxScroll := m.totalLines - (m.height - m.pinnedHeight)
@@ -591,7 +591,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.scrollY++
 			m.sendViewportUpdate()
 		}
-		return m, nil
+		return *m, nil
 	}
 
 	// Handle mouse lifecycle for long-press detection
@@ -614,7 +614,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.mouseDownTime = time.Now()
 				m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
 				m.longPressActive = false
-				return m, nil
+				return *m, nil
 			}
 
 			// Check for double-click (second press within threshold)
@@ -641,7 +641,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				debugLog.Printf("  Starting long-press timer at X=%d Y=%d", msg.X, msg.Y)
 			}
 			// Start a timer for long-press
-			return m, tea.Tick(longPressThreshold, func(t time.Time) tea.Msg {
+			return *m, tea.Tick(longPressThreshold, func(t time.Time) tea.Msg {
 				return longPressMsg{X: msg.X, Y: msg.Y}
 			})
 		}
@@ -666,7 +666,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.mouseDownValid = false
 			}
 		}
-		return m, nil
+		return *m, nil
 
 	case tea.MouseActionRelease:
 		// Skip this release if menu just closed (prevents false drag detection)
@@ -675,7 +675,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.longPressActive = false
 			m.mouseDownTime = time.Time{}
 			m.mouseDownValid = false
-			return m, nil
+			return *m, nil
 		}
 
 		if !m.mouseDownValid {
@@ -690,13 +690,13 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 			m.longPressActive = false
 			m.mouseDownTime = time.Time{}
-			return m, nil
+			return *m, nil
 		}
 		m.mouseDownValid = false
 
 		if !m.isTouchMode {
 			if m.mouseDownTime.IsZero() {
-				return m, nil
+				return *m, nil
 			}
 			elapsed := time.Since(m.mouseDownTime)
 			m.mouseDownTime = time.Time{}
@@ -705,7 +705,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			dy := abs(msg.Y - m.mouseDownPos.Y)
 			isDrag := elapsed > 0 && (dx > 5 || dy > 2)
 			if isDrag || elapsed <= 0 {
-				return m, nil
+				return *m, nil
 			}
 
 			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
@@ -714,7 +714,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		wasLongPressActive := m.longPressActive
 		m.longPressActive = false
 		if m.mouseDownTime.IsZero() {
-			return m, nil
+			return *m, nil
 		}
 		elapsed := time.Since(m.mouseDownTime)
 		m.mouseDownTime = time.Time{}
@@ -738,7 +738,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				debugLog.Printf("  Drag detected: from (%d,%d) to (%d,%d), dx=%d dy=%d",
 					m.mouseDownPos.X, m.mouseDownPos.Y, msg.X, msg.Y, dx, dy)
 			}
-			return m, nil
+			return *m, nil
 		}
 
 		// Record click time/position for double-click detection (checked on next press)
@@ -753,14 +753,14 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
 		}
 		// Long-press would have already triggered via timer
-		return m, nil
+		return *m, nil
 	}
 
-	return m, nil
+	return *m, nil
 }
 
 // processMouseClick handles the actual click processing after determining button type
-func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSimulated bool) (tea.Model, tea.Cmd) {
+func (m *rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSimulated bool) (rendererModel, tea.Cmd) {
 	var resolvedAction, resolvedTarget string
 
 	// Translate Y to content line (accounting for scroll)
@@ -869,13 +869,13 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSim
 	}
 
 	m.sendInput(input)
-	return m, nil
+	return *m, nil
 }
 
 // --- Context Menu Handling ---
 
 // handleMenuKey processes keyboard events while menu is showing
-func (m rendererModel) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *rendererModel) handleMenuKey(msg tea.KeyMsg) (rendererModel, tea.Cmd) {
 	key := msg.String()
 
 	// Check menu item shortcut keys FIRST (before navigation)
@@ -887,7 +887,7 @@ func (m rendererModel) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.menuShowing = false
 			m.menuDragActive = false
 			m.menuRestoreFocus()
-			return m, nil
+			return *m, nil
 		}
 	}
 
@@ -898,13 +898,13 @@ func (m rendererModel) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.menuShowing = false
 		m.menuDragActive = false
 		m.menuRestoreFocus()
-		return m, nil
+		return *m, nil
 	case "up", "k":
 		m.menuMoveHighlight(-1)
-		return m, nil
+		return *m, nil
 	case "down", "j":
 		m.menuMoveHighlight(1)
-		return m, nil
+		return *m, nil
 	case "enter":
 		if m.menuHighlight >= 0 && m.menuHighlight < len(m.menuItems) {
 			item := m.menuItems[m.menuHighlight]
@@ -919,13 +919,13 @@ func (m rendererModel) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.menuShowing = false
 		m.menuDragActive = false
 		m.menuRestoreFocus()
-		return m, nil
+		return *m, nil
 	}
-	return m, nil
+	return *m, nil
 }
 
 // handleMenuMouse processes mouse events while menu is showing
-func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m *rendererModel) handleMenuMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 	// Scroll wheel should close menu
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
 		if inputLog != nil && isInputLogEnabled() {
@@ -935,7 +935,7 @@ func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.menuShowing = false
 		m.menuDragActive = false
 		m.menuRestoreFocus()
-		return m, nil
+		return *m, nil
 	}
 
 	inMenu := m.isInMenuBounds(msg.X, msg.Y)
@@ -955,7 +955,7 @@ func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.menuHighlight = -1
 		}
-		return m, nil
+		return *m, nil
 
 	case tea.MouseActionRelease:
 		if m.menuDragActive {
@@ -967,14 +967,14 @@ func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					m.menuShowing = false
 					m.skipNextRelease = true // Prevent false drag detection
 					m.menuRestoreFocus()
-					return m, nil
+					return *m, nil
 				}
 			}
 			// Released outside or on non-selectable item - keep menu open
 			// so user can use keyboard shortcuts after releasing the mouse
-			return m, nil
+			return *m, nil
 		}
-		return m, nil
+		return *m, nil
 
 	case tea.MouseActionPress:
 		if !inMenu {
@@ -987,7 +987,7 @@ func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.menuDragActive = false
 			m.skipNextRelease = true // Prevent false drag detection
 			m.menuRestoreFocus()
-			return m, nil
+			return *m, nil
 		}
 		if msg.Button == tea.MouseButtonLeft && !m.menuDragActive {
 			// Direct left-click on menu item (not drag mode)
@@ -1001,14 +1001,14 @@ func (m rendererModel) handleMenuMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					m.menuShowing = false
 					m.skipNextRelease = true // Prevent false drag detection
 					m.menuRestoreFocus()
-					return m, nil
+					return *m, nil
 				}
 			}
 		}
-		return m, nil
+		return *m, nil
 	}
 
-	return m, nil
+	return *m, nil
 }
 
 // menuMoveHighlight moves the highlight to the next/previous selectable item
@@ -1332,30 +1332,30 @@ func (m *rendererModel) pickerEnsureCursorVisible() {
 	}
 }
 
-func (m rendererModel) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *rendererModel) handlePickerKey(msg tea.KeyMsg) (rendererModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "escape", "q":
 		m.pickerDismiss(true)
-		return m, nil
+		return *m, nil
 	case "enter":
 		m.pickerSelectCurrent()
-		return m, nil
+		return *m, nil
 	case "up", "k":
 		if len(m.pickerFiltered) > 0 && m.pickerCursor > 0 {
 			m.pickerCursor--
 			m.pickerEnsureCursorVisible()
 		}
-		return m, nil
+		return *m, nil
 	case "down", "j":
 		if len(m.pickerFiltered) > 0 && m.pickerCursor < len(m.pickerFiltered)-1 {
 			m.pickerCursor++
 			m.pickerEnsureCursorVisible()
 		}
-		return m, nil
+		return *m, nil
 	case "ctrl+u":
 		m.pickerQuery = ""
 		m.pickerApplyFilter()
-		return m, nil
+		return *m, nil
 	case "backspace", "ctrl+h":
 		if m.pickerQuery != "" {
 			r := []rune(m.pickerQuery)
@@ -1364,13 +1364,13 @@ func (m rendererModel) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.pickerApplyFilter()
 			}
 		}
-		return m, nil
+		return *m, nil
 	}
 
 	if msg.String() == "space" {
 		m.pickerQuery += " "
 		m.pickerApplyFilter()
-		return m, nil
+		return *m, nil
 	}
 
 	if len(msg.Runes) > 0 {
@@ -1382,7 +1382,7 @@ func (m rendererModel) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pickerApplyFilter()
 	}
 
-	return m, nil
+	return *m, nil
 }
 
 func (m rendererModel) pickerModalLayout() (startX, startY, modalW, modalH int) {
@@ -1429,12 +1429,12 @@ func (m rendererModel) pickerIndexAt(screenX, screenY int) int {
 	return idx
 }
 
-func (m rendererModel) handlePickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m *rendererModel) handlePickerMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 	if msg.Button == tea.MouseButtonWheelUp {
 		if m.pickerScroll > 0 {
 			m.pickerScroll--
 		}
-		return m, nil
+		return *m, nil
 	}
 	if msg.Button == tea.MouseButtonWheelDown {
 		rows := m.pickerVisibleRows()
@@ -1445,7 +1445,7 @@ func (m rendererModel) handlePickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) 
 		if m.pickerScroll < max {
 			m.pickerScroll++
 		}
-		return m, nil
+		return *m, nil
 	}
 
 	idx := m.pickerIndexAt(msg.X, msg.Y)
@@ -1457,7 +1457,7 @@ func (m rendererModel) handlePickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) 
 	case tea.MouseActionPress:
 		if idx == -2 {
 			m.pickerDismiss(true)
-			return m, nil
+			return *m, nil
 		}
 		if idx >= 0 {
 			m.pickerCursor = idx
@@ -1467,11 +1467,11 @@ func (m rendererModel) handlePickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) 
 		if m.pickerMouseDown && idx >= 0 && idx == m.pickerCursor {
 			m.pickerSelectCurrent()
 			m.pickerMouseDown = false
-			return m, nil
+			return *m, nil
 		}
 		m.pickerMouseDown = false
 	}
-	return m, nil
+	return *m, nil
 }
 
 func clampInt(v, min, max int) int {
@@ -1713,54 +1713,54 @@ func renderGradientBar(width, cursor, maxVal int, colorForValue func(int) string
 	return b.String()
 }
 
-func (m rendererModel) handleColorPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *rendererModel) handleColorPickerKey(msg tea.KeyMsg) (rendererModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "escape", "q":
 		m.colorPickerDismiss(true)
-		return m, nil
+		return *m, nil
 	case "enter":
 		m.colorPickerApply()
-		return m, nil
+		return *m, nil
 	case "left", "h":
 		m.colorPickerAdjust(-5)
-		return m, nil
+		return *m, nil
 	case "right", "l":
 		m.colorPickerAdjust(5)
-		return m, nil
+		return *m, nil
 	case "shift+left", "shift+h":
 		m.colorPickerAdjust(-1)
-		return m, nil
+		return *m, nil
 	case "shift+right", "shift+l":
 		m.colorPickerAdjust(1)
-		return m, nil
+		return *m, nil
 	case "up", "k", "shift+tab", "backtab":
 		m.colorPickerFocus = (m.colorPickerFocus + 2) % 3
-		return m, nil
+		return *m, nil
 	case "down", "j", "tab":
 		m.colorPickerFocus = (m.colorPickerFocus + 1) % 3
-		return m, nil
+		return *m, nil
 	}
-	return m, nil
+	return *m, nil
 }
 
-func (m rendererModel) handleColorPickerMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m *rendererModel) handleColorPickerMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 	startX, startY, modalW, modalH := m.colorPickerModalLayout()
 	inModal := msg.X >= startX && msg.X < startX+modalW && msg.Y >= startY && msg.Y < startY+modalH
 	if msg.Action == tea.MouseActionPress && !inModal {
 		m.colorPickerDismiss(true)
-		return m, nil
+		return *m, nil
 	}
 
 	if msg.Button != tea.MouseButtonLeft {
-		return m, nil
+		return *m, nil
 	}
 	if msg.Action != tea.MouseActionPress && msg.Action != tea.MouseActionMotion {
-		return m, nil
+		return *m, nil
 	}
 
 	barX, barW, hueY, satY, litY := m.colorPickerBarGeometry()
 	if msg.Y != hueY && msg.Y != satY && msg.Y != litY {
-		return m, nil
+		return *m, nil
 	}
 	relX := msg.X - barX
 	switch msg.Y {
@@ -1774,7 +1774,7 @@ func (m rendererModel) handleColorPickerMouse(msg tea.MouseMsg) (tea.Model, tea.
 		m.colorPickerFocus = 2
 		m.colorPickerLit = sliderValueAtPos(relX, barW, 100)
 	}
-	return m, nil
+	return *m, nil
 }
 
 func (m rendererModel) renderColorPickerModal() []string {
@@ -2079,12 +2079,12 @@ func (m rendererModel) View() string {
 			if row < 0 || row >= len(visible) {
 				continue
 			}
-			left := strings.Repeat(" ", startX)
+			left := bgStyle.Render(strings.Repeat(" ", startX))
 			rightWidth := m.width - startX - modalW
 			if rightWidth < 0 {
 				rightWidth = 0
 			}
-			right := strings.Repeat(" ", rightWidth)
+			right := bgStyle.Render(strings.Repeat(" ", rightWidth))
 			visible[row] = left + pl + right
 		}
 	}
@@ -2097,12 +2097,12 @@ func (m rendererModel) View() string {
 			if row < 0 || row >= len(visible) {
 				continue
 			}
-			left := strings.Repeat(" ", startX)
+			left := bgStyle.Render(strings.Repeat(" ", startX))
 			rightWidth := m.width - startX - modalW
 			if rightWidth < 0 {
 				rightWidth = 0
 			}
-			right := strings.Repeat(" ", rightWidth)
+			right := bgStyle.Render(strings.Repeat(" ", rightWidth))
 			visible[row] = left + pl + right
 		}
 	}

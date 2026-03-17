@@ -58,6 +58,7 @@ TABBAR_HEIGHT=2
 
 DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
 RENDERER_BIN="$CURRENT_DIR/bin/sidebar-renderer"
+WATCHDOG_SCRIPT="$CURRENT_DIR/scripts/watchdog_daemon.sh"
 
 # Get mode: prefer global option (source of truth), fall back to session then state file
 MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
@@ -93,11 +94,25 @@ if [ "$MODE" = "enabled" ]; then
 
         # Start daemon if needed - it will spawn renderers via its ticker loop
         if [ "$DAEMON_RUNNING" = "false" ]; then
-            rm -f "$DAEMON_SOCK" "$DAEMON_PID_FILE"
-            if [ "${TABBY_DEBUG:-}" = "1" ]; then
-                "$DAEMON_BIN" -session "$SESSION_ID" -debug &
-            else
-                "$DAEMON_BIN" -session "$SESSION_ID" &
+            # Check if a watchdog is already running (race with toggle_sidebar_daemon)
+            WATCHDOG_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.watchdog.pid"
+            if [ -f "$WATCHDOG_PID_FILE" ]; then
+                WD_PID=$(cat "$WATCHDOG_PID_FILE" 2>/dev/null || echo "")
+                if [ -n "$WD_PID" ] && kill -0 "$WD_PID" 2>/dev/null; then
+                    # Watchdog is alive — it will restart daemon, nothing to do
+                    printf "%s ensure_sidebar skip: watchdog running pid=%s\n" "$TS" "$WD_PID" >> "$LOG"
+                else
+                    rm -f "$WATCHDOG_PID_FILE"
+                fi
+            fi
+
+            if [ ! -f "$WATCHDOG_PID_FILE" ] || ! kill -0 "$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+                rm -f "$DAEMON_SOCK" "$DAEMON_PID_FILE"
+                if [ "${TABBY_DEBUG:-}" = "1" ]; then
+                    "$WATCHDOG_SCRIPT" -session "$SESSION_ID" -debug &
+                else
+                    "$WATCHDOG_SCRIPT" -session "$SESSION_ID" &
+                fi
             fi
             # Wait for socket
             for i in $(seq 1 20); do

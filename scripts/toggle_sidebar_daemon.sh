@@ -86,6 +86,9 @@ if [ -z "$SIDEBAR_MODE" ]; then SIDEBAR_MODE="full"; fi
 
 DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
 RENDERER_BIN="$CURRENT_DIR/bin/sidebar-renderer"
+WATCHDOG_SCRIPT="$CURRENT_DIR/scripts/watchdog_daemon.sh"
+CLEAN_STOP_SENTINEL="/tmp/tabby-daemon-${SESSION_ID}.clean-stop"
+WATCHDOG_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.watchdog.pid"
 
 # Check if daemon binaries exist
 # Note: Old sidebar code archived in .archive/old-sidebar/ (not loaded by default)
@@ -122,6 +125,9 @@ fi
 if [ "$CURRENT_STATE" = "enabled" ]; then
     # === DISABLE SIDEBARS ===
 
+    # Write sentinel so the watchdog knows this is an intentional stop
+    echo $$ > "$CLEAN_STOP_SENTINEL"
+
     # Kill daemon if running
     if [ -f "$DAEMON_PID_FILE" ]; then
         DAEMON_PID=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
@@ -131,6 +137,15 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
         rm -f "$DAEMON_PID_FILE"
     fi
     rm -f "$DAEMON_SOCK"
+
+    # Kill watchdog if running
+    if [ -f "$WATCHDOG_PID_FILE" ]; then
+        WATCHDOG_PID=$(cat "$WATCHDOG_PID_FILE" 2>/dev/null || echo "")
+        if [ -n "$WATCHDOG_PID" ] && kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+            kill "$WATCHDOG_PID" 2>/dev/null || true
+        fi
+        rm -f "$WATCHDOG_PID_FILE"
+    fi
 
     # Close all sidebar and renderer panes in session (gracefully)
     RENDERER_PIDS=""
@@ -216,9 +231,9 @@ else
     tmux set-option -g @tabby_last_pane "$CURRENT_PANE"
 
     if [ "${TABBY_DEBUG:-}" = "1" ]; then
-        "$DAEMON_BIN" -session "$SESSION_ID" -debug &
+        "$WATCHDOG_SCRIPT" -session "$SESSION_ID" -debug &
     else
-        "$DAEMON_BIN" -session "$SESSION_ID" &
+        "$WATCHDOG_SCRIPT" -session "$SESSION_ID" &
     fi
 
     SOCKET_READY=false

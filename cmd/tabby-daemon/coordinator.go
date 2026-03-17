@@ -54,6 +54,11 @@ type lockInfo struct {
 	location  string
 }
 
+type CWDColorMapping struct {
+	Color string `json:"color,omitempty"`
+	Icon  string `json:"icon,omitempty"`
+}
+
 func init() {
 	// Default to discard (no logging)
 	coordinatorDebugLog = log.New(io.Discard, "", 0)
@@ -192,6 +197,9 @@ type Coordinator struct {
 
 	// Pet state
 	pet petState
+
+	cwdColors   map[string]CWDColorMapping
+	cwdColorsMu sync.RWMutex
 
 	// Last known width (for pet physics clamping)
 	lastWidth int
@@ -682,6 +690,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		config:             cfg,
 		bgDetector:         bgDetector,
 		theme:              theme,
+		cwdColors:          make(map[string]CWDColorMapping),
 		collapsedGroups:    make(map[string]bool),
 		clientWidths:       make(map[string]int),
 		pendingMenus:       make(map[string][]menuItemDef),
@@ -729,6 +738,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 
 	// Load pet state from shared file
 	c.loadPetState()
+	c.loadCWDColors()
 
 	// Initialize LLM if thoughts are enabled
 	if cfg.Widgets.Pet.Thoughts {
@@ -1108,6 +1118,11 @@ func petStatePath() string {
 	return paths.StatePath("pet.json")
 }
 
+func cwdColorsPath() string {
+	paths.EnsureStateDir()
+	return paths.StatePath("cwd-colors.json")
+}
+
 // loadPetState loads pet state from disk (used once at startup for persistence across restarts).
 func (c *Coordinator) loadPetState() {
 	data, err := os.ReadFile(petStatePath())
@@ -1121,6 +1136,192 @@ func (c *Coordinator) loadPetState() {
 func (c *Coordinator) savePetState() {
 	data, _ := json.Marshal(c.pet)
 	os.WriteFile(petStatePath(), data, 0644)
+}
+
+func (c *Coordinator) loadCWDColors() {
+	data, err := os.ReadFile(cwdColorsPath())
+	if err != nil {
+		return
+	}
+
+	loaded := make(map[string]CWDColorMapping)
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return
+	}
+
+	c.cwdColorsMu.Lock()
+	c.cwdColors = loaded
+	c.cwdColorsMu.Unlock()
+}
+
+func (c *Coordinator) saveCWDColors() {
+	c.cwdColorsMu.RLock()
+	cloned := make(map[string]CWDColorMapping, len(c.cwdColors))
+	for k, v := range c.cwdColors {
+		cloned[k] = v
+	}
+	c.cwdColorsMu.RUnlock()
+
+	data, err := json.MarshalIndent(cloned, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(cwdColorsPath(), data, 0644)
+}
+
+func normalizeCWD(cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return ""
+	}
+	return filepath.Clean(cwd)
+}
+
+func firstPaneCWD(win tmux.Window) string {
+	if len(win.Panes) == 0 {
+		return ""
+	}
+	return normalizeCWD(win.Panes[0].CurrentPath)
+}
+
+func (c *Coordinator) getCWDColorMapping(cwd string) (CWDColorMapping, bool) {
+	normalized := normalizeCWD(cwd)
+	if normalized == "" {
+		return CWDColorMapping{}, false
+	}
+
+	c.cwdColorsMu.RLock()
+	mapping, ok := c.cwdColors[normalized]
+	c.cwdColorsMu.RUnlock()
+	return mapping, ok
+}
+
+func (c *Coordinator) setCWDColor(cwd, color string) {
+	normalized := normalizeCWD(cwd)
+	if normalized == "" {
+		return
+	}
+
+	c.cwdColorsMu.Lock()
+	mapping := c.cwdColors[normalized]
+	mapping.Color = strings.TrimSpace(color)
+	if mapping.Color == "" && strings.TrimSpace(mapping.Icon) == "" {
+		delete(c.cwdColors, normalized)
+	} else {
+		c.cwdColors[normalized] = mapping
+	}
+	c.cwdColorsMu.Unlock()
+
+	c.saveCWDColors()
+}
+
+func (c *Coordinator) setCWDIcon(cwd, icon string) {
+	normalized := normalizeCWD(cwd)
+	if normalized == "" {
+		return
+	}
+
+	c.cwdColorsMu.Lock()
+	mapping := c.cwdColors[normalized]
+	mapping.Icon = strings.TrimSpace(icon)
+	if strings.TrimSpace(mapping.Color) == "" && mapping.Icon == "" {
+		delete(c.cwdColors, normalized)
+	} else {
+		c.cwdColors[normalized] = mapping
+	}
+	c.cwdColorsMu.Unlock()
+
+	c.saveCWDColors()
+}
+
+func (c *Coordinator) getWindowFirstPaneCWDByIndex(windowIndex int) string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	for _, win := range c.windows {
+		if win.Index == windowIndex {
+			return firstPaneCWD(win)
+		}
+	}
+	return ""
+}
+
+func (c *Coordinator) getActiveWindowFirstPaneCWD() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	for _, win := range c.windows {
+		if win.Active {
+			return firstPaneCWD(win)
+		}
+	}
+	return ""
+}
+
+func (c *Coordinator) resolveWindowCWD(windowIndex int) string {
+	cwd := c.getWindowFirstPaneCWDByIndex(windowIndex)
+	if cwd != "" {
+		return cwd
+	}
+	return c.getActiveWindowFirstPaneCWD()
+}
+
+func (c *Coordinator) windowTargetForIndex(windowIndex int) string {
+	target := fmt.Sprintf(":%d", windowIndex)
+	if c.sessionID != "" {
+		target = fmt.Sprintf("%s:%d", c.sessionID, windowIndex)
+	}
+	return target
+}
+
+func (c *Coordinator) setWindowColor(windowIndex int, color string) {
+	trimmedColor := strings.TrimSpace(color)
+	if trimmedColor == "" {
+		return
+	}
+
+	windowTarget := c.windowTargetForIndex(windowIndex)
+	exec.Command("tmux", "set-window-option", "-t", windowTarget, "@tabby_color", trimmedColor).Run()
+
+	if cwd := c.resolveWindowCWD(windowIndex); cwd != "" {
+		c.setCWDColor(cwd, trimmedColor)
+	}
+}
+
+func (c *Coordinator) setWindowIcon(windowIndex int, icon string) {
+	trimmedIcon := strings.TrimSpace(icon)
+	windowTarget := c.windowTargetForIndex(windowIndex)
+	if trimmedIcon == "" {
+		exec.Command("tmux", "set-window-option", "-t", windowTarget, "-u", "@tabby_icon").Run()
+	} else {
+		exec.Command("tmux", "set-window-option", "-t", windowTarget, "@tabby_icon", trimmedIcon).Run()
+	}
+
+	if cwd := c.resolveWindowCWD(windowIndex); cwd != "" {
+		c.setCWDIcon(cwd, trimmedIcon)
+	}
+}
+
+func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
+	for i := range windows {
+		cwd := firstPaneCWD(windows[i])
+		if cwd == "" {
+			continue
+		}
+
+		mapping, ok := c.getCWDColorMapping(cwd)
+		if !ok {
+			continue
+		}
+
+		if windows[i].CustomColor == "" && strings.TrimSpace(mapping.Color) != "" {
+			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_color", mapping.Color).Run()
+			windows[i].CustomColor = mapping.Color
+		}
+
+		if strings.TrimSpace(windows[i].Icon) == "" && strings.TrimSpace(mapping.Icon) != "" {
+			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_icon", mapping.Icon).Run()
+			windows[i].Icon = mapping.Icon
+		}
+	}
 }
 
 // RefreshWindows fetches current window/pane state from tmux
@@ -1137,6 +1338,8 @@ func (c *Coordinator) RefreshWindows() {
 	if err != nil {
 		return
 	}
+
+	c.applyCWDColorIconMappings(windows)
 
 	touchModeOverride := ""
 	{
@@ -8111,11 +8314,11 @@ func (c *Coordinator) applyColorPickerSelection(scope, target, hexColor string) 
 	}
 
 	if scope == "window" {
-		windowTarget := ":" + target
-		if c.sessionID != "" {
-			windowTarget = c.sessionID + ":" + target
+		windowIndex, err := strconv.Atoi(strings.TrimSpace(target))
+		if err != nil {
+			return false
 		}
-		exec.Command("tmux", "set-window-option", "-t", windowTarget, "@tabby_color", hexColor).Run()
+		c.setWindowColor(windowIndex, hexColor)
 		return true
 	}
 
@@ -9488,6 +9691,28 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 		return
 	}
 
+	if strings.HasPrefix(item.Command, "tabby-set-window-color:") {
+		parts := strings.SplitN(item.Command, ":", 3)
+		if len(parts) == 3 {
+			windowIndex, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err == nil {
+				c.setWindowColor(windowIndex, parts[2])
+			}
+		}
+		return
+	}
+
+	if strings.HasPrefix(item.Command, "tabby-set-window-icon:") {
+		parts := strings.SplitN(item.Command, ":", 3)
+		if len(parts) == 3 {
+			windowIndex, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err == nil {
+				c.setWindowIcon(windowIndex, parts[2])
+			}
+		}
+		return
+	}
+
 	// Execute the tmux command via temp file (handles complex quoting correctly)
 	executeTmuxCommand(item.Command)
 }
@@ -9526,18 +9751,11 @@ func (c *Coordinator) applyMarkerSelection(scope, target, markerValue string) bo
 	value := strings.TrimSpace(markerValue)
 
 	if scope == "window" {
-		if strings.TrimSpace(target) == "" {
+		windowIndex, err := strconv.Atoi(strings.TrimSpace(target))
+		if err != nil {
 			return false
 		}
-		windowTarget := ":" + target
-		if c.sessionID != "" {
-			windowTarget = c.sessionID + ":" + target
-		}
-		if value == "" {
-			exec.Command("tmux", "set-window-option", "-t", windowTarget, "-u", "@tabby_icon").Run()
-		} else {
-			exec.Command("tmux", "set-window-option", "-t", windowTarget, "@tabby_icon", value).Run()
-		}
+		c.setWindowIcon(windowIndex, value)
 		return true
 	}
 
@@ -9685,10 +9903,11 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	}
 	if !c.config.Sidebar.HidePredefinedColors {
 		for _, color := range colorOptions {
-			setColorCmd := fmt.Sprintf("set-window-option -t %s @tabby_color '%s'", windowTarget, color.hex)
+			setColorCmd := fmt.Sprintf("tabby-set-window-color:%d:%s", win.Index, color.hex)
 			args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
 		}
 	}
+
 	colorTarget := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(win.Index)))
 	currentColor := win.CustomColor
 	colorPickerCmd := fmt.Sprintf("tabby-color-picker:window:%s:%s", colorTarget, currentColor)
@@ -9705,7 +9924,7 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		args = append(args, "Set Marker", "m", searchCmd)
 		// Show remove option only if a marker is currently set
 		if win.Icon != "" {
-			resetIconCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_icon", win.Index)
+			resetIconCmd := fmt.Sprintf("tabby-set-window-icon:%d:", win.Index)
 			args = append(args, "Remove Marker", "0", resetIconCmd)
 		}
 	}
@@ -10126,6 +10345,7 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 				args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
 			}
 		}
+
 		groupColorTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
 		groupCurrentColor := group.Theme.Bg
 		colorPickerCmd := fmt.Sprintf("tabby-color-picker:group:%s:%s", groupColorTarget, groupCurrentColor)
@@ -10202,10 +10422,12 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	c.executeOrSendMenu(clientID, args, pos)
 }
 
-// createNewWindowInCurrentGroup creates a new window in the same group as the current window,
-// using the group's configured working_dir if available.
-// Sets @tabby_spawning to prevent hook-chain focus stealing, spawns the sidebar
-// renderer inline, and clears the guard asynchronously (matching new_window_with_group.sh).
+// createNewWindowInCurrentGroup creates a new window in the same group as the
+// current window, using the group's configured working_dir if available.
+//
+// Simplified approach: create the window (focused), assign the group, and let
+// tmux's after-new-window hook chain handle daemon signaling and renderer
+// spawning. No spawning guards, no async focus retries.
 func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	logEvent("NEW_WINDOW_START client=%s", clientID)
 	c.stateMu.RLock()
@@ -10242,7 +10464,9 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 
 	c.stateMu.RUnlock()
 
-	args := []string{"new-window", "-d", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
+	// Basic new-window: create it focused (no -d), let tmux's after-new-window
+	// hook handle daemon signaling via ensure_sidebar.sh → USR1.
+	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
 	if workingDir != "" {
 		if strings.HasPrefix(workingDir, "~/") {
 			if home, err := os.UserHomeDir(); err == nil {
@@ -10256,38 +10480,19 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	newWindowID := strings.TrimSpace(string(out))
 	logEvent("NEW_WINDOW_RESULT id=%s err=%v", newWindowID, err)
 
+	// Assign group (the after-new-window hook also runs apply_new_window_group.sh
+	// but that reads @tabby_new_window_group which is only set by the shell script
+	// path — so set it directly here for the daemon path).
 	if newWindowID != "" && currentGroup != "" && currentGroup != "Default" {
 		exec.Command("tmux", "set-window-option", "-t", newWindowID, "@tabby_group", currentGroup).Run()
 	}
 
 	if newWindowID != "" {
-		// Set @tabby_new_window_id so daemon cleanup/focus-repair skips this
-		// window while the renderer spawns (same guard the shell script uses).
 		exec.Command("tmux", "set-option", "-g", "@tabby_new_window_id", newWindowID).Run()
-
-		clientTTY := ""
-		rawClients := ""
-		if ttyOut, err2 := exec.Command("tmux", "list-clients", "-F",
-			"#{client_tty}|#{window_id}").Output(); err2 == nil {
-			rawClients = strings.TrimSpace(string(ttyOut))
-			for _, line := range strings.Split(rawClients, "\n") {
-				parts := strings.SplitN(strings.TrimSpace(line), "|", 2)
-				if len(parts) == 2 && strings.TrimSpace(parts[1]) == clientID {
-					clientTTY = strings.TrimSpace(parts[0])
-					break
-				}
-			}
-		}
-		logEvent("NEW_WINDOW_FOCUS clientID=%s newWindowID=%s clientTTY=%s clients=%q",
-			clientID, newWindowID, clientTTY, rawClients)
-		if clientTTY != "" {
-			exec.Command("tmux", "switch-client", "-c", clientTTY, "-t", newWindowID).Run()
-		} else {
-			exec.Command("tmux", "select-window", "-t", newWindowID).Run()
-		}
+		exec.Command("tmux", "select-window", "-t", newWindowID).Run()
 
 		go func(id string) {
-			time.Sleep(1200 * time.Millisecond)
+			time.Sleep(2 * time.Second)
 			if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output(); err == nil {
 				if strings.TrimSpace(string(out)) == id {
 					exec.Command("tmux", "set-option", "-gu", "@tabby_new_window_id").Run()
