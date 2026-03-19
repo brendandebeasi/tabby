@@ -1025,35 +1025,37 @@ func (c *Coordinator) getMainPaneDirection() string {
 	return "-R"
 }
 
-// loadCollapsedGroups loads collapsed state from tmux options
+// loadCollapsedGroups loads collapsed state from tmux options.
+// Runs all tmux queries BEFORE acquiring stateMu to avoid holding the lock
+// during external I/O.
 func (c *Coordinator) loadCollapsedGroups() {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	c.loadCollapsedGroupsLocked()
-}
+	// Phase 1: Query tmux for legacy format (outside lock)
+	legacyOut, legacyErr := tmuxOutputCtx("show-options", "-v", "-q", "@tabby_collapsed_groups")
 
-// loadCollapsedGroupsLocked loads collapsed state (caller must hold stateMu)
-func (c *Coordinator) loadCollapsedGroupsLocked() {
-	// Clear existing state
-	c.collapsedGroups = make(map[string]bool)
-
-	// First try legacy JSON format for backwards compatibility
-	out, err := exec.Command("tmux", "show-options", "-v", "-q", "@tabby_collapsed_groups").Output()
-	if err == nil && len(out) > 0 {
-		var groups []string
-		if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &groups); err == nil {
-			for _, g := range groups {
-				c.collapsedGroups[g] = true
-			}
-			// Migrate to new per-group format
-			c.saveCollapsedGroupsLocked()
-			exec.Command("tmux", "set-option", "-u", "@tabby_collapsed_groups").Run()
-			return
+	var legacyGroups []string
+	useLegacy := false
+	if legacyErr == nil && len(legacyOut) > 0 {
+		if err := json.Unmarshal([]byte(strings.TrimSpace(string(legacyOut))), &legacyGroups); err == nil {
+			useLegacy = true
 		}
 	}
 
-	// Load per-group options (new format)
-	// Build a set of all known group names to check
+	if useLegacy {
+		// Legacy migration path: assign under lock, then save+unset outside lock.
+		c.stateMu.Lock()
+		c.collapsedGroups = make(map[string]bool)
+		for _, g := range legacyGroups {
+			c.collapsedGroups[g] = true
+		}
+		c.stateMu.Unlock()
+		// Migrate: save in new format and remove legacy option (outside lock).
+		c.saveCollapsedGroups()
+		tmuxRun("set-option", "-u", "@tabby_collapsed_groups")
+		return
+	}
+
+	// Phase 2: Build group names to check (need lock for config/grouped reads)
+	c.stateMu.RLock()
 	groupsToCheck := make(map[string]bool)
 	for _, group := range c.config.Groups {
 		groupsToCheck[group.Name] = true
@@ -1062,15 +1064,22 @@ func (c *Coordinator) loadCollapsedGroupsLocked() {
 		groupsToCheck[gw.Name] = true
 	}
 	groupsToCheck["Default"] = true
+	c.stateMu.RUnlock()
 
-	// Check all known groups for collapsed state
+	// Phase 3: Query tmux for each group's collapsed state (outside lock)
+	collapsedResults := make(map[string]bool)
 	for groupName := range groupsToCheck {
 		optName := fmt.Sprintf("@tabby_grp_collapsed_%s", strings.ReplaceAll(groupName, " ", "_"))
-		out, err := exec.Command("tmux", "show-options", "-v", "-q", optName).Output()
+		out, err := tmuxOutputCtx("show-options", "-v", "-q", optName)
 		if err == nil && strings.TrimSpace(string(out)) == "1" {
-			c.collapsedGroups[groupName] = true
+			collapsedResults[groupName] = true
 		}
 	}
+
+	// Phase 4: Assign results under lock (minimal critical section)
+	c.stateMu.Lock()
+	c.collapsedGroups = collapsedResults
+	c.stateMu.Unlock()
 }
 
 // saveCollapsedGroups saves collapsed state to tmux options
@@ -1132,7 +1141,16 @@ func (c *Coordinator) loadPetState() {
 	json.Unmarshal(data, &c.pet)
 }
 
-// savePetState saves the pet state to the shared file
+// savePetStateData saves the given pet state snapshot to the shared file.
+// Safe to call without holding stateMu since it only writes the provided data.
+func savePetStateData(pet petState) {
+	data, _ := json.Marshal(pet)
+	os.WriteFile(petStatePath(), data, 0644)
+}
+
+// savePetState saves the pet state to the shared file.
+// Caller must NOT hold stateMu — this performs file I/O.
+// For call sites that hold stateMu, snapshot c.pet first, unlock, then call savePetStateData().
 func (c *Coordinator) savePetState() {
 	data, _ := json.Marshal(c.pet)
 	os.WriteFile(petStatePath(), data, 0644)
@@ -1341,6 +1359,19 @@ func (c *Coordinator) RefreshWindows() {
 
 	c.applyCWDColorIconMappings(windows)
 
+	// Pre-load process tree BEFORE acquiring stateMu. loadProcessTree runs
+	// ps -A which can be slow; running it inside the lock blocks IncrementSpinner
+	// and other stateMu-dependent goroutines, causing LOOP_STALL / daemon crash.
+	// Reading c.lastProcessCheck here without the lock is safe: this function
+	// runs in a single goroutine (window_tick) and c.lastProcessCheck is only
+	// written later by processAIToolStates in this same call.
+	var preloadedProcessTree *processTree
+	if c.config.Indicators.Busy.Enabled || c.config.Indicators.Input.Enabled {
+		if time.Since(c.lastProcessCheck) > 2*time.Second {
+			preloadedProcessTree = loadProcessTree()
+		}
+	}
+
 	touchModeOverride := ""
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1371,14 +1402,16 @@ func (c *Coordinator) RefreshWindows() {
 	c.windows = windows
 
 	// Auto-sync window names from active pane title, unless name is locked.
-	c.syncWindowNames()
+	// Collects pending rename ops for execution after unlock.
+	pendingRenames := c.syncWindowNames()
 
 	// Detect AI tool busy/done/idle states using state transitions.
-	c.processAIToolStates()
+	// Collects pending tmux set-option ops for execution after unlock.
+	aiToolOps := c.processAIToolStates(preloadedProcessTree)
 
 	c.grouped = grouping.GroupWindowsWithOptions(windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 	c.computeVisualPositions()
-	c.syncWindowIndices()
+	pendingMoves := c.syncWindowIndices()
 
 	c.touchModeOverride = touchModeOverride
 	if prefixModeRaw != "" {
@@ -1397,6 +1430,26 @@ func (c *Coordinator) RefreshWindows() {
 		defer cancel()
 		exec.CommandContext(ctx, "tmux", colorArgs...).Run()
 	}
+
+	// Execute deferred AI tool state tmux set-option ops outside the lock.
+	for _, op := range aiToolOps {
+		if op.unset {
+			tmuxRun("set-option", "-w", "-t", op.windowID, "-u", op.key)
+		} else {
+			tmuxRun("set-option", "-w", "-t", op.windowID, op.key, op.value)
+		}
+	}
+
+	// Execute deferred window rename ops outside the lock.
+	for _, op := range pendingRenames {
+		tmuxRun("rename-window", "-t", op.windowID, op.desiredName)
+		tmuxRun("set-window-option", "-t", op.windowID, "@tabby_name_locked", "0")
+	}
+
+	// Execute deferred window move ops outside the lock.
+	for _, op := range pendingMoves {
+		tmuxRun("move-window", "-s", op.src, "-t", op.dst)
+	}
 }
 
 // SetActiveWindowOptimistic flips the Active flag on c.windows so the next
@@ -1411,6 +1464,15 @@ func (c *Coordinator) SetActiveWindowOptimistic(windowID string) {
 	// Re-group so generateSidebarHeader picks up the new active window's colors
 	c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 	c.computeVisualPositions()
+}
+
+// tmuxSetOption is a pending tmux set-option command collected under lock
+// for deferred execution after the lock is released.
+type tmuxSetOption struct {
+	windowID string
+	key      string
+	value    string // value to set (ignored when unset=true)
+	unset    bool   // true means use -u flag to unset the option
 }
 
 // processAIToolStates detects AI tool busy/done/idle states using stateful
@@ -1430,16 +1492,23 @@ func (c *Coordinator) SetActiveWindowOptimistic(windowID string) {
 //   - Was busy, now idle (tool still running) -> Input indicator (needs user input)
 //   - AI tool exited (was present, now gone) -> Bell indicator at window level
 //   - Was idle, still idle -> no indicator
-func (c *Coordinator) processAIToolStates() {
+func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOption {
+	var pending []tmuxSetOption
 	now := time.Now().Unix()
 
-	// Load process table once per cycle for CPU-based busy detection
-	// Throttle this expensive operation (ps -A) to max once per 2s
-	// Skip entirely if busy/input indicators are disabled (saves ~31ms/2s)
+	// Load process table once per cycle for CPU-based busy detection.
+	// Throttle to max once per 2s; skip if indicators are disabled.
+	// preloaded is non-nil when RefreshWindows pre-fetched it outside the lock
+	// (the normal path). The fallback inline load should not be reached in
+	// practice but is kept as a safety net for direct callers.
 	var pt *processTree
 	needsProcessTree := c.config.Indicators.Busy.Enabled || c.config.Indicators.Input.Enabled
 	if needsProcessTree {
-		if time.Since(c.lastProcessCheck) > 2*time.Second {
+		if preloaded != nil {
+			pt = preloaded
+			c.cachedProcessTree = pt
+			c.lastProcessCheck = time.Now()
+		} else if time.Since(c.lastProcessCheck) > 2*time.Second {
 			pt = loadProcessTree()
 			c.cachedProcessTree = pt
 			c.lastProcessCheck = time.Now()
@@ -1504,19 +1573,19 @@ func (c *Coordinator) processAIToolStates() {
 				win.Bell = true
 				win.Input = false
 				c.aiBellUntil[idx] = now + 30
-				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "@tabby_bell", "1").Run()
-				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "@tabby_input", "").Run()
+				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", value: "1"})
+				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_input", value: ""})
 			}
 			// Clear stale hook indicators on windows with no AI tools.
 			// Handles cases where the daemon wasn't tracking the AI tool
 			// (e.g., daemon restart, race between hook and exit) but hooks
 			// left indicators set.
 			if win.Busy {
-				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "-u", "@tabby_busy").Run()
+				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_busy", unset: true})
 				win.Busy = false
 			}
 			if win.Input {
-				exec.Command("tmux", "set-option", "-w", "-t", win.ID, "-u", "@tabby_input").Run()
+				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_input", unset: true})
 				win.Input = false
 			}
 			continue
@@ -1525,7 +1594,7 @@ func (c *Coordinator) processAIToolStates() {
 		// If this is the active window, clear window-level input indicator
 		if win.Active && win.Input {
 			win.Input = false
-			exec.Command("tmux", "set-option", "-w", "-t", win.ID, "-u", "@tabby_input").Run()
+			pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_input", unset: true})
 		}
 
 		// === Per-pane AI detection ===
@@ -1577,7 +1646,7 @@ func (c *Coordinator) processAIToolStates() {
 					idleSecs := now - c.hookPaneBusyIdleAt[stalePID]
 					coordinatorDebugLog.Printf("[AI] Pane %s (win %d): auto-clearing stale @tabby_busy (idle for %ds)", stalePID, idx, idleSecs)
 					logEvent("STALE_BUSY_CLEAR pane=%s window=%d idle_secs=%d", stalePID, idx, idleSecs)
-					exec.Command("tmux", "set-option", "-w", "-t", win.ID, "-u", "@tabby_busy").Run()
+					pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_busy", unset: true})
 					win.Busy = false
 					hookBusyPaneID = ""
 					delete(c.hookPaneBusyIdleAt, stalePID)
@@ -1748,6 +1817,7 @@ func (c *Coordinator) processAIToolStates() {
 			delete(c.prevPaneTitle, pid)
 		}
 	}
+	return pending
 }
 
 // processTree holds pre-parsed process table data for CPU-based busy detection.
@@ -1762,7 +1832,9 @@ func loadProcessTree() *processTree {
 	t := perf.Start("loadProcessTree")
 	defer t.Stop()
 
-	out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,%cpu=").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-A", "-o", "pid=,ppid=,%cpu=").Output()
 	if err != nil {
 		return nil
 	}
@@ -1827,11 +1899,20 @@ func (c *Coordinator) computeVisualPositions() {
 }
 
 // syncWindowIndices renumbers tmux windows so their indices match the visual
+// tmuxWindowRename is a pending window rename operation collected under lock
+// for deferred execution after the lock is released.
+type tmuxWindowRename struct {
+	windowID    string
+	desiredName string
+}
+
 // syncWindowNames updates window names from pane directories for
 // windows that haven't been explicitly renamed (NameLocked=false).
 // Uses the directory basename; combines with " | " when panes are in different dirs.
-func (c *Coordinator) syncWindowNames() {
+// Returns pending rename operations to execute after stateMu is released.
+func (c *Coordinator) syncWindowNames() []tmuxWindowRename {
 	home := os.Getenv("HOME")
+	var pending []tmuxWindowRename
 
 	for i := range c.windows {
 		if c.windows[i].NameLocked {
@@ -1866,11 +1947,10 @@ func (c *Coordinator) syncWindowNames() {
 			continue
 		}
 
-		exec.Command("tmux", "rename-window", "-t", c.windows[i].ID, desiredName).Run()
-		// Ensure daemon-initiated renames don't leave the lock flag set
-		exec.Command("tmux", "set-window-option", "-t", c.windows[i].ID, "@tabby_name_locked", "0").Run()
+		pending = append(pending, tmuxWindowRename{windowID: c.windows[i].ID, desiredName: desiredName})
 		c.windows[i].Name = desiredName
 	}
+	return pending
 }
 
 // shortenPath converts a full path to a short display name.
@@ -1888,9 +1968,17 @@ func shortenPath(p, home string) string {
 	return base
 }
 
+// tmuxWindowMove is a pending tmux move-window operation collected under lock
+// for deferred execution after the lock is released.
+type tmuxWindowMove struct {
+	src string // source window ID or :index
+	dst string // destination :index
+}
+
 // positions shown in the sidebar. This ensures prefix+N selects the window
 // the user sees as "N" in the sidebar.
-func (c *Coordinator) syncWindowIndices() {
+// Returns pending move operations to execute after stateMu is released.
+func (c *Coordinator) syncWindowIndices() []tmuxWindowMove {
 	// Build desired mapping: visual position -> window ID
 	type winMapping struct {
 		id           string
@@ -1915,24 +2003,32 @@ func (c *Coordinator) syncWindowIndices() {
 	}
 
 	if allMatch {
-		return // Already in order
+		return nil // Already in order
 	}
 
 	coordinatorDebugLog.Printf("syncWindowIndices: reordering %d windows", len(mappings))
 
+	// Collect pending moves: Phase 1 (to temp indices) + Phase 2 (to desired indices).
+	var pending []tmuxWindowMove
+
 	// Phase 1: Move all windows to high temporary indices to avoid conflicts.
-	// Use index 1000+ as temp space.
 	for i, m := range mappings {
 		tmpIdx := 1000 + i
 		if m.currentIndex != tmpIdx {
-			exec.Command("tmux", "move-window", "-s", m.id, "-t", fmt.Sprintf(":%d", tmpIdx)).Run()
+			pending = append(pending, tmuxWindowMove{
+				src: m.id,
+				dst: fmt.Sprintf(":%d", tmpIdx),
+			})
 		}
 	}
 
 	// Phase 2: Move windows from temp indices to their desired positions.
 	for i, m := range mappings {
 		tmpIdx := 1000 + i
-		exec.Command("tmux", "move-window", "-s", fmt.Sprintf(":%d", tmpIdx), "-t", fmt.Sprintf(":%d", m.desiredIndex)).Run()
+		pending = append(pending, tmuxWindowMove{
+			src: fmt.Sprintf(":%d", tmpIdx),
+			dst: fmt.Sprintf(":%d", m.desiredIndex),
+		})
 	}
 
 	// Update local state to reflect new indices
@@ -1943,6 +2039,7 @@ func (c *Coordinator) syncWindowIndices() {
 	}
 
 	coordinatorDebugLog.Printf("syncWindowIndices: done")
+	return pending
 }
 
 // updatePaneHeaderColors sets per-window tmux options for pane header colors
@@ -2345,10 +2442,10 @@ func (c *Coordinator) IncrementSpinner() bool {
 // Returns true if pet is enabled and visually changed (needs render)
 func (c *Coordinator) UpdatePetState() bool {
 	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
 
 	// If pet widget is disabled, nothing to update
 	if !c.config.Widgets.Pet.Enabled {
+		c.stateMu.Unlock()
 		return false
 	}
 
@@ -2396,7 +2493,9 @@ func (c *Coordinator) UpdatePetState() bool {
 		}
 		c.pet.FloatingItems = activeItems
 
-		c.savePetState()
+		petSnap := c.pet
+		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		// Adventure always triggers visual change
 		return true
 	}
@@ -2893,7 +2992,9 @@ func (c *Coordinator) UpdatePetState() bool {
 		if c.pet.AnimFrame%100 == 0 {
 			c.pet.LastThought = randomThought("dead")
 		}
-		c.savePetState()
+		petSnap := c.pet
+		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return false // Dead pet doesn't animate
 	}
 
@@ -2913,7 +3014,9 @@ func (c *Coordinator) UpdatePetState() bool {
 				c.pet.DeathTime = now
 				c.pet.State = "dead"
 				c.pet.LastThought = "goodbye..."
-				c.savePetState()
+				petSnap := c.pet
+				c.stateMu.Unlock()
+				savePetStateData(petSnap)
 				return true // State changed to dead
 			} else {
 				// Guilt trip mode - passive aggressive thoughts every 10 seconds
@@ -2974,14 +3077,15 @@ func (c *Coordinator) UpdatePetState() bool {
 		}
 	}
 
-	c.savePetState()
-
+	petSnap := c.pet
 	// Return true if any visual state changed
 	changed := c.pet.Pos != prevPos ||
 		c.pet.State != prevState ||
 		c.pet.YarnPos != prevYarnPos ||
 		len(c.pet.FloatingItems) != prevFloatingCount ||
 		c.pet.MousePos != prevMousePos
+	c.stateMu.Unlock()
+	savePetStateData(petSnap)
 	return changed
 }
 
@@ -7871,8 +7975,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 				c.pet.State = "sleeping"
 				c.pet.LastThought = randomThought("sleepy")
 			}
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		if clickedToken(line1, "[die]") {
@@ -7890,8 +7995,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 				c.pet.DeathTime = time.Now()
 				c.pet.LastThought = randomThought("dead")
 			}
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		if clickedToken(line1, "[poo]") {
@@ -7904,8 +8010,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			poopX := safeRandRange(0, w-2)
 			c.pet.PoopPositions = append(c.pet.PoopPositions, poopX)
 			c.pet.LastThought = randomThought("poop")
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		if clickedToken(line1, "[mse]") {
@@ -7918,8 +8025,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.pet.MousePos = pos2D{X: safeRandRange(0, w-2), Y: 0}
 			c.pet.MouseAppearsAt = time.Time{} // Clear timer
 			c.pet.LastThought = randomThought("mouse_spot")
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		if clickedToken(line1, "[yrn]") {
@@ -7933,8 +8041,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			c.pet.YarnExpiresAt = time.Now().Add(30 * time.Second)
 			c.pet.YarnPushCount = 0
 			c.pet.LastThought = randomThought("yarn")
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		return false
@@ -7960,8 +8069,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 				category = debugThoughtCategories[c.pet.DebugThoughtIdx]
 			}
 			c.pet.LastThought = randomThought(category)
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		if clickedToken(line2, "[<<]") {
@@ -7991,8 +8101,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			if c.pet.Happiness > 100 {
 				c.pet.Happiness = 100
 			}
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		if clickedToken(line2, "[H-]") {
@@ -8002,8 +8113,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			if c.pet.Happiness < 0 {
 				c.pet.Happiness = 0
 			}
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		if clickedToken(line2, "[F+]") {
@@ -8013,8 +8125,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			if c.pet.Hunger > 100 {
 				c.pet.Hunger = 100
 			}
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		if clickedToken(line2, "[F-]") {
@@ -8024,8 +8137,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			if c.pet.Hunger < 0 {
 				c.pet.Hunger = 0
 			}
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		return false
@@ -8693,8 +8807,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.pet.Happiness = 50
 			c.pet.State = "eating"
 			c.pet.LastThought = "life-giving noms!"
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return false
 		}
 		width := c.getClientWidth(clientID)
@@ -8715,8 +8830,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		c.pet.FoodItem = pos2D{X: dropX, Y: 2} // Drop from high air
 		c.pet.LastThought = "food!"
-		c.savePetState()
+		petSnap := c.pet
 		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return false // Pet action, no window refresh needed
 
 	case "drop_yarn":
@@ -8744,8 +8860,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.ActionPending = "play"
 		c.pet.State = "walking"
 		c.pet.LastThought = "yarn!"
-		c.savePetState()
+		petSnap := c.pet
 		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return false // Pet action, no window refresh needed
 
 	case "clean_poop":
@@ -8756,9 +8873,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.pet.PoopPositions = c.pet.PoopPositions[1:]
 			c.pet.TotalPoopsCleaned++
 			c.pet.LastThought = "much better."
-			c.savePetState()
 		}
+		petSnap := c.pet
 		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return false // Pet action, no window refresh needed
 
 	case "pet_pet":
@@ -8774,8 +8892,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		} else {
 			c.pet.LastThought = randomThought("petting")
 		}
-		c.savePetState()
+		petSnap := c.pet
 		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return false // Pet action, no window refresh needed
 
 	case "shrink_sidebar", "shrink":
@@ -9072,8 +9191,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			} else {
 				c.pet.LastThought = randomThought("petting")
 			}
-			c.savePetState()
+			petSnap := c.pet
 			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return false
 		}
 
@@ -9084,8 +9204,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				c.pet.PoopPositions = append(c.pet.PoopPositions[:i], c.pet.PoopPositions[i+1:]...)
 				c.pet.TotalPoopsCleaned++
 				c.pet.LastThought = "much better."
-				c.savePetState()
+				petSnap := c.pet
 				c.stateMu.Unlock()
+				savePetStateData(petSnap)
 				return false
 			}
 		}
@@ -9107,8 +9228,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.ActionPending = "play"
 		c.pet.State = "walking"
 		c.pet.LastThought = "yarn!"
-		c.savePetState()
+		petSnap := c.pet
 		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return false
 	}
 	return false
@@ -9154,8 +9276,9 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 		dropX := safeRandRange(2, clientWidth-2)
 		c.pet.FoodItem = pos2D{X: dropX, Y: 2}
 		c.pet.LastThought = "food!"
-		c.savePetState()
+		petSnap := c.pet
 		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return true
 	}
 
@@ -9271,7 +9394,6 @@ func (c *Coordinator) getSprites() petSprites {
 // clickX is the X position, petY is the Y in pet coordinate space (0=ground, 1=low air, 2=high air)
 func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.InputPayload, clickX, petY int) bool {
 	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
 
 	// Get sprite strings for width calculation
 	sprites := c.getSprites()
@@ -9338,7 +9460,9 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 			coordinatorDebugLog.Printf("    -> Clicked on sleeping cat (💤)! Waking up.")
 			c.pet.State = "idle"
 			c.pet.LastThought = randomThought("wakeup")
-			c.savePetState()
+			petSnap := c.pet
+			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 	}
@@ -9357,7 +9481,9 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 			c.pet.Happiness = 50
 			c.pet.State = "happy"
 			c.pet.LastThought = "back from the void!"
-			c.savePetState()
+			petSnap := c.pet
+			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 		coordinatorDebugLog.Printf("    -> Clicked on cat at X=%d (cat rendered at %d, width=%d)! Petting.", clickX, catPosX, catWidth)
@@ -9366,7 +9492,9 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		c.pet.LastPet = time.Now()
 		c.pet.State = "happy"
 		c.pet.LastThought = randomThought("petting")
-		c.savePetState()
+		petSnap := c.pet
+		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return true
 	}
 
@@ -9390,7 +9518,9 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 				c.pet.PoopPositions = append(c.pet.PoopPositions[:i], c.pet.PoopPositions[i+1:]...)
 				c.pet.TotalPoopsCleaned++
 				c.pet.LastThought = "much better."
-				c.savePetState()
+				petSnap := c.pet
+				c.stateMu.Unlock()
+				savePetStateData(petSnap)
 				return true
 			}
 		}
@@ -9418,7 +9548,9 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 			c.pet.HasTarget = false
 			c.pet.ActionPending = ""
 			c.pet.LastThought = randomThought("mouse_kill")
-			c.savePetState()
+			petSnap := c.pet
+			c.stateMu.Unlock()
+			savePetStateData(petSnap)
 			return true
 		}
 	}
@@ -9429,7 +9561,9 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		c.pet.MouseDirection = 1
 		c.pet.MousePos = pos2D{X: 0, Y: 0}
 		c.pet.LastThought = randomThought("mouse_spot")
-		c.savePetState()
+		petSnap := c.pet
+		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return true
 	}
 
@@ -9451,7 +9585,9 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		c.pet.ActionPending = "play"
 		c.pet.State = "walking"
 		c.pet.LastThought = "again!"
-		c.savePetState()
+		petSnap := c.pet
+		c.stateMu.Unlock()
+		savePetStateData(petSnap)
 		return true
 	}
 
@@ -9473,7 +9609,9 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 	c.pet.ActionPending = "play"
 	c.pet.State = "walking"
 	c.pet.LastThought = "yarn!"
-	c.savePetState()
+	petSnap := c.pet
+	c.stateMu.Unlock()
+	savePetStateData(petSnap)
 	return true
 }
 
@@ -10430,15 +10568,17 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 // spawning. No spawning guards, no async focus retries.
 func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	logEvent("NEW_WINDOW_START client=%s", clientID)
-	c.stateMu.RLock()
 
-	// Find which group the current window belongs to
+	// Query tmux for active window ID BEFORE acquiring the lock to avoid
+	// holding stateMu during external I/O.
 	windowID := clientID
-	if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+	if out, err := tmuxOutputCtx("display-message", "-p", "#{window_id}"); err == nil {
 		if id := strings.TrimSpace(string(out)); id != "" {
 			windowID = id
 		}
 	}
+
+	c.stateMu.RLock()
 
 	var currentGroup string
 	for _, group := range c.grouped {
@@ -10693,8 +10833,12 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			c.config = cfg
 			c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 			c.computeVisualPositions()
-			c.syncWindowIndices()
+			moves := c.syncWindowIndices()
 			c.stateMu.Unlock()
+			// Execute deferred window move ops outside the lock.
+			for _, op := range moves {
+				tmuxRun("move-window", "-s", op.src, "-t", op.dst)
+			}
 		}
 	case "m":
 		// Open marker picker for active window
@@ -10993,10 +11137,8 @@ type HeaderColors struct {
 
 // GetHeaderColorsForPane returns the fg and bg colors for a pane header.
 // Mirrors the tab color logic from sidebar rendering (custom colors, shading, active/inactive).
+// Must be called with stateMu at least read-locked (callers hold RLock from RenderHeaderForClient).
 func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-
 	var foundWindow *tmux.Window
 	var isWindowActive bool
 	for i := range c.windows {
