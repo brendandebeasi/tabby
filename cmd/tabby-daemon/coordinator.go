@@ -3878,6 +3878,21 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string) (int, bool)
 
 	windowWidthOut, err := exec.Command("tmux", "display-message", "-p", "-t", windowID, "#{window_width}").Output()
 	if err != nil {
+		// Fall back to globalWidth so clamping still works on query failure
+		if c.globalWidth > 0 {
+			windowWidth := c.globalWidth
+			maxPercent := 20
+			if out, err2 := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_percent").Output(); err2 == nil {
+				if v, err3 := strconv.Atoi(strings.TrimSpace(string(out))); err3 == nil && v >= 10 && v <= 60 {
+					maxPercent = v
+				}
+			}
+			maxWidth := windowWidth * maxPercent / 100
+			if maxWidth < 15 {
+				maxWidth = 15
+			}
+			return maxWidth, true
+		}
 		return 0, false
 	}
 	windowWidth, err := strconv.Atoi(strings.TrimSpace(string(windowWidthOut)))
@@ -8957,6 +8972,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if newWidth < 15 {
 			newWidth = 25
 		}
+		newWidth = c.boundedSidebarWidthForWindow(clientID, newWidth)
 		exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_collapsed").Run()
 		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
 		syncAllSidebarWidths(newWidth)

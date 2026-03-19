@@ -12,6 +12,11 @@ LAYOUT="${2:-$(tmux display-message -p '#{window_layout}' 2>/dev/null)}"
 
 [ -z "$WINDOW_ID" ] || [ -z "$LAYOUT" ] && exit 0
 
+# Don't overwrite layouts while tabby is spawning headers
+if [ "$(tmux show-option -gqv @tabby_spawning 2>/dev/null)" = "1" ]; then
+    exit 0
+fi
+
 # Store layout per-window using a global option keyed by window ID
 tmux set-option -g "@tabby_layout_${WINDOW_ID}" "$LAYOUT" 2>/dev/null || true
 exit 0
