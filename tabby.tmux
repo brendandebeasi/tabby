@@ -20,6 +20,35 @@ if [ ! -f "$CURRENT_DIR/bin/render-status" ]; then
     "$CURRENT_DIR/scripts/install.sh" || true
 fi
 
+# --- Early daemon pre-start (cold-boot optimization) ---
+# Start the watchdog+daemon as early as possible so the Go binary warms up
+# while we parse config, set options, and wire hooks below.  By the time
+# ensure_sidebar runs (async, at the bottom) the socket should already exist.
+_TABBY_PRESTART_SESSION=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
+_TABBY_PRESTART_MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
+# Default mode is "enabled", so pre-start when mode is enabled OR not yet set
+if [ -n "$_TABBY_PRESTART_SESSION" ] && { [ "$_TABBY_PRESTART_MODE" = "enabled" ] || [ -z "$_TABBY_PRESTART_MODE" ]; }; then
+    _TABBY_PRESTART_SOCK="/tmp/tabby-daemon-${_TABBY_PRESTART_SESSION}.sock"
+    _TABBY_PRESTART_PIDF="/tmp/tabby-daemon-${_TABBY_PRESTART_SESSION}.pid"
+    _TABBY_PRESTART_WD="/tmp/tabby-daemon-${_TABBY_PRESTART_SESSION}.watchdog.pid"
+    _TABBY_DAEMON_ALIVE=false
+    if [ -S "$_TABBY_PRESTART_SOCK" ] && [ -f "$_TABBY_PRESTART_PIDF" ]; then
+        _TPID=$(cat "$_TABBY_PRESTART_PIDF" 2>/dev/null || echo "")
+        [ -n "$_TPID" ] && kill -0 "$_TPID" 2>/dev/null && _TABBY_DAEMON_ALIVE=true
+    fi
+    if [ "$_TABBY_DAEMON_ALIVE" = "false" ]; then
+        _TABBY_WD_ALIVE=false
+        if [ -f "$_TABBY_PRESTART_WD" ]; then
+            _WP=$(cat "$_TABBY_PRESTART_WD" 2>/dev/null || echo "")
+            [ -n "$_WP" ] && kill -0 "$_WP" 2>/dev/null && _TABBY_WD_ALIVE=true
+        fi
+        if [ "$_TABBY_WD_ALIVE" = "false" ]; then
+            rm -f "$_TABBY_PRESTART_SOCK" "$_TABBY_PRESTART_PIDF"
+            "$CURRENT_DIR/scripts/watchdog_daemon.sh" -session "$_TABBY_PRESTART_SESSION" &
+        fi
+    fi
+fi
+
 # Start local-only Tabby Web bridge if enabled
 WEB_ENABLED=$(grep -A6 "^web:" "$CONFIG_FILE" 2>/dev/null | grep "enabled:" | awk '{print $2}' | tr -d '"' || echo "false")
 WEB_ENABLED=${WEB_ENABLED:-false}
@@ -767,13 +796,11 @@ tmux bind-key -n M-% select-window -t :5
 # Ensure mode surfaces are present on load.
 # This covers first-run bootstrap and config reloads where mode is already set
 # but daemon/renderers are not running yet.
-# Run synchronously (no -b) so the sidebar is ready before the first prompt appears.
-# session-created and client-attached hooks fire before tabby.tmux runs, so this
-# is the only reliable bootstrap path for the initial session.
-_TABBY_BOOT_T0=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null || date +%s)
-tmux run-shell "$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\""
-_TABBY_BOOT_T1=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null || date +%s)
-printf "%s tabby_bootstrap_ms=%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$((_TABBY_BOOT_T1 - _TABBY_BOOT_T0))" >> /tmp/tabby-startup.log 2>/dev/null || true
+# Run ASYNC (-b) to avoid blocking tmux startup on cold boot.
+# The daemon was pre-started at the top of this file, so by now the socket
+# should be ready (or nearly ready).  Hooks (session-created, after-new-window,
+# after-select-window) also call ensure_sidebar, providing redundancy.
+tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\""
 
 tmux run-shell -b "$STATUS_GUARD_SCRIPT \"#{session_id}\""
 tmux run-shell -b "$FOCUS_RECOVERY_SCRIPT \"#{session_id}\""
