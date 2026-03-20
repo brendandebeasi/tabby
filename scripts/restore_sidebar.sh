@@ -6,7 +6,8 @@
 # This script ensures the daemon is running and renderers exist in all windows.
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
-SESSION_ID=$(tmux display-message -p '#{session_id}')
+SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
+if [ -z "$SESSION_ID" ]; then exit 0; fi
 SIDEBAR_STATE_FILE="/tmp/tabby-sidebar-${SESSION_ID}.state"
 DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"

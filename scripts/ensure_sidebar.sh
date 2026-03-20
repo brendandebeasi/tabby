@@ -18,6 +18,15 @@ fi
 # tmux run-shell embeds e.g. "$0" in the shell command, which sh then
 # re-expands to the shell executable name instead of the tmux session ID.
 SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
+
+# Bail out if we can't determine the session — this happens during very early
+# startup (tabby.tmux run-shell -b) before tmux is fully initialized.
+# Hooks will call us again once the session is ready.
+if [ -z "$SESSION_ID" ]; then
+    printf "%s ensure_sidebar bail: empty session_id\n" "$TS" >> "$LOG"
+    exit 0
+fi
+
 WINDOW_ID="${2:-}"
 
 if [ -z "$WINDOW_ID" ]; then
