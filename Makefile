@@ -1,4 +1,4 @@
-.PHONY: build test test-e2e test-unit capture-visual compare-visual update-baseline clean install
+.PHONY: build test test-e2e test-unit test-race test-cover vet ci capture-visual compare-visual update-baseline clean install
 
 # Go parameters
 GOCMD=go
