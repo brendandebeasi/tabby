@@ -9040,12 +9040,14 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	case "header_carat_up":
 		exec.Command("tmux", "resize-pane", "-t", input.ResolvedTarget, "-U", "5").Run()
+		fixHeaderHeightsInWindow(input.ResolvedTarget)
 		exec.Command("tmux", "select-pane", "-t", input.ResolvedTarget).Run()
 		c.RefreshWindows()
 		return true
 
 	case "header_carat_down":
 		exec.Command("tmux", "resize-pane", "-t", input.ResolvedTarget, "-D", "5").Run()
+		fixHeaderHeightsInWindow(input.ResolvedTarget)
 		exec.Command("tmux", "select-pane", "-t", input.ResolvedTarget).Run()
 		c.RefreshWindows()
 		return true
@@ -9130,14 +9132,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		case "pane_grow_h":
 			exec.Command("tmux", "resize-pane", "-t", paneID, "-R", "5").Run()
 		case "pane_shrink_h":
-			// -L 5 expands the left wall (no-op when left wall is at the terminal edge).
-			// Use absolute width to reliably shrink regardless of which side the pane is on.
 			wOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_width}").Output()
 			if w, err := strconv.Atoi(strings.TrimSpace(string(wOut))); err == nil && w > 10 {
 				exec.Command("tmux", "resize-pane", "-t", paneID, "-x", fmt.Sprintf("%d", w-5)).Run()
 			}
 		}
 
+		fixHeaderHeightsInWindow(paneID)
 		exec.Command("tmux", "select-pane", "-t", paneID).Run()
 		c.RefreshWindows()
 		return true
@@ -11034,6 +11035,24 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func fixHeaderHeightsInWindow(paneID string) {
+	windowIDOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{window_id}").Output()
+	windowID := strings.TrimSpace(string(windowIDOut))
+	if windowID == "" {
+		return
+	}
+	listOut, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}:#{pane_current_command}").Output()
+	for _, line := range strings.Split(string(listOut), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		if isAuxiliaryPaneCommand(parts[1]) {
+			exec.Command("tmux", "resize-pane", "-t", parts[0], "-y", "1").Run()
+		}
+	}
 }
 
 func isAuxiliaryPaneCommand(cmd string) bool {
