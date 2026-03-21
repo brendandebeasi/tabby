@@ -333,3 +333,57 @@ func TestCheckOrigin_EmptyHostname(t *testing.T) {
 		t.Fatal("origin with empty hostname should be rejected")
 	}
 }
+
+func TestSidebarBridge_SwitchClient_NewClientWithPrev(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	sb.clientID = "old-client"
+	err := sb.SwitchClient("new-client")
+	if err == nil {
+		t.Fatal("SwitchClient with nil conn should return error when sending unsubscribe")
+	}
+}
+
+func TestSidebarBridge_SwitchClient_FirstClient(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	err := sb.SwitchClient("first-client")
+	if err == nil {
+		t.Fatal("SwitchClient with nil conn should return error when sending subscribe")
+	}
+}
+
+func TestSidebarBridge_ClearClient_Matching(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	sb.clientID = "my-client"
+	err := sb.ClearClient("my-client")
+	if err == nil {
+		t.Fatal("ClearClient with matching client and nil conn should return error")
+	}
+}
+
+func TestSidebarBridge_Stop_AfterSend(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	_ = sb.Send(daemon.Message{})
+	sb.Stop()
+	sb.Stop()
+}
+
+func TestControlModeSession_CapturePane_NilOutput(t *testing.T) {
+	s := NewControlModeSession("session", nil)
+	s.CapturePane("%1")
+}
+
+func TestRegenerateToken_FileExists_Overwrites(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/token"
+	first, err := RegenerateToken(path)
+	if err != nil {
+		t.Fatalf("first RegenerateToken: %v", err)
+	}
+	second, err := RegenerateToken(path)
+	if err != nil {
+		t.Fatalf("second RegenerateToken: %v", err)
+	}
+	if first == second {
+		t.Fatal("repeated RegenerateToken should generate different tokens")
+	}
+}

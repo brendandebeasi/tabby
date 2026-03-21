@@ -186,3 +186,52 @@ func TestUnescapeControlData_OctalMultiDigit(t *testing.T) {
 		t.Fatalf("octal multi: got %q, want %q", got, "AB")
 	}
 }
+
+func TestNewControlModeSession_ReturnsNonNil(t *testing.T) {
+	s := NewControlModeSession("test-session", nil)
+	if s == nil {
+		t.Fatal("NewControlModeSession should return non-nil")
+	}
+	if s.session != "test-session" {
+		t.Fatalf("session = %q, want 'test-session'", s.session)
+	}
+}
+
+func TestControlModeSession_Stop_NilCmd(t *testing.T) {
+	s := NewControlModeSession("test-session", nil)
+	s.Stop()
+	s.Stop()
+}
+
+func TestControlModeSession_Resize_NilStdin(t *testing.T) {
+	s := NewControlModeSession("test-session", nil)
+	s.Resize("%1", 80, 24)
+}
+
+func TestControlModeSession_SelectPane_NilStdin(t *testing.T) {
+	s := NewControlModeSession("test-session", nil)
+	s.SelectPane("%1")
+}
+
+func TestControlModeSession_SelectPane_EmptyPaneID(t *testing.T) {
+	s := NewControlModeSession("test-session", nil)
+	s.SelectPane("")
+}
+
+func TestControlModeSession_RefreshClient_NilStdin(t *testing.T) {
+	s := NewControlModeSession("test-session", nil)
+	s.RefreshClient(80, 24)
+}
+
+func TestControlModeSession_CapturePane_EmptyID(t *testing.T) {
+	s := NewControlModeSession("test-session", nil)
+	s.CapturePane("")
+}
+
+func TestControlModeSession_CapturePaneData_EmptyID(t *testing.T) {
+	s := NewControlModeSession("test-session", nil)
+	data, err := s.CapturePaneData("")
+	if data != nil || err != nil {
+		t.Fatalf("CapturePaneData empty ID should return nil,nil; got %v, %v", data, err)
+	}
+}

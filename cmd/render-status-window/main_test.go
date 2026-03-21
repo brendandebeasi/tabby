@@ -1,12 +1,20 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/brendandebeasi/tabby/pkg/config"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
+
+func withArgs(args []string, fn func()) {
+	old := os.Args
+	os.Args = args
+	defer func() { os.Args = old }()
+	fn()
+}
 
 func TestBuildIndicators_None(t *testing.T) {
 	win := tmux.Window{}
@@ -117,4 +125,16 @@ func TestBuildIndicators_MultipleActive(t *testing.T) {
 	if !strings.Contains(got, "🔔") || !strings.Contains(got, "●") {
 		t.Fatalf("want both indicators in %q", got)
 	}
+}
+
+func TestMain_NoArgs(t *testing.T) {
+	withArgs([]string{"cmd"}, main)
+}
+
+func TestMain_InvalidIndex(t *testing.T) {
+	withArgs([]string{"cmd", "notanumber"}, main)
+}
+
+func TestMain_ValidIndex(t *testing.T) {
+	withArgs([]string{"cmd", "1"}, main)
 }
