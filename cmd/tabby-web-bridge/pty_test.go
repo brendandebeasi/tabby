@@ -148,3 +148,41 @@ func TestUnescapeControlData_TrailingBackslash(t *testing.T) {
 		t.Fatal("unescapeControlData trailing backslash should not panic")
 	}
 }
+
+func TestReadControlLine_EOFWithContent(t *testing.T) {
+	input := []byte("no-newline-at-end")
+	reader := bufio.NewReader(bytes.NewReader(input))
+	line, err := readControlLine(reader)
+	if len(line) == 0 {
+		t.Fatal("readControlLine EOF with content should return content")
+	}
+	_ = err
+}
+
+func TestReadControlLine_CRLFTrimmed(t *testing.T) {
+	input := "line\r\n"
+	reader := bufio.NewReader(strings.NewReader(input))
+	line, err := readControlLine(reader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(line) != "line" {
+		t.Fatalf("CRLF not trimmed: %q", line)
+	}
+}
+
+func TestUnescapeControlData_HexInvalidDigits(t *testing.T) {
+	input := []byte(`\xZZ`)
+	got := unescapeControlData(input)
+	if len(got) == 0 {
+		t.Fatal("invalid hex escape should not produce empty output")
+	}
+}
+
+func TestUnescapeControlData_OctalMultiDigit(t *testing.T) {
+	input := []byte(`\101\102`)
+	got := unescapeControlData(input)
+	if string(got) != "AB" {
+		t.Fatalf("octal multi: got %q, want %q", got, "AB")
+	}
+}
