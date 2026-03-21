@@ -169,3 +169,42 @@ func TestBuildIndicators_WithColor(t *testing.T) {
 		t.Fatalf("want fg= color escape in %q", got)
 	}
 }
+
+func TestBuildIndicators_ActivityWithColor(t *testing.T) {
+	win := tmux.Window{Activity: true}
+	cfg := &config.Config{
+		Indicators: config.Indicators{
+			Activity: config.Indicator{Enabled: true, Icon: "●", Color: "#00ff00"},
+		},
+	}
+	got := buildIndicators(win, cfg)
+	if !strings.Contains(got, "fg=") {
+		t.Fatalf("want fg= in %q", got)
+	}
+}
+
+func TestBuildIndicators_SilenceWithColor(t *testing.T) {
+	win := tmux.Window{Silence: true}
+	cfg := &config.Config{
+		Indicators: config.Indicators{
+			Silence: config.Indicator{Enabled: true, Icon: "🔇", Color: "#0000ff"},
+		},
+	}
+	got := buildIndicators(win, cfg)
+	if !strings.Contains(got, "fg=") {
+		t.Fatalf("want fg= in %q", got)
+	}
+}
+
+func TestBuildIndicators_LastWithColor(t *testing.T) {
+	win := tmux.Window{Last: true, Active: false}
+	cfg := &config.Config{
+		Indicators: config.Indicators{
+			Last: config.Indicator{Enabled: true, Icon: "⟵", Color: "#aaaaaa"},
+		},
+	}
+	got := buildIndicators(win, cfg)
+	if !strings.Contains(got, "fg=") {
+		t.Fatalf("want fg= in %q", got)
+	}
+}
