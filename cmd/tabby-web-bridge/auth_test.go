@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"os"
 	"testing"
 )
 
@@ -69,4 +70,73 @@ func TestGenerateToken_Unique(t *testing.T) {
 	if t1 == t2 {
 		t.Fatal("generateToken should return unique tokens each call")
 	}
+}
+
+func TestDefaultTokenPath_NonEmpty(t *testing.T) {
+	got, err := DefaultTokenPath()
+	if err != nil {
+		t.Fatalf("DefaultTokenPath error: %v", err)
+	}
+	if got == "" {
+		t.Fatal("DefaultTokenPath should return non-empty path")
+	}
+}
+
+func TestRegenerateToken_WritesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/web-token"
+	token, err := RegenerateToken(path)
+	if err != nil {
+		t.Fatalf("RegenerateToken error: %v", err)
+	}
+	if len(token) < 20 {
+		t.Fatalf("RegenerateToken returned short token: %q", token)
+	}
+}
+
+func TestLoadOrGenerateToken_FromExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/token"
+	expected := "my-existing-token"
+	if err := writeFile(path, expected+"\n"); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	got, err := LoadOrGenerateToken(path)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateToken error: %v", err)
+	}
+	if got != expected {
+		t.Fatalf("LoadOrGenerateToken = %q, want %q", got, expected)
+	}
+}
+
+func TestLoadOrGenerateToken_GeneratesWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/missing-token"
+	got, err := LoadOrGenerateToken(path)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateToken error: %v", err)
+	}
+	if len(got) < 20 {
+		t.Fatalf("LoadOrGenerateToken returned short token: %q", got)
+	}
+}
+
+func TestLoadOrGenerateToken_RegeneratesEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/empty-token"
+	if err := writeFile(path, "\n"); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	got, err := LoadOrGenerateToken(path)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateToken error: %v", err)
+	}
+	if len(got) < 20 {
+		t.Fatalf("expected generated token, got %q", got)
+	}
+}
+
+func writeFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0600)
 }
