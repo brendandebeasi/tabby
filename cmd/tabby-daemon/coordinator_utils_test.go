@@ -258,3 +258,169 @@ func TestGetClientWidth(t *testing.T) {
 		assert.Equal(t, 40, c.getClientWidth("c1"))
 	})
 }
+
+func TestDesaturateHex_Empty(t *testing.T) {
+	assert.Equal(t, "", desaturateHex("", 0.5))
+}
+
+func TestDesaturateHex_InvalidHexReturnsUnchanged(t *testing.T) {
+	assert.Equal(t, "notahex", desaturateHex("notahex", 0.5))
+	assert.Equal(t, "#fff", desaturateHex("#fff", 0.5))
+}
+
+func TestDesaturateHex_FullOpacityNoChange(t *testing.T) {
+	assert.Equal(t, "#ff0000", desaturateHex("#ff0000", 1.0))
+}
+
+func TestDesaturateHex_ZeroOpacityDarkColor(t *testing.T) {
+	got := desaturateHex("#1a1a1a", 0.0)
+	assert.NotEmpty(t, got)
+	assert.NotEqual(t, "#1a1a1a", got)
+}
+
+func TestDesaturateHex_ZeroOpacityLightColor(t *testing.T) {
+	got := desaturateHex("#ffffff", 0.0)
+	assert.NotEmpty(t, got)
+}
+
+func TestDesaturateHex_WithExplicitTarget(t *testing.T) {
+	got := desaturateHex("#ff0000", 0.5, "#0000ff")
+	assert.NotEmpty(t, got)
+	assert.NotEqual(t, "#ff0000", got)
+	assert.NotEqual(t, "#0000ff", got)
+}
+
+func TestDesaturateHex_WithEmptyTarget(t *testing.T) {
+	got := desaturateHex("#ff0000", 0.5, "")
+	assert.NotEmpty(t, got)
+}
+
+func TestFindWindowByTarget_Empty(t *testing.T) {
+	wins := []tmux.Window{{ID: "@1", Index: 1}}
+	assert.Nil(t, findWindowByTarget(wins, ""))
+	assert.Nil(t, findWindowByTarget(wins, "   "))
+}
+
+func TestFindWindowByTarget_ByID(t *testing.T) {
+	wins := []tmux.Window{
+		{ID: "@1", Name: "first", Index: 1},
+		{ID: "@2", Name: "second", Index: 2},
+	}
+	got := findWindowByTarget(wins, "@2")
+	assert.NotNil(t, got)
+	assert.Equal(t, "second", got.Name)
+}
+
+func TestFindWindowByTarget_ByIDNotFound(t *testing.T) {
+	wins := []tmux.Window{{ID: "@1", Index: 1}}
+	assert.Nil(t, findWindowByTarget(wins, "@99"))
+}
+
+func TestFindWindowByTarget_ByNumericIndex(t *testing.T) {
+	wins := []tmux.Window{
+		{ID: "@1", Name: "win-one", Index: 1},
+		{ID: "@2", Name: "win-two", Index: 2},
+	}
+	got := findWindowByTarget(wins, "2")
+	assert.NotNil(t, got)
+	assert.Equal(t, "win-two", got.Name)
+}
+
+func TestFindWindowByTarget_ByNumericIndexNotFound(t *testing.T) {
+	wins := []tmux.Window{{ID: "@1", Index: 1}}
+	assert.Nil(t, findWindowByTarget(wins, "99"))
+}
+
+func TestFindWindowByTarget_NonParseable(t *testing.T) {
+	wins := []tmux.Window{{ID: "@1", Index: 1}}
+	assert.Nil(t, findWindowByTarget(wins, "notanid"))
+}
+
+func TestClampSpriteX_WithinBounds(t *testing.T) {
+	assert.Equal(t, 5, clampSpriteX(5, "X", 20))
+}
+
+func TestClampSpriteX_AboveMax(t *testing.T) {
+	result := clampSpriteX(100, "X", 20)
+	assert.LessOrEqual(t, result, 19)
+}
+
+func TestClampSpriteX_AtZero(t *testing.T) {
+	assert.Equal(t, 0, clampSpriteX(0, "X", 20))
+}
+
+func TestClampSpriteX_NegativePreserved(t *testing.T) {
+	assert.Equal(t, -5, clampSpriteX(-5, "X", 20))
+}
+
+func TestClampSpriteX_NarrowWidth(t *testing.T) {
+	result := clampSpriteX(5, "X", 1)
+	assert.GreaterOrEqual(t, result, 0)
+}
+
+func TestClampSpriteX_EmptySprite(t *testing.T) {
+	result := clampSpriteX(5, "", 20)
+	assert.LessOrEqual(t, result, 19)
+}
+
+func TestIsVerticalStackedPane_NilWindow(t *testing.T) {
+	c := newTestCoordinator(t)
+	assert.False(t, c.isVerticalStackedPane(nil, "%1"))
+}
+
+func TestIsVerticalStackedPane_EmptyPaneID(t *testing.T) {
+	c := newTestCoordinator(t)
+	w := tmux.Window{ID: "@1", Panes: []tmux.Pane{{ID: "%1", Command: "bash", Width: 80}}}
+	assert.False(t, c.isVerticalStackedPane(&w, ""))
+}
+
+func TestIsVerticalStackedPane_SinglePane(t *testing.T) {
+	c := newTestCoordinator(t)
+	w := tmux.Window{ID: "@1", Panes: []tmux.Pane{{ID: "%1", Command: "bash", Width: 80, Height: 24}}}
+	assert.False(t, c.isVerticalStackedPane(&w, "%1"))
+}
+
+func TestIsVerticalStackedPane_TwoSameWidthDifferentTop(t *testing.T) {
+	c := newTestCoordinator(t)
+	w := tmux.Window{
+		ID: "@1",
+		Panes: []tmux.Pane{
+			{ID: "%1", Command: "bash", Width: 80, Height: 12, Top: 0},
+			{ID: "%2", Command: "vim", Width: 80, Height: 12, Top: 12},
+		},
+	}
+	assert.True(t, c.isVerticalStackedPane(&w, "%1"))
+}
+
+func TestIsVerticalStackedPane_TwoDifferentWidths(t *testing.T) {
+	c := newTestCoordinator(t)
+	w := tmux.Window{
+		ID: "@1",
+		Panes: []tmux.Pane{
+			{ID: "%1", Command: "bash", Width: 40, Height: 24, Top: 0},
+			{ID: "%2", Command: "vim", Width: 40, Height: 24, Top: 0},
+		},
+	}
+	assert.False(t, c.isVerticalStackedPane(&w, "%1"))
+}
+
+func TestGetAnimatedActiveIndicator_EmptyFrames(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.Sidebar.Colors.ActiveIndicatorFrames = nil
+	assert.Equal(t, "▶", c.getAnimatedActiveIndicator("▶"))
+}
+
+func TestGetAnimatedActiveIndicator_NonEmptyFrame(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.Sidebar.Colors.ActiveIndicatorFrames = []string{"A", "B", "C"}
+	c.spinnerFrame = 0
+	result := c.getAnimatedActiveIndicator("X")
+	assert.Contains(t, []string{"A", "B", "C"}, result)
+}
+
+func TestGetAnimatedActiveIndicator_BlankFrameBecomesSpace(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.Sidebar.Colors.ActiveIndicatorFrames = []string{"", "A"}
+	c.spinnerFrame = 0
+	assert.Equal(t, " ", c.getAnimatedActiveIndicator("X"))
+}
