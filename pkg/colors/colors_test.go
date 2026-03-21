@@ -227,6 +227,57 @@ func TestEnsureContrast(t *testing.T) {
 	}
 }
 
+func TestHexToTmuxColor(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"#000000", "colour16"},
+		{"000000", "colour16"},
+		{"#ff0000", "colour196"},
+		{"invalid", "colour0"},
+		{"", "colour0"},
+		{"#fff", "colour0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := HexToTmuxColor(tt.input)
+			if got != tt.want {
+				t.Errorf("HexToTmuxColor(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAdjustHex(t *testing.T) {
+	tests := []struct {
+		name   string
+		hex    string
+		amount float64
+		want   string
+		tol    int64
+	}{
+		{"brighten black by 0.5", "#000000", 0.5, "#7f7f7f", 1},
+		{"darken white by 0.5", "#ffffff", -0.5, "#7f7f7f", 1},
+		{"clamp to white", "#000000", 1.0, "#ffffff", 1},
+		{"clamp to black", "#ffffff", -1.0, "#000000", 1},
+		{"no change", "#808080", 0, "#808080", 1},
+		{"invalid hex", "bad", 0.5, "bad", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AdjustHex(tt.hex, tt.amount)
+			if tt.tol == 0 {
+				if got != tt.want {
+					t.Errorf("AdjustHex(%q, %v) = %q, want %q", tt.hex, tt.amount, got, tt.want)
+				}
+			} else if !colorsClose(got, tt.want, tt.tol) {
+				t.Errorf("AdjustHex(%q, %v) = %q, want ~%q", tt.hex, tt.amount, got, tt.want)
+			}
+		})
+	}
+}
+
 // colorsClose checks if two hex colors are close within a tolerance (per channel)
 func colorsClose(a, b string, tolerance int64) bool {
 	r1, g1, b1 := hexToRGB(a)
