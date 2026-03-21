@@ -72,6 +72,22 @@ test: test-unit test-e2e
 test-unit:
 	$(GOTEST) -v ./pkg/...
 
+# Run all Go unit tests with race detector
+test-race:
+	$(GOTEST) -race ./...
+
+# Run tests with coverage profile and per-function report
+test-cover:
+	$(GOTEST) -coverprofile=coverage.out -covermode=atomic ./...
+	$(GOCMD) tool cover -func=coverage.out
+
+# Run static analysis
+vet:
+	$(GOCMD) vet ./...
+
+# Full CI check: vet + race tests + coverage
+ci: vet test-race test-cover
+
 # Run E2E tests
 test-e2e: build
 	@$(E2E_DIR)/run_e2e.sh
