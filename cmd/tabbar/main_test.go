@@ -149,3 +149,113 @@ func TestDelayedRefresh_ReturnsCmd(t *testing.T) {
 		t.Fatal("delayedRefresh should return non-nil Cmd")
 	}
 }
+
+func TestView_Empty(t *testing.T) {
+	m := model{grouped: nil, width: 80}
+	got := m.View()
+	if got == "" {
+		t.Fatal("View() with empty grouped should return 'No windows' message")
+	}
+}
+
+func TestView_WithOneWindow(t *testing.T) {
+	win := tmux.Window{Index: 1, Name: "zsh", Active: true}
+	m := model{
+		grouped: []grouping.GroupedWindows{
+			{Windows: []tmux.Window{win}},
+		},
+		width: 80,
+	}
+	got := m.View()
+	if got == "" {
+		t.Fatal("View() with windows should return non-empty")
+	}
+}
+
+func TestView_WithScrollIndicator(t *testing.T) {
+	win1 := tmux.Window{Index: 1, Name: "zsh", Active: true}
+	win2 := tmux.Window{Index: 2, Name: "vim", Active: false}
+	m := model{
+		grouped: []grouping.GroupedWindows{
+			{Windows: []tmux.Window{win1, win2}},
+		},
+		width:     80,
+		scrollPos: 1,
+	}
+	got := m.View()
+	if got == "" {
+		t.Fatal("View() with scrollPos>0 should return non-empty")
+	}
+}
+
+func TestAdjustScrollForActiveTab_Empty(t *testing.T) {
+	m := model{grouped: nil, width: 80}
+	m.adjustScrollForActiveTab()
+	if m.scrollPos != 0 {
+		t.Fatalf("adjustScrollForActiveTab with empty grouped should set scrollPos=0, got %d", m.scrollPos)
+	}
+}
+
+func TestAdjustScrollForActiveTab_WithActiveWindow(t *testing.T) {
+	m := model{
+		grouped: []grouping.GroupedWindows{
+			{Windows: []tmux.Window{
+				{Index: 1, Name: "zsh", Active: false},
+				{Index: 2, Name: "vim", Active: true},
+			}},
+		},
+		width:     80,
+		scrollPos: 5,
+	}
+	m.adjustScrollForActiveTab()
+	if m.scrollPos < 0 {
+		t.Fatal("scrollPos should not be negative after adjustment")
+	}
+}
+
+func TestBuildPaneBar_NoActiveWindow(t *testing.T) {
+	m := model{grouped: nil, width: 80}
+	got := m.buildPaneBar()
+	if got != "" {
+		t.Fatalf("buildPaneBar with no active window should return empty, got %q", got)
+	}
+}
+
+func TestBuildPaneBar_ActiveWindowSinglePane(t *testing.T) {
+	win := tmux.Window{
+		Index:  1,
+		Active: true,
+		Panes:  []tmux.Pane{{ID: "%1", Index: 0, Active: true, Command: "zsh"}},
+	}
+	m := model{
+		grouped: []grouping.GroupedWindows{
+			{Windows: []tmux.Window{win}},
+		},
+		width: 80,
+	}
+	got := m.buildPaneBar()
+	if got != "" {
+		t.Fatalf("buildPaneBar with single pane should return empty, got %q", got)
+	}
+}
+
+func TestBuildPaneBar_ActiveWindowMultiplePanes(t *testing.T) {
+	win := tmux.Window{
+		Index:  1,
+		Active: true,
+		Panes: []tmux.Pane{
+			{ID: "%1", Index: 0, Active: true, Command: "zsh"},
+			{ID: "%2", Index: 1, Active: false, Command: "vim"},
+		},
+	}
+	m := model{
+		grouped: []grouping.GroupedWindows{
+			{Windows: []tmux.Window{win}},
+		},
+		width: 80,
+	}
+	got := m.buildPaneBar()
+	if got == "" {
+		t.Fatal("buildPaneBar with multiple panes should return non-empty")
+	}
+}
