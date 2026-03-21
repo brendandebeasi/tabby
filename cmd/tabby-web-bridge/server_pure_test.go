@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"sync"
 	"testing"
+
+	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 func newTestServer(token, user, pass string) *Server {
@@ -249,5 +251,85 @@ func TestNewSidebarBridge_ReturnsNonNil(t *testing.T) {
 	}
 	if sb.sessionID != "test-session" {
 		t.Fatalf("sessionID = %q, want 'test-session'", sb.sessionID)
+	}
+}
+
+func TestMakeWebSidebarClientID(t *testing.T) {
+	got := makeWebSidebarClientID("@1", "abc123")
+	if got != "@1#web-abc123" {
+		t.Fatalf("makeWebSidebarClientID = %q, want %q", got, "@1#web-abc123")
+	}
+}
+
+func TestMakeWebSidebarClientID_Empty(t *testing.T) {
+	got := makeWebSidebarClientID("", "")
+	if got != "#web-" {
+		t.Fatalf("makeWebSidebarClientID empty = %q", got)
+	}
+}
+
+func TestSidebarBridge_Stop_NilConn(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	sb.Stop()
+	sb.Stop()
+}
+
+func TestSidebarBridge_Send_NilConn(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	err := sb.Send(daemon.Message{Type: "ping"})
+	if err == nil {
+		t.Fatal("Send with nil conn should return error")
+	}
+}
+
+func TestSidebarBridge_ClearClient_Empty(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	if err := sb.ClearClient(""); err != nil {
+		t.Fatalf("ClearClient empty should return nil, got %v", err)
+	}
+}
+
+func TestSidebarBridge_ClearClient_NonMatching(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	sb.clientID = "other-client"
+	if err := sb.ClearClient("different-client"); err != nil {
+		t.Fatalf("ClearClient non-matching should return nil, got %v", err)
+	}
+}
+
+func TestSidebarBridge_SwitchClient_Empty(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	if err := sb.SwitchClient(""); err != nil {
+		t.Fatalf("SwitchClient empty should return nil, got %v", err)
+	}
+}
+
+func TestSidebarBridge_SwitchClient_Same(t *testing.T) {
+	sb := NewSidebarBridge("session", nil)
+	sb.clientID = "my-client"
+	if err := sb.SwitchClient("my-client"); err != nil {
+		t.Fatalf("SwitchClient same should return nil, got %v", err)
+	}
+}
+
+func TestCheckOrigin_InvalidURL(t *testing.T) {
+	s := newTestServer("", "", "")
+	r := &http.Request{
+		Header: http.Header{"Origin": []string{"://bad-url"}},
+		Host:   "localhost:8080",
+	}
+	if s.checkOrigin(r) {
+		t.Fatal("invalid origin URL should be rejected")
+	}
+}
+
+func TestCheckOrigin_EmptyHostname(t *testing.T) {
+	s := newTestServer("", "", "")
+	r := &http.Request{
+		Header: http.Header{"Origin": []string{"file://"}},
+		Host:   "localhost:8080",
+	}
+	if s.checkOrigin(r) {
+		t.Fatal("origin with empty hostname should be rejected")
 	}
 }

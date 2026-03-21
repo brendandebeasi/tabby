@@ -1,9 +1,17 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+func withArgs(args []string, fn func()) {
+	old := os.Args
+	os.Args = args
+	defer func() { os.Args = old }()
+	fn()
+}
 
 func TestStripANSI_NoEscapes(t *testing.T) {
 	if got := stripANSI("hello"); got != "hello" {
@@ -71,4 +79,32 @@ func TestParseFlags_NoMatch(t *testing.T) {
 	if got := parseFlags("XYZ"); got != "" {
 		t.Fatalf("parseFlags(\"XYZ\") = %q, want empty", got)
 	}
+}
+
+func TestMain_ActiveDefault(t *testing.T) {
+	withArgs([]string{"cmd", "active", "1", "zsh"}, main)
+}
+
+func TestMain_InactiveDefault(t *testing.T) {
+	withArgs([]string{"cmd", "inactive", "2", "vim"}, main)
+}
+
+func TestMain_ActiveSDPrefix(t *testing.T) {
+	withArgs([]string{"cmd", "active", "3", "SD|sidebar"}, main)
+}
+
+func TestMain_InactiveSDPrefix(t *testing.T) {
+	withArgs([]string{"cmd", "inactive", "3", "SD|sidebar"}, main)
+}
+
+func TestMain_ActiveGPPrefix(t *testing.T) {
+	withArgs([]string{"cmd", "active", "4", "GP|gamepad"}, main)
+}
+
+func TestMain_WithFlags(t *testing.T) {
+	withArgs([]string{"cmd", "active", "1", "zsh", "M!~"}, main)
+}
+
+func TestMain_ANSIInName(t *testing.T) {
+	withArgs([]string{"cmd", "active", "1", "\x1b[31mred\x1b[0m"}, main)
 }
