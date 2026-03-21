@@ -335,3 +335,156 @@ func TestRenderTouchButton(t *testing.T) {
 	result := c.renderTouchButton(30, "Test", "#3498db")
 	assert.NotEmpty(t, result)
 }
+
+func TestRenderClaudeWidget_Disabled(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Widgets.Claude.Enabled = false
+	result := c.renderClaudeWidget(30)
+	assert.Empty(t, result)
+}
+
+func TestRenderClaudeWidget_Enabled(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Widgets.Claude.Enabled = true
+	result := c.renderClaudeWidget(30)
+	assert.NotEmpty(t, result)
+}
+
+func TestRenderClaudeWidget_EnabledWithDivider(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Widgets.Claude.Enabled = true
+	c.config.Widgets.Claude.Divider = "─"
+	result := c.renderClaudeWidget(30)
+	assert.NotEmpty(t, result)
+}
+
+func TestGetHeaderColorsForPane_PaneNotFound(t *testing.T) {
+	c := newRenderCoordinator(t)
+	colors := c.GetHeaderColorsForPane("%99")
+	assert.NotEmpty(t, colors.Fg+colors.Bg)
+}
+
+func TestGetHeaderColorsForPane_PaneFound(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.stateMu.Lock()
+	c.windows = []tmux.Window{{
+		ID: "@1", Index: 1, Active: true,
+		Panes: []tmux.Pane{{ID: "%1", Command: "bash"}},
+	}}
+	c.grouped = []grouping.GroupedWindows{{
+		Name:    "Default",
+		Theme:   config.Theme{Bg: "#2c3e50", Fg: "#ecf0f1", ActiveBg: "#3498db", ActiveFg: "#ffffff"},
+		Windows: c.windows,
+	}}
+	c.stateMu.Unlock()
+	colors := c.GetHeaderColorsForPane("%1")
+	assert.NotEmpty(t, colors.Fg+colors.Bg)
+}
+
+func TestRenderForClient_WithCollapsedWindow(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.stateMu.Lock()
+	c.windows = []tmux.Window{{
+		ID: "@1", Index: 1, Active: true, Collapsed: true,
+		Panes: []tmux.Pane{
+			{ID: "%1", Command: "bash", Active: true},
+			{ID: "%2", Command: "vim"},
+		},
+	}}
+	c.grouped = []grouping.GroupedWindows{{
+		Name:    "Default",
+		Theme:   config.Theme{Bg: "#2c3e50", Fg: "#ecf0f1"},
+		Windows: c.windows,
+	}}
+	c.stateMu.Unlock()
+	payload := c.RenderForClient("test-client", 30, 24)
+	assert.NotNil(t, payload)
+}
+
+func TestRenderSessionWidget_Enabled(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Widgets.Session.Enabled = true
+	c.sessionName = "work"
+	c.windowCount = 3
+	c.sessionClients = 1
+	result := c.renderSessionWidget(30)
+	assert.NotEmpty(t, result)
+}
+
+func TestRenderSessionWidget_Disabled(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Widgets.Session.Enabled = false
+	result := c.renderSessionWidget(30)
+	assert.Empty(t, result)
+}
+
+func TestRenderClockWidget_AlwaysRendersContent(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Widgets.Clock.Enabled = false
+	result := c.renderClockWidget(30)
+	assert.NotEmpty(t, result)
+}
+
+func TestRenderGitWidget_DirtyRepo(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.isGitRepo = true
+	c.gitBranch = "feature/my-branch"
+	c.gitDirty = 5
+	c.gitAhead = 2
+	result := c.renderGitWidget(30)
+	assert.NotEmpty(t, result)
+}
+
+func TestCollectWidgetEntries_WithClockEnabled(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Widgets.Clock.Enabled = true
+	entries := c.collectWidgetEntries(30)
+	found := false
+	for _, e := range entries {
+		if e.name == "clock" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found)
+}
+
+func TestCollectWidgetEntries_WithSessionEnabled(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Widgets.Session.Enabled = true
+	entries := c.collectWidgetEntries(30)
+	found := false
+	for _, e := range entries {
+		if e.name == "session" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found)
+}
+
+func TestRenderForClient_MultipleGroups(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.stateMu.Lock()
+	c.windows = []tmux.Window{
+		testWindow("group1-win", true, "bash"),
+		testWindow("group2-win", false, "vim"),
+	}
+	c.grouped = []grouping.GroupedWindows{
+		{
+			Name:    "Group1",
+			Theme:   config.Theme{Bg: "#3498db", Fg: "#ffffff"},
+			Windows: []tmux.Window{c.windows[0]},
+		},
+		{
+			Name:    "Group2",
+			Theme:   config.Theme{Bg: "#e74c3c", Fg: "#ffffff"},
+			Windows: []tmux.Window{c.windows[1]},
+		},
+	}
+	c.stateMu.Unlock()
+	payload := c.RenderForClient("test-client", 30, 24)
+	assert.NotNil(t, payload)
+	assert.Contains(t, payload.Content, "group1-win")
+	assert.Contains(t, payload.Content, "group2-win")
+}
