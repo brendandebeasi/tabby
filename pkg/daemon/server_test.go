@@ -319,6 +319,21 @@ func TestCheckAndClaimPid(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "daemon already running")
 	})
+
+	t.Run("unwritable_dir_returns_error", func(t *testing.T) {
+		roDir := t.TempDir()
+		if err := os.Chmod(roDir, 0555); err != nil {
+			t.Skipf("cannot chmod dir: %v", err)
+		}
+		t.Cleanup(func() { os.Chmod(roDir, 0755) })
+
+		s := newTestServer(t)
+		s.pidPath = filepath.Join(roDir, "test.pid")
+
+		err := s.checkAndClaimPid()
+		assert.Error(t, err, "writing to read-only dir should fail")
+		assert.Contains(t, err.Error(), "failed to write pidfile")
+	})
 }
 
 func TestGetSocketPath(t *testing.T) {

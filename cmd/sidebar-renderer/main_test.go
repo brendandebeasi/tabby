@@ -181,6 +181,39 @@ func TestHexToHSL(t *testing.T) {
 	if h3 != 180 || s3 != 70 || l3 != 50 {
 		t.Fatalf("non-hex chars should return defaults, got h=%d s=%d l=%d", h3, s3, l3)
 	}
+
+	_, s4, _ := hexToHSL("#808080")
+	if s4 != 0 {
+		t.Fatalf("gray should have saturation=0 (achromatic), got %d", s4)
+	}
+
+	h5, _, _ := hexToHSL("#00ff00")
+	if h5 < 110 || h5 > 130 {
+		t.Fatalf("pure green hue should be ~120, got %d", h5)
+	}
+
+	h6, _, _ := hexToHSL("#0000ff")
+	if h6 < 230 || h6 > 250 {
+		t.Fatalf("pure blue hue should be ~240, got %d", h6)
+	}
+
+	hShort, _, lShort := hexToHSL("#fff")
+	if lShort < 90 {
+		t.Fatalf("3-char #fff should expand to #ffffff, got l=%d", lShort)
+	}
+	_ = hShort
+
+	_, _, lInvalid := hexToHSL("tooshort")
+	if lInvalid != 50 {
+		t.Fatalf("invalid 8-char hex should return defaults, got l=%d", lInvalid)
+	}
+}
+
+func TestHexToHSL_LightColor(t *testing.T) {
+	_, _, l := hexToHSL("#ffccdd")
+	if l < 80 {
+		t.Fatalf("light pink should have high lightness, got %d", l)
+	}
 }
 
 func TestHslToHex(t *testing.T) {
@@ -221,6 +254,18 @@ func TestSliderValueAtPos(t *testing.T) {
 	got5 := sliderValueAtPos(5, 10, 100)
 	if got5 < 50 || got5 > 60 {
 		t.Fatalf("pos=5 of 10 should give 50-60 range, got %d", got5)
+	}
+	if sliderValueAtPos(0, 1, 100) != 0 {
+		t.Fatal("width=1 should return 0")
+	}
+	if sliderValueAtPos(5, 10, 0) != 0 {
+		t.Fatal("maxVal=0 should return 0")
+	}
+	if sliderValueAtPos(-3, 10, 100) != sliderValueAtPos(0, 10, 100) {
+		t.Fatal("negative relX should be clamped to 0")
+	}
+	if sliderValueAtPos(20, 10, 100) != sliderValueAtPos(9, 10, 100) {
+		t.Fatal("relX>=width should be clamped to width-1")
 	}
 }
 
@@ -459,6 +504,43 @@ func TestFuzzyScoreEdgeCases(t *testing.T) {
 	}
 	if fuzzyScore("z", "abc") >= 0 {
 		t.Fatal("char not in candidate should return -1")
+	}
+}
+
+func TestPickerIndexAt_Extended(t *testing.T) {
+	m := rendererModel{
+		width: 60, height: 24,
+		pickerOptions: []daemon.MarkerOptionPayload{
+			{Symbol: "A", Name: "alpha"},
+			{Symbol: "B", Name: "beta"},
+			{Symbol: "C", Name: "gamma"},
+		},
+	}
+	m.pickerQuery = ""
+	m.pickerApplyFilter()
+
+	startX, startY, modalW, _ := m.pickerModalLayout()
+	listTop := startY + 5
+	rows := m.pickerVisibleRows()
+
+	if rows <= 0 || modalW <= 0 {
+		t.Skip("modal layout not valid in this environment")
+	}
+
+	if m.pickerIndexAt(0, 0) != -2 {
+		t.Error("position above/left of modal should return -2")
+	}
+
+	insideX := startX + modalW/2
+	if m.pickerIndexAt(insideX, startY+1) != -1 {
+		t.Errorf("position inside modal but above list (y=%d, listTop=%d) should return -1", startY+1, listTop)
+	}
+
+	if listTop < 24 {
+		got := m.pickerIndexAt(insideX, listTop)
+		if got < 0 {
+			t.Errorf("position inside list area should return valid index >= 0, got %d", got)
+		}
 	}
 }
 

@@ -565,3 +565,46 @@ func TestInit_ReturnsCmd(t *testing.T) {
 		t.Fatal("Init should return a non-nil Cmd")
 	}
 }
+
+func TestProcessMouseClick_MiddleButton(t *testing.T) {
+	m := rendererModel{width: 80}
+	result, _ := m.processMouseClick(5, 0, tea.MouseButtonMiddle, false)
+	if result == nil {
+		t.Fatal("middle-click should return non-nil model")
+	}
+}
+
+func TestHandleMouse_TouchModeLeftPress_FirstTap(t *testing.T) {
+	m := rendererModel{connected: true, width: 80, isTouchMode: true}
+	msg := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 5, Y: 0}
+	result, cmd := m.handleMouse(msg)
+	if result == nil {
+		t.Fatal("touch left press should return non-nil model")
+	}
+	if cmd == nil {
+		t.Fatal("touch left press should return a long-press tick cmd")
+	}
+	rm := result.(rendererModel)
+	if !rm.longPressActive {
+		t.Error("touch left press should set longPressActive")
+	}
+}
+
+func TestHandleMouse_NonTouchReleaseWithDownTime(t *testing.T) {
+	m := rendererModel{
+		connected:    true,
+		isTouchMode:  false,
+		width:        80,
+		mouseDownPos: struct{ X, Y int }{5, 0},
+	}
+	m.mouseDownTime = m.mouseDownTime.Add(0)
+
+	import_time_pkg := func() {}
+	_ = import_time_pkg
+
+	msg := tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 5, Y: 0}
+	result, _ := m.handleMouse(msg)
+	if result == nil {
+		t.Fatal("release should return non-nil model")
+	}
+}
