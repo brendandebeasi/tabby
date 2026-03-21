@@ -225,7 +225,7 @@ func ListWindows() ([]Window, error) {
 	}
 	args = append(args, "-F",
 		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}\x1f#{@tabby_pinned}\x1f#{@tabby_icon}\x1f#{window_layout}")
-	out, err := tmuxOutput(args...)
+	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
 	}
@@ -367,7 +367,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 	if sessionTarget != "" {
 		windowTarget = fmt.Sprintf("%s:%d", sessionTarget, windowIndex)
 	}
-	out, err := tmuxOutput("list-panes", "-t", windowTarget, "-F",
+	out, err := DefaultRunner.Run("list-panes", "-t", windowTarget, "-F",
 		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_left}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_dead}")
 	if err != nil {
 		return nil, err
@@ -496,7 +496,7 @@ func ListAllPanes() (map[int][]Pane, error) {
 	}
 	args = append(args, "-F",
 		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_left}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_width}\x1f#{pane_height}")
-	out, err := tmuxOutput(args...)
+	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, err
 	}
