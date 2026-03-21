@@ -684,10 +684,9 @@ func cleanupOrphanWindowsByTmux(sessionID string) {
 // Each content pane gets its own header showing that pane's info and action buttons.
 // Height is 1 line normally, or 2 lines when custom_border is enabled (to render our own border).
 func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool, windows []tmux.Window) {
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
-		logEvent("HEADER_SPAWN_SKIP script_lock_active")
-		return
-	}
+	// NOTE: No @tabby_spawning check here — the caller (doPaneLayoutOps) already
+	// holds the lock. Checking it here would self-deadlock since the caller sets
+	// @tabby_spawning=1 before calling us.
 	headerBin := getPaneHeaderBin()
 	if headerBin == "" {
 		return
