@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -385,5 +386,44 @@ func TestRegenerateToken_FileExists_Overwrites(t *testing.T) {
 	}
 	if first == second {
 		t.Fatal("repeated RegenerateToken should generate different tokens")
+	}
+}
+
+func TestSidebarBridge_Send_WithRealConn(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+
+	sb := NewSidebarBridge("session", nil)
+	sb.conn = client
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 256)
+		server.Read(buf)
+	}()
+
+	err := sb.Send(daemon.Message{Type: "ping"})
+	if err != nil {
+		t.Fatalf("Send with real conn should succeed, got %v", err)
+	}
+	client.Close()
+	<-done
+}
+
+func TestSidebarBridge_Stop_WithRealConn(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+
+	sb := NewSidebarBridge("session", nil)
+	sb.conn = client
+	sb.Stop()
+}
+
+func TestControlModeSession_CapturePaneData_NonEmptyID(t *testing.T) {
+	s := NewControlModeSession("session", nil)
+	_, err := s.CapturePaneData("%nonexistent-pane-12345")
+	if err == nil {
+		t.Fatal("CapturePaneData for non-existent pane should return error")
 	}
 }

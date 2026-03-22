@@ -70,6 +70,19 @@ func TestMessageTypeConstants(t *testing.T) {
 	})
 }
 
+func TestMessageTypeJSONFieldName(t *testing.T) {
+	msg := Message{Type: MsgRender, ClientID: "c1"}
+	data, err := json.Marshal(msg)
+	assert.NoError(t, err)
+	assert.Contains(t, string(data), `"type":"render"`)
+	assert.Contains(t, string(data), `"client_id":"c1"`)
+
+	msg2 := Message{Type: MsgSubscribe}
+	data2, err := json.Marshal(msg2)
+	assert.NoError(t, err)
+	assert.Contains(t, string(data2), `"type":"subscribe"`)
+}
+
 // TestJSONRoundTrip verifies all payload types can be marshaled and unmarshaled
 func TestJSONRoundTrip(t *testing.T) {
 	t.Run("RenderPayload", func(t *testing.T) {

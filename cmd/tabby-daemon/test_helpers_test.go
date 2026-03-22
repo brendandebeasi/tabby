@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brendandebeasi/tabby/pkg/colors"
 	"github.com/brendandebeasi/tabby/pkg/config"
 	"github.com/brendandebeasi/tabby/pkg/grouping"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
@@ -95,6 +96,7 @@ func newTestCoordinator(t *testing.T) *Coordinator {
 	cfg := testConfig()
 	return &Coordinator{
 		config:             cfg,
+		bgDetector:         colors.NewBackgroundDetector(colors.ThemeModeDark),
 		windows:            []tmux.Window{},
 		grouped:            []grouping.GroupedWindows{},
 		windowVisualPos:    make(map[string]int),

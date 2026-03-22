@@ -501,3 +501,168 @@ func TestUpdatePetState_PetEnabledNoWindows(t *testing.T) {
 	c.lastWidth = 30
 	_ = c.UpdatePetState()
 }
+
+func TestTogglePaneCollapse_EmptyTarget(t *testing.T) {
+	c := newTestCoordinator(t)
+	result := c.togglePaneCollapse(":")
+	assert.False(t, result)
+}
+
+func TestTogglePaneCollapse_NonNumericTarget(t *testing.T) {
+	c := newTestCoordinator(t)
+	result := c.togglePaneCollapse(":notanumber")
+	assert.False(t, result)
+}
+
+func TestTogglePaneCollapse_NoMatchingWindow(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.windows = []tmux.Window{{Index: 1, Name: "test"}}
+	result := c.togglePaneCollapse(":99")
+	assert.False(t, result)
+}
+
+func TestTogglePaneCollapse_MatchingWindow_NotCollapsed(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.windows = []tmux.Window{
+		{Index: 1, Name: "test", Panes: []tmux.Pane{{ID: "%1"}}},
+	}
+	result := c.togglePaneCollapse(":1")
+	_ = result
+}
+
+func TestCollapseWindowPanes_EmptyPanes(t *testing.T) {
+	c := newTestCoordinator(t)
+	win := &tmux.Window{Index: 1, Name: "test", Panes: []tmux.Pane{}}
+	c.collapseWindowPanes(":1", win)
+}
+
+func TestCollapseWindowPanes_WithPanes(t *testing.T) {
+	c := newTestCoordinator(t)
+	win := &tmux.Window{
+		Index: 1, Name: "test",
+		Panes: []tmux.Pane{{ID: "%1"}, {ID: "%2"}},
+	}
+	c.collapseWindowPanes(":1", win)
+}
+
+func TestExpandWindowPanes_EmptyPanes(t *testing.T) {
+	c := newTestCoordinator(t)
+	win := &tmux.Window{Index: 1, Name: "test", Panes: []tmux.Pane{}}
+	c.expandWindowPanes(":1", win)
+}
+
+func TestExpandWindowPanes_WithPanes(t *testing.T) {
+	c := newTestCoordinator(t)
+	win := &tmux.Window{
+		Index: 1, Name: "test",
+		Panes: []tmux.Pane{{ID: "%1"}, {ID: "%2"}},
+	}
+	c.expandWindowPanes(":1", win)
+}
+
+func TestNewCoordinator_ReturnsNonNil(t *testing.T) {
+	c := NewCoordinator("test-session")
+	assert.NotNil(t, c)
+}
+
+func TestGetPaneHeaderInactiveBg_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.PaneHeader.InactiveBg = ""
+	c.theme = nil
+	got := c.getPaneHeaderInactiveBg()
+	_ = got
+}
+
+func TestGetPaneHeaderInactiveFg_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.PaneHeader.InactiveFg = ""
+	c.theme = nil
+	got := c.getPaneHeaderInactiveFg()
+	_ = got
+}
+
+func TestGetCommandFg_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.PaneHeader.CommandFg = ""
+	c.theme = nil
+	got := c.getCommandFg()
+	_ = got
+}
+
+func TestGetButtonFg_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.PaneHeader.ButtonFg = ""
+	c.theme = nil
+	got := c.getButtonFg()
+	_ = got
+}
+
+func TestGetBorderFg_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.PaneHeader.BorderFg = ""
+	c.theme = nil
+	got := c.getBorderFg()
+	_ = got
+}
+
+func TestGetHandleColor_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.PaneHeader.HandleColor = ""
+	c.theme = nil
+	got := c.getHandleColor()
+	_ = got
+}
+
+func TestGetPromptFg_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.Prompt.Fg = ""
+	c.theme = nil
+	got := c.getPromptFg()
+	_ = got
+}
+
+func TestGetPromptBg_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.Prompt.Bg = ""
+	c.theme = nil
+	got := c.getPromptBg()
+	_ = got
+}
+
+func TestGetDividerFg_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.PaneHeader.DividerFg = ""
+	c.theme = nil
+	got := c.getDividerFg()
+	_ = got
+}
+
+func TestGetTerminalBg_DefaultFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.PaneHeader.TerminalBg = ""
+	c.theme = nil
+	got := c.GetTerminalBg()
+	_ = got
+}
+
+func TestSetWindowColor_NotFound(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.windows = []tmux.Window{{Index: 1, Name: "test"}}
+	c.setWindowColor(99, "#ff0000")
+}
+
+func TestSetWindowIcon_NotFound(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.windows = []tmux.Window{{Index: 1, Name: "test"}}
+	c.setWindowIcon(99, "🔥")
+}
+
+func TestGroupedWindowsFromWindows(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.windows = []tmux.Window{
+		testWindow("TestGroup|win1", true, "zsh"),
+		testWindow("Default|win2", false, "vim"),
+	}
+	grouped := grouping.GroupWindows(c.windows, c.config.Groups)
+	assert.NotNil(t, grouped)
+}

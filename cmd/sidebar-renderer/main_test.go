@@ -9,8 +9,8 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
-func newPickerTestModel() rendererModel {
-	m := rendererModel{
+func newPickerTestModel() *rendererModel {
+	m := &rendererModel{
 		width:         80,
 		height:        24,
 		connected:     true,
