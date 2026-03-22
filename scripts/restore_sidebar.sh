@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restore sidebar/tabbar state when client attaches to session
+# Restore sidebar state when client attaches to session
 # Uses tmux user option @tabby_sidebar for persistence across reattach
 #
 # Architecture: 1 daemon per session + 1 renderer per window
@@ -79,10 +79,6 @@ if [ "$MODE" = "enabled" ]; then
 
 	restart_daemon_if_unresponsive
 
-	while IFS= read -r pane_id; do
-		[ -n "$pane_id" ] && tmux kill-pane -t "$pane_id" 2>/dev/null || true
-	done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep "^tabbar|" | cut -d'|' -f2 || true)
-
     # Vertical sidebar mode using daemon architecture
     # Ensure daemon is running - it handles all renderer spawning/cleanup
 
@@ -120,25 +116,4 @@ if [ "$MODE" = "enabled" ]; then
 
     "$CURRENT_DIR/scripts/resize_sidebar.sh" >/dev/null 2>&1 || true
 
-elif [ "$MODE" = "horizontal" ]; then
-    # Horizontal tabbar mode
-    tmux set-option -g status off
-
-    # Note: grep -c outputs count (0 if no match) but exits 1 on no match
-    TABBAR_COUNT=$(tmux list-panes -s -F "#{pane_current_command}" 2>/dev/null | grep -c "^tabbar$" || true)
-
-    if [ "$TABBAR_COUNT" -eq 0 ]; then
-        # Restore tabbars in all windows
-        CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
-
-        tmux list-windows -F "#{window_id}" | while read -r window_id; do
-            if ! tmux list-panes -t "$window_id" -F "#{pane_current_command}" 2>/dev/null | grep -q "^tabbar$"; then
-                tmux split-window -t "$window_id" -v -b -l 1 "exec \"$CURRENT_DIR/bin/tabbar\"" 2>/dev/null || true
-            fi
-        done
-
-        # Return to original window and focus main pane
-        tmux select-window -t "$CURRENT_WINDOW" 2>/dev/null || true
-        tmux select-pane -t "{down}" 2>/dev/null || true
-    fi
 fi

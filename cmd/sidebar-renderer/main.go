@@ -117,7 +117,6 @@ type rendererModel struct {
 	viewportOffset int
 	totalLines     int
 	sequenceNum    uint64
-	isTouchMode    bool // Touch mode status from coordinator
 	sidebarBg      string
 	terminalBg     string
 
@@ -407,7 +406,6 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.regions = msg.payload.Regions
 		m.totalLines = msg.payload.TotalLines
 		m.sequenceNum = msg.payload.SequenceNum
-		m.isTouchMode = msg.payload.IsTouchMode
 		m.sidebarBg = msg.payload.SidebarBg
 		m.terminalBg = msg.payload.TerminalBg
 
@@ -610,40 +608,10 @@ func (m *rendererModel) handleMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 
 		if msg.Button == tea.MouseButtonLeft {
 			m.mouseDownValid = true
-			if !m.isTouchMode {
-				m.mouseDownTime = time.Now()
-				m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
-				m.longPressActive = false
-				return *m, nil
-			}
-
-			// Check for double-click (second press within threshold)
-			timeSinceLastClick := time.Since(m.lastTapTime)
-			clickDx := abs(msg.X - m.lastTapPos.X)
-			clickDy := abs(msg.Y - m.lastTapPos.Y)
-
-			if timeSinceLastClick < doubleTapThreshold && clickDx <= doubleTapDistance && clickDy <= doubleTapDistance {
-				// Double-click detected - treat as right-click to open context menu
-				if *debugMode {
-					debugLog.Printf("  Double-click detected on PRESS (interval=%v, distance=%d,%d) -> right-click", timeSinceLastClick, clickDx, clickDy)
-				}
-				m.lastTapTime = time.Time{} // Reset to prevent triple-click
-				m.skipNextRelease = true    // Don't process the release
-				m.mouseDownValid = false
-				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonRight, true)
-			}
-
-			// Start long-press detection
 			m.mouseDownTime = time.Now()
 			m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
-			m.longPressActive = true
-			if *debugMode {
-				debugLog.Printf("  Starting long-press timer at X=%d Y=%d", msg.X, msg.Y)
-			}
-			// Start a timer for long-press
-			return *m, tea.Tick(longPressThreshold, func(t time.Time) tea.Msg {
-				return longPressMsg{X: msg.X, Y: msg.Y}
-			})
+			m.longPressActive = false
+			return *m, nil
 		}
 		// Right or middle click - process immediately (not simulated)
 		// Skip the release to prevent false drag detection from stale mouseDownPos
@@ -679,40 +647,12 @@ func (m *rendererModel) handleMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 		}
 
 		if !m.mouseDownValid {
-			if m.isTouchMode && msg.Button == tea.MouseButtonLeft {
-				if *debugMode {
-					debugLog.Printf("  Release-only left click fallback at x=%d y=%d", msg.X, msg.Y)
-				}
-				if inputLog != nil && isInputLogEnabled() {
-					inputLog.Printf("RELEASE_ONLY_FALLBACK x=%d y=%d", msg.X, msg.Y)
-				}
-				return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
-			}
 			m.longPressActive = false
 			m.mouseDownTime = time.Time{}
 			return *m, nil
 		}
 		m.mouseDownValid = false
 
-		if !m.isTouchMode {
-			if m.mouseDownTime.IsZero() {
-				return *m, nil
-			}
-			elapsed := time.Since(m.mouseDownTime)
-			m.mouseDownTime = time.Time{}
-
-			dx := abs(msg.X - m.mouseDownPos.X)
-			dy := abs(msg.Y - m.mouseDownPos.Y)
-			isDrag := elapsed > 0 && (dx > 5 || dy > 2)
-			if isDrag || elapsed <= 0 {
-				return *m, nil
-			}
-
-			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
-		}
-
-		wasLongPressActive := m.longPressActive
-		m.longPressActive = false
 		if m.mouseDownTime.IsZero() {
 			return *m, nil
 		}
@@ -720,15 +660,10 @@ func (m *rendererModel) handleMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 		m.mouseDownTime = time.Time{}
 
 		if *debugMode {
-			debugLog.Printf("  RELEASE at (%d,%d), press was (%d,%d), longPress=%v elapsed=%v",
-				msg.X, msg.Y, m.mouseDownPos.X, m.mouseDownPos.Y, wasLongPressActive, elapsed)
+			debugLog.Printf("  RELEASE at (%d,%d), press was (%d,%d), elapsed=%v",
+				msg.X, msg.Y, m.mouseDownPos.X, m.mouseDownPos.Y, elapsed)
 		}
 
-		// Detect drag by comparing press vs release position directly.
-		// This works even if motion events aren't received (e.g. mosh).
-		// Use larger threshold (5 chars horizontal, 2 lines vertical) to avoid
-		// false drag detection from slight mouse movement during clicks
-		// Also skip if elapsed is 0 (no valid press - stale state)
 		dx := abs(msg.X - m.mouseDownPos.X)
 		dy := abs(msg.Y - m.mouseDownPos.Y)
 		isDrag := elapsed > 0 && (dx > 5 || dy > 2)
@@ -741,19 +676,7 @@ func (m *rendererModel) handleMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 			return *m, nil
 		}
 
-		// Record click time/position for double-click detection (checked on next press)
-		m.lastTapTime = time.Now()
-		m.lastTapPos = struct{ X, Y int }{msg.X, msg.Y}
-
-		// Only process left-click action if this wasn't a long-press that already triggered
-		if wasLongPressActive && elapsed < longPressThreshold {
-			if *debugMode {
-				debugLog.Printf("  Quick click (elapsed=%v) -> left-click action", elapsed)
-			}
-			return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
-		}
-		// Long-press would have already triggered via timer
-		return *m, nil
+		return m.processMouseClick(msg.X, msg.Y, tea.MouseButtonLeft, false)
 	}
 
 	return *m, nil
@@ -865,7 +788,6 @@ func (m *rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSi
 		ResolvedTarget:        resolvedTarget,
 		PaneID:                paneID,
 		IsSimulatedRightClick: isSimulated,
-		IsTouchMode:           m.isTouchMode,
 	}
 
 	m.sendInput(input)

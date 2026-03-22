@@ -25,8 +25,6 @@ printf 'pane\tmain\t0\tcode\t1\t*\t0\t/home\t1\tbash\tbash\n' >> "$TMPFILE"
 printf 'pane\tmain\t0\tcode\t1\t*\t1\t/home\t0\tsidebar-renderer\tsidebar-renderer --session main\n' >> "$TMPFILE"
 printf 'pane\tmain\t0\tcode\t1\t*\t2\t/home\t0\tpane-header\tpane-header --pane 0\n' >> "$TMPFILE"
 printf 'pane\tmain\t1\tnotes\t0\t-\t0\t/home\t1\tvim\tvim notes.md\n' >> "$TMPFILE"
-printf 'pane\tmain\t1\tnotes\t0\t-\t1\t/home\t0\ttabbar\ttabbar --session main\n' >> "$TMPFILE"
-printf 'pane\tmain\t1\tnotes\t0\t-\t2\t/home\t0\tpane-bar\tpane-bar\n' >> "$TMPFILE"
 printf 'state\tsome_state_data\n' >> "$TMPFILE"
 
 bash "$SAVE_HOOK" "$TMPFILE"
@@ -38,7 +36,7 @@ else
     fail "Save hook kept $REMAINING_PANES panes, expected 2"
 fi
 
-if grep -q 'sidebar-renderer\|pane-header\|tabbar\|pane-bar' "$TMPFILE"; then
+if grep -q 'sidebar-renderer\|pane-header' "$TMPFILE"; then
     fail "Save hook left Tabby pane lines in file"
 else
     pass "Save hook stripped all Tabby pane lines"

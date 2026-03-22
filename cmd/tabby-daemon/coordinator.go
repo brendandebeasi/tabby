@@ -222,9 +222,6 @@ type Coordinator struct {
 	sidebarCollapsed     bool
 	sidebarPreviousWidth int
 
-	// Touch mode runtime override ("", "1", "0")
-	touchModeOverride string
-
 	// Pet widget layout (for custom click detection)
 	petLayout petWidgetLayout
 
@@ -1372,15 +1369,6 @@ func (c *Coordinator) RefreshWindows() {
 		}
 	}
 
-	touchModeOverride := ""
-	{
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if out, err := exec.CommandContext(ctx, "tmux", "show-option", "-gqv", "@tabby_touch_mode").Output(); err == nil {
-			touchModeOverride = strings.TrimSpace(string(out))
-		}
-		cancel()
-	}
-
 	prefixModeRaw := ""
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1413,7 +1401,6 @@ func (c *Coordinator) RefreshWindows() {
 	c.computeVisualPositions()
 	pendingMoves := c.syncWindowIndices()
 
-	c.touchModeOverride = touchModeOverride
 	if prefixModeRaw != "" {
 		c.config.Sidebar.PrefixMode = (prefixModeRaw == "1" || prefixModeRaw == "true")
 	}
@@ -4180,8 +4167,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		TotalLines:    totalLines,
 		PinnedHeight:  0, // No pinned section
 		Regions:       allRegions,
-		PinnedRegions: nil,                  // All regions are in main Regions array now
-		IsTouchMode:   c.isTouchMode(width), // Pass touch mode status to renderer
+		PinnedRegions: nil, // All regions are in main Regions array now
 		SidebarBg:     sidebarBg,
 		TerminalBg:    terminalBg,
 	}
@@ -4740,40 +4726,6 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		})
 	}
 
-	if c.config.PaneHeader.LargeMode {
-		caratUp := "▲"
-		caratDown := "▼"
-		caratStyle := btnStyle.Copy()
-
-		caratLine := baseStyle.Render(strings.Repeat(" ", width/2-2)) +
-			caratStyle.Render(caratUp+" "+caratDown) +
-			baseStyle.Render(strings.Repeat(" ", width-width/2-2))
-
-		// Large mode: line-0 regions stay on line 0 (do NOT extend to line 1)
-		// The carat buttons below are correctly placed on line 1
-
-		caratUpCol := width/2 - 2
-		caratDownCol := caratUpCol + 2
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 1, EndLine: 1,
-			StartCol: caratUpCol, EndCol: caratDownCol,
-			Action: "header_carat_up", Target: paneID,
-		})
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 1, EndLine: 1,
-			StartCol: caratDownCol, EndCol: caratDownCol + 2,
-			Action: "header_carat_down", Target: paneID,
-		})
-
-		return &daemon.RenderPayload{
-			Content:    line + "\n" + caratLine,
-			Width:      width,
-			Height:     2,
-			TotalLines: 2,
-			Regions:    regions,
-		}
-	}
-
 	if c.config.PaneHeader.CustomBorder {
 		return &daemon.RenderPayload{
 			Content:    line,
@@ -4809,102 +4761,6 @@ func hashContent(s string) uint32 {
 		h = h*31 + uint32(c)
 	}
 	return h
-}
-
-// isTouchMode checks if touch mode is enabled
-func (c *Coordinator) isTouchMode(width int) bool {
-	if c.config.Sidebar.DisableLargeMode {
-		return false
-	}
-	// Runtime override via @tabby_touch_mode tmux option
-	if c.touchModeOverride == "1" {
-		return true
-	}
-	if c.touchModeOverride == "0" {
-		return false
-	}
-	if c.config.Sidebar.TouchMode {
-		return true
-	}
-	if os.Getenv("TABBY_TOUCH") == "1" {
-		return true
-	}
-	if os.Getenv("TABBY_TOUCH") == "auto" && width < 40 {
-		return true
-	}
-	return false
-}
-
-// touchDivider returns a divider for touch mode.
-// Disabled: headers are minimal 1-char height with no top/bottom borders.
-func (c *Coordinator) touchDivider(width int, bgColor string) string {
-	return ""
-}
-
-// lineSpacing returns extra line spacing for touch mode
-func (c *Coordinator) lineSpacing() string {
-	if c.config.Sidebar.LineHeight > 0 {
-		return strings.Repeat("\n", c.config.Sidebar.LineHeight)
-	}
-	return ""
-}
-
-// touchPadLine renders a blank padding line with background color for touch mode.
-// Returns empty string when touch mode is off.
-func (c *Coordinator) touchPadLine(width int, bgColor string) string {
-	if width < 1 {
-		return "\n"
-	}
-	return strings.Repeat(" ", width) + "\n"
-}
-
-// touchButtonOpts configures renderTouchButton appearance.
-type touchButtonOpts struct {
-	FgColor  string // text color (default: #ffffff)
-	BoldText bool   // bold content text
-	BorderFg string // border color override (default: same as FgColor)
-}
-
-// renderTouchButton renders a 3-line bordered button for touch mode.
-// Returns a multi-line string (3 lines, no trailing newline):
-//
-//	╭──────────────────╮
-//	│ + New Tab        │
-//	╰──────────────────╯
-func (c *Coordinator) renderTouchButton(width int, label string, bgColor string, opts ...touchButtonOpts) string {
-	fgColor := c.getTextColorWithFallback("")
-	bold := false
-	borderFg := ""
-	if len(opts) > 0 {
-		if opts[0].FgColor != "" {
-			fgColor = opts[0].FgColor
-		}
-		bold = opts[0].BoldText
-		borderFg = opts[0].BorderFg
-	}
-	if borderFg == "" {
-		if bgColor != "" {
-			borderFg = bgColor
-		} else {
-			borderFg = fgColor
-		}
-	}
-	borderType := lipgloss.RoundedBorder()
-	if !c.config.Style.Rounded {
-		borderType = lipgloss.NormalBorder()
-	}
-	boxStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(fgColor)).
-		Bold(bold).
-		Width(width - 2).
-		Border(borderType).
-		BorderForeground(lipgloss.Color(borderFg))
-
-	if bgColor != "" {
-		boxStyle = boxStyle.Background(lipgloss.Color(bgColor))
-	}
-
-	return boxStyle.Render(label)
 }
 
 // syncAllSidebarWidths resizes all sidebar panes to match the given width.
@@ -5345,24 +5201,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		groupStartLine := currentLine
 		hasWindows := len(group.Windows) > 0
 
-		// Render group header - touch mode uses bordered button, normal mode uses inline
-		if c.isTouchMode(width) {
-			// Build header label with collapse icon (if has windows)
-			var headerLabel string
-			if hasWindows {
-				headerLabel = collapseIcon + " " + headerText
-			} else {
-				headerLabel = "  " + headerText
-			}
-
-			// Use touch button for consistent 3-line bordered appearance
-			headerOpts := touchButtonOpts{
-				FgColor:  inactiveFg,
-				BoldText: true,
-			}
-			s.WriteString(c.renderTouchButton(width, headerLabel, theme.Bg, headerOpts) + "\n")
-			currentLine += 3 // Touch button is 3 lines tall
-		} else {
+		// Render group header
+		{
 			bg := theme.Bg
 			if strings.EqualFold(bg, "transparent") {
 				bg = ""
@@ -5450,62 +5290,34 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		}
 
 		if hasWindows {
-			if c.isTouchMode(width) {
-				iconLine := groupStartLine + 1
-				regions = append(regions, daemon.ClickableRegion{
-					StartLine: iconLine,
-					EndLine:   iconLine,
-					StartCol:  1,
-					EndCol:    2,
-					Action:    "toggle_group",
-					Target:    group.Name,
-				})
-				regions = append(regions, daemon.ClickableRegion{
-					StartLine: groupStartLine,
-					EndLine:   currentLine - 1,
-					StartCol:  3,
-					EndCol:    width - 2,
-					Action:    "group_header",
-					Target:    group.Name,
-				})
-				regions = append(regions, daemon.ClickableRegion{
-					StartLine: groupStartLine,
-					EndLine:   currentLine - 1,
-					StartCol:  width - 2,
-					EndCol:    0,
-					Action:    "group_menu",
-					Target:    group.Name,
-				})
-			} else {
-				iconWidth := uniseg.StringWidth(stripAnsi(collapseStyle.Render(collapseIcon)))
-				if iconWidth < 1 {
-					iconWidth = 1
-				}
-				regions = append(regions, daemon.ClickableRegion{
-					StartLine: groupStartLine,
-					EndLine:   currentLine - 1,
-					StartCol:  0,
-					EndCol:    iconWidth,
-					Action:    "toggle_group",
-					Target:    group.Name,
-				})
-				regions = append(regions, daemon.ClickableRegion{
-					StartLine: groupStartLine,
-					EndLine:   currentLine - 1,
-					StartCol:  iconWidth,
-					EndCol:    width - 2,
-					Action:    "group_header",
-					Target:    group.Name,
-				})
-				regions = append(regions, daemon.ClickableRegion{
-					StartLine: groupStartLine,
-					EndLine:   currentLine - 1,
-					StartCol:  width - 2,
-					EndCol:    0,
-					Action:    "group_menu",
-					Target:    group.Name,
-				})
+			iconWidth := uniseg.StringWidth(stripAnsi(collapseStyle.Render(collapseIcon)))
+			if iconWidth < 1 {
+				iconWidth = 1
 			}
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: groupStartLine,
+				EndLine:   currentLine - 1,
+				StartCol:  0,
+				EndCol:    iconWidth,
+				Action:    "toggle_group",
+				Target:    group.Name,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: groupStartLine,
+				EndLine:   currentLine - 1,
+				StartCol:  iconWidth,
+				EndCol:    width - 2,
+				Action:    "group_header",
+				Target:    group.Name,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: groupStartLine,
+				EndLine:   currentLine - 1,
+				StartCol:  width - 2,
+				EndCol:    0,
+				Action:    "group_menu",
+				Target:    group.Name,
+			})
 		} else {
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: groupStartLine,
@@ -5699,43 +5511,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				contentStyle = contentStyle.Background(lipgloss.Color(bgColor))
 			}
 
-			// Render tab line - touch mode uses bordered box, normal mode uses inline
-			if c.isTouchMode(width) {
-				// Build the tab label with indicators
-				tabLabel := " " + contentText
-				if hasPanes {
-					tabLabel = " " + windowCollapseIcon + " " + contentText
-				}
-				// Prepend status icon (busy/bell/activity) if present
-				if alertIcon != "" {
-					tabLabel = alertIcon + tabLabel
-				}
-				tabBg := bgColor
-				if tabBg == "" {
-					tabBg = theme.Bg
-				}
-				// Active tab: bold, text-colored border (clean)
-				// Inactive tab: accent-colored border (visual pop)
-				tb := c.config.Sidebar.TouchButtons
-				tabOpts := touchButtonOpts{FgColor: fgColor}
-				if isActive {
-					tabOpts.BoldText = true
-					// Active border: use config override or text color (clean look)
-					if tb.ActiveBorder != "" {
-						tabOpts.BorderFg = tb.ActiveBorder
-					}
-					// BorderFg defaults to FgColor in renderTouchButton when empty
-				} else {
-					// Inactive border: use config override or theme accent color
-					if tb.InactiveBorder != "" {
-						tabOpts.BorderFg = tb.InactiveBorder
-					} else if theme.ActiveIndicatorBg != "" {
-						tabOpts.BorderFg = theme.ActiveIndicatorBg
-					}
-				}
-				s.WriteString(c.renderTouchButton(width, tabLabel, tabBg, tabOpts) + "\n")
-				currentLine += 3
-			} else {
+			// Render tab line
+			{
 				// Build prefix (indicator + tree branch) separately from content
 				// so background color only applies to the content portion
 				var prefix, content string
@@ -6047,23 +5824,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					s.WriteString(panePrefix + paneContent + paneBtns + "\n")
 					currentLine++
 
-					// Touch mode: bottom padding for pane (2 lines total: content + pad)
-					if c.isTouchMode(width) {
-						// Pane tree continuation: │ if not last pane, space if last
-						var panePadBranch string
-						if isLastPane {
-							panePadBranch = " "
-						} else {
-							panePadBranch = treeStyle.Render(treeContinueChar)
-						}
-						// paneIndentWidth = 6: " " + treeContinue + " " + branch + connector + connector
-						panePadFillWidth := width - 6
-						panePadFillStyle := lipgloss.NewStyle().
-							Width(panePadFillWidth)
-						s.WriteString(" " + treeContinue + " " + panePadBranch + "  " + panePadFillStyle.Render("") + "\n")
-						currentLine++
-					}
-
 					regions = append(regions, daemon.ClickableRegion{
 						StartLine: paneStartLine,
 						EndLine:   currentLine - 1,
@@ -6298,38 +6058,8 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			windowCollapseStyle = windowCollapseStyle.Foreground(lipgloss.Color(disclosureColor))
 		}
 
-		// Render window line - touch mode uses bordered box, normal mode uses inline
-		if c.isTouchMode(width) {
-			// Build the tab label with indicators
-			tabLabel := " " + contentText
-			if hasPanes {
-				tabLabel = " " + windowCollapseIcon + " " + contentText
-			}
-			// Prepend status icon if present
-			if alertIcon != "" {
-				tabLabel = alertIcon + tabLabel
-			}
-			tabBg := bgColor
-			if tabBg == "" {
-				tabBg = theme.Bg
-			}
-			tb := c.config.Sidebar.TouchButtons
-			tabOpts := touchButtonOpts{FgColor: fgColor}
-			if isActive {
-				tabOpts.BoldText = true
-				if tb.ActiveBorder != "" {
-					tabOpts.BorderFg = tb.ActiveBorder
-				}
-			} else {
-				if tb.InactiveBorder != "" {
-					tabOpts.BorderFg = tb.InactiveBorder
-				} else if theme.ActiveIndicatorBg != "" {
-					tabOpts.BorderFg = theme.ActiveIndicatorBg
-				}
-			}
-			s.WriteString(c.renderTouchButton(width, tabLabel, tabBg, tabOpts) + "\n")
-			currentLine += 3
-		} else {
+		// Render window line
+		{
 			windowLineStyle := lipgloss.NewStyle().Width(width)
 			effectiveBg := bgColor
 			if effectiveBg == "" {
@@ -6556,12 +6286,6 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				}
 				currentLine++
 
-				// Touch mode: bottom padding for pane
-				if c.isTouchMode(width) {
-					s.WriteString(strings.Repeat(" ", width) + "\n")
-					currentLine++
-				}
-
 				// Record pane region for click handling
 				regions = append(regions, daemon.ClickableRegion{
 					StartLine: paneStartLine,
@@ -6620,8 +6344,7 @@ func (c *Coordinator) collectWidgetEntries(width int) []widgetEntry {
 			name:     "pet",
 			zone:     pos,
 			priority: c.config.Widgets.Pet.Priority,
-			// Do not constrain pet content here - it has zone markers that would be corrupted
-			content: c.renderPetWidget(width),
+			content:  c.renderPetWidget(width),
 		})
 	}
 
@@ -6666,6 +6389,13 @@ func (c *Coordinator) collectWidgetEntries(width int) []widgetEntry {
 			content:  constrainWidgetWidth(c.renderClaudeWidget(width), width),
 		})
 	}
+
+	entries = append(entries, widgetEntry{
+		name:     "nav_buttons",
+		zone:     "bottom",
+		priority: 95,
+		content:  c.renderNavButtons(width),
+	})
 
 	// Action buttons (new tab, new group, close, touch mode toggle)
 	actionZone := c.config.Sidebar.ActionZone
@@ -6718,9 +6448,9 @@ func (c *Coordinator) renderWidgetZone(entries []widgetEntry, width int) (string
 		"pet:drop_food", "pet:drop_yarn", "pet:clean_poop", "pet:pet_pet", "pet:ground",
 		// Button zones
 		"sidebar:new_tab", "sidebar:new_group", "sidebar:close_tab",
-		"sidebar:toggle_touch_mode",
 		// Sidebar zones
 		"sidebar:shrink", "sidebar:grow",
+		"sidebar:prev_window", "sidebar:next_window",
 	}
 	var regions []daemon.ClickableRegion
 	for _, zoneID := range knownZones {
@@ -8163,71 +7893,6 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 	return false
 }
 
-// renderPetTouchButtons renders touch-friendly action buttons for the pet widget
-func (c *Coordinator) renderPetTouchButtons(width int, sprites petSprites) string {
-	var result strings.Builder
-
-	// Simple button style without Width/Padding (we'll handle width manually)
-	buttonFg := lipgloss.Color("#ffffff")
-	buttonStyle := lipgloss.NewStyle().
-		Foreground(buttonFg)
-
-	// Divider line (constrain to exact width) - fall back to background-aware default
-	touchDividerFg := c.getInactiveTextColorWithFallback(c.config.Widgets.Pet.DividerFg)
-	dividerStyle := lipgloss.NewStyle()
-	if touchDividerFg != "" {
-		dividerStyle = dividerStyle.Foreground(lipgloss.Color(touchDividerFg))
-	}
-	dividerWidth := width
-	if dividerWidth < 1 {
-		dividerWidth = 1
-	}
-	result.WriteString(dividerStyle.Render(strings.Repeat("─", dividerWidth)) + "\n")
-
-	// Define pet action buttons (regular full-width)
-	buttons := []struct {
-		emoji  string
-		label  string
-		action string
-		show   bool
-	}{
-		{sprites.Food, "Feed", "drop_food", true},
-		{sprites.Yarn, "Play", "drop_yarn", true},
-		{sprites.Poop, "Clean", "clean_poop", len(c.pet.PoopPositions) > 0},
-		{sprites.Heart, "Pet", "pet_pet", true},
-	}
-
-	for _, btn := range buttons {
-		if btn.show {
-			// Format: emoji  label, manually padded to fit width
-			content := fmt.Sprintf("%s  %s", btn.emoji, btn.label)
-			// Calculate visual width (emoji is 2 cols, spaces are 1 col each)
-			contentWidth := uniseg.StringWidth(content)
-			// Add padding to reach target width (account for background color padding)
-			targetWidth := width - 2 // Leave 1 char margin on each side
-			if targetWidth < contentWidth {
-				targetWidth = contentWidth
-			}
-			padding := targetWidth - contentWidth
-			if padding > 0 {
-				content = content + strings.Repeat(" ", padding)
-			}
-			// Add single space padding on left and right
-			content = " " + content + " "
-
-			// Apply style and wrap with zone for click detection
-			zoneID := fmt.Sprintf("pet:%s", btn.action)
-			styledContent := buttonStyle.Render(content)
-			markedContent := zone.Mark(zoneID, styledContent)
-			coordinatorDebugLog.Printf("zone.Mark(%q) input len=%d, output len=%d, hasMarker=%v",
-				zoneID, len(styledContent), len(markedContent), len(markedContent) > len(styledContent))
-			result.WriteString(markedContent + "\n")
-		}
-	}
-
-	return result.String()
-}
-
 // renderSmallButton renders a single-line flat button with background color.
 func renderSmallButton(width int, label string, bgColor, fgColor string) string {
 	return lipgloss.NewStyle().
@@ -8247,12 +7912,10 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 		width = 1
 	}
 	var s strings.Builder
-	_ = c.config.Sidebar.TouchButtons
-	large := c.isTouchMode(width)
 
 	// Get button colors from theme, with fallbacks
 	var primaryBg, primaryFg, secondaryBg, secondaryFg string
-	var destructiveBg, destructiveFg, defaultBg, defaultFg string
+	var destructiveBg, destructiveFg string
 	if c.theme != nil {
 		primaryBg = c.getThemeColor(c.theme.ButtonPrimaryBg, "#27ae60")
 		primaryFg = c.getThemeColor(c.theme.ButtonPrimaryFg, "#ffffff")
@@ -8260,79 +7923,33 @@ func (c *Coordinator) renderPinnedActionButtons(width int) string {
 		secondaryFg = c.getThemeColor(c.theme.ButtonSecondaryFg, "#ffffff")
 		destructiveBg = c.getThemeColor(c.theme.ButtonDestructiveBg, "#e74c3c")
 		destructiveFg = c.getThemeColor(c.theme.ButtonDestructiveFg, "#ffffff")
-		defaultBg = c.getThemeColor(c.theme.ButtonBg, "#555555")
-		defaultFg = c.getThemeColor(c.theme.ButtonFg, "#ffffff")
 	} else {
 		primaryBg, primaryFg = "#27ae60", "#ffffff"
 		secondaryBg, secondaryFg = "#9b59b6", "#ffffff"
 		destructiveBg, destructiveFg = "#e74c3c", "#ffffff"
-		defaultBg, defaultFg = "#555555", "#ffffff"
 	}
 
 	// New Tab + New Group side by side
 	if c.config.Sidebar.NewTabButton && c.config.Sidebar.NewGroupButton {
 		leftWidth := width / 2
 		rightWidth := width - leftWidth
-
-		var leftBtn, rightBtn string
-		if large {
-			leftBtn = c.renderTouchButton(leftWidth, "+ Tab", primaryBg, touchButtonOpts{FgColor: primaryFg})
-			rightBtn = c.renderTouchButton(rightWidth, "+ Group", secondaryBg, touchButtonOpts{FgColor: secondaryFg})
-		} else {
-			leftBtn = renderSmallButton(leftWidth, "+ Tab", primaryBg, primaryFg)
-			rightBtn = renderSmallButton(rightWidth, "+ Group", secondaryBg, secondaryFg)
-		}
-
+		leftBtn := renderSmallButton(leftWidth, "+ Tab", primaryBg, primaryFg)
+		rightBtn := renderSmallButton(rightWidth, "+ Group", secondaryBg, secondaryFg)
 		left := zone.Mark("sidebar:new_tab", leftBtn)
 		right := zone.Mark("sidebar:new_group", rightBtn)
 		s.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, right) + "\n")
 	} else if c.config.Sidebar.NewTabButton {
-		var btn string
-		if large {
-			btn = c.renderTouchButton(width, "+ New Tab", primaryBg, touchButtonOpts{FgColor: primaryFg})
-		} else {
-			btn = renderSmallButton(width, "+ New Tab", primaryBg, primaryFg)
-		}
+		btn := renderSmallButton(width, "+ New Tab", primaryBg, primaryFg)
 		s.WriteString(zone.Mark("sidebar:new_tab", btn) + "\n")
 	} else if c.config.Sidebar.NewGroupButton {
-		var btn string
-		if large {
-			btn = c.renderTouchButton(width, "+ New Group", secondaryBg, touchButtonOpts{FgColor: secondaryFg})
-		} else {
-			btn = renderSmallButton(width, "+ New Group", secondaryBg, secondaryFg)
-		}
+		btn := renderSmallButton(width, "+ New Group", secondaryBg, secondaryFg)
 		s.WriteString(zone.Mark("sidebar:new_group", btn) + "\n")
 	}
 
 	// Close Tab button
 	if c.config.Sidebar.CloseButton {
-		var btn string
-		if large {
-			btn = c.renderTouchButton(width, "x Close Tab", destructiveBg, touchButtonOpts{FgColor: destructiveFg})
-		} else {
-			btn = renderSmallButton(width, "x Close Tab", destructiveBg, destructiveFg)
-		}
+		btn := renderSmallButton(width, "x Close Tab", destructiveBg, destructiveFg)
 		s.WriteString(zone.Mark("sidebar:close_tab", btn) + "\n")
-	}
-
-	if !c.config.Sidebar.DisableLargeMode {
-		touchLabel := "Large Mode"
-		touchColor := defaultBg
-		if large {
-			touchLabel = "Small Mode"
-			if c.theme != nil {
-				touchColor = c.getThemeColor(c.theme.ButtonPrimaryBg, "#2980b9")
-			} else {
-				touchColor = "#2980b9"
-			}
-		}
-		var btn string
-		if large {
-			btn = c.renderTouchButton(width, touchLabel, touchColor, touchButtonOpts{FgColor: defaultFg})
-		} else {
-			btn = renderSmallButton(width, touchLabel, touchColor, defaultFg)
-		}
-		s.WriteString(zone.Mark("sidebar:toggle_touch_mode", btn) + "\n")
 	}
 
 	return s.String()
@@ -8358,20 +7975,39 @@ func (c *Coordinator) renderSidebarResizeButtons(width int) string {
 	leftWidth := width / 2
 	rightWidth := width - leftWidth
 
-	var shrinkBtn, growBtn string
-	if c.isTouchMode(width) {
-		shrinkBtn = c.renderTouchButton(leftWidth, "<", destructiveBg, touchButtonOpts{FgColor: destructiveFg})
-		growBtn = c.renderTouchButton(rightWidth, ">", primaryBg, touchButtonOpts{FgColor: primaryFg})
-	} else {
-		shrinkBtn = renderSmallButton(leftWidth, "<", destructiveBg, destructiveFg)
-		growBtn = renderSmallButton(rightWidth, ">", primaryBg, primaryFg)
-	}
+	shrinkBtn := renderSmallButton(leftWidth, "<", destructiveBg, destructiveFg)
+	growBtn := renderSmallButton(rightWidth, ">", primaryBg, primaryFg)
 
 	left := zone.Mark("sidebar:shrink", shrinkBtn)
 	right := zone.Mark("sidebar:grow", growBtn)
 	combined := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
 	return combined + "\n"
+}
+
+func (c *Coordinator) renderNavButtons(width int) string {
+	if width < 1 {
+		width = 1
+	}
+
+	var prevBg, nextBg, navFg string
+	if c.theme != nil {
+		prevBg = c.getThemeColor(c.theme.ButtonPrimaryBg, "#2563eb")
+		nextBg = c.getThemeColor(c.theme.ButtonSecondaryBg, "#16a34a")
+		navFg = c.getThemeColor(c.theme.ButtonPrimaryFg, "#ffffff")
+	} else {
+		prevBg, nextBg, navFg = "#2563eb", "#16a34a", "#ffffff"
+	}
+
+	leftWidth := width / 2
+	rightWidth := width - leftWidth
+
+	prevBtn := renderSmallButton(leftWidth, "▲", prevBg, navFg)
+	nextBtn := renderSmallButton(rightWidth, "▼", nextBg, navFg)
+
+	navLeft := zone.Mark("sidebar:prev_window", prevBtn)
+	navRight := zone.Mark("sidebar:next_window", nextBtn)
+	return lipgloss.JoinHorizontal(lipgloss.Top, navLeft, navRight) + "\n"
 }
 func (c *Coordinator) getThemeColor(themeColor, fallback string) string {
 	if c.theme != nil && themeColor != "" {
@@ -8488,8 +8124,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	// Handle right-click for context menus
 	// Show context menu for all right-clicks (regular, simulated, or touch mode)
 	if input.Button == "right" && input.ResolvedAction != "" {
-		coordinatorDebugLog.Printf("  -> Right-click: touchMode=%v simulated=%v -> showing context menu",
-			input.IsTouchMode, input.IsSimulatedRightClick)
+		coordinatorDebugLog.Printf("  -> Right-click: simulated=%v -> showing context menu",
+			input.IsSimulatedRightClick)
 		c.handleRightClick(clientID, input)
 		return true
 	}
@@ -8808,6 +8444,14 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		exec.Command("tmux", "kill-window").Run()
 		exec.Command("tmux", "last-window").Run()
 		selectContentPaneInActiveWindow()
+		return true
+
+	case "prev_window":
+		exec.Command("tmux", "previous-window").Run()
+		return true
+
+	case "next_window":
+		exec.Command("tmux", "next-window").Run()
 		return true
 
 	case "drop_food":
@@ -9156,25 +8800,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			restartCmd := fmt.Sprintf("tmux set-option -g @tabby_sidebar_position %s; '%s'; sleep 0.3; '%s'", newPos, toggleScript, toggleScript)
 			exec.Command("tmux", "run-shell", "-b", restartCmd).Run()
 		}
-		return false
-
-	case "toggle_touch_mode":
-		if c.config.Sidebar.DisableLargeMode {
-			return false
-		}
-		// Toggle touch mode via tmux option
-		newVal := "1"
-		if c.touchModeOverride == "1" {
-			newVal = "0"
-		} else if c.touchModeOverride == "0" {
-			newVal = "" // cycle back to "auto" (use config/env)
-		}
-		if newVal == "" {
-			exec.Command("tmux", "set-option", "-gqu", "@tabby_touch_mode").Run()
-		} else {
-			exec.Command("tmux", "set-option", "-gq", "@tabby_touch_mode", newVal).Run()
-		}
-		c.touchModeOverride = newVal
 		return false
 
 	case "toggle_prefix_mode":

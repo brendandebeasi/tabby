@@ -22,7 +22,6 @@ A modern tab manager for tmux with grouping, a clickable vertical sidebar, and d
 - [Configuration](#configuration)
 - [Tab Grouping](#tab-grouping)
 - [Development](#development)
-- [Tabby Web (Local-Only)](#tabby-web-local-only)
 - [macOS Notifications with Deep Links](#macos-notifications-with-deep-links)
 - [Session Persistence (tmux-resurrect)](#session-persistence-tmux-resurrect)
 - [Troubleshooting](#troubleshooting)
@@ -284,7 +283,6 @@ This approach doesn't require SSH config changes and won't interfere with other 
 | Config | `~/.config/tabby/config.yaml` | `TABBY_CONFIG_DIR` |
 | Pet state | `~/.local/state/tabby/pet.json` | `TABBY_STATE_DIR` |
 | Thought cache | `~/.local/state/tabby/thought_buffer.txt` | `TABBY_STATE_DIR` |
-| Web token | `~/.local/state/tabby/web-token` | `TABBY_STATE_DIR` |
 | Runtime | `/tmp/tabby-*` | -- |
 
 
@@ -488,67 +486,6 @@ temporary files, and likely hardcoded secrets.
 ./tests/e2e/test_edge_cases.sh
 ```
 
-## Tabby Web (Local-Only)
-
-Tabby Web runs a local-only bridge that exposes tmux + sidebar over WebSocket. The bridge only binds to loopback and requires user/password for access.
-
-Note: the web interface is currently alpha and is not guaranteed to work in all setups yet.
-
-### Enable in config (default disabled)
-Add this to `~/.config/tabby/config.yaml`:
-```yaml
-web:
-  enabled: true
-  host: "127.0.0.1"
-  port: 8080
-  auth_user: "tabby"
-  auth_pass: "testpass"
-```
-
-### Start the bridge
-```bash
-# Start daemon for a session
-go run ./cmd/tabby-daemon -session tabby-web-test
-
-# Start web bridge (loopback only) with auth
-go run ./cmd/tabby-web-bridge -session tabby-web-test -host 127.0.0.1 -port 8080 -auth-user tabby -auth-pass testpass
-```
-
-### Start the web client
-```bash
-cd web
-npm install
-npm run dev
-```
-
-### Connect in browser
-Open `http://127.0.0.1:5173/?token=<token>&user=<user>&pass=<pass>&pane=<pane_id>&ws=127.0.0.1:8080`
-
-- Token is stored at `~/.local/state/tabby/web-token`
-- Pane ID can be retrieved with `tmux list-panes -t tabby-web-test -F '#{pane_id}'`
-- The bridge rejects non-loopback requests
-
-### Project Structure
-```
-tabby/
-├── cmd/
-│   ├── tabby-daemon/    # Session coordinator + render payloads
-│   ├── sidebar-renderer/ # Per-window sidebar TUI client
-│   ├── pane-header/     # Per-pane header TUI client
-│   └── render-status/   # Native tmux status rendering helpers
-├── pkg/
-│   ├── config/         # Configuration loading
-│   ├── grouping/       # Tab grouping logic
-│   ├── paths/          # XDG config/state paths
-│   └── tmux/           # Tmux integration
-├── scripts/
-│   ├── install.sh      # Build and install
-│   ├── toggle_sidebar.sh
-│   └── ensure_sidebar.sh
-├── tests/              # Test suites
-├── config.yaml         # Default configuration template
-└── tabby.tmux          # Plugin entry point
-```
 
 ## macOS Notifications with Deep Links
 
@@ -772,8 +709,8 @@ To avoid duplicate notifications when using custom hooks:
 
 Tabby integrates with [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) so your sessions survive tmux server restarts and reboots. When resurrect is installed, Tabby automatically:
 
-- **On save** (`prefix + Ctrl-s`): Strips Tabby utility panes (sidebar, pane headers, tabbar) from the save file so they don't create zombie shell panes on restore.
-- **On restore** (`prefix + Ctrl-r`): Cleans stale runtime state, kills leftover processes, and re-initializes the sidebar/tabbar based on your saved mode.
+- **On save** (`prefix + Ctrl-s`): Strips Tabby utility panes (sidebar, pane headers) from the save file so they don't create zombie shell panes on restore.
+- **On restore** (`prefix + Ctrl-r`): Cleans stale runtime state, kills leftover processes, and re-initializes the sidebar based on your saved mode.
 
 ### Setup
 
@@ -790,7 +727,7 @@ Then `prefix + I` to install, or `tmux source ~/.tmux.conf` to reload. That's it
 
 | Preserved by resurrect | Restored by Tabby |
 |---|---|
-| Window layout and names | Sidebar / tabbar UI |
+| Window layout and names | Sidebar UI |
 | Pane working directories | Pane headers |
 | Running programs (vim, etc.) | Daemon process |
 | Global options (`@tabby_sidebar` mode) | Mouse state cleanup |

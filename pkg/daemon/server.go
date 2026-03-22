@@ -54,6 +54,7 @@ type Server struct {
 	// Callback for client disconnect
 	OnDisconnect func(clientID string)
 
+
 	// Debug logging callback (set by daemon for diagnostics)
 	DebugLog func(format string, args ...interface{})
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ensure sidebar/tabbar exists in current window when that mode is enabled
+# Ensure sidebar exists in current window when that mode is enabled
 # Called by tmux hooks when windows are created/switched
 #
 # Architecture: 1 daemon per session + 1 renderer per window
@@ -81,10 +81,6 @@ fi
 if [ "$MODE" = "enabled" ]; then
 	tmux set-option -g status off
 
-	while IFS= read -r pane_id; do
-		[ -n "$pane_id" ] && tmux kill-pane -t "$pane_id" 2>/dev/null || true
-    done < <(tmux list-panes -t "${WINDOW_ID:-}" -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep "^tabbar|" | cut -d'|' -f2 || true)
-
     # Check if CURRENT window has a sidebar-renderer (daemon-based)
     # Check both current command and start command (for reliability during startup)
     HAS_SIDEBAR=$(tmux list-panes -t "${WINDOW_ID:-}" -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -qE "(sidebar-renderer|sidebar)" && echo "yes" || echo "no")
@@ -133,19 +129,6 @@ if [ "$MODE" = "enabled" ]; then
         # Signal daemon for immediate renderer spawning (don't wait for 2s ticker)
         if [ -f "$DAEMON_PID_FILE" ]; then
             kill -USR1 "$(cat "$DAEMON_PID_FILE")" 2>/dev/null || true
-        fi
-    fi
-elif [ "$MODE" = "horizontal" ]; then
-    tmux set-option -g status off
-
-    # Check if CURRENT window has a tabbar
-    TABBAR_COUNT=$(tmux list-panes -t "${WINDOW_ID:-}" -F "#{pane_current_command}" 2>/dev/null | grep -c "^tabbar$" || echo "0")
-
-    if [ "$TABBAR_COUNT" -eq 0 ]; then
-        FIRST_PANE=$(tmux list-panes -t "${WINDOW_ID:-}" -F "#{pane_id}" 2>/dev/null | head -1)
-        if [ -n "$FIRST_PANE" ]; then
-            tmux split-window -t "$FIRST_PANE" -v -b -l "$TABBAR_HEIGHT" "exec \"$CURRENT_DIR/bin/tabbar\"" || true
-            tmux select-pane -t "{bottom}" 2>/dev/null || true
         fi
     fi
 fi

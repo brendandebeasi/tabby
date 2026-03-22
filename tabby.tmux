@@ -49,16 +49,6 @@ if [ -n "$_TABBY_PRESTART_SESSION" ] && { [ "$_TABBY_PRESTART_MODE" = "enabled" 
     fi
 fi
 
-# Start local-only Tabby Web bridge if enabled
-WEB_ENABLED=$(grep -A6 "^web:" "$CONFIG_FILE" 2>/dev/null | grep "enabled:" | awk '{print $2}' | tr -d '"' || echo "false")
-WEB_ENABLED=${WEB_ENABLED:-false}
-if [[ "$WEB_ENABLED" == "true" ]]; then
-    WEB_START_SCRIPT="$CURRENT_DIR/scripts/start_web_bridge.sh"
-    chmod +x "$WEB_START_SCRIPT"
-    run-shell "$WEB_START_SCRIPT"
-    tmux set-hook -g session-created "run-shell '$WEB_START_SCRIPT'"
-    tmux set-hook -g client-attached "run-shell '$WEB_START_SCRIPT'"
-fi
 
 # Auto-renumber windows when one is closed (keeps indices sequential)
 tmux set-option -g renumber-windows on
@@ -288,7 +278,7 @@ fi
 # attaches do not end up with off-screen sidebars in dual-client setups.
 tmux set-window-option -g window-size "latest"
 
-# Pane header format: hide for utility panes (sidebar, pane-bar, tabbar)
+# Pane header format: hide for utility panes (sidebar, pane-header)
 
 # Unbind right-click on pane so it passes through to apps with mouse capture
 # (sidebar-renderer / pane-header use BubbleTea mouse mode and handle right-click internally)
@@ -382,7 +372,7 @@ cat > "$KILL_PANE_SCRIPT" << 'SCRIPT_EOF'
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 WINDOW_INDEX=$(tmux display-message -p '#{window_index}' 2>/dev/null || echo "")
-CONTENT_COUNT=$(tmux list-panes -F '#{pane_current_command}|#{pane_start_command}' 2>/dev/null | awk -F'|' '$1 !~ /(sidebar|renderer|pane-header|tabbar|pane-bar|tabby-daemon)/ && $2 !~ /(sidebar|renderer|pane-header|tabbar|pane-bar|tabby-daemon)/ {c++} END {print c+0}')
+CONTENT_COUNT=$(tmux list-panes -F '#{pane_current_command}|#{pane_start_command}' 2>/dev/null | awk -F'|' '$1 !~ /(sidebar|renderer|pane-header|tabby-daemon)/ && $2 !~ /(sidebar|renderer|pane-header|tabby-daemon)/ {c++} END {print c+0}')
 
 if [ -n "$WINDOW_INDEX" ] && [ "$CONTENT_COUNT" -le 1 ]; then
     "$CURRENT_DIR/scripts/kill_window.sh" "$WINDOW_INDEX"
@@ -538,16 +528,6 @@ chmod +x "$STATUS_GUARD_SCRIPT"
 FOCUS_RECOVERY_SCRIPT="$CURRENT_DIR/scripts/restore_input_focus.sh"
 chmod +x "$FOCUS_RECOVERY_SCRIPT"
 
-# Helper script to update pane bar (horizontal mode second line)
-UPDATE_PANE_BAR_SCRIPT="$CURRENT_DIR/scripts/update_pane_bar.sh"
-chmod +x "$UPDATE_PANE_BAR_SCRIPT"
-
-# Helper scripts for clickable pane-bar TUI
-ENSURE_PANE_BAR_SCRIPT="$CURRENT_DIR/scripts/ensure_pane_bar.sh"
-chmod +x "$ENSURE_PANE_BAR_SCRIPT"
-SIGNAL_PANE_BAR_SCRIPT="$CURRENT_DIR/scripts/signal_pane_bar.sh"
-chmod +x "$SIGNAL_PANE_BAR_SCRIPT"
-
 # Create script to apply saved group to new window
 APPLY_GROUP_SCRIPT="$CURRENT_DIR/scripts/apply_new_window_group.sh"
 cat > "$APPLY_GROUP_SCRIPT" << 'SCRIPT_EOF'
@@ -582,7 +562,7 @@ chmod +x "$SAVE_LAYOUT_SCRIPT"
 # These hooks trigger both sidebar and status bar refresh
 tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 # On window close: select previous window (sync for UX), then background the rest.
-# The daemon handles orphan cleanup, sidebar spawning, and pane-bar signaling on USR1.
+# The daemon handles orphan cleanup and sidebar spawning on USR1.
 tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT \"#{window_index}\"'; run-shell -b '$RESIZE_SIDEBAR_SCRIPT; $SIGNAL_SIDEBAR_SCRIPT; $REFRESH_STATUS_SCRIPT; $EXIT_IF_NO_MAIN_WINDOWS_SCRIPT; $STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 # Note: after-kill-window is not a valid hook in tmux 3.6+; window-unlinked
 # covers the window-close case. exit_if_no_main runs in the background chains above.
@@ -613,11 +593,11 @@ tmux set-hook -g after-select-pane "run-shell -b '$ON_PANE_SELECT_SCRIPT \"#{ses
 # Update pane bar when panes are split, and preserve group prefixes
 PRESERVE_NAME_SCRIPT="$CURRENT_DIR/scripts/preserve_window_name.sh"
 chmod +x "$PRESERVE_NAME_SCRIPT"
-tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_SIDEBAR_SCRIPT #{session_id}'; run-shell '$PRESERVE_NAME_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT #{window_id} #{window_layout}'; run-shell '$SIGNAL_PANE_BAR_SCRIPT'"
+tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_SIDEBAR_SCRIPT #{session_id}'; run-shell '$PRESERVE_NAME_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT #{window_id} #{window_layout}'"
 
 # When a pane is killed: preserve ratios synchronously (must happen before tmux
 # reflows), then signal daemon in background. The daemon's USR1 handler takes
-# care of orphan cleanup, sidebar spawning, and pane-bar refresh.
+# care of orphan cleanup and sidebar spawning.
 # Note: uses after-kill-pane (not pane-exited which doesn't exist in tmux 3.6+).
 PRESERVE_RATIOS_SCRIPT="$CURRENT_DIR/scripts/preserve_pane_ratios.sh"
 chmod +x "$PRESERVE_RATIOS_SCRIPT"
@@ -626,7 +606,7 @@ tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_SCRIPT \"#{window_
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'; run-shell '$STABILIZE_CLIENT_RESIZE_SCRIPT \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
-# Ensure sidebar/tabbar panes exist for newly created sessions/windows
+# Ensure sidebar panes exist for newly created sessions/windows
 # (do not toggle global mode on session creation)
 tmux set-hook -g session-created "run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
@@ -728,11 +708,6 @@ fi
 
 # Optional: Also bind to a prefix-less key for quick access
 # tmux bind-key -n M-Tab run-shell "$CURRENT_DIR/scripts/toggle_sidebar.sh"
-
-# Mode toggle and switching
-tmux bind-key M run-shell "$CURRENT_DIR/scripts/toggle_mode.sh"
-tmux bind-key V run-shell "$CURRENT_DIR/scripts/switch_to_vertical.sh"
-tmux bind-key H run-shell "$CURRENT_DIR/scripts/switch_to_horizontal.sh"
 
 # New Group shortcut (prefix + G)
 tmux bind-key G command-prompt -p 'New group name:' "run-shell '$CURRENT_DIR/scripts/new_group.sh %%'"

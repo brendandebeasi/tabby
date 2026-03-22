@@ -7,12 +7,6 @@ terminal_title:
   # Format: #{window_index}.#{pane_index} #{window_name} #{pane_current_command}
   format: "tmux #{window_index}.#{pane_index} #{window_name} #{pane_current_command}"
 
-web:
-  enabled: false
-  host: "127.0.0.1"
-  port: 8080
-  auth_user: ""
-  auth_pass: ""
 
 style:
   rounded: true
@@ -79,13 +73,11 @@ sidebar:
   pane_headers: true    # Enable clickable overlay pane headers (replaces native border headers)
   new_tab_button: false
   new_group_button: false
-  show_empty_groups: true
+  show_empty_groups: false
   close_button: false
   sort_by: "group"  # "group" or "index"
   hide_predefined_colors: false  # Hide predefined color palette in context menus (keep Custom + Reset)
   debug: true  # Enable debug logging to /tmp/tabby-debug.log
-  touch_mode: false  # Force touch mode on when true. For auto mode, set TABBY_TOUCH=auto.
-  disable_large_mode: true
   line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
   mobile_max_percent: 15
   mobile_min_content_cols: 40
@@ -108,22 +100,10 @@ sidebar:
     active_indicator_bg: "transparent"
     tree_branch: "├─"               # Branch connector
     tree_branch_last: "└─"          # Last branch connector
-    tree_connector: "─"             # Horizontal connector
-    tree_connector_panes: "┬"       # Connector when has panes
-    tree_continue: "│"              # Vertical continuation
-    # Colors auto-derived from terminal theme detection
-  touch_buttons:
-    # new_tab_bg: "#27ae60"         # New Tab button background (green)
-    # new_tab_fg: "#ffffff"         # New Tab button text
-    # new_tab_border: ""            # New Tab button border (default: same as fg)
-    # new_group_bg: "#9b59b6"       # New Group button background (purple)
-    # new_group_fg: "#ffffff"       # New Group button text
-    # new_group_border: ""          # New Group button border
-    # close_bg: "#e74c3c"           # Close button background (red)
-    # close_fg: "#ffffff"           # Close button text
-    # close_border: ""              # Close button border
-    # active_border: ""             # Active tab border (default: text color)
-    # inactive_border: ""           # Inactive tab border (default: theme accent)
+     tree_connector: "─"             # Horizontal connector
+     tree_connector_panes: "┬"       # Connector when has panes
+     tree_continue: "│"              # Vertical continuation
+     # Colors auto-derived from terminal theme detection
 
 pane_header:
   active_fg: "#ffffff"

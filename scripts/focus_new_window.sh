@@ -8,7 +8,7 @@ fi
 
 is_aux_cmd() {
     case "$1" in
-        *sidebar*|*renderer*|*pane-header*|*tabbar*|*pane-bar*|*tabby-daemon*) return 0 ;;
+        *sidebar*|*renderer*|*pane-header*|*tabby-daemon*) return 0 ;;
         *) return 1 ;;
     esac
 }

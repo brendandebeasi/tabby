@@ -53,7 +53,6 @@ type RenderPayload struct {
 	ViewportOffset int               `json:"viewport_offset"` // Suggested scroll position
 	Regions        []ClickableRegion `json:"regions"`         // Clickable regions for hit testing
 	PinnedRegions  []ClickableRegion `json:"pinned_regions"`  // Clickable regions in pinned content (Y relative to pinned start)
-	IsTouchMode    bool              `json:"is_touch_mode"`   // True if coordinator is in touch mode for this render
 	SidebarBg      string            `json:"sidebar_bg,omitempty"`
 	TerminalBg     string            `json:"terminal_bg,omitempty"`
 }
@@ -77,7 +76,6 @@ type InputPayload struct {
 	ResolvedTarget string `json:"resolved_target,omitempty"` // window index, pane ID, group name, or button action
 	// Context menu control
 	IsSimulatedRightClick bool   `json:"is_simulated_right_click,omitempty"` // True if right-click came from long-press or double-tap
-	IsTouchMode           bool   `json:"is_touch_mode,omitempty"`            // True if renderer is in touch mode
 	PickerAction          string `json:"picker_action,omitempty"`
 	PickerScope           string `json:"picker_scope,omitempty"`
 	PickerTarget          string `json:"picker_target,omitempty"`

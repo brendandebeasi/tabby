@@ -316,12 +316,6 @@ func applyDefaults(cfg *Config) {
 		cfg.Sidebar.Colors.TreeContinue = "│"
 	}
 
-	if cfg.Web.Host == "" {
-		cfg.Web.Host = "127.0.0.1"
-	}
-	if cfg.Web.Port == 0 {
-		cfg.Web.Port = 8080
-	}
 }
 
 // applyIconStyleDefaults applies icon preset values based on IconStyle setting.

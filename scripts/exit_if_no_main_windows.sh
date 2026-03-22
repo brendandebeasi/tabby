@@ -14,7 +14,7 @@ while IFS= read -r line; do
 	if [ "$dead" = "1" ]; then
 		continue
 	fi
-	if printf '%s|%s' "$cmd" "$start" | grep -qE '(sidebar|sidebar-renderer|tabbar|pane-bar|pane-header|tabby-daemon)'; then
+	if printf '%s|%s' "$cmd" "$start" | grep -qE '(sidebar|sidebar-renderer|pane-header|tabby-daemon)'; then
 		continue
 	fi
 	MAIN_PANES=$((MAIN_PANES + 1))

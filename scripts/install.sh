@@ -17,8 +17,6 @@ go build -o bin/render-tab ./cmd/render-tab
 go build -o bin/tabby-daemon ./cmd/tabby-daemon
 go build -o bin/sidebar-renderer ./cmd/sidebar-renderer
 go build -o bin/pane-header ./cmd/pane-header
-go build -o bin/tabbar ./cmd/tabbar
-go build -o bin/tabby-web-bridge ./cmd/tabby-web-bridge
 go build -o bin/cycle-pane ./cmd/cycle-pane
 
 chmod +x bin/render-status
@@ -26,11 +24,7 @@ chmod +x bin/render-tab
 chmod +x bin/tabby-daemon
 chmod +x bin/sidebar-renderer
 chmod +x bin/pane-header
-chmod +x bin/tabbar
-chmod +x bin/tabby-web-bridge
 chmod +x bin/cycle-pane
 chmod +x scripts/toggle_sidebar.sh
-chmod +x scripts/ensure_pane_bar.sh
-chmod +x scripts/signal_pane_bar.sh
 
 printf "Installation complete. Reload tmux config with: tmux source ~/.tmux.conf\n"

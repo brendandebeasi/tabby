@@ -36,9 +36,9 @@ fi
 if ! tmux display-message -p -t "$TARGET_PANE" '#{pane_id}' >/dev/null 2>&1; then
   FALLBACK=""
   if [ -n "$WINDOW_ID" ]; then
-    FALLBACK=$(tmux list-panes -t "$WINDOW_ID" -F '#{pane_id}|#{pane_current_command}|#{pane_start_command}|#{pane_active}' 2>/dev/null | awk -F'|' '$2 !~ /(sidebar|renderer|pane-header|tabbar|pane-bar|tabby-daemon)/ && $3 !~ /(sidebar|renderer|pane-header|tabbar|pane-bar|tabby-daemon)/ && $4 == "1" { print $1; exit }')
+    FALLBACK=$(tmux list-panes -t "$WINDOW_ID" -F '#{pane_id}|#{pane_current_command}|#{pane_start_command}|#{pane_active}' 2>/dev/null | awk -F'|' '$2 !~ /(sidebar|renderer|pane-header|tabby-daemon)/ && $3 !~ /(sidebar|renderer|pane-header|tabby-daemon)/ && $4 == "1" { print $1; exit }')
     if [ -z "$FALLBACK" ]; then
-      FALLBACK=$(tmux list-panes -t "$WINDOW_ID" -F '#{pane_id}|#{pane_current_command}|#{pane_start_command}' 2>/dev/null | awk -F'|' '$2 !~ /(sidebar|renderer|pane-header|tabbar|pane-bar|tabby-daemon)/ && $3 !~ /(sidebar|renderer|pane-header|tabbar|pane-bar|tabby-daemon)/ { print $1; exit }')
+      FALLBACK=$(tmux list-panes -t "$WINDOW_ID" -F '#{pane_id}|#{pane_current_command}|#{pane_start_command}' 2>/dev/null | awk -F'|' '$2 !~ /(sidebar|renderer|pane-header|tabby-daemon)/ && $3 !~ /(sidebar|renderer|pane-header|tabby-daemon)/ { print $1; exit }')
     fi
   fi
   [ -n "$FALLBACK" ] && TARGET_PANE="$FALLBACK"

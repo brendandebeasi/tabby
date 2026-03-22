@@ -31,7 +31,7 @@ fi
 
 target_pane=""
 case "$current_cmd" in
-    sidebar|sidebar-renderer|pane-header|tabbar|pane-bar)
+    sidebar|sidebar-renderer|pane-header)
         ;;
     *)
         if [ -n "$current_pane" ]; then
@@ -44,7 +44,7 @@ if [ -z "$target_pane" ] && [ -n "$current_window" ]; then
     while IFS='|' read -r pane_id pane_cmd; do
         [ -z "$pane_id" ] && continue
         case "$pane_cmd" in
-            sidebar|sidebar-renderer|pane-header|tabbar|pane-bar)
+            sidebar|sidebar-renderer|pane-header)
                 continue
                 ;;
             *)
@@ -59,7 +59,7 @@ if [ -z "$target_pane" ]; then
     while IFS='|' read -r pane_id pane_cmd; do
         [ -z "$pane_id" ] && continue
         case "$pane_cmd" in
-            sidebar|sidebar-renderer|pane-header|tabbar|pane-bar)
+            sidebar|sidebar-renderer|pane-header)
                 continue
                 ;;
             *)

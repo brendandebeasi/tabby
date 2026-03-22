@@ -18,7 +18,6 @@ type Config struct {
 	Widgets       Widgets       `yaml:"widgets"`
 	BusyDetection BusyDetection `yaml:"busy_detection"`
 	TerminalTitle TerminalTitle `yaml:"terminal_title"`
-	Web           WebConfig     `yaml:"web"`
 }
 
 // BusyDetection configures which pane commands trigger the busy indicator.
@@ -33,14 +32,6 @@ type BusyDetection struct {
 type TerminalTitle struct {
 	Enabled bool   `yaml:"enabled"`
 	Format  string `yaml:"format"`
-}
-
-type WebConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	AuthUser string `yaml:"auth_user"`
-	AuthPass string `yaml:"auth_pass"`
 }
 
 type Widgets struct {
@@ -164,7 +155,6 @@ type PetWidget struct {
 	PoopChance      int    `yaml:"poop_chance"`      // % chance to poop after eating
 	ActionChance    int    `yaml:"action_chance"`    // % chance to do random action when idle (default: 15)
 	CanDie          bool   `yaml:"can_die"`          // If true, pet dies when starved; if false, just guilt trips
-	TouchButtons    bool   `yaml:"touch_buttons"`    // Show large touch-friendly action buttons
 	DebugBar        bool   `yaml:"debug_bar"`        // Show debug controls below pet widget (default: false)
 	// Adventure mode settings
 	AdventureEnabled bool   `yaml:"adventure_enabled"` // Enable random adventure events (default: true)
@@ -275,7 +265,6 @@ type PaneHeader struct {
 	ResizeVerticalGrowIcon     string `yaml:"resize_vertical_grow_icon"`
 	ResizeVerticalShrinkIcon   string `yaml:"resize_vertical_shrink_icon"`
 	ResizeSeparator            string `yaml:"resize_separator"`
-	LargeMode                  bool   `yaml:"large_mode"`
 	TerminalBg                 string `yaml:"terminal_bg"` // Terminal background color for hiding borders (default: #000000)
 }
 
@@ -301,8 +290,6 @@ type Sidebar struct {
 	ShowEmptyGroups      bool          `yaml:"show_empty_groups"`
 	SortBy               string        `yaml:"sort_by"`
 	Debug                bool          `yaml:"debug"`                  // Enable debug logging to /tmp/tabby-debug.log
-	TouchMode            bool          `yaml:"touch_mode"`             // Larger tap targets for mobile/touch
-	DisableLargeMode     bool          `yaml:"disable_large_mode"`     // Disable large touch-mode UI entirely
 	LineHeight           int           `yaml:"line_height"`            // Extra blank lines between items (0=compact, 1+=spaced)
 	ActionZone           string        `yaml:"action_zone"`            // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
 	ActionPriority       int           `yaml:"action_priority"`        // Priority within zone (default: 90)
@@ -311,23 +298,7 @@ type Sidebar struct {
 	ThemeMode            string        `yaml:"theme_mode"`             // Theme detection: "auto" (default), "dark", or "light" (deprecated, use theme)
 	IconStyle            string        `yaml:"icon_style"`             // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
 	Colors               SidebarColors `yaml:"colors"`                 // Manual color overrides (applied on top of theme)
-	TouchButtons         TouchButtons  `yaml:"touch_buttons"`          // Touch mode button styling
 	HidePredefinedColors bool          `yaml:"hide_predefined_colors"` // Hide predefined color palette in context menus (keep Custom + Reset)
-}
-
-// TouchButtons configures colors for touch mode buttons
-type TouchButtons struct {
-	NewTabBg       string `yaml:"new_tab_bg"`       // New Tab button background (default: #27ae60)
-	NewTabFg       string `yaml:"new_tab_fg"`       // New Tab button text (default: #ffffff)
-	NewTabBorder   string `yaml:"new_tab_border"`   // New Tab button border (default: same as fg)
-	NewGroupBg     string `yaml:"new_group_bg"`     // New Group button background (default: #9b59b6)
-	NewGroupFg     string `yaml:"new_group_fg"`     // New Group button text (default: #ffffff)
-	NewGroupBorder string `yaml:"new_group_border"` // New Group button border (default: same as fg)
-	CloseBg        string `yaml:"close_bg"`         // Close button background (default: #e74c3c)
-	CloseFg        string `yaml:"close_fg"`         // Close button text (default: #ffffff)
-	CloseBorder    string `yaml:"close_border"`     // Close button border (default: same as fg)
-	ActiveBorder   string `yaml:"active_border"`    // Active tab border color (default: from theme.active_indicator_bg)
-	InactiveBorder string `yaml:"inactive_border"`  // Inactive tab border color (default: same as text)
 }
 
 type SidebarColors struct {

@@ -2,7 +2,7 @@
 #
 # resurrect_restore_hook.sh — tmux-resurrect post-restore-all hook
 #
-# Cleans stale Tabby state and re-initializes the sidebar/tabbar after
+# Cleans stale Tabby state and re-initializes the sidebar after
 # a tmux-resurrect restore. Runs once at the end of the restore cycle.
 #
 # Usage: Called automatically by tmux-resurrect via:
@@ -14,7 +14,7 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- 1. Kill stale Tabby processes from previous session ---
 
-for proc in tabby-daemon sidebar-renderer pane-header tabbar pane-bar; do
+for proc in tabby-daemon sidebar-renderer pane-header; do
     pkill -f "$proc" 2>/dev/null || true
 done
 
@@ -42,7 +42,7 @@ for pane_info in $(tmux list-panes -a -F "#{pane_current_command}|#{pane_id}" 2>
     cmd="${pane_info%%|*}"
     pane_id="${pane_info##*|}"
     case "$cmd" in
-        sidebar-renderer|sidebar|tabby-daemon|pane-header|tabbar|pane-bar)
+        sidebar-renderer|sidebar|tabby-daemon|pane-header)
             tmux kill-pane -t "$pane_id" 2>/dev/null || true
             ;;
     esac
@@ -58,7 +58,7 @@ sleep 0.5
 MODE=$(tmux show-option -gqv @tabby_sidebar 2>/dev/null || echo "disabled")
 
 case "$MODE" in
-    enabled|horizontal)
+    enabled)
         if [ -x "$CURRENT_DIR/restore_sidebar.sh" ]; then
             "$CURRENT_DIR/restore_sidebar.sh" &
         fi

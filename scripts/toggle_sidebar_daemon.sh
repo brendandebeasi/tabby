@@ -208,7 +208,7 @@ else
         if [ -n "$pane_pid" ]; then
             kill -TERM "$pane_pid" 2>/dev/null || true
         fi
-    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}|#{pane_pid}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabbar|pane-header)" || true)
+    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}|#{pane_pid}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|pane-header)" || true)
 
     # Wait for cleanup
     sleep 0.5
@@ -220,7 +220,7 @@ else
         [ -z "$line" ] && continue
         pane_id=$(echo "$line" | cut -d'|' -f2)
         tmux kill-pane -t "$pane_id" 2>/dev/null || true
-    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabbar|pane-header)" || true)
+    done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|tabby-daemon|pane-header)" || true)
 
     tmux set-option -g status off
 

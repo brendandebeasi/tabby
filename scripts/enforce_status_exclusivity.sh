@@ -17,14 +17,14 @@ fi
 
 HAS_TABBY_PANES="no"
 if [ -n "$SESSION_ID" ]; then
-    if tmux list-panes -s -t "$SESSION_ID" -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -qE "(sidebar-renderer|sidebar|tabbar|pane-bar|pane-header)"; then
+    if tmux list-panes -s -t "$SESSION_ID" -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | grep -qE "(sidebar-renderer|sidebar|pane-header)"; then
         HAS_TABBY_PANES="yes"
     fi
 fi
 
 if [ "$MODE" = "disabled" ]; then
     tmux set-option -g status on
-elif [ "$MODE" = "enabled" ] || [ "$MODE" = "horizontal" ]; then
+elif [ "$MODE" = "enabled" ]; then
     tmux set-option -g status off
 elif [ "$HAS_TABBY_PANES" = "yes" ]; then
     tmux set-option -g status off

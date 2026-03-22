@@ -534,10 +534,8 @@ func cleanupOrphanedSidebars(windows []tmux.Window) {
 func paneIsSystemPane(cmd string, startCmd string) bool {
 	return strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") ||
 		strings.Contains(cmd, "tabby") || strings.Contains(cmd, "pane-header") ||
-		strings.Contains(cmd, "tabbar") || strings.Contains(cmd, "pane-bar") ||
 		strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") ||
-		strings.Contains(startCmd, "tabby") || strings.Contains(startCmd, "pane-header") ||
-		strings.Contains(startCmd, "tabbar") || strings.Contains(startCmd, "pane-bar")
+		strings.Contains(startCmd, "tabby") || strings.Contains(startCmd, "pane-header")
 }
 
 var orphanWindowFirstSeen = map[string]time.Time{}
@@ -1264,9 +1262,7 @@ func shouldRestoreFocus() bool {
 	}
 	return strings.Contains(cmd, "sidebar") ||
 		strings.Contains(cmd, "renderer") ||
-		strings.Contains(cmd, "pane-header") ||
-		strings.Contains(cmd, "tabbar") ||
-		strings.Contains(cmd, "pane-bar")
+		strings.Contains(cmd, "pane-header")
 }
 
 // syncClientSizesFromTmux updates all client widths/heights from actual tmux pane sizes

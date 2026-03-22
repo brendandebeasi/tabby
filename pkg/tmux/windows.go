@@ -157,7 +157,7 @@ var remoteCommands = map[string]bool{
 
 // sidebarCommands are commands that should be filtered from pane lists
 var sidebarCommands = map[string]bool{
-	"sidebar": true, "tabbar": true, "sidebar-master": true, "sidebar-shadow": true,
+	"sidebar": true, "sidebar-master": true, "sidebar-shadow": true,
 	"tabby-daemon": true, "sidebar-renderer": true, "render-status": true,
 	"pane-header": true,
 }
@@ -393,7 +393,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		if err != nil {
 			continue
 		}
-		// Skip sidebar/tabbar/daemon panes by command name
+		// Skip sidebar/daemon panes by command name
 		// Check for exact matches and also suffix matches (for path-qualified commands)
 		cmd := parts[3]
 		startCommand := ""
@@ -524,7 +524,7 @@ func ListAllPanes() (map[int][]Pane, error) {
 			continue
 		}
 
-		// Skip sidebar/tabbar/daemon panes by command name
+		// Skip sidebar/daemon panes by command name
 		cmd := parts[4]
 		startCommand := ""
 		if len(parts) >= 15 {

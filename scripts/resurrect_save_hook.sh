@@ -3,7 +3,7 @@
 # resurrect_save_hook.sh — tmux-resurrect post-save-layout hook
 #
 # Strips Tabby utility pane lines from the resurrect save file so that
-# sidebar-renderer, pane-header, tabbar, pane-bar, and tabby-daemon panes
+# sidebar-renderer, pane-header, and tabby-daemon panes
 # are NOT restored as zombie shells on next resurrect-restore.
 #
 # Usage: Called automatically by tmux-resurrect via:
@@ -28,7 +28,7 @@ fi
 # NOTE: macOS truncates process names to 15 chars (MAXCOMLEN), so
 # "sidebar-renderer" (16 chars) appears as "sidebar-rendere" in save files.
 # We use substring matching (index()) instead of exact match to handle this.
-TABBY_PROCS="sidebar-renderer|sidebar-rendere|sidebar|tabby-daemon|pane-header|tabbar|pane-bar"
+TABBY_PROCS="sidebar-renderer|sidebar-rendere|sidebar|tabby-daemon|pane-header"
 
 # Use awk to filter: only drop lines where field 1 is "pane" AND field 10
 # matches a Tabby process name (substring match for truncation safety).

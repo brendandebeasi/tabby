@@ -42,7 +42,7 @@ create_orphan_window() {
 kill_non_system_pane() {
   local window_name="$1"
   local pane_id
-  pane_id="$(tmux list-panes -t "$TEST_SESSION:$window_name" -F '#{pane_id}|#{pane_current_command}|#{pane_start_command}' | awk -F'|' '$2 !~ /(sidebar|sidebar-renderer|tabbar|pane-bar|pane-header)/ && $3 !~ /(sidebar|sidebar-renderer|tabbar|pane-bar|pane-header)/ { print $1; exit }')"
+  pane_id="$(tmux list-panes -t "$TEST_SESSION:$window_name" -F '#{pane_id}|#{pane_current_command}|#{pane_start_command}' | awk -F'|' '$2 !~ /(sidebar|sidebar-renderer|pane-header)/ && $3 !~ /(sidebar|sidebar-renderer|pane-header)/ { print $1; exit }')"
   if [ -z "$pane_id" ]; then
     echo "✗ No non-system pane found in $window_name" >&2
     exit 1

@@ -37,7 +37,7 @@ cleanup_window_if_orphan() {
         main_panes=$(printf "%s\n" "$panes" | awk -F'|' '
             $1 != "1" {
                 cmd = $2 " " $3
-                if (cmd !~ /(sidebar|sidebar-renderer|tabbar|pane-bar|pane-header)/) {
+                if (cmd !~ /(sidebar|sidebar-renderer|pane-header)/) {
                     count++
                 }
             }

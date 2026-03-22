@@ -82,7 +82,7 @@ if [ -n "$SESSION_ID" ]; then
     fi
 fi
 
-# Also refresh the status bar (for horizontal mode)
+# Refresh the status bar
 $TMUX_CMD refresh-client -t "$SESSION" -S 2>/dev/null || true
 echo "  Refreshed tmux client status bar" >> "$LOG"
 

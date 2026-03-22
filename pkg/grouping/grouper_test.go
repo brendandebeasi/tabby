@@ -12,10 +12,10 @@ func TestGroupWindows(t *testing.T) {
 	windows := []tmux.Window{
 		{Name: "app", Index: 0, Group: "StudioDome"},
 		{Name: "tool", Index: 1, Group: "Gunpowder"},
-		{Name: "notes", Index: 2, Group: ""},  // Empty Group means Default
+		{Name: "notes", Index: 2, Group: ""}, // Empty Group means Default
 	}
 	groups := []config.Group{
-		{Name: "StudioDome", Pattern: "^SD\\|"},  // Pattern kept for backwards compat but not used
+		{Name: "StudioDome", Pattern: "^SD\\|"}, // Pattern kept for backwards compat but not used
 		{Name: "Gunpowder", Pattern: "^GP\\|"},
 		{Name: "Default", Pattern: ".*"},
 	}
@@ -63,10 +63,10 @@ func TestGroupWindowsFallbackToDefault(t *testing.T) {
 
 func TestLightenColor(t *testing.T) {
 	tests := []struct {
-		name     string
-		color    string
-		amount   float64
-		want     string
+		name      string
+		color     string
+		amount    float64
+		want      string
 		tolerance int64
 	}{
 		{"lighten black by 15%", "#000000", 0.15, "#262626", 2},
@@ -97,10 +97,10 @@ func TestLightenColor(t *testing.T) {
 
 func TestDarkenColor(t *testing.T) {
 	tests := []struct {
-		name     string
-		color    string
-		amount   float64
-		want     string
+		name      string
+		color     string
+		amount    float64
+		want      string
 		tolerance int64
 	}{
 		{"darken white by 15%", "#ffffff", 0.15, "#d9d9d9", 2},
@@ -167,4 +167,58 @@ func colorsClose(a, b string, tolerance int64) bool {
 	}
 
 	return abs(r1-r2) <= tolerance && abs(g1-g2) <= tolerance && abs(b1-b2) <= tolerance
+}
+
+func TestGroupWindowsWithOptionsHidesEmptyGroups(t *testing.T) {
+	windows := []tmux.Window{
+		{Name: "app", Index: 0, Group: "Active"},
+	}
+	groups := []config.Group{
+		{Name: "Active", Pattern: ""},
+		{Name: "EmptyGroup", Pattern: ""},
+		{Name: "Default", Pattern: ""},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+	for _, g := range result {
+		if g.Name == "EmptyGroup" {
+			t.Fatal("expected EmptyGroup hidden when includeEmpty=false")
+		}
+	}
+}
+
+func TestGroupWindowsWithOptionsShowsEmptyGroups(t *testing.T) {
+	windows := []tmux.Window{
+		{Name: "app", Index: 0, Group: "Active"},
+	}
+	groups := []config.Group{
+		{Name: "Active", Pattern: ""},
+		{Name: "EmptyGroup", Pattern: ""},
+		{Name: "Default", Pattern: ""},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, true)
+	found := false
+	for _, g := range result {
+		if g.Name == "EmptyGroup" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected EmptyGroup present when includeEmpty=true")
+	}
+}
+
+func TestShowEmptyGroupsDefaultIsFalse(t *testing.T) {
+	windows := []tmux.Window{}
+	groups := []config.Group{
+		{Name: "Orphan", Pattern: ""},
+		{Name: "Default", Pattern: ""},
+	}
+	result := GroupWindows(windows, groups)
+	for _, g := range result {
+		if len(g.Windows) == 0 && g.Name != "Default" {
+			t.Fatalf("empty group %q shown by default — should be hidden", g.Name)
+		}
+	}
 }

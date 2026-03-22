@@ -82,14 +82,12 @@ sidebar:
   pane_headers: true
   new_tab_button: false
   new_group_button: false
-  close_button: false
-  show_empty_groups: true
-  sort_by: "group"
-  debug: false
-  touch_mode: false
-  disable_large_mode: true
-  line_height: 0
-  theme: dark
+   close_button: false
+   show_empty_groups: false
+   sort_by: "group"
+   debug: false
+   line_height: 0
+   theme: dark
   icon_style: "emoji"
   colors:
     inactive_fg: "#f0f0f0"
@@ -213,7 +211,6 @@ widgets:
     poop_chance: 0
     action_chance: 30
     can_die: false
-    touch_buttons: false
     debug_bar: true
     adventure_enabled: true
     adventure_chance: 10

@@ -12,8 +12,8 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/config"
 )
 
-// skipPanes are never dimmed and never cycled (sidebar, tabbar, pane-bar).
-var skipCommands = []string{"sidebar-render", "tabbar", "pane-bar"}
+// skipPanes are never dimmed and never cycled (sidebar, pane-header).
+var skipCommands = []string{"sidebar-render"}
 
 // headerCommand identifies pane-header processes (dimmed with their content pane).
 const headerCommand = "pane-header"
@@ -108,7 +108,7 @@ func cyclePane(content []paneInfo) {
 // applyDim re-reads panes to get fresh active state after potential cycle,
 // then sets per-pane background on inactive content panes AND their headers.
 // Uses set-option -p (not select-pane -P) to avoid triggering after-select-pane hook.
-// Sidebar/tabbar/pane-bar panes are never touched.
+// Sidebar/pane-header panes are never touched.
 // isSpawning returns true when the daemon is actively splitting panes to create
 // 1-line header panes. During this window, pane data is stale and applying
 // dim styles can race with the daemon's own style-setting.

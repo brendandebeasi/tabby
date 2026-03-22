@@ -27,13 +27,9 @@ tabby/
 │   ├── tabby-daemon/        # Session coordinator + render payloads
 │   ├── sidebar-renderer/    # Per-window sidebar TUI client
 │   ├── pane-header/         # Per-pane header TUI client
-│   ├── tabbar/              # Horizontal mode top pane UI
-│   ├── pane-bar/            # Horizontal mode pane selector UI
 │   ├── render-status/       # Native tmux status rendering helpers
 │   ├── render-tab/
-│   ├── render-pane-bar/
 │   ├── manage-group/
-│   └── tabby-web-bridge/
 ├── pkg/
 │   ├── config/              # YAML config loading + schema structs
 │   ├── daemon/              # Daemon protocol payloads
@@ -64,7 +60,6 @@ Go code resolves paths via `pkg/paths/paths.go`. Shell scripts must source `scri
 - Source-of-truth runtime state: tmux option `@tabby_sidebar`
 - Values:
   - `enabled`: vertical sidebar mode
-  - `horizontal`: top tabbar mode
   - `disabled`: native tmux status mode
 - Per-session runtime files: `/tmp/tabby-daemon-<session>.{pid,sock,events.log,input.log}`
 
@@ -151,7 +146,7 @@ bash tests/e2e/run_e2e.sh window_close_removes
 
 1. Runtime is stale after rebuild: run `./scripts/dev-status.sh`, then restart per the sidebar restart command above.
 2. Click handling seems wrong: verify `tabby.tmux` root mouse bindings and pane-header pass-through behavior.
-3. Sidebar/tabbar duplication: ensure mode state is correct in `@tabby_sidebar` and run `scripts/ensure_sidebar.sh`.
+3. Sidebar duplication: ensure mode state is correct in `@tabby_sidebar` and run `scripts/ensure_sidebar.sh`.
 4. Wrong process targeted: use `pgrep -a tabby-daemon` and `pgrep -a sidebar-renderer` to confirm what is running and which session/window it owns.
 
 ## Dependencies
