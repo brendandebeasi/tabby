@@ -4050,21 +4050,37 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	headerContent, headerRegions := c.generateSidebarHeader(width, clientID)
 	headerLines := strings.Count(headerContent, "\n")
 
-	// Generate widget zones (top and bottom) using priority-based layout
-	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(width)
+	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(width, false)
 	topWidgetLines := strings.Count(topWidgets, "\n")
 	bottomWidgetLines := strings.Count(bottomWidgets, "\n")
 
-	// Generate main content (window/pane list) with clickable regions
-	// Pass clientID so we can show this client's window as active
 	mainContent, mainRegions := c.generateMainContent(clientID, width, height)
+	mainContentLines := strings.Count(mainContent, "\n")
 
 	maxMainLines := height - headerLines - topWidgetLines - bottomWidgetLines
 	if maxMainLines < 0 {
 		maxMainLines = 0
 	}
+
+	// Auto-hide pet when viewport is too small to show all tabs
+	if maxMainLines < mainContentLines && c.config.Widgets.Pet.Enabled {
+		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(width, true)
+		topWidgetLines = strings.Count(topWidgets, "\n")
+		bottomWidgetLines = strings.Count(bottomWidgets, "\n")
+		maxMainLines = height - headerLines - topWidgetLines - bottomWidgetLines
+		if maxMainLines < 0 {
+			maxMainLines = 0
+		}
+	}
+
 	mainContent, mainRegions = trimContentAndRegions(mainContent, mainRegions, maxMainLines)
 	mainLines := strings.Count(mainContent, "\n")
+
+	// Pad main content to pin bottom widgets to the viewport bottom
+	if mainLines < maxMainLines {
+		mainContent += strings.Repeat("\n", maxMainLines-mainLines)
+		mainLines = maxMainLines
+	}
 
 	// Offset top widget regions by header height
 	for i := range topWRegions {
@@ -6317,7 +6333,7 @@ type widgetEntry struct {
 
 // collectWidgetEntries gathers all enabled widgets and action buttons into
 // a sorted slice of widgetEntry, ready for zone-based rendering.
-func (c *Coordinator) collectWidgetEntries(width int) []widgetEntry {
+func (c *Coordinator) collectWidgetEntries(width int, skipPet bool) []widgetEntry {
 	var entries []widgetEntry
 
 	// Clock widget
@@ -6334,8 +6350,8 @@ func (c *Coordinator) collectWidgetEntries(width int) []widgetEntry {
 		})
 	}
 
-	// Pet widget
-	if c.config.Widgets.Pet.Enabled {
+	// Pet widget — skip when viewport is too small for all tabs
+	if c.config.Widgets.Pet.Enabled && !skipPet {
 		pos := c.config.Widgets.Pet.Position
 		if pos == "" {
 			pos = "bottom"
@@ -6393,7 +6409,7 @@ func (c *Coordinator) collectWidgetEntries(width int) []widgetEntry {
 	entries = append(entries, widgetEntry{
 		name:     "nav_buttons",
 		zone:     "bottom",
-		priority: 95,
+		priority: 9998,
 		content:  c.renderNavButtons(width),
 	})
 
@@ -6482,8 +6498,8 @@ func (c *Coordinator) renderWidgetZone(entries []widgetEntry, width int) (string
 // generateWidgetZones renders all widgets into top and bottom zones,
 // plus resize buttons that always appear at the very bottom.
 // Returns: topContent, topRegions, bottomContent, bottomRegions
-func (c *Coordinator) generateWidgetZones(width int) (string, []daemon.ClickableRegion, string, []daemon.ClickableRegion) {
-	entries := c.collectWidgetEntries(width)
+func (c *Coordinator) generateWidgetZones(width int, skipPet bool) (string, []daemon.ClickableRegion, string, []daemon.ClickableRegion) {
+	entries := c.collectWidgetEntries(width, skipPet)
 
 	// Split into top and bottom zones
 	var topEntries, bottomEntries []widgetEntry
@@ -8007,7 +8023,7 @@ func (c *Coordinator) renderNavButtons(width int) string {
 
 	navLeft := zone.Mark("sidebar:prev_window", prevBtn)
 	navRight := zone.Mark("sidebar:next_window", nextBtn)
-	return lipgloss.JoinHorizontal(lipgloss.Top, navLeft, navRight) + "\n"
+	return lipgloss.JoinHorizontal(lipgloss.Top, navLeft, navRight) + "\n\n"
 }
 func (c *Coordinator) getThemeColor(themeColor, fallback string) string {
 	if c.theme != nil && themeColor != "" {

@@ -90,8 +90,9 @@ type rendererModel struct {
 	lastTapTime     time.Time
 	lastTapPos      struct{ X, Y int }
 
-	// Message sending (thread-safe)
-	sendMu sync.Mutex
+	// Message sending (thread-safe) — pointer avoids go-vet lock-copy warnings
+	// since BubbleTea passes models by value
+	sendMu *sync.Mutex
 }
 
 // Message types
@@ -634,6 +635,7 @@ func main() {
 		width:        80,
 		height:       1, // Single line for header
 		headerPaneID: headerPaneID,
+		sendMu:       &sync.Mutex{},
 	}
 
 	p := tea.NewProgram(model, tea.WithMouseCellMotion(), tea.WithReportFocus())

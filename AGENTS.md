@@ -15,7 +15,7 @@
 
 ## Project Overview
 
-Tabby is a tmux plugin with a daemon-driven vertical UI and optional horizontal UI.
+Tabby is a tmux plugin with a daemon-driven vertical UI.
 The runtime center is `tabby-daemon`, with per-window `sidebar-renderer` clients and
 per-pane `pane-header` clients.
 
