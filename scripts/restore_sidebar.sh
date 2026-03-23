@@ -114,6 +114,4 @@ if [ "$MODE" = "enabled" ]; then
         kill -USR1 "$PID" 2>/dev/null || true
     fi
 
-    "$CURRENT_DIR/scripts/resize_sidebar.sh" >/dev/null 2>&1 || true
-
 fi

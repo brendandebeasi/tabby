@@ -3713,7 +3713,8 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 // RunWidthSync checks all connected sidebar clients and resizes any whose width
 // doesn't match the global target. Called from the main event loop (not the render path)
 // to avoid blocking BroadcastRender with tmux subprocess calls.
-func (c *Coordinator) RunWidthSync(activeWindowID string) {
+// When force=true, skips the 500ms debounce (used for immediate restoration after layout changes).
+func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	if c.sidebarCollapsed {
 		return
 	}
@@ -3749,12 +3750,14 @@ func (c *Coordinator) RunWidthSync(activeWindowID string) {
 		c.lastActiveWindowID = activeWindowID
 	}
 
-	// Debounce: ignore resize events within 500ms of our last sync
-	sinceLast := time.Since(c.lastWidthSync)
-	if sinceLast < 500*time.Millisecond {
-		untrackLock("widthSyncMu")
-		c.widthSyncMu.Unlock()
-		return
+	// Debounce: ignore resize events within 500ms of our last sync (unless forced)
+	if !force {
+		sinceLast := time.Since(c.lastWidthSync)
+		if sinceLast < 500*time.Millisecond {
+			untrackLock("widthSyncMu")
+			c.widthSyncMu.Unlock()
+			return
+		}
 	}
 
 	// Build list of panes to resize (compute under lock, execute after unlock)

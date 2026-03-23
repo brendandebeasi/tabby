@@ -319,6 +319,133 @@ func restoreLayoutsFromDisk() {
 	}
 }
 
+// computeResponsiveSidebarWidth applies responsive breakpoint logic given all parameters.
+// This is the pure, testable core of responsiveSidebarWidth.
+func computeResponsiveSidebarWidth(windowWidth, mobileMax, tabletMax, mobileWidth, tabletWidth, desktopWidth, maxPercent, minContentCols int) int {
+	// desktop
+	if windowWidth > tabletMax {
+		return desktopWidth
+	}
+	// tablet
+	if windowWidth > mobileMax {
+		if tabletWidth < 15 {
+			tabletWidth = 15
+		}
+		return tabletWidth
+	}
+	// mobile: apply fraction and content caps
+	maxByFraction := windowWidth * maxPercent / 100
+	if maxByFraction < 15 {
+		maxByFraction = 15
+	}
+
+	maxByContent := windowWidth - minContentCols
+	if maxByContent < 15 {
+		maxByContent = 15
+	}
+
+	maxReasonable := maxByFraction
+	if maxByContent < maxReasonable {
+		maxReasonable = maxByContent
+	}
+	if mobileWidth < maxReasonable {
+		maxReasonable = mobileWidth
+	}
+	if maxReasonable < 10 {
+		maxReasonable = 10
+	}
+
+	return maxReasonable
+}
+
+// responsiveSidebarWidth computes the appropriate sidebar width for a given window,
+// accounting for mobile/tablet/desktop breakpoints and content constraints.
+// windowID: the tmux window ID to compute width for
+// globalWidth: the saved global sidebar width (typically 25)
+// Returns the responsive width as an int.
+func responsiveSidebarWidth(windowID string, globalWidth int) int {
+	// Get window width
+	windowWidthOut, err := exec.Command("tmux", "display-message", "-p", "-t", windowID, "#{window_width}").Output()
+	if err != nil {
+		// Fall back to globalWidth on query failure
+		return globalWidth
+	}
+	windowWidth, err := strconv.Atoi(strings.TrimSpace(string(windowWidthOut)))
+	if err != nil || windowWidth <= 0 {
+		return globalWidth
+	}
+
+	// Read mobile/tablet thresholds
+	mobileMaxWindowCols := 110
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_window_cols").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 60 {
+			mobileMaxWindowCols = v
+		}
+	}
+
+	tabletMaxWindowCols := 170
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_tablet_max_window_cols").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= mobileMaxWindowCols {
+			tabletMaxWindowCols = v
+		}
+	}
+
+	// Read width presets for each tier
+	widthDesktop := globalWidth
+	if widthDesktop < 15 {
+		widthDesktop = 25
+	}
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_desktop").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 15 {
+			widthDesktop = v
+		}
+	}
+
+	// Desktop: window > tabletMaxWindowCols
+	if windowWidth > tabletMaxWindowCols {
+		return widthDesktop
+	}
+
+	// Tablet: window > mobileMaxWindowCols
+	widthTablet := 20
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_tablet").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 15 {
+			widthTablet = v
+		}
+	}
+	if windowWidth > mobileMaxWindowCols {
+		if widthTablet < 15 {
+			widthTablet = 15
+		}
+		return widthTablet
+	}
+
+	// Mobile: window <= mobileMaxWindowCols
+	widthMobile := 15
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_mobile").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
+			widthMobile = v
+		}
+	}
+
+	// Apply mobile constraints: maxByFraction and maxByContent
+	maxPercent := 20
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_percent").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 && v <= 60 {
+			maxPercent = v
+		}
+	}
+
+	minContentCols := 40
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_min_content_cols").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 20 {
+			minContentCols = v
+		}
+	}
+
+	return computeResponsiveSidebarWidth(windowWidth, mobileMaxWindowCols, tabletMaxWindowCols, widthMobile, widthTablet, widthDesktop, maxPercent, minContentCols)
+}
+
 // spawnRenderersForNewWindows checks for windows without renderers and spawns them.
 // Returns true if any renderer was spawned (caller should restore focus afterward).
 func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window) bool {
@@ -333,10 +460,10 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 	spawned := false
 
 	// Get saved sidebar width or default
-	width := "25"
+	globalWidth := 25
 	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width").Output(); err == nil {
 		if w, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && w > 0 {
-			width = fmt.Sprintf("%d", w)
+			globalWidth = w
 		}
 	}
 
@@ -410,11 +537,14 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		}
 		firstPane := win.Panes[0].ID
 
+		// Compute responsive width for this window
+		width := responsiveSidebarWidth(windowID, globalWidth)
+
 		// Spawn renderer in this window
 		// Log active pane before spawn for debugging focus issues
 		// Optimization: We can skip this log or assume activeWindow is correct enough
-		logEvent("SPAWN_RENDERER window=%s pane=%s", windowID, firstPane)
-		debugLog.Printf("Spawning renderer for new window %s (pane %s)", windowID, firstPane)
+		logEvent("SPAWN_RENDERER window=%s pane=%s width=%d", windowID, firstPane, width)
+		debugLog.Printf("Spawning renderer for new window %s (pane %s) with width %d", windowID, firstPane, width)
 
 		// Use exec to replace shell with renderer (matches toggle_sidebar_daemon.sh behavior)
 		debugFlag := ""
@@ -422,7 +552,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			debugFlag = "-debug"
 		}
 		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && exec '%s' -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
-		cmd := exec.Command("tmux", "split-window", "-d", "-t", firstPane, "-h", "-b", "-f", "-l", width, "-P", "-F", "#{pane_id}", cmdStr)
+		cmd := exec.Command("tmux", "split-window", "-d", "-t", firstPane, "-h", "-b", "-f", "-l", fmt.Sprintf("%d", width), "-P", "-F", "#{pane_id}", cmdStr)
 		paneOut, err := cmd.CombinedOutput()
 		if err != nil {
 			debugLog.Printf("Failed to spawn renderer: %v, output: %s", err, string(paneOut))
@@ -866,7 +996,7 @@ func paneTargetFromStartCmd(startCmd string) string {
 
 // cleanupOrphanedHeaders removes header panes that are disabled or orphaned
 // (target pane no longer exists).
-func cleanupOrphanedHeaders(customBorder bool) {
+func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeWindowID string) {
 	// Get all panes with geometry, start command, and window ID.
 	// Scoped to our session with -t to avoid cross-session interference.
 	listArgs := []string{"list-panes", "-s"}
@@ -1041,7 +1171,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 
 	// Restore sidebar widths if we killed any headers (layout may have shifted)
 	if killed {
-		restoreSidebarWidths()
+		coordinator.RunWidthSync(activeWindowID, true)
 	}
 }
 
@@ -1148,42 +1278,9 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 	}
 }
 
-// restoreSidebarWidths ensures all sidebar panes match the saved desired width.
-// Reads @tabby_sidebar_width (set by grow/shrink buttons) with a minimum of 15.
+// restoreSidebarWidths is deprecated. Use coordinator.RunWidthSync(activeWindowID, true) instead.
+// Kept as empty stub for backwards compatibility.
 func restoreSidebarWidths() {
-	// Read saved desired width
-	desiredWidth := 25
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width").Output(); err == nil {
-		if w, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && w >= 15 {
-			desiredWidth = w
-		}
-	}
-
-	// Scoped to our session to avoid resizing panes in other sessions
-	restoreArgs := []string{"list-panes", "-s"}
-	if *sessionID != "" {
-		restoreArgs = append(restoreArgs, "-t", *sessionID)
-	}
-	restoreArgs = append(restoreArgs, "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_width}")
-	out, err := exec.Command("tmux", restoreArgs...).Output()
-	if err != nil {
-		return
-	}
-	widthStr := strconv.Itoa(desiredWidth)
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "\x1f", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		cmd := parts[1]
-		if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") {
-			width, _ := strconv.Atoi(parts[2])
-			if width != desiredWidth && width > 0 {
-				exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", widthStr).Run()
-			}
-		}
-	}
 }
 
 // updateHeaderBorderStyles sets pane-border-style on each header pane.
@@ -1686,7 +1783,7 @@ func main() {
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
 			spawnPaneHeaders(server, *sessionID, customBorder, coordinator.GetWindows())
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
-			cleanupOrphanedHeaders(customBorder)
+			cleanupOrphanedHeaders(customBorder, coordinator, activeWindowID)
 			// NOTE: updateHeaderBorderStyles is NOT called here to avoid
 			// border flickering. It's only called when windows hash changes
 			// (on refreshCh + hash change) which is when groups/colors change.
@@ -1735,7 +1832,7 @@ func main() {
 					server.BroadcastRender()
 					t1b := time.Now()
 					// Width sync runs off the render path to prevent deadlocks
-					coordinator.RunWidthSync(activeWindowID)
+					coordinator.RunWidthSync(activeWindowID, false)
 
 					// Heavy ops (spawn/cleanup/layout) only if enough time has
 					// passed since the last full refresh. This breaks the feedback
@@ -1816,7 +1913,7 @@ func main() {
 					// Persist current layouts to disk for restart recovery
 					saveLayoutsToDisk(windows)
 					// Width sync as fallback for missed events
-					coordinator.RunWidthSync(activeWindowID)
+					coordinator.RunWidthSync(activeWindowID, false)
 				})
 			case <-watchdogTicker.C:
 				ok := runLoopTask("watchdog", 6*time.Second, func() {
