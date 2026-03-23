@@ -26,7 +26,7 @@ for client_tty in $(tmux list-clients -F "#{client_tty}" 2>/dev/null); do
     printf '\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1006l\033[?1015l' > "$client_tty" 2>/dev/null || true
 done
 
-# --- 3. Clean runtime files ---
+# --- 3. Clean runtime files and reset tmux options ---
 
 rm -f /tmp/tabby-daemon-*.pid \
       /tmp/tabby-daemon-*.sock \
@@ -34,6 +34,8 @@ rm -f /tmp/tabby-daemon-*.pid \
       /tmp/tabby-daemon-*-events.log \
       /tmp/tabby-daemon-*-input.log \
       /tmp/tabby-ensure-debounce-* 2>/dev/null || true
+
+tmux set-option -g @tabby_view_mode "current" 2>/dev/null || true
 
 # --- 4. Kill any zombie Tabby panes that survived restore ---
 # The save hook strips these, but belt-and-suspenders.

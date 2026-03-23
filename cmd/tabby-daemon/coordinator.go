@@ -222,6 +222,10 @@ type Coordinator struct {
 	sidebarCollapsed     bool
 	sidebarPreviousWidth int
 
+	// Overview view mode state
+	viewMode          string          // "" or "current" = normal, "overview" = all-windows
+	overviewCollapsed map[string]bool // per-window collapse in overview (keyed by window ID)
+
 	// Pet widget layout (for custom click detection)
 	petLayout petWidgetLayout
 
@@ -783,6 +787,20 @@ func NewCoordinator(sessionID string) *Coordinator {
 			}
 		}
 	}
+
+	// Read view mode from tmux option
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_view_mode").Output(); err == nil {
+		if mode := strings.TrimSpace(string(out)); mode == "overview" {
+			c.viewMode = "overview"
+		} else {
+			c.viewMode = "current"
+		}
+	} else {
+		c.viewMode = "current"
+	}
+
+	// Initialize overview collapse map
+	c.overviewCollapsed = make(map[string]bool)
 
 	// Apply global theme styles to tmux (borders, messages, etc.)
 	c.applyThemeToTmux()
@@ -5130,6 +5148,22 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 // generateMainContent creates the main scrollable area with window list
 // clientID is the window ID that this content is being rendered for
 func (c *Coordinator) generateMainContent(clientID string, width, height int) (string, []daemon.ClickableRegion) {
+	viewMode := c.viewMode
+	if viewMode == "" {
+		viewMode = "current"
+	}
+	tabContent, tabRegions := c.renderTabSwitcherForMode(width, viewMode)
+	tabLines := strings.Count(tabContent, "\n")
+
+	if viewMode == "overview" {
+		overviewContent, overviewRegions := c.renderOverviewContent(width)
+		for i := range overviewRegions {
+			overviewRegions[i].StartLine += tabLines
+			overviewRegions[i].EndLine += tabLines
+		}
+		return tabContent + overviewContent, append(tabRegions, overviewRegions...)
+	}
+
 	var s strings.Builder
 	var regions []daemon.ClickableRegion
 
@@ -5897,7 +5931,11 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		}
 	}
 
-	return s.String(), regions
+	for i := range regions {
+		regions[i].StartLine += tabLines
+		regions[i].EndLine += tabLines
+	}
+	return tabContent + s.String(), append(tabRegions, regions...)
 }
 
 // generatePrefixModeContent creates a flat window list with group prefixes (e.g., "SD| WindowName")
@@ -8441,6 +8479,19 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		exec.Command("tmux", "select-pane", "-t", paneID).Run()
 		return true
+
+	case "switch_view":
+		c.setViewMode(input.ResolvedTarget)
+		return false
+
+	case "toggle_view_mode":
+		c.toggleViewMode()
+		return false
+
+	case "overview_toggle_window":
+		// Toggle per-window collapse state in overview mode
+		c.toggleOverviewWindow(input.ResolvedTarget)
+		return false // No tmux window state change
 
 	case "toggle_group":
 		c.stateMu.Lock()
