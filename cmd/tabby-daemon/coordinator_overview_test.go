@@ -175,6 +175,54 @@ func TestTabSwitcherNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestOverviewContentEmpty(t *testing.T) {
+	c := newOverviewCoordinator("overview")
+	content, regions := c.renderOverviewContent(30)
+	_ = content
+	_ = regions
+}
+
+func TestOverviewContentRegions(t *testing.T) {
+	c := newOverviewCoordinator("overview")
+	windows := makeTestWindows(3)
+	c.grouped = groupTestWindows(windows, c.config)
+	_, regions := c.renderOverviewContent(30)
+
+	if len(regions) == 0 {
+		t.Fatal("renderOverviewContent returned no regions")
+	}
+	for i, r := range regions {
+		if r.Action == "" {
+			t.Errorf("region[%d] has empty action", i)
+		}
+		if r.Target == "" {
+			t.Errorf("region[%d] has empty target", i)
+		}
+		switch r.Action {
+		case "select_window", "select_pane", "overview_toggle_window":
+		default:
+			t.Errorf("region[%d] has unexpected action %q", i, r.Action)
+		}
+	}
+}
+
+func TestGoldenRenderOverviewContent(t *testing.T) {
+	c := newOverviewCoordinator("overview")
+	windows := makeTestWindows(3)
+	c.grouped = groupTestWindows(windows, c.config)
+	content, _ := c.renderOverviewContent(30)
+	checkOrUpdateGolden(t, "render_overview_content", stripForGolden(content))
+}
+
+func TestGoldenRenderOverviewContentExpanded(t *testing.T) {
+	c := newOverviewCoordinator("overview")
+	windows := makeTestWindows(3)
+	c.grouped = groupTestWindows(windows, c.config)
+	c.overviewCollapsed["@1"] = true
+	content, _ := c.renderOverviewContent(30)
+	checkOrUpdateGolden(t, "render_overview_content_expanded", stripForGolden(content))
+}
+
 func TestGoldenTabSwitcherCurrent(t *testing.T) {
 	c := newOverviewCoordinator("current")
 	content, _ := c.renderTabSwitcher(25)
