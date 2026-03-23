@@ -206,6 +206,8 @@ set -sa terminal-features 'xterm*:extkeys'
 
 To use `Cmd+Shift+\` as the trigger, your terminal must send the CSI u sequence `\x1b[92;6u` (which tmux decodes as `Ctrl+Shift+\`). Configuration varies by terminal:
 
+**Blink Shell** — the recommended mobile terminal for Tabby on iPad/iPhone. See configuration below.
+
 **Ghostty** — add to `~/.config/ghostty/config`:
 ```
 super+shift+backslash=text:\x1b[92;6u
@@ -217,7 +219,7 @@ defaults write com.mitchellh.ghostty NSUserKeyEquivalents -dict-add "Show All Ta
 # Restart Ghostty after running this
 ```
 
-**Blink Shell (iPad)** — add to your keyboard configuration (`kb.json`):
+**Blink Shell (iPad)** — [https://blink.sh/](https://blink.sh/) — add to your keyboard configuration (`kb.json`):
 ```json
 {
   "keys": "cmd+shift+\\",
