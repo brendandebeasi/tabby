@@ -647,6 +647,15 @@ chmod +x "$TOGGLE_COLLAPSE_SCRIPT"
 tmux bind-key -n 'M-<' run-shell -b "$TOGGLE_COLLAPSE_SCRIPT"
 # Ctrl+Shift+\ (CSI u encoded) — requires extended-keys in tmux.conf
 tmux bind-key -n 'C-S-\' run-shell -b "$TOGGLE_COLLAPSE_SCRIPT" 2>/dev/null || true
+# Double-click sidebar pane or border toggles collapse/expand
+tmux bind-key -T root DoubleClick1Pane \
+    if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
+        "run-shell -b '$TOGGLE_COLLAPSE_SCRIPT'" \
+        "select-pane -t = ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send-keys -M } { copy-mode -H ; send-keys -X select-word ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }"
+tmux bind-key -T root DoubleClick1Border \
+    if-shell "tmux list-panes -F '#{pane_current_command}' | grep -q sidebar-render" \
+        "run-shell -b '$TOGGLE_COLLAPSE_SCRIPT'" \
+        ""
 
 normalize_global_key() {
 	local key="$1"

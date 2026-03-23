@@ -684,6 +684,32 @@ func (m *rendererModel) handleMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 
 // processMouseClick handles the actual click processing after determining button type
 func (m *rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSimulated bool) (rendererModel, tea.Cmd) {
+	// Double-click on rightmost columns toggles sidebar collapse/expand
+	if button == tea.MouseButtonLeft && !isSimulated {
+		now := time.Now()
+		edgeZone := m.width - 3 // rightmost 3 columns
+		if edgeZone < 0 {
+			edgeZone = 0
+		}
+		isEdge := x >= edgeZone
+		wasEdge := m.lastTapPos.X >= edgeZone
+		if isEdge && wasEdge && !m.lastTapTime.IsZero() && now.Sub(m.lastTapTime) < 400*time.Millisecond {
+			m.lastTapTime = time.Time{} // reset so triple-tap doesn't re-fire
+			if *debugMode {
+				debugLog.Printf("  Double-click on right edge -> toggle_collapse_sidebar")
+			}
+			paneID := os.Getenv("TMUX_PANE")
+			m.sendInput(&daemon.InputPayload{
+				Type:           "action",
+				ResolvedAction: "toggle_collapse_sidebar",
+				PaneID:         paneID,
+			})
+			return *m, nil
+		}
+		m.lastTapTime = now
+		m.lastTapPos = struct{ X, Y int }{x, y}
+	}
+
 	var resolvedAction, resolvedTarget string
 
 	// Translate Y to content line (accounting for scroll)
