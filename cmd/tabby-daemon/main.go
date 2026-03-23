@@ -319,6 +319,45 @@ func restoreLayoutsFromDisk() {
 	}
 }
 
+// computeResponsiveSidebarWidth applies responsive breakpoint logic given all parameters.
+// This is the pure, testable core of responsiveSidebarWidth.
+func computeResponsiveSidebarWidth(windowWidth, mobileMax, tabletMax, mobileWidth, tabletWidth, desktopWidth, maxPercent, minContentCols int) int {
+	// desktop
+	if windowWidth > tabletMax {
+		return desktopWidth
+	}
+	// tablet
+	if windowWidth > mobileMax {
+		if tabletWidth < 15 {
+			tabletWidth = 15
+		}
+		return tabletWidth
+	}
+	// mobile: apply fraction and content caps
+	maxByFraction := windowWidth * maxPercent / 100
+	if maxByFraction < 15 {
+		maxByFraction = 15
+	}
+
+	maxByContent := windowWidth - minContentCols
+	if maxByContent < 15 {
+		maxByContent = 15
+	}
+
+	maxReasonable := maxByFraction
+	if maxByContent < maxReasonable {
+		maxReasonable = maxByContent
+	}
+	if mobileWidth < maxReasonable {
+		maxReasonable = mobileWidth
+	}
+	if maxReasonable < 10 {
+		maxReasonable = 10
+	}
+
+	return maxReasonable
+}
+
 // responsiveSidebarWidth computes the appropriate sidebar width for a given window,
 // accounting for mobile/tablet/desktop breakpoints and content constraints.
 // windowID: the tmux window ID to compute width for
@@ -404,28 +443,7 @@ func responsiveSidebarWidth(windowID string, globalWidth int) int {
 		}
 	}
 
-	maxByFraction := windowWidth * maxPercent / 100
-	if maxByFraction < 15 {
-		maxByFraction = 15
-	}
-
-	maxByContent := windowWidth - minContentCols
-	if maxByContent < 15 {
-		maxByContent = 15
-	}
-
-	maxReasonable := maxByFraction
-	if maxByContent < maxReasonable {
-		maxReasonable = maxByContent
-	}
-	if widthMobile < maxReasonable {
-		maxReasonable = widthMobile
-	}
-	if maxReasonable < 10 {
-		maxReasonable = 10
-	}
-
-	return maxReasonable
+	return computeResponsiveSidebarWidth(windowWidth, mobileMaxWindowCols, tabletMaxWindowCols, widthMobile, widthTablet, widthDesktop, maxPercent, minContentCols)
 }
 
 // spawnRenderersForNewWindows checks for windows without renderers and spawns them.
