@@ -978,7 +978,7 @@ func paneTargetFromStartCmd(startCmd string) string {
 
 // cleanupOrphanedHeaders removes header panes that are disabled or orphaned
 // (target pane no longer exists).
-func cleanupOrphanedHeaders(customBorder bool) {
+func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeWindowID string) {
 	// Get all panes with geometry, start command, and window ID.
 	// Scoped to our session with -t to avoid cross-session interference.
 	listArgs := []string{"list-panes", "-s"}
@@ -1153,7 +1153,7 @@ func cleanupOrphanedHeaders(customBorder bool) {
 
 	// Restore sidebar widths if we killed any headers (layout may have shifted)
 	if killed {
-		restoreSidebarWidths()
+		coordinator.RunWidthSync(activeWindowID, true)
 	}
 }
 
@@ -1260,42 +1260,9 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 	}
 }
 
-// restoreSidebarWidths ensures all sidebar panes match the saved desired width.
-// Reads @tabby_sidebar_width (set by grow/shrink buttons) with a minimum of 15.
+// restoreSidebarWidths is deprecated. Use coordinator.RunWidthSync(activeWindowID, true) instead.
+// Kept as empty stub for backwards compatibility.
 func restoreSidebarWidths() {
-	// Read saved desired width
-	desiredWidth := 25
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width").Output(); err == nil {
-		if w, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && w >= 15 {
-			desiredWidth = w
-		}
-	}
-
-	// Scoped to our session to avoid resizing panes in other sessions
-	restoreArgs := []string{"list-panes", "-s"}
-	if *sessionID != "" {
-		restoreArgs = append(restoreArgs, "-t", *sessionID)
-	}
-	restoreArgs = append(restoreArgs, "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_width}")
-	out, err := exec.Command("tmux", restoreArgs...).Output()
-	if err != nil {
-		return
-	}
-	widthStr := strconv.Itoa(desiredWidth)
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "\x1f", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		cmd := parts[1]
-		if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") {
-			width, _ := strconv.Atoi(parts[2])
-			if width != desiredWidth && width > 0 {
-				exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", widthStr).Run()
-			}
-		}
-	}
 }
 
 // updateHeaderBorderStyles sets pane-border-style on each header pane.
@@ -1798,7 +1765,7 @@ func main() {
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
 			spawnPaneHeaders(server, *sessionID, customBorder, coordinator.GetWindows())
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
-			cleanupOrphanedHeaders(customBorder)
+			cleanupOrphanedHeaders(customBorder, coordinator, activeWindowID)
 			// NOTE: updateHeaderBorderStyles is NOT called here to avoid
 			// border flickering. It's only called when windows hash changes
 			// (on refreshCh + hash change) which is when groups/colors change.
@@ -1847,7 +1814,7 @@ func main() {
 					server.BroadcastRender()
 					t1b := time.Now()
 					// Width sync runs off the render path to prevent deadlocks
-					coordinator.RunWidthSync(activeWindowID)
+					coordinator.RunWidthSync(activeWindowID, false)
 
 					// Heavy ops (spawn/cleanup/layout) only if enough time has
 					// passed since the last full refresh. This breaks the feedback
@@ -1928,7 +1895,7 @@ func main() {
 					// Persist current layouts to disk for restart recovery
 					saveLayoutsToDisk(windows)
 					// Width sync as fallback for missed events
-					coordinator.RunWidthSync(activeWindowID)
+					coordinator.RunWidthSync(activeWindowID, false)
 				})
 			case <-watchdogTicker.C:
 				ok := runLoopTask("watchdog", 6*time.Second, func() {
