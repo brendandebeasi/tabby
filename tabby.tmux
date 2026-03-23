@@ -574,7 +574,7 @@ tmux set-hook -g after-new-window "run-shell '$APPLY_GROUP_SCRIPT'; run-shell '$
 # Combined script to reduce latency + track window history
 ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
 chmod +x "$ON_WINDOW_SELECT_SCRIPT"
-tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-shell '$TRACK_WINDOW_HISTORY_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'; run-shell -b '[ -x \"$CYCLE_PANE_BIN\" ] && \"$CYCLE_PANE_BIN\" --dim-only'"
+tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell -b '$TRACK_WINDOW_HISTORY_SCRIPT'; run-shell -b '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell -b '$STATUS_GUARD_SCRIPT \"#{session_id}\"'; run-shell -b '[ -x \"$CYCLE_PANE_BIN\" ] && \"$CYCLE_PANE_BIN\" --dim-only'"
 # Lock window name on manual rename via prefix+, keybinding
 # NOTE: We intentionally do NOT use after-rename-window hook because the daemon's
 # own rename-window calls would trigger it, locking the daemon out of future updates.
@@ -639,6 +639,14 @@ KEY=${TOGGLE_KEY##*+ }
 if [ -z "$KEY" ]; then KEY="Tab"; fi
 
 tmux bind-key "$KEY" run-shell -b "$CURRENT_DIR/scripts/toggle_sidebar.sh"
+
+# Sidebar collapse/expand keybindings (shrink to 1 col / restore width)
+TOGGLE_COLLAPSE_SCRIPT="$CURRENT_DIR/scripts/toggle_sidebar_collapse.sh"
+chmod +x "$TOGGLE_COLLAPSE_SCRIPT"
+# Alt+< to toggle collapse/expand
+tmux bind-key -n 'M-<' run-shell -b "$TOGGLE_COLLAPSE_SCRIPT"
+# Ctrl+Shift+\ (CSI u encoded) — requires extended-keys in tmux.conf
+tmux bind-key -n 'C-S-\' run-shell -b "$TOGGLE_COLLAPSE_SCRIPT" 2>/dev/null || true
 
 normalize_global_key() {
 	local key="$1"
