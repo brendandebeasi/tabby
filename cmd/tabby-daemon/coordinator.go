@@ -222,6 +222,10 @@ type Coordinator struct {
 	sidebarCollapsed     bool
 	sidebarPreviousWidth int
 
+	// Overview view mode state
+	viewMode          string          // "" or "current" = normal, "overview" = all-windows
+	overviewCollapsed map[string]bool // per-window collapse in overview (keyed by window ID)
+
 	// Pet widget layout (for custom click detection)
 	petLayout petWidgetLayout
 
@@ -783,6 +787,20 @@ func NewCoordinator(sessionID string) *Coordinator {
 			}
 		}
 	}
+
+	// Read view mode from tmux option
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_view_mode").Output(); err == nil {
+		if mode := strings.TrimSpace(string(out)); mode == "overview" {
+			c.viewMode = "overview"
+		} else {
+			c.viewMode = "current"
+		}
+	} else {
+		c.viewMode = "current"
+	}
+
+	// Initialize overview collapse map
+	c.overviewCollapsed = make(map[string]bool)
 
 	// Apply global theme styles to tmux (borders, messages, etc.)
 	c.applyThemeToTmux()
