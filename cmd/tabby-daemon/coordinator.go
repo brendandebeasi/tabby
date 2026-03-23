@@ -3666,12 +3666,14 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	if isActive && currentWidth != c.globalWidth && currentWidth >= 10 {
 		coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global", clientID, c.globalWidth, currentWidth)
 		c.globalWidth = currentWidth
+		c.lastWidthSync = time.Now()
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", currentWidth)).Run()
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
 		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
+		c.persistSidebarWidthProfile(clientID, currentWidth)
 		return
 	}
 
@@ -8646,6 +8648,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.sidebarCollapsed = true
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_collapsed", "1").Run()
 		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_previous_width", fmt.Sprintf("%d", currentWidth)).Run()
+		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", "1").Run()
 		syncAllSidebarWidths(1)
 		coordinatorDebugLog.Printf("Sidebar collapsed: saved width=%d, synced all to 1", currentWidth)
 		return true
