@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TABBY_DIR="$(cd "$(dirname "$0")/../.." && pwd -P)"
+TABBY_DIR="$(cd "$(dirname "$0")/../.." >/dev/null && pwd -P)"
 SESSION="tabby-overview-test-$$"
 PASS=0
 FAIL=0
