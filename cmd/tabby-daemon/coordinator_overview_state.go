@@ -38,9 +38,17 @@ func (c *Coordinator) toggleViewMode() {
 
 // isOverviewWindowCollapsed returns true if the window should be collapsed in overview mode.
 // Missing key = collapsed (default behavior).
+// This method acquires stateMu.RLock — do NOT call from code that already holds stateMu.
 func (c *Coordinator) isOverviewWindowCollapsed(windowID string) bool {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
+	return c.isOverviewWindowCollapsedLocked(windowID)
+}
+
+// isOverviewWindowCollapsedLocked is the lock-free variant for callers that already
+// hold c.stateMu (e.g. renderOverviewContent called from generateMainContent under RenderForClient).
+// true in the map means expanded; missing key or false means collapsed.
+func (c *Coordinator) isOverviewWindowCollapsedLocked(windowID string) bool {
 	expanded, exists := c.overviewCollapsed[windowID]
 	if !exists {
 		return true // default: collapsed

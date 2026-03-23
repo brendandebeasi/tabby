@@ -86,7 +86,7 @@ func (c *Coordinator) renderTabSwitcherForMode(width int, viewMode string) (stri
 		},
 		{
 			StartLine: 0, EndLine: 0,
-			StartCol: leftWidth, EndCol: 0,
+			StartCol: leftWidth, EndCol: width - 1,
 			Action: "switch_view", Target: "overview",
 		},
 	}
@@ -151,7 +151,7 @@ func (c *Coordinator) renderOverviewContent(width int) (string, []daemon.Clickab
 				}
 			}
 
-			isCollapsed := c.isOverviewWindowCollapsed(win.ID)
+			isCollapsed := c.isOverviewWindowCollapsedLocked(win.ID)
 
 			collapseIcon := " "
 			if contentPaneCount > 1 {
@@ -182,7 +182,30 @@ func (c *Coordinator) renderOverviewContent(width int) (string, []daemon.Clickab
 				nameText = truncated + "~"
 			}
 
-			iconPart := treeStyle.Render(collapseIcon) + " "
+			alertIcon := " "
+			ind := c.config.Indicators
+			if ind.Busy.Enabled && win.Busy {
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
+				busyFrames := c.getBusyFrames()
+				alertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
+			} else if ind.Input.Enabled && win.Input {
+				inputIcon := ind.Input.Icon
+				if inputIcon == "" {
+					inputIcon = "?"
+				}
+				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Input.Color))
+				alertIcon = alertStyle.Render(inputIcon)
+			} else if !win.Active {
+				if ind.Bell.Enabled && win.Bell {
+					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
+					alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Bell))
+				} else if ind.Activity.Enabled && win.Activity {
+					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
+					alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Activity))
+				}
+			}
+
+			iconPart := treeStyle.Render(collapseIcon) + alertIcon
 			var rowContent string
 			if win.Active {
 				rowContent = iconPart + activeStyle.Width(maxNameW).Render(nameText)
