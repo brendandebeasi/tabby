@@ -117,11 +117,8 @@ if [ "$MODE" = "enabled" ]; then
                 [ -S "$DAEMON_SOCK" ] && break
                 sleep 0.1
             done
-        fi
-
-        # Signal daemon for immediate renderer spawning (don't wait for 2s ticker)
-        if [ -f "$DAEMON_PID_FILE" ]; then
-            kill -USR1 "$(cat "$DAEMON_PID_FILE")" 2>/dev/null || true
+            # Clear spawning guard - renderers should spawn soon
+            tmux set-option -gu @tabby_spawning
         fi
     fi
 fi
