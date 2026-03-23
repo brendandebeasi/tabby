@@ -11,13 +11,20 @@ import (
 )
 
 func (c *Coordinator) renderTabSwitcher(width int) (string, []daemon.ClickableRegion) {
+	c.stateMu.RLock()
+	viewMode := c.viewMode
+	c.stateMu.RUnlock()
+	if viewMode == "" {
+		viewMode = "current"
+	}
+	return c.renderTabSwitcherForMode(width, viewMode)
+}
+
+func (c *Coordinator) renderTabSwitcherForMode(width int, viewMode string) (string, []daemon.ClickableRegion) {
 	if width < 2 {
 		width = 2
 	}
 
-	c.stateMu.RLock()
-	viewMode := c.viewMode
-	c.stateMu.RUnlock()
 	if viewMode == "" {
 		viewMode = "current"
 	}

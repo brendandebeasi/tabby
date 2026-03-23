@@ -5143,16 +5143,14 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 // generateMainContent creates the main scrollable area with window list
 // clientID is the window ID that this content is being rendered for
 func (c *Coordinator) generateMainContent(clientID string, width, height int) (string, []daemon.ClickableRegion) {
-	c.stateMu.RLock()
 	viewMode := c.viewMode
-	c.stateMu.RUnlock()
 	if viewMode == "" {
 		viewMode = "current"
 	}
+	tabContent, tabRegions := c.renderTabSwitcherForMode(width, viewMode)
+	tabLines := strings.Count(tabContent, "\n")
 
 	if viewMode == "overview" {
-		tabContent, tabRegions := c.renderTabSwitcher(width)
-		tabLines := strings.Count(tabContent, "\n")
 		overviewContent, overviewRegions := c.renderOverviewContent(width)
 		for i := range overviewRegions {
 			overviewRegions[i].StartLine += tabLines
@@ -5928,15 +5926,11 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		}
 	}
 
-	tabContent, tabRegions := c.renderTabSwitcher(width)
-	tabLines := strings.Count(tabContent, "\n")
-	shiftedRegions := make([]daemon.ClickableRegion, len(regions))
-	for i, r := range regions {
-		r.StartLine += tabLines
-		r.EndLine += tabLines
-		shiftedRegions[i] = r
+	for i := range regions {
+		regions[i].StartLine += tabLines
+		regions[i].EndLine += tabLines
 	}
-	return tabContent + s.String(), append(tabRegions, shiftedRegions...)
+	return tabContent + s.String(), append(tabRegions, regions...)
 }
 
 // generatePrefixModeContent creates a flat window list with group prefixes (e.g., "SD| WindowName")

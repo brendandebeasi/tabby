@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/colors"
 	"github.com/brendandebeasi/tabby/pkg/config"
@@ -291,5 +293,78 @@ func TestSelectPaneKeepsOverview(t *testing.T) {
 	c.stateMu.RUnlock()
 	if after != "overview" {
 		t.Errorf("after select_pane simulation: viewMode = %q, want \"overview\"", after)
+	}
+}
+
+func TestGenerateMainContentTabSwitcherAlwaysPresent(t *testing.T) {
+	for _, mode := range []string{"current", "overview"} {
+		t.Run(mode, func(t *testing.T) {
+			c := newOverviewCoordinator(mode)
+			content, _ := c.generateMainContent("@0", 30, 40)
+			plain := stripForGolden(content)
+			if !strings.Contains(plain, "Window") {
+				t.Errorf("mode=%s: 'Window' tab label missing from content", mode)
+			}
+			if !strings.Contains(plain, "All") {
+				t.Errorf("mode=%s: 'All' tab label missing from content", mode)
+			}
+		})
+	}
+}
+
+func TestGenerateMainContentRegionShiftInCurrentMode(t *testing.T) {
+	c := newOverviewCoordinator("current")
+	windows := makeTestWindows(1)
+	c.grouped = groupTestWindows(windows, c.config)
+	_, regions := c.generateMainContent("@0", 30, 40)
+
+	for _, r := range regions {
+		if r.Action == "select_window" {
+			if r.StartLine < 2 {
+				t.Errorf("select_window region StartLine=%d, want >= 2 (tab switcher occupies lines 0-1)", r.StartLine)
+			}
+			return
+		}
+	}
+	t.Error("no select_window region found")
+}
+
+func TestGoldenGenerateMainContentOverview(t *testing.T) {
+	c := newOverviewCoordinator("overview")
+	windows := makeTestWindows(3)
+	c.grouped = groupTestWindows(windows, c.config)
+	content, _ := c.generateMainContent("@1", 30, 40)
+	checkOrUpdateGolden(t, "generate_main_content_overview", stripForGolden(content))
+}
+
+func TestGoldenGenerateMainContentCurrent(t *testing.T) {
+	c := newOverviewCoordinator("current")
+	content, _ := c.generateMainContent("@0", 30, 40)
+	checkOrUpdateGolden(t, "generate_main_content_current", stripForGolden(content))
+}
+
+func TestRenderForClientOverviewMode(t *testing.T) {
+	c := newOverviewCoordinator("overview")
+	windows := makeTestWindows(3)
+	c.grouped = groupTestWindows(windows, c.config)
+	c.clientWidths = make(map[string]int)
+	c.lastWindowSelect = make(map[string]time.Time)
+	c.lastWindowByClient = make(map[string]time.Time)
+
+	payload := c.RenderForClient("test-client", 25, 40)
+	if payload == nil {
+		t.Fatal("RenderForClient returned nil")
+	}
+	if payload.Content == "" {
+		t.Fatal("RenderForClient returned empty content")
+	}
+
+	plain := stripAnsi(payload.Content)
+	if !strings.Contains(plain, "Frontend") && !strings.Contains(plain, "Default") {
+		t.Errorf("overview content missing group names; got:\n%s", plain)
+	}
+
+	if len(payload.Regions) < 2 {
+		t.Errorf("expected at least 2 regions (tab switcher), got %d", len(payload.Regions))
 	}
 }
