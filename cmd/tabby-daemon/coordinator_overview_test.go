@@ -339,7 +339,9 @@ func TestGoldenGenerateMainContentOverview(t *testing.T) {
 
 func TestGoldenGenerateMainContentCurrent(t *testing.T) {
 	c := newOverviewCoordinator("current")
-	content, _ := c.generateMainContent("@0", 30, 40)
+	windows := makeTestWindows(3)
+	c.grouped = groupTestWindows(windows, c.config)
+	content, _ := c.generateMainContent("@1", 30, 40)
 	checkOrUpdateGolden(t, "generate_main_content_current", stripForGolden(content))
 }
 
