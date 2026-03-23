@@ -127,6 +127,7 @@ Tabby follows standard tmux keybindings. All standard tmux shortcuts work as exp
 | `prefix + G` | Create new group |
 | `Ctrl + <` or `Alt + <` | Collapse/expand sidebar |
 | `Cmd + Shift + \` | Collapse/expand sidebar (requires [terminal config](#sidebar-collapse-shortcut)) |
+| `Alt + a` | Toggle all-windows overview mode |
 
 When the sidebar is focused, press `m` to open the marker picker for the active window.
 

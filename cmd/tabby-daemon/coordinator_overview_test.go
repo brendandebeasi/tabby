@@ -370,3 +370,21 @@ func TestRenderForClientOverviewMode(t *testing.T) {
 		t.Errorf("expected at least 2 regions (tab switcher), got %d", len(payload.Regions))
 	}
 }
+
+func TestToggleViewMode(t *testing.T) {
+	c := newOverviewCoordinator("current")
+	c.toggleViewMode()
+	c.stateMu.RLock()
+	mode := c.viewMode
+	c.stateMu.RUnlock()
+	if mode != "overview" {
+		t.Errorf("after 1st toggle: viewMode = %q, want \"overview\"", mode)
+	}
+	c.toggleViewMode()
+	c.stateMu.RLock()
+	mode = c.viewMode
+	c.stateMu.RUnlock()
+	if mode != "current" {
+		t.Errorf("after 2nd toggle: viewMode = %q, want \"current\"", mode)
+	}
+}
