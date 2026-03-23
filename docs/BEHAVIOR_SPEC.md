@@ -54,8 +54,6 @@ StudioDome
 
 These pane commands are ALWAYS filtered from display:
 - `sidebar`
-- `tabbar`
-- `pane-bar`
 
 ---
 
@@ -144,7 +142,6 @@ tmux rename-window "SD|project"
 1. New pane created in current window
 2. If window has group prefix, `automatic-rename` stays off
 3. Sidebar refreshes to show pane list (now 2+ panes)
-4. Pane bar refreshes (if horizontal mode)
 
 **Validation**:
 ```bash
@@ -268,25 +265,16 @@ tmux set-window-option -t :1 -u @tabby_group
 - Full mouse interaction (click, right-click, middle-click)
 - Pane list visible for multi-pane windows
 
-### 5.2 Horizontal Mode
-
-**State**: `@tabby_sidebar = "horizontal"`
-
-**Characteristics**:
-- Top pane running `tabbar` binary
-- tmux status bar disabled
-- Limited mouse support
-
-### 5.3 Disabled Mode
+### 5.2 Disabled Mode
 
 **State**: `@tabby_sidebar = "disabled"` or empty
 
 **Characteristics**:
-- No sidebar/tabbar panes
+- No sidebar panes
 - tmux native status bar enabled
 - Tab rendering via `render-status` and `render-tab`
 
-### 5.4 Mode Toggle (prefix + Tab)
+### 5.3 Mode Toggle (prefix + Tab)
 
 **Current: Enabled -> Disabled**:
 1. Kill all sidebar panes across session
@@ -296,8 +284,7 @@ tmux set-window-option -t :1 -u @tabby_group
 **Current: Disabled -> Enabled**:
 1. Set state to "enabled"
 2. Disable tmux status bar
-3. Kill any tabbar panes
-4. Add sidebar to all windows
+3. Add sidebar to all windows
 
 ---
 
