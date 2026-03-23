@@ -8455,6 +8455,16 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		exec.Command("tmux", "select-pane", "-t", paneID).Run()
 		return true
 
+	case "switch_view":
+		// Switch between "current" and "overview" sidebar modes
+		c.setViewMode(input.ResolvedTarget)
+		return false // No tmux window state change; render triggered by next cycle
+
+	case "overview_toggle_window":
+		// Toggle per-window collapse state in overview mode
+		c.toggleOverviewWindow(input.ResolvedTarget)
+		return false // No tmux window state change
+
 	case "toggle_group":
 		c.stateMu.Lock()
 		groupName := input.ResolvedTarget
