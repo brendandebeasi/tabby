@@ -551,9 +551,7 @@ KILL_WINDOW_SCRIPT="$CURRENT_DIR/scripts/kill_window.sh"
 chmod +x "$KILL_WINDOW_SCRIPT"
 EXIT_IF_NO_MAIN_WINDOWS_SCRIPT="$CURRENT_DIR/scripts/exit_if_no_main_windows.sh"
 chmod +x "$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT"
-# Define resize script early so it can be used in window-unlinked hook
-RESIZE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/resize_sidebar.sh"
-chmod +x "$RESIZE_SIDEBAR_SCRIPT"
+
 # Define save layout script early so it can be used in pane hooks
 SAVE_LAYOUT_SCRIPT="$CURRENT_DIR/scripts/save_pane_layout.sh"
 chmod +x "$SAVE_LAYOUT_SCRIPT"
@@ -563,7 +561,7 @@ chmod +x "$SAVE_LAYOUT_SCRIPT"
 tmux set-hook -g window-linked "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 # On window close: select previous window (sync for UX), then background the rest.
 # The daemon handles orphan cleanup and sidebar spawning on USR1.
-tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT \"#{window_index}\"'; run-shell -b '$RESIZE_SIDEBAR_SCRIPT; $SIGNAL_SIDEBAR_SCRIPT; $REFRESH_STATUS_SCRIPT; $EXIT_IF_NO_MAIN_WINDOWS_SCRIPT; $STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+tmux set-hook -g window-unlinked "run-shell '$SELECT_PREVIOUS_WINDOW_SCRIPT \"#{window_index}\"'; run-shell -b '$SIGNAL_SIDEBAR_SCRIPT; $REFRESH_STATUS_SCRIPT; $EXIT_IF_NO_MAIN_WINDOWS_SCRIPT; $STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 # Note: after-kill-window is not a valid hook in tmux 3.6+; window-unlinked
 # covers the window-close case. exit_if_no_main runs in the background chains above.
 # after-new-window: apply group label, then let ensure_sidebar handle the
@@ -611,8 +609,8 @@ tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'; run-shell
 tmux set-hook -g session-created "run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
 # Maintain sidebar width after terminal resize
-# (RESIZE_SIDEBAR_SCRIPT already defined above for window-unlinked hook)
-tmux set-hook -g client-resized "run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+# (daemon's RunWidthSync handles all resize logic via USR1 signal)
+tmux set-hook -g client-resized "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
 # tmux-resurrect integration (options are inert if resurrect is not installed)
 RESURRECT_SAVE_HOOK="$CURRENT_DIR/scripts/resurrect_save_hook.sh"
