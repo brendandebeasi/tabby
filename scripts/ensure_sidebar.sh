@@ -6,10 +6,7 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 
-LOG="/tmp/tabby-focus.log"
-TS=$(date +%s 2>/dev/null || echo "")
 SPAWNING=$(tmux show-option -gqv @tabby_spawning 2>/dev/null || echo "")
-printf "%s ensure_sidebar start win=%s pane=%s spawning=%s\n" "$TS" "$(tmux display-message -p '#{window_id}' 2>/dev/null || echo '')" "$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo '')" "$SPAWNING" >> "$LOG"
 if [ "$SPAWNING" = "1" ]; then
     exit 0
 fi
@@ -23,7 +20,6 @@ SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
 # startup (tabby.tmux run-shell -b) before tmux is fully initialized.
 # Hooks will call us again once the session is ready.
 if [ -z "$SESSION_ID" ]; then
-    printf "%s ensure_sidebar bail: empty session_id\n" "$TS" >> "$LOG"
     exit 0
 fi
 
@@ -36,19 +32,19 @@ if [ -z "$WINDOW_ID" ] && [ -n "$SESSION_ID" ]; then
     WINDOW_ID=$(tmux list-windows -t "$SESSION_ID" -F "#{window_id}" 2>/dev/null | head -1)
 fi
 
-# Debounce - skip if called within 100ms to prevent flicker
+# Debounce - skip if called within 1s to prevent redundant daemon checks
 DEBOUNCE_FILE="/tmp/tabby-ensure-debounce-${SESSION_ID:-default}-${WINDOW_ID:-current}.ts"
-DEBOUNCE_MS=100
+DEBOUNCE_S=1
 
 if [ -f "$DEBOUNCE_FILE" ]; then
     LAST_RUN=$(cat "$DEBOUNCE_FILE" 2>/dev/null || echo "0")
-    NOW=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null || date +%s000)
+    NOW=$(date +%s)
     DIFF=$((NOW - LAST_RUN))
-    if [ "$DIFF" -lt "$DEBOUNCE_MS" ]; then
+    if [ "$DIFF" -lt "$DEBOUNCE_S" ]; then
         exit 0
     fi
 fi
-perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null > "$DEBOUNCE_FILE" || date +%s000 > "$DEBOUNCE_FILE"
+date +%s > "$DEBOUNCE_FILE"
 SIDEBAR_STATE_FILE="/tmp/tabby-sidebar-${SESSION_ID}.state"
 DAEMON_SOCK="/tmp/tabby-daemon-${SESSION_ID}.sock"
 DAEMON_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
@@ -103,10 +99,7 @@ if [ "$MODE" = "enabled" ]; then
             WATCHDOG_PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.watchdog.pid"
             if [ -f "$WATCHDOG_PID_FILE" ]; then
                 WD_PID=$(cat "$WATCHDOG_PID_FILE" 2>/dev/null || echo "")
-                if [ -n "$WD_PID" ] && kill -0 "$WD_PID" 2>/dev/null; then
-                    # Watchdog is alive — it will restart daemon, nothing to do
-                    printf "%s ensure_sidebar skip: watchdog running pid=%s\n" "$TS" "$WD_PID" >> "$LOG"
-                else
+                if [ -z "$WD_PID" ] || ! kill -0 "$WD_PID" 2>/dev/null; then
                     rm -f "$WATCHDOG_PID_FILE"
                 fi
             fi
