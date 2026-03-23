@@ -256,13 +256,13 @@ else
 
     # Restore tmux hooks to match what tabby.tmux originally sets.
     # The disable path removes these, so we must put back the full versions
-    # (not just USR1-only stubs) to keep resize_sidebar + ensure_sidebar working.
-    RESIZE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/resize_sidebar.sh"
+    # (not just USR1-only stubs) to keep signal_sidebar + ensure_sidebar working.
+    SIGNAL_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/signal_sidebar.sh"
     ENSURE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/ensure_sidebar.sh"
     STATUS_GUARD_SCRIPT="$CURRENT_DIR/scripts/status_guard.sh"
     tmux set-hook -g after-resize-pane 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     tmux set-hook -g after-resize-window 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
-    tmux set-hook -g client-resized "run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+    tmux set-hook -g client-resized "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
     # Wait for daemon to spawn renderers (poll instead of fixed sleep).
     RENDERER_WAIT_MAX=20  # 20 * 0.1s = 2s max
