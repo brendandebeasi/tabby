@@ -8476,9 +8476,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "switch_view":
-		// Switch between "current" and "overview" sidebar modes
 		c.setViewMode(input.ResolvedTarget)
-		return false // No tmux window state change; render triggered by next cycle
+		return false
+
+	case "toggle_view_mode":
+		c.toggleViewMode()
+		return false
 
 	case "overview_toggle_window":
 		// Toggle per-window collapse state in overview mode

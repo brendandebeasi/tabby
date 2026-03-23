@@ -24,6 +24,18 @@ func (c *Coordinator) toggleOverviewWindow(windowID string) {
 	c.overviewCollapsed[windowID] = !c.overviewCollapsed[windowID]
 }
 
+func (c *Coordinator) toggleViewMode() {
+	c.stateMu.Lock()
+	if c.viewMode == "overview" {
+		c.viewMode = "current"
+	} else {
+		c.viewMode = "overview"
+	}
+	mode := c.viewMode
+	c.stateMu.Unlock()
+	exec.Command("tmux", "set-option", "-g", "@tabby_view_mode", mode).Run() //nolint:errcheck
+}
+
 // isOverviewWindowCollapsed returns true if the window should be collapsed in overview mode.
 // Missing key = collapsed (default behavior).
 func (c *Coordinator) isOverviewWindowCollapsed(windowID string) bool {
