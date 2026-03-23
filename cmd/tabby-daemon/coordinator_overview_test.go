@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/brendandebeasi/tabby/pkg/colors"
@@ -9,6 +10,12 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/grouping"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
+
+var zoneMarkRe = regexp.MustCompile(`\x1b\[[0-9;]*z`)
+
+func stripForGolden(s string) string {
+	return zoneMarkRe.ReplaceAllString(stripAnsi(s), "")
+}
 
 // newOverviewCoordinator creates a minimal coordinator for overview mode testing.
 func newOverviewCoordinator(viewMode string) *Coordinator {
@@ -137,4 +144,45 @@ func TestGroupTestWindows(t *testing.T) {
 	if totalWindows != 3 {
 		t.Errorf("grouped windows total = %d, want 3", totalWindows)
 	}
+}
+
+func TestTabSwitcherRegions(t *testing.T) {
+	c := newOverviewCoordinator("current")
+	_, regions := c.renderTabSwitcher(25)
+
+	if len(regions) != 2 {
+		t.Fatalf("expected 2 regions, got %d", len(regions))
+	}
+	if regions[0].Action != "switch_view" || regions[0].Target != "current" {
+		t.Errorf("region[0]: got action=%q target=%q, want switch_view/current", regions[0].Action, regions[0].Target)
+	}
+	if regions[1].Action != "switch_view" || regions[1].Target != "overview" {
+		t.Errorf("region[1]: got action=%q target=%q, want switch_view/overview", regions[1].Action, regions[1].Target)
+	}
+	if regions[0].EndCol <= 0 || regions[1].StartCol <= 0 {
+		t.Errorf("tab regions have zero column bounds: %+v %+v", regions[0], regions[1])
+	}
+}
+
+func TestTabSwitcherNarrowWidth(t *testing.T) {
+	c := newOverviewCoordinator("overview")
+	content, regions := c.renderTabSwitcher(12)
+	if content == "" {
+		t.Error("renderTabSwitcher(12) returned empty content")
+	}
+	if len(regions) != 2 {
+		t.Fatalf("expected 2 regions at narrow width, got %d", len(regions))
+	}
+}
+
+func TestGoldenTabSwitcherCurrent(t *testing.T) {
+	c := newOverviewCoordinator("current")
+	content, _ := c.renderTabSwitcher(25)
+	checkOrUpdateGolden(t, "tab_switcher_current", stripForGolden(content))
+}
+
+func TestGoldenTabSwitcherOverview(t *testing.T) {
+	c := newOverviewCoordinator("overview")
+	content, _ := c.renderTabSwitcher(25)
+	checkOrUpdateGolden(t, "tab_switcher_overview", stripForGolden(content))
 }
