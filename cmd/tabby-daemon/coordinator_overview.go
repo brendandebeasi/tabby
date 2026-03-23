@@ -81,12 +81,12 @@ func (c *Coordinator) renderTabSwitcherForMode(width int, viewMode string) (stri
 	regions := []daemon.ClickableRegion{
 		{
 			StartLine: 0, EndLine: 0,
-			StartCol: 0, EndCol: leftWidth - 1,
+			StartCol: 0, EndCol: leftWidth,
 			Action: "switch_view", Target: "current",
 		},
 		{
 			StartLine: 0, EndLine: 0,
-			StartCol: leftWidth, EndCol: width - 1,
+			StartCol: leftWidth, EndCol: 0,
 			Action: "switch_view", Target: "overview",
 		},
 	}
