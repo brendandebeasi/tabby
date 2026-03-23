@@ -1899,6 +1899,7 @@ type tmuxWindowRename struct {
 // Returns pending rename operations to execute after stateMu is released.
 func (c *Coordinator) syncWindowNames() []tmuxWindowRename {
 	home := os.Getenv("HOME")
+	showSSHHost := c.config.Sidebar.ShowSSHHost
 	var pending []tmuxWindowRename
 
 	for i := range c.windows {
@@ -1913,11 +1914,19 @@ func (c *Coordinator) syncWindowNames() []tmuxWindowRename {
 		seen := make(map[string]bool)
 		var dirs []string
 		for _, pane := range c.windows[i].Panes {
-			p := pane.CurrentPath
-			if p == "" {
-				continue
+			var name string
+			if showSSHHost && pane.Remote && pane.Command == "ssh" {
+				if host := tmux.SSHHostForPane(pane.PID); host != "" {
+					name = host
+				}
 			}
-			name := shortenPath(p, home)
+			if name == "" {
+				p := pane.CurrentPath
+				if p == "" {
+					continue
+				}
+				name = shortenPath(p, home)
+			}
 			if !seen[name] {
 				seen[name] = true
 				dirs = append(dirs, name)
@@ -3622,15 +3631,18 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		c.globalWidth = currentWidth
 	}
 
-	// If sidebar got squeezed or stretched to extreme values by tmux resize, restore to global
-	// Use wide bounds (10-80) to only catch clearly broken cases, not user preferences
-	if (currentWidth < 10 || currentWidth > 80) && c.globalWidth >= 10 && c.globalWidth <= 80 {
-		coordinatorDebugLog.Printf("Width sync: %s out of bounds (%d), restoring to global %d", clientID, currentWidth, c.globalWidth)
+	// If the active window's sidebar was resized by the user, adopt as new global width.
+	// Only reject widths below the absolute minimum (broken state).
+	if currentWidth < 10 {
+		coordinatorDebugLog.Printf("Width sync: %s below minimum (%d), restoring to global %d", clientID, currentWidth, c.globalWidth)
 		c.lastWidthSync = time.Now()
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
-		targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth)
+		targetWidth := c.globalWidth
+		if targetWidth < 10 {
+			targetWidth = 25
+		}
 		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 
@@ -3647,6 +3659,19 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 				}
 			}
 		}
+		return
+	}
+
+	// User manually resized the active window's sidebar — adopt as new global width
+	if isActive && currentWidth != c.globalWidth && currentWidth >= 10 {
+		coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global", clientID, c.globalWidth, currentWidth)
+		c.globalWidth = currentWidth
+		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", currentWidth)).Run()
+		if justBecameActive {
+			c.lastActiveWindowID = clientID
+		}
+		untrackLock("widthSyncMu")
+		c.widthSyncMu.Unlock()
 		return
 	}
 
@@ -3752,9 +3777,8 @@ func (c *Coordinator) RunWidthSync(activeWindowID string) {
 			c.globalWidth = currentWidth
 		}
 
-		// If sidebar got squeezed or stretched to extreme values, restore to global
-		if (currentWidth < 10 || currentWidth > 80) && c.globalWidth >= 10 && c.globalWidth <= 80 {
-			coordinatorDebugLog.Printf("Width sync: %s out of bounds (%d), restoring to global %d", clientID, currentWidth, c.globalWidth)
+		if currentWidth < 10 {
+			coordinatorDebugLog.Printf("Width sync: %s below minimum (%d), restoring to global %d", clientID, currentWidth, c.globalWidth)
 			targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth)
 			ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
 			continue

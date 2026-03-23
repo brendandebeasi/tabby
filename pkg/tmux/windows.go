@@ -155,6 +155,73 @@ var remoteCommands = map[string]bool{
 	"ssh": true, "mosh": true, "mosh-client": true, "telnet": true,
 }
 
+// SSHHostForPane returns the SSH destination hostname for a pane's process.
+// Returns empty string if the pane isn't running ssh or host can't be determined.
+func SSHHostForPane(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	// pane_pid is the shell; the ssh process is a child. Walk children first.
+	if out, err := exec.Command("pgrep", "-P", strconv.Itoa(pid)).Output(); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			childPID := strings.TrimSpace(line)
+			if childPID == "" {
+				continue
+			}
+			if argsOut, err2 := exec.Command("ps", "-o", "args=", "-p", childPID).Output(); err2 == nil {
+				if host := parseSSHHost(strings.TrimSpace(string(argsOut))); host != "" {
+					return host
+				}
+			}
+		}
+	}
+	// Fallback: check the pid itself
+	out, err := exec.Command("ps", "-o", "args=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return parseSSHHost(strings.TrimSpace(string(out)))
+}
+
+// parseSSHHost extracts the hostname from an ssh command line string.
+// Handles: ssh host, ssh user@host, ssh -p 22 user@host, ssh -J jump host, etc.
+func parseSSHHost(cmdline string) string {
+	if !strings.HasPrefix(cmdline, "ssh ") && cmdline != "ssh" {
+		return ""
+	}
+	fields := strings.Fields(cmdline)
+	if len(fields) < 2 {
+		return ""
+	}
+	skipNext := false
+	for _, f := range fields[1:] {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if strings.HasPrefix(f, "-") {
+			// SSH flags that consume the next argument as a value
+			if len(f) == 2 {
+				switch f[1] {
+				case 'b', 'c', 'D', 'E', 'e', 'F', 'I', 'i', 'J', 'L', 'l',
+					'm', 'O', 'o', 'p', 'Q', 'R', 'S', 'W', 'w':
+					skipNext = true
+				}
+			}
+			continue
+		}
+		host := f
+		if at := strings.LastIndex(host, "@"); at >= 0 {
+			host = host[at+1:]
+		}
+		if colon := strings.LastIndex(host, ":"); colon > 0 {
+			host = host[:colon]
+		}
+		return host
+	}
+	return ""
+}
+
 // sidebarCommands are commands that should be filtered from pane lists
 var sidebarCommands = map[string]bool{
 	"sidebar": true, "sidebar-master": true, "sidebar-shadow": true,
@@ -695,4 +762,65 @@ func ListWindowsWithPanes() ([]Window, error) {
 	}
 
 	return windows, nil
+}
+
+// extractSSHHostname parses an SSH command and extracts the hostname.
+// Handles formats like:
+//
+//	ssh host
+//	ssh user@host
+//	ssh -o Option=value host
+//	ssh -i /path/to/key user@host
+//	ssh -p 2222 host
+//
+// Returns empty string if the command is not SSH or hostname cannot be extracted.
+func extractSSHHostname(cmd string) string {
+	if cmd == "" {
+		return ""
+	}
+
+	// Split command into parts, respecting quoted strings
+	parts := strings.Fields(cmd)
+	if len(parts) == 0 || parts[0] != "ssh" {
+		return ""
+	}
+
+	// Parse SSH arguments to find the hostname (last non-option argument)
+	var hostname string
+	for i := 1; i < len(parts); i++ {
+		arg := parts[i]
+
+		// Skip option flags and their values
+		if strings.HasPrefix(arg, "-") {
+			// Options like -o, -i, -p, -l, etc. may have values
+			if arg == "-o" || arg == "-i" || arg == "-p" || arg == "-l" || arg == "-w" || arg == "-D" || arg == "-L" || arg == "-R" || arg == "-S" {
+				// Skip the next argument (the option value)
+				i++
+				continue
+			}
+			// Combined options like -v, -N, -f, etc. don't have values
+			continue
+		}
+
+		// This is the hostname (or user@hostname)
+		hostname = arg
+		break
+	}
+
+	if hostname == "" {
+		return ""
+	}
+
+	// Extract just the hostname part if it's user@hostname
+	if strings.Contains(hostname, "@") {
+		parts := strings.Split(hostname, "@")
+		hostname = parts[len(parts)-1] // Take the last part after @
+	}
+
+	// Remove any trailing command or arguments (after space in the hostname field)
+	if strings.Contains(hostname, " ") {
+		hostname = strings.Fields(hostname)[0]
+	}
+
+	return hostname
 }

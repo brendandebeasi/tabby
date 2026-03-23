@@ -299,6 +299,7 @@ type Sidebar struct {
 	IconStyle            string        `yaml:"icon_style"`             // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
 	Colors               SidebarColors `yaml:"colors"`                 // Manual color overrides (applied on top of theme)
 	HidePredefinedColors bool          `yaml:"hide_predefined_colors"` // Hide predefined color palette in context menus (keep Custom + Reset)
+	ShowSSHHost          bool          `yaml:"show_ssh_host"`          // Show SSH hostname in tab name when pane is connected via SSH
 }
 
 type SidebarColors struct {

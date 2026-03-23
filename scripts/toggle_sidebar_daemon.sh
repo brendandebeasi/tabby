@@ -264,9 +264,30 @@ else
     tmux set-hook -g after-resize-window 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     tmux set-hook -g client-resized "run-shell '$RESIZE_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
-    # The daemon handles spawning sidebar renderers and pane headers
-    # via its windowCheckTicker loop. Just wait briefly for it to spawn them.
-    sleep 1
+    # Wait for daemon to spawn renderers (poll instead of fixed sleep).
+    RENDERER_WAIT_MAX=20  # 20 * 0.1s = 2s max
+    RENDERER_WAIT_COUNT=0
+    RENDERERS_READY=false
+    
+    while [ $RENDERER_WAIT_COUNT -lt $RENDERER_WAIT_MAX ]; do
+        # Check if any sidebar-renderer panes exist in any window
+        RENDERER_COUNT=$(tmux list-panes -s -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | \
+            grep -cE "(sidebar-renderer|sidebar)" || true)
+        RENDERER_COUNT="${RENDERER_COUNT:-0}"
+        RENDERER_COUNT=$(echo "$RENDERER_COUNT" | tr -d '[:space:]')
+        
+        if [ "$RENDERER_COUNT" -gt 0 ]; then
+            RENDERERS_READY=true
+            break
+        fi
+        
+        sleep 0.1
+        RENDERER_WAIT_COUNT=$((RENDERER_WAIT_COUNT + 1))
+    done
+    
+    if [ "${TABBY_DEBUG:-}" = "1" ]; then
+        echo "Renderers ready: $RENDERERS_READY (waited ${RENDERER_WAIT_COUNT}*0.1s)" >&2
+    fi
 
     # Restore content pane layouts — re-spawning system panes disrupts saved ratios.
     while IFS= read -r window_id; do

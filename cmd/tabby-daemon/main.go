@@ -421,15 +421,28 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		if *debugMode {
 			debugFlag = "-debug"
 		}
-		cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
-		cmd := exec.Command("tmux", "split-window", "-d", "-t", firstPane, "-h", "-b", "-f", "-l", width, cmdStr)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			debugLog.Printf("Failed to spawn renderer: %v, output: %s", err, string(out))
+		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && exec '%s' -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
+		cmd := exec.Command("tmux", "split-window", "-d", "-t", firstPane, "-h", "-b", "-f", "-l", width, "-P", "-F", "#{pane_id}", cmdStr)
+		paneOut, err := cmd.CombinedOutput()
+		if err != nil {
+			debugLog.Printf("Failed to spawn renderer: %v, output: %s", err, string(paneOut))
 			continue
+		}
+		newPaneID := strings.TrimSpace(string(paneOut))
+		if newPaneID != "" {
+			exec.Command("tmux", "set-option", "-p", "-t", newPaneID, "pane-border-status", "off").Run()
 		}
 
 		spawned = true
-		logEvent("SPAWN_COMPLETE window=%s", windowID)
+		logEvent("SPAWN_COMPLETE window=%s pane=%s", windowID, newPaneID)
+
+		// Force SIGWINCH on content panes so TUI apps (OpenCode, etc.)
+		// re-detect their terminal size after the sidebar split changed dimensions.
+		for _, p := range win.Panes {
+			if p.PID > 0 {
+				exec.Command("kill", "-WINCH", strconv.Itoa(p.PID)).Run()
+			}
+		}
 	}
 	return spawned
 }
@@ -802,9 +815,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			activeBeforeHeader = strings.TrimSpace(string(out))
 		}
 		logEvent("SPAWN_HEADER pane=%s window=%s active_before=%s width=%d height=%d custom_border=%v", pane.id, pane.windowID, activeBeforeHeader, pane.width, pane.height, customBorder)
-		cmdStr := fmt.Sprintf("exec '%s' -session '%s' -pane '%s' %s", headerBin, sessionID, pane.id, debugFlag)
-		// Split the target pane vertically (-v), placing header before/above (-b).
-		// Height is 1 line normally. CustomBorder drag handle is rendered within the single line.
+		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && exec '%s' -session '%s' -pane '%s' %s", headerBin, sessionID, pane.id, debugFlag)
 		headerHeight := "1"
 		spawnCmd := exec.Command("tmux", "split-window", "-d", "-t", pane.id, "-v", "-b", "-l", headerHeight, cmdStr)
 		if out, err := spawnCmd.CombinedOutput(); err != nil {
@@ -1619,7 +1630,7 @@ func main() {
 		}
 
 		refreshTicker := time.NewTicker(30 * time.Second)         // Window list poll (fallback, signal_refresh handles real-time)
-		windowCheckTicker := time.NewTicker(10 * time.Second)     // Spawn/cleanup poll (fallback)
+		windowCheckTicker := time.NewTicker(3 * time.Second)      // Spawn/cleanup poll (fallback, reduced from 10s for faster new-window response)
 		animationTicker := time.NewTicker(100 * time.Millisecond) // Combined spinner + pet animation (was two separate tickers)
 		gitTicker := time.NewTicker(5 * time.Second)              // Git status
 		watchdogTicker := time.NewTicker(5 * time.Second)         // Watchdog: check renderer health
@@ -1654,8 +1665,14 @@ func main() {
 		// back to us, causing re-entry. 50ms cooldown is sufficient to break cycle
 		// while keeping UI responsive.
 		var lastPaneLayoutOps time.Time
-		paneLayoutCooldown := 50 * time.Millisecond
-		layoutsRestored := false
+		paneLayoutCooldown := 150 * time.Millisecond
+
+		// Restore saved layouts once at startup, before the main event loop.
+		// Must not run inside doPaneLayoutOps: spawnPaneHeaders sets @tabby_spawning=1
+		// which blocks save_pane_layout.sh from updating @tabby_layout_<windowID>,
+		// so any stale layout written after the split would persist and be applied
+		// by preserve_pane_ratios.sh, corrupting the live pane geometry.
+		restoreLayoutsFromDisk()
 
 		doPaneLayoutOps := func() {
 			now := time.Now()
@@ -1669,10 +1686,6 @@ func main() {
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
 			spawnPaneHeaders(server, *sessionID, customBorder, coordinator.GetWindows())
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
-			if !layoutsRestored {
-				layoutsRestored = true
-				restoreLayoutsFromDisk()
-			}
 			cleanupOrphanedHeaders(customBorder)
 			// NOTE: updateHeaderBorderStyles is NOT called here to avoid
 			// border flickering. It's only called when windows hash changes
@@ -1693,7 +1706,7 @@ func main() {
 		// (RefreshWindows + BroadcastRender). This prevents feedback loops
 		// where spawn/cleanup tmux ops trigger hooks that send more USR1 signals.
 		var lastFullRefresh time.Time
-		fullRefreshCooldown := 300 * time.Millisecond
+		fullRefreshCooldown := 100 * time.Millisecond
 
 		for {
 			// Record heartbeat at each loop iteration for deadlock detection

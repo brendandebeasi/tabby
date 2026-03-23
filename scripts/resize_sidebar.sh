@@ -89,12 +89,6 @@ tmux list-panes -a -F '#{pane_id}:#{pane_current_command}:#{pane_start_command}'
         fi
     fi
 
-    if [ -n "$CURRENT_WIDTH" ] && [ "$CURRENT_WIDTH" -ge "$MIN_WIDTH" ] 2>/dev/null; then
-        if [ "$CURRENT_WIDTH" -lt "$TARGET_WIDTH" ]; then
-            TARGET_WIDTH="$CURRENT_WIDTH"
-        fi
-    fi
-
     tmux resize-pane -t "$pane_id" -x "$TARGET_WIDTH" 2>/dev/null || true
 done
 
