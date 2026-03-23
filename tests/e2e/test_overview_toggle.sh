@@ -21,8 +21,8 @@ cd "$TABBY_DIR"
 go build -o bin/tabby-daemon ./cmd/tabby-daemon 2>&1 || { echo "BUILD FAILED"; exit 1; }
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50
-tmux new-window -t "$SESSION"
-tmux new-window -t "$SESSION"
+tmux new-window -d -t "$SESSION"
+tmux new-window -d -t "$SESSION"
 
 DEFAULT_MODE=$(tmux show-option -gqv @tabby_view_mode 2>/dev/null || echo "")
 [[ "$DEFAULT_MODE" == "" || "$DEFAULT_MODE" == "current" ]] && pass "default view mode is current/empty" || fail "default view mode unexpected: $DEFAULT_MODE"
