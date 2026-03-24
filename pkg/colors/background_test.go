@@ -360,3 +360,82 @@ func TestCheckGhosttyConfig_InvalidColor(t *testing.T) {
 	assert.True(t, ok, "invalid color should still return ok=true (config found)")
 	assert.True(t, isDark, "invalid hex is treated as dark (luminance=0)")
 }
+
+func TestDetectDarkBackground_CheckCOLORFGBG_DarkANSI(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("COLORFGBG", "15;0")
+	t.Setenv("ITERM_PROFILE", "")
+	t.Setenv("TERM_PROGRAM", "")
+	isDark := d.detectDarkBackground()
+	assert.True(t, isDark, "COLORFGBG with dark ANSI code (0-7) should return dark")
+}
+
+func TestDetectDarkBackground_CheckCOLORFGBG_LightANSI(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("COLORFGBG", "0;15")
+	t.Setenv("ITERM_PROFILE", "")
+	t.Setenv("TERM_PROGRAM", "")
+	isDark := d.detectDarkBackground()
+	assert.False(t, isDark, "COLORFGBG with light ANSI code (8-15) should return light")
+}
+
+func TestDetectDarkBackground_FallbackToTerminalHints(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("COLORFGBG", "")
+	t.Setenv("ITERM_PROFILE", "Dark Profile")
+	t.Setenv("TERM_PROGRAM", "")
+	isDark := d.detectDarkBackground()
+	assert.True(t, isDark, "should fallback to terminal hints when COLORFGBG fails")
+}
+
+func TestDetectDarkBackground_FallbackToGhosttyConfig(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("COLORFGBG", "")
+	t.Setenv("ITERM_PROFILE", "")
+	t.Setenv("TERM_PROGRAM", "")
+
+	configDir := tmpDir + "/.config/ghostty"
+	err := os.MkdirAll(configDir, 0755)
+	if err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+	configFile := configDir + "/config"
+	content := "background = 1a1a2e\n"
+	err = os.WriteFile(configFile, []byte(content), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	isDark := d.detectDarkBackground()
+	assert.True(t, isDark, "should fallback to ghostty config when other methods fail")
+}
+
+func TestDetectDarkBackground_DefaultToDark(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("COLORFGBG", "")
+	t.Setenv("ITERM_PROFILE", "")
+	t.Setenv("TERM_PROGRAM", "")
+	isDark := d.detectDarkBackground()
+	assert.True(t, isDark, "should default to dark when all detection methods fail")
+}
+
+func TestDetectDarkBackground_TermenvFallback(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("COLORFGBG", "invalid")
+	t.Setenv("ITERM_PROFILE", "")
+	t.Setenv("TERM_PROGRAM", "")
+	isDark := d.detectDarkBackground()
+	assert.True(t, isDark, "should fallback through chain when COLORFGBG is invalid")
+}

@@ -129,6 +129,148 @@ func TestDarkenColor(t *testing.T) {
 	}
 }
 
+func TestLightenColor_BoundaryLightness(t *testing.T) {
+	tests := []struct {
+		name   string
+		color  string
+		amount float64
+		desc   string
+	}{
+		{"lighten at 0.0 amount", "#ff0000", 0.0, "no change"},
+		{"lighten at 1.0 amount", "#ff0000", 1.0, "full lightening"},
+		{"lighten pure black", "#000000", 0.5, "black to gray"},
+		{"lighten pure white", "#ffffff", 0.5, "white stays white"},
+		{"lighten red channel boundary", "#ff0000", 0.1, "red with lightening"},
+		{"lighten green channel boundary", "#00ff00", 0.1, "green with lightening"},
+		{"lighten blue channel boundary", "#0000ff", 0.1, "blue with lightening"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LightenColor(tt.color, tt.amount)
+			if len(got) != 7 || got[0] != '#' {
+				t.Errorf("LightenColor(%q, %v) %s should return valid hex, got %s", tt.color, tt.amount, tt.desc, got)
+			}
+		})
+	}
+}
+
+func TestDarkenColor_BoundaryLightness(t *testing.T) {
+	tests := []struct {
+		name   string
+		color  string
+		amount float64
+		desc   string
+	}{
+		{"darken at 0.0 amount", "#ff0000", 0.0, "no change"},
+		{"darken at 1.0 amount", "#ff0000", 1.0, "full darkening"},
+		{"darken pure white", "#ffffff", 0.5, "white to gray"},
+		{"darken pure black", "#000000", 0.5, "black stays black"},
+		{"darken red channel boundary", "#ff0000", 0.1, "red with darkening"},
+		{"darken green channel boundary", "#00ff00", 0.1, "green with darkening"},
+		{"darken blue channel boundary", "#0000ff", 0.1, "blue with darkening"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DarkenColor(tt.color, tt.amount)
+			if len(got) != 7 || got[0] != '#' {
+				t.Errorf("DarkenColor(%q, %v) %s should return valid hex, got %s", tt.color, tt.amount, tt.desc, got)
+			}
+		})
+	}
+}
+
+func TestLightenColor_OverflowClamping(t *testing.T) {
+	tests := []struct {
+		name     string
+		color    string
+		amount   float64
+		expected string
+	}{
+		{"lighten high red to white", "#ff0000", 1.0, "#ffffff"},
+		{"lighten high green to white", "#00ff00", 1.0, "#ffffff"},
+		{"lighten high blue to white", "#0000ff", 1.0, "#ffffff"},
+		{"lighten mixed high channels", "#ffff00", 0.5, "#ffff7f"},
+		{"lighten single high channel", "#ff0000", 0.5, "#ff7f7f"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LightenColor(tt.color, tt.amount)
+			if got != tt.expected {
+				t.Errorf("LightenColor(%q, %v) expected %s, got %s", tt.color, tt.amount, tt.expected, got)
+			}
+		})
+	}
+}
+
+func TestLightenColor_InvalidFormats(t *testing.T) {
+	tests := []struct {
+		name  string
+		color string
+	}{
+		{"too short", "#fff"},
+		{"too long", "#fffffff"},
+		{"invalid hex chars", "#gggggg"},
+		{"empty string", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LightenColor(tt.color, 0.5)
+			if got != tt.color {
+				t.Errorf("LightenColor(%q, 0.5) should return original for invalid format, got %s", tt.color, got)
+			}
+		})
+	}
+}
+
+func TestDarkenColor_UnderflowClamping(t *testing.T) {
+	tests := []struct {
+		name     string
+		color    string
+		amount   float64
+		expected string
+	}{
+		{"darken low red to black", "#ff0000", 1.0, "#000000"},
+		{"darken low green to black", "#00ff00", 1.0, "#000000"},
+		{"darken low blue to black", "#0000ff", 1.0, "#000000"},
+		{"darken mixed low channels", "#ff0000", 0.5, "#7f0000"},
+		{"darken single low channel", "#ff0000", 0.9, "#190000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DarkenColor(tt.color, tt.amount)
+			if got != tt.expected {
+				t.Errorf("DarkenColor(%q, %v) expected %s, got %s", tt.color, tt.amount, tt.expected, got)
+			}
+		})
+	}
+}
+
+func TestDarkenColor_InvalidFormats(t *testing.T) {
+	tests := []struct {
+		name  string
+		color string
+	}{
+		{"too short", "#fff"},
+		{"too long", "#fffffff"},
+		{"invalid hex chars", "#gggggg"},
+		{"empty string", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DarkenColor(tt.color, 0.5)
+			if got != tt.color {
+				t.Errorf("DarkenColor(%q, 0.5) should return original for invalid format, got %s", tt.color, got)
+			}
+		})
+	}
+}
+
 func TestFindGroupTheme(t *testing.T) {
 	groups := []config.Group{
 		{Name: "Alpha", Theme: config.Theme{Bg: "#ff0000", Fg: "#ffffff"}},
