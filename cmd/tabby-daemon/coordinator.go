@@ -10251,9 +10251,9 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 // createNewWindowInCurrentGroup creates a new window in the same group as the
 // current window, using the group's configured working_dir if available.
 //
-// Simplified approach: create the window (focused), assign the group, and let
-// tmux's after-new-window hook chain handle daemon signaling and renderer
-// spawning. No spawning guards, no async focus retries.
+// Delegates to the bin/new-window binary for atomic creation: the sidebar
+// renderer is spawned BEFORE the user sees the window, eliminating the
+// "spazzing" UX issue caused by the old hook-storm approach.
 func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	logEvent("NEW_WINDOW_START client=%s", clientID)
 
@@ -10292,32 +10292,63 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 
 	c.stateMu.RUnlock()
 
-	// Basic new-window: create it focused (no -d), let tmux's after-new-window
-	// hook handle daemon signaling via ensure_sidebar.sh → USR1.
-	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
+	// Resolve working directory (expand ~/)
+	if workingDir != "" && strings.HasPrefix(workingDir, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			workingDir = filepath.Join(home, workingDir[2:])
+		}
+	}
+
+	// Set override options that the new-window binary reads.
+	// These are cleared by the binary after use.
+	if currentGroup != "" && currentGroup != "Default" {
+		exec.Command("tmux", "set-option", "-g", "@tabby_new_window_group", currentGroup).Run()
+	}
 	if workingDir != "" {
-		if strings.HasPrefix(workingDir, "~/") {
-			if home, err := os.UserHomeDir(); err == nil {
-				workingDir = filepath.Join(home, workingDir[2:])
+		exec.Command("tmux", "set-option", "-g", "@tabby_new_window_path", workingDir).Run()
+	}
+
+	// Find the new-window binary (sibling of this daemon binary)
+	newWindowBin := ""
+	if exe, err := os.Executable(); err == nil {
+		newWindowBin = filepath.Join(filepath.Dir(exe), "new-window")
+	}
+
+	if newWindowBin != "" {
+		if _, err := os.Stat(newWindowBin); err == nil {
+			// Atomic path: binary spawns sidebar before switching, no hook storm.
+			args := []string{"-session", c.sessionID}
+			logEvent("NEW_WINDOW_BINARY bin=%s session=%s group=%s", newWindowBin, c.sessionID, currentGroup)
+			if err := exec.Command(newWindowBin, args...).Run(); err != nil {
+				logEvent("NEW_WINDOW_BINARY_ERR err=%v (falling back to legacy)", err)
+				// Fall through to legacy path below
+				newWindowBin = ""
+			} else {
+				lastNewWindowCreation = time.Now()
+				return
 			}
 		}
+	}
+
+	// Legacy fallback: create window (focused), assign group, let hook chain handle renderer.
+	// Used when bin/new-window is not built (e.g. fresh clone without install.sh).
+	logEvent("NEW_WINDOW_LEGACY session=%s group=%s", c.sessionID, currentGroup)
+	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
+	if workingDir != "" {
 		args = append(args, "-c", workingDir)
 	}
 
 	out, err := exec.Command("tmux", args...).CombinedOutput()
-	newWindowID := strings.TrimSpace(string(out))
-	logEvent("NEW_WINDOW_RESULT id=%s err=%v", newWindowID, err)
+	newWindowIDLegacy := strings.TrimSpace(string(out))
+	logEvent("NEW_WINDOW_LEGACY_RESULT id=%s err=%v", newWindowIDLegacy, err)
 
-	// Assign group (the after-new-window hook also runs apply_new_window_group.sh
-	// but that reads @tabby_new_window_group which is only set by the shell script
-	// path — so set it directly here for the daemon path).
-	if newWindowID != "" && currentGroup != "" && currentGroup != "Default" {
-		exec.Command("tmux", "set-window-option", "-t", newWindowID, "@tabby_group", currentGroup).Run()
+	if newWindowIDLegacy != "" && currentGroup != "" && currentGroup != "Default" {
+		exec.Command("tmux", "set-window-option", "-t", newWindowIDLegacy, "@tabby_group", currentGroup).Run()
 	}
 
-	if newWindowID != "" {
-		exec.Command("tmux", "set-option", "-g", "@tabby_new_window_id", newWindowID).Run()
-		exec.Command("tmux", "select-window", "-t", newWindowID).Run()
+	if newWindowIDLegacy != "" {
+		exec.Command("tmux", "set-option", "-g", "@tabby_new_window_id", newWindowIDLegacy).Run()
+		exec.Command("tmux", "select-window", "-t", newWindowIDLegacy).Run()
 
 		go func(id string) {
 			time.Sleep(2 * time.Second)
@@ -10326,7 +10357,7 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 					exec.Command("tmux", "set-option", "-gu", "@tabby_new_window_id").Run()
 				}
 			}
-		}(newWindowID)
+		}(newWindowIDLegacy)
 	}
 
 	lastNewWindowCreation = time.Now()
