@@ -443,3 +443,23 @@ func TestDeriveTextColor_LuminanceFallback(t *testing.T) {
 	assert.True(t, got == "#ffffff" || got == "#000000", "luminance fallback should return white or black")
 	assert.True(t, isValidHex(got), "result should be valid hex")
 }
+
+func TestDeriveTextColor_WhiteContrastFails(t *testing.T) {
+	got := DeriveTextColor("#ffff00")
+	assert.Equal(t, "#000000", got, "should return black when white contrast fails")
+}
+
+func TestDeriveTextColor_BothContrastFail(t *testing.T) {
+	got := DeriveTextColor("#888888")
+	assert.True(t, got == "#ffffff" || got == "#000000", "should fall back to luminance")
+}
+
+func TestDeriveTextColor_VeryDarkColor(t *testing.T) {
+	got := DeriveTextColor("#111111")
+	assert.Equal(t, "#ffffff", got, "very dark color should use white text")
+}
+
+func TestDeriveTextColor_VeryLightColor(t *testing.T) {
+	got := DeriveTextColor("#eeeeee")
+	assert.Equal(t, "#000000", got, "very light color should use black text")
+}

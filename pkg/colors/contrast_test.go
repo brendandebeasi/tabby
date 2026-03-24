@@ -261,3 +261,35 @@ func TestToHex_Zero(t *testing.T) {
 		t.Errorf("toHex(0) should return '00', got '%s'", result)
 	}
 }
+
+func TestEnsureContrast_AdjustmentLoopLighten(t *testing.T) {
+	fg := "#999999"
+	bg := "#000000"
+	ratio := 7.0
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f through adjustment, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_AdjustmentLoopDarken(t *testing.T) {
+	fg := "#666666"
+	bg := "#ffffff"
+	ratio := 7.0
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f through adjustment, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_InvalidBackground(t *testing.T) {
+	fg := "#ffffff"
+	bg := "notacolor"
+	ratio := 5.0
+	got := EnsureContrast(fg, bg, ratio)
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("EnsureContrast with invalid bg should return valid hex, got %s", got)
+	}
+}
