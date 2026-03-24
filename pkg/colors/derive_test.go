@@ -199,3 +199,49 @@ func TestRgbToHexInternal_Clamps(t *testing.T) {
 	assert.Equal(t, "#ffffff", rgbToHexInternal(300, 300, 300))
 	assert.Equal(t, "#000000", rgbToHexInternal(-1, -1, -1))
 }
+
+func TestDeriveTextColor_WhiteOnDarkBg(t *testing.T) {
+	got := DeriveTextColor("#000000")
+	assert.Equal(t, "#ffffff", got, "should return white on pure black")
+}
+
+func TestDeriveTextColor_BlackOnLightBg(t *testing.T) {
+	got := DeriveTextColor("#ffffff")
+	assert.Equal(t, "#000000", got, "should return black on pure white")
+}
+
+func TestDeriveTextColor_YellowFallback(t *testing.T) {
+	got := DeriveTextColor("#ffff00")
+	assert.Equal(t, "#000000", got, "yellow is light, should return black")
+}
+
+func TestDeriveTextColor_GrayFallback(t *testing.T) {
+	got := DeriveTextColor("#808080")
+	assert.True(t, isValidHex(got), "gray should return valid hex")
+	assert.True(t, got == "#ffffff" || got == "#000000", "gray should return white or black")
+}
+
+func TestDeriveActiveBg_DarkTerminalBrighter(t *testing.T) {
+	darkResult := DeriveActiveBg("#3498db", true)
+	lightResult := DeriveActiveBg("#3498db", false)
+	assert.NotEqual(t, darkResult, lightResult, "dark and light terminal should produce different results")
+	assert.True(t, isValidHex(darkResult), "dark terminal result should be valid hex")
+	assert.True(t, isValidHex(lightResult), "light terminal result should be valid hex")
+}
+
+func TestDeriveActiveBg_InvalidColorPassthrough(t *testing.T) {
+	got := DeriveActiveBg("notahex", true)
+	assert.Equal(t, "notahex", got, "invalid color should pass through unchanged")
+}
+
+func TestDeriveActiveBg_SaturationBoost(t *testing.T) {
+	result := DeriveActiveBg("#808080", true)
+	assert.True(t, isValidHex(result), "grayscale input should produce valid hex")
+}
+
+func TestDeriveActiveBg_LightnessConstraints(t *testing.T) {
+	darkResult := DeriveActiveBg("#000000", true)
+	assert.True(t, isValidHex(darkResult), "pure black on dark terminal should produce valid hex")
+	lightResult := DeriveActiveBg("#ffffff", false)
+	assert.True(t, isValidHex(lightResult), "pure white on light terminal should produce valid hex")
+}
