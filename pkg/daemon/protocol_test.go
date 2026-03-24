@@ -95,7 +95,6 @@ func TestJSONRoundTrip(t *testing.T) {
 			TotalLines:     100,
 			PinnedHeight:   3,
 			ViewportOffset: 5,
-			IsTouchMode:    true,
 			SidebarBg:      "#1a1a2e",
 			TerminalBg:     "#0f0f1e",
 			Regions: []ClickableRegion{
@@ -132,7 +131,6 @@ func TestJSONRoundTrip(t *testing.T) {
 			ClickedArea:           "scrollable",
 			ResolvedAction:        "select_window",
 			ResolvedTarget:        "1",
-			IsTouchMode:           false,
 			IsSimulatedRightClick: false,
 		}
 

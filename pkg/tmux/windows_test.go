@@ -82,7 +82,7 @@ func TestStripANSI(t *testing.T) {
 
 func TestIsSidebarCommand(t *testing.T) {
 	trueTests := []string{
-		"sidebar", "tabbar", "tabby-daemon", "sidebar-renderer",
+		"sidebar", "tabby-daemon", "sidebar-renderer",
 		"pane-header", "render-status",
 		"/usr/local/bin/sidebar-renderer",
 		"/opt/tabby/pane-header",

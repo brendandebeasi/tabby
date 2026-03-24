@@ -65,8 +65,3 @@ pane_header:
   resize_separator: "¦"
   collapse_expanded_icon: "▾"
   collapse_collapsed_icon: "▸"
-
-web:
-  enabled: false
-  host: "127.0.0.1"
-  port: 8080

@@ -186,13 +186,6 @@ func TestApplyDefaults_SidebarColors(t *testing.T) {
 	assert.Len(t, cfg.Sidebar.Colors.ActiveIndicatorFrames, 6)
 }
 
-func TestApplyDefaults_Web(t *testing.T) {
-	cfg := loadEmpty(t)
-
-	assert.Equal(t, "127.0.0.1", cfg.Web.Host)
-	assert.Equal(t, 8080, cfg.Web.Port)
-}
-
 func TestApplyDefaults_UserValuesNotOverwritten(t *testing.T) {
 	cfg, err := loadYAML(t, `
 indicators:
@@ -205,9 +198,6 @@ sidebar:
     height: 5
   colors:
     inactive_fg: "#aabbcc"
-web:
-  host: "0.0.0.0"
-  port: 9999
 `)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -218,8 +208,6 @@ web:
 	assert.Equal(t, "CUSTOM", cfg.Sidebar.Header.Text)
 	assert.Equal(t, 5, cfg.Sidebar.Header.Height)
 	assert.Equal(t, "#aabbcc", cfg.Sidebar.Colors.InactiveFg)
-	assert.Equal(t, "0.0.0.0", cfg.Web.Host)
-	assert.Equal(t, 9999, cfg.Web.Port)
 	assert.Equal(t, "◆", cfg.Indicators.Bell.Icon)
 }
 
@@ -303,7 +291,6 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 	}
 
 	cfg.Sidebar.Header.Text = "ROUND-TRIP"
-	cfg.Web.Port = 9090
 	cfg.Groups = append(cfg.Groups, Group{
 		Name:    "Personal",
 		Pattern: "^personal\\|",
@@ -321,7 +308,6 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 	}
 
 	assert.Equal(t, "ROUND-TRIP", cfg2.Sidebar.Header.Text)
-	assert.Equal(t, 9090, cfg2.Web.Port)
 	assert.Len(t, cfg2.Groups, 3)
 
 	personal := FindGroup(cfg2, "Personal")

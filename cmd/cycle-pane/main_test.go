@@ -10,18 +10,6 @@ func TestIsSkip_SidebarRenderer(t *testing.T) {
 	}
 }
 
-func TestIsSkip_Tabbar(t *testing.T) {
-	if !isSkip("tabbar") {
-		t.Fatal("tabbar should be skipped")
-	}
-}
-
-func TestIsSkip_PaneBar(t *testing.T) {
-	if !isSkip("pane-bar") {
-		t.Fatal("pane-bar should be skipped")
-	}
-}
-
 func TestIsSkip_CaseInsensitive(t *testing.T) {
 	if !isSkip("SIDEBAR-RENDER") {
 		t.Fatal("isSkip should be case-insensitive")
@@ -58,12 +46,6 @@ func TestIsHeader_NormalCommand(t *testing.T) {
 	}
 }
 
-func TestIsUtility_Skip(t *testing.T) {
-	if !isUtility("tabbar") {
-		t.Fatal("tabbar should be utility")
-	}
-}
-
 func TestIsUtility_Header(t *testing.T) {
 	if !isUtility("pane-header") {
 		t.Fatal("pane-header should be utility")
@@ -79,7 +61,7 @@ func TestIsUtility_Normal(t *testing.T) {
 func TestFilterContent_RemovesUtility(t *testing.T) {
 	panes := []paneInfo{
 		{id: "%1", active: true, command: "zsh", left: 0},
-		{id: "%2", active: false, command: "tabbar", left: 5},
+		{id: "%2", active: false, command: "sidebar-render", left: 5},
 		{id: "%3", active: false, command: "pane-header", left: 0},
 		{id: "%4", active: false, command: "vim", left: 10},
 	}
@@ -102,8 +84,8 @@ func TestFilterContent_Empty(t *testing.T) {
 
 func TestFilterContent_AllUtility(t *testing.T) {
 	panes := []paneInfo{
-		{id: "%1", command: "tabbar"},
-		{id: "%2", command: "sidebar-renderer"},
+		{id: "%1", command: "pane-header"},
+		{id: "%2", command: "sidebar-render"},
 	}
 	content := filterContent(panes)
 	if len(content) != 0 {
