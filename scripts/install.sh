@@ -18,6 +18,7 @@ go build -o bin/tabby-daemon ./cmd/tabby-daemon
 go build -o bin/sidebar-renderer ./cmd/sidebar-renderer
 go build -o bin/pane-header ./cmd/pane-header
 go build -o bin/cycle-pane ./cmd/cycle-pane
+go build -o bin/new-window ./cmd/new-window
 
 chmod +x bin/render-status
 chmod +x bin/render-tab
@@ -25,6 +26,7 @@ chmod +x bin/tabby-daemon
 chmod +x bin/sidebar-renderer
 chmod +x bin/pane-header
 chmod +x bin/cycle-pane
+chmod +x bin/new-window
 chmod +x scripts/toggle_sidebar.sh
 
 printf "Installation complete. Reload tmux config with: tmux source ~/.tmux.conf\n"
