@@ -135,7 +135,7 @@ type rendererModel struct {
 	lastTapPos  struct{ X, Y int }
 
 	// Message sending (thread-safe)
-	sendMu sync.Mutex
+	sendMu *sync.Mutex
 
 	// Context menu overlay state
 	menuShowing    bool
@@ -2284,6 +2284,7 @@ func main() {
 		width:         80,
 		height:        24,
 		sidebarPaneID: sidebarPane,
+		sendMu:        &sync.Mutex{},
 	}
 
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
