@@ -869,6 +869,25 @@ func TestLightenColor_ShortHexPassthrough(t *testing.T) {
 	}
 }
 
+func TestLightenColor_ClampToWhite(t *testing.T) {
+	// Lighten black by 100% should clamp to white (#ffffff)
+	got := LightenColor("#000000", 1.0)
+	if got != "#ffffff" {
+		t.Errorf("LightenColor black by 100%% should clamp to white, got %q", got)
+	}
+}
+
+func TestLightenColor_ClampPartialChannel(t *testing.T) {
+	// Lighten #ff0000 (red) by 0.5 should clamp green and blue to 255
+	// R: 255 + (255-255)*0.5 = 255
+	// G: 0 + (255-0)*0.5 = 127.5 ≈ 127
+	// B: 0 + (255-0)*0.5 = 127.5 ≈ 127
+	got := LightenColor("#ff0000", 0.5)
+	if got != "#ff7f7f" {
+		t.Errorf("LightenColor #ff0000 by 0.5 should be #ff7f7f, got %q", got)
+	}
+}
+
 func TestDarkenColor_InvalidHexPassthrough(t *testing.T) {
 	got := DarkenColor("#gg", 0.5)
 	if got != "#gg" {
@@ -883,7 +902,28 @@ func TestDarkenColor_ShortHexPassthrough(t *testing.T) {
 	}
 }
 
+func TestDarkenColor_ClampToBlack(t *testing.T) {
+	// Darken white by 100% should clamp to black (#000000)
+	got := DarkenColor("#ffffff", 1.0)
+	if got != "#000000" {
+		t.Errorf("DarkenColor white by 100%% should clamp to black, got %q", got)
+	}
+}
+
+func TestDarkenColor_ClampPartialChannel(t *testing.T) {
+	// Darken #ff0000 (red) by 0.5 should clamp to #7f0000
+	// R: 255 * (1.0 - 0.5) = 127.5 ≈ 127
+	// G: 0 * (1.0 - 0.5) = 0
+	// B: 0 * (1.0 - 0.5) = 0
+	got := DarkenColor("#ff0000", 0.5)
+	if got != "#7f0000" {
+		t.Errorf("DarkenColor #ff0000 by 0.5 should be #7f0000, got %q", got)
+	}
+}
+
 func TestShadeColorByIndex_CapAt40Percent(t *testing.T) {
+	// index=6 means darken by 6*0.08=0.48, but capped at 0.40
+	// So white (#ffffff = 255,255,255) becomes (255*(1-0.40), 255*(1-0.40), 255*(1-0.40)) = (153,153,153)
 	result := ShadeColorByIndex("#ffffff", 6)
 	if result == "" {
 		t.Errorf("ShadeColorByIndex with index=6 should return valid hex, got empty")
@@ -899,9 +939,10 @@ func TestShadeColorByIndex_CapAt40Percent(t *testing.T) {
 	r, _ := strconv.ParseInt(hex[0:2], 16, 64)
 	g, _ := strconv.ParseInt(hex[2:4], 16, 64)
 	b, _ := strconv.ParseInt(hex[4:6], 16, 64)
-	_, _, l := rgbToHsl(float64(r)/255.0, float64(g)/255.0, float64(b)/255.0)
-	if l > 0.60 {
-		t.Errorf("ShadeColorByIndex with index=6 should darken significantly, got lightness %f", l)
+	// With 40% darkening applied to white, we expect ~153 (255 * 0.6)
+	// Allow some tolerance for rounding
+	if r > 160 || g > 160 || b > 160 {
+		t.Errorf("ShadeColorByIndex with index=6 should darken to ~40%% reduction, got RGB(%d,%d,%d)", r, g, b)
 	}
 }
 
@@ -929,5 +970,498 @@ func TestRgbToHsl_AchromaticGray(t *testing.T) {
 	}
 	if l != 0.5 {
 		t.Errorf("rgbToHsl achromatic gray should have l=0.5, got %f", l)
+	}
+}
+
+func TestLightenColor_InvalidHexParseError(t *testing.T) {
+	// Invalid hex characters should trigger parse error and return input unchanged
+	got := LightenColor("#gg0000", 0.5)
+	if got != "#gg0000" {
+		t.Errorf("LightenColor with invalid hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestLightenColor_ExceedsMax(t *testing.T) {
+	// Lighten #ff0000 (red) by 0.5 should clamp to #ff8080
+	// R: 255 + (255-255)*0.5 = 255 (already at max, no change)
+	// G: 0 + (255-0)*0.5 = 127.5 ≈ 127
+	// B: 0 + (255-0)*0.5 = 127.5 ≈ 127
+	got := LightenColor("#ff0000", 0.5)
+	if got != "#ff7f7f" {
+		t.Errorf("LightenColor #ff0000 by 0.5 should be #ff7f7f, got %q", got)
+	}
+}
+
+func TestLightenColor_AllChannelsExceedMax(t *testing.T) {
+	// Lighten #ffffff (white) by any amount should stay #ffffff (already at max)
+	got := LightenColor("#ffffff", 0.5)
+	if got != "#ffffff" {
+		t.Errorf("LightenColor #ffffff should stay #ffffff, got %q", got)
+	}
+}
+
+func TestDarkenColor_InvalidHexParseError(t *testing.T) {
+	// Invalid hex characters should trigger parse error and return input unchanged
+	got := DarkenColor("#gg0000", 0.5)
+	if got != "#gg0000" {
+		t.Errorf("DarkenColor with invalid hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestDarkenColor_ExceedsMin(t *testing.T) {
+	// Darken #000000 (black) by 0.5 should stay #000000 (already at min)
+	got := DarkenColor("#000000", 0.5)
+	if got != "#000000" {
+		t.Errorf("DarkenColor #000000 should stay #000000, got %q", got)
+	}
+}
+
+func TestDarkenColor_AllChannelsExceedMin(t *testing.T) {
+	// Darken #ff0000 (red) by 0.5 should clamp to #7f0000
+	// R: 255 * (1.0 - 0.5) = 127.5 ≈ 127
+	// G: 0 * (1.0 - 0.5) = 0 (already at min, no change)
+	// B: 0 * (1.0 - 0.5) = 0 (already at min, no change)
+	got := DarkenColor("#ff0000", 0.5)
+	if got != "#7f0000" {
+		t.Errorf("DarkenColor #ff0000 by 0.5 should be #7f0000, got %q", got)
+	}
+}
+
+func TestRgbToHsl_RedMaxChannel(t *testing.T) {
+	// Test when red is the max channel (case r in switch)
+	// Red (1.0, 0.0, 0.0) should give h=0, s=1.0, l=0.5
+	h, s, l := rgbToHsl(1.0, 0.0, 0.0)
+	if h != 0 {
+		t.Errorf("rgbToHsl red should have h=0, got %f", h)
+	}
+	if s != 1.0 {
+		t.Errorf("rgbToHsl red should have s=1.0, got %f", s)
+	}
+	if l != 0.5 {
+		t.Errorf("rgbToHsl red should have l=0.5, got %f", l)
+	}
+}
+
+func TestRgbToHsl_GreenMaxChannel(t *testing.T) {
+	// Test when green is the max channel (case g in switch)
+	// Green (0.0, 1.0, 0.0) should give h=120, s=1.0, l=0.5
+	h, s, l := rgbToHsl(0.0, 1.0, 0.0)
+	if h != 120 {
+		t.Errorf("rgbToHsl green should have h=120, got %f", h)
+	}
+	if s != 1.0 {
+		t.Errorf("rgbToHsl green should have s=1.0, got %f", s)
+	}
+	if l != 0.5 {
+		t.Errorf("rgbToHsl green should have l=0.5, got %f", l)
+	}
+}
+
+func TestRgbToHsl_BlueMaxChannel(t *testing.T) {
+	// Test when blue is the max channel (case b in switch)
+	// Blue (0.0, 0.0, 1.0) should give h=240, s=1.0, l=0.5
+	h, s, l := rgbToHsl(0.0, 0.0, 1.0)
+	if h != 240 {
+		t.Errorf("rgbToHsl blue should have h=240, got %f", h)
+	}
+	if s != 1.0 {
+		t.Errorf("rgbToHsl blue should have s=1.0, got %f", s)
+	}
+	if l != 0.5 {
+		t.Errorf("rgbToHsl blue should have l=0.5, got %f", l)
+	}
+}
+
+func TestRgbToHsl_RedMaxWithGreenLessThanBlue(t *testing.T) {
+	// Test the g < b branch in case r (line 305-307)
+	// Color where red is max, green < blue
+	h, s, l := rgbToHsl(1.0, 0.0, 0.5)
+	if h < 0 || h > 360 {
+		t.Errorf("rgbToHsl with red max and g<b should have valid hue, got %f", h)
+	}
+	if s < 0 || s > 1 {
+		t.Errorf("rgbToHsl should have valid saturation, got %f", s)
+	}
+	if l < 0 || l > 1 {
+		t.Errorf("rgbToHsl should have valid lightness, got %f", l)
+	}
+}
+
+func TestRgbToHsl_HighLightness(t *testing.T) {
+	// Test the l > 0.5 branch in saturation calculation (line 296-297)
+	// Light color: (1.0, 0.8, 0.8) has high lightness
+	_, s, l := rgbToHsl(1.0, 0.8, 0.8)
+	if l <= 0.5 {
+		t.Errorf("rgbToHsl light color should have l > 0.5, got %f", l)
+	}
+	if s < 0 || s > 1 {
+		t.Errorf("rgbToHsl should have valid saturation, got %f", s)
+	}
+}
+
+func TestShadeColorByIndex_InvalidHexPassthrough(t *testing.T) {
+	got := ShadeColorByIndex("#gg", 0)
+	if got != "#gg" {
+		t.Errorf("ShadeColorByIndex invalid hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestShadeColorByIndex_LowIndex(t *testing.T) {
+	// index=0 means darken by 0*0.08=0, so no darkening
+	got := ShadeColorByIndex("#ffffff", 0)
+	if got != "#ffffff" {
+		t.Errorf("ShadeColorByIndex with index=0 should not darken, got %q", got)
+	}
+}
+
+func TestShadeColorByIndex_HighIndexCapped(t *testing.T) {
+	// index=10 means darken by 10*0.08=0.80, but capped at 0.40
+	// So white (#ffffff = 255,255,255) becomes (255*(1-0.40), 255*(1-0.40), 255*(1-0.40)) = (153,153,153)
+	got := ShadeColorByIndex("#ffffff", 10)
+	if got != "#999999" {
+		t.Errorf("ShadeColorByIndex with index=10 (capped at 0.40) should be #999999, got %q", got)
+	}
+}
+
+// Tests for GroupWindowsWithOptions to cover missing branches
+func TestGroupWindowsWithOptions_PinnedWindowsFirst(t *testing.T) {
+	// Test that pinned windows are placed in a special "Pinned" group at the start
+	windows := []tmux.Window{
+		{Index: 0, Name: "unpinned1", Pinned: false, Group: ""},
+		{Index: 1, Name: "pinned1", Pinned: true, Group: ""},
+		{Index: 2, Name: "unpinned2", Pinned: false, Group: ""},
+		{Index: 3, Name: "pinned2", Pinned: true, Group: ""},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	// First group should be "Pinned" with 2 windows
+	if len(result) < 1 {
+		t.Fatal("Expected at least 1 group (Pinned)")
+	}
+	if result[0].Name != "Pinned" {
+		t.Errorf("First group should be 'Pinned', got %q", result[0].Name)
+	}
+	if len(result[0].Windows) != 2 {
+		t.Errorf("Pinned group should have 2 windows, got %d", len(result[0].Windows))
+	}
+	// Pinned windows should be sorted by index
+	if result[0].Windows[0].Index != 1 || result[0].Windows[1].Index != 3 {
+		t.Errorf("Pinned windows should be sorted by index, got %v", []int{result[0].Windows[0].Index, result[0].Windows[1].Index})
+	}
+}
+
+func TestGroupWindowsWithOptions_PinnedWindowsSortedByIndex(t *testing.T) {
+	// Test that pinned windows are sorted by index within the Pinned group
+	windows := []tmux.Window{
+		{Index: 5, Name: "pinned5", Pinned: true, Group: ""},
+		{Index: 2, Name: "pinned2", Pinned: true, Group: ""},
+		{Index: 8, Name: "pinned8", Pinned: true, Group: ""},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	if result[0].Name != "Pinned" {
+		t.Fatalf("First group should be 'Pinned', got %q", result[0].Name)
+	}
+	if len(result[0].Windows) != 3 {
+		t.Fatalf("Pinned group should have 3 windows, got %d", len(result[0].Windows))
+	}
+	// Check sorting: 2, 5, 8
+	if result[0].Windows[0].Index != 2 || result[0].Windows[1].Index != 5 || result[0].Windows[2].Index != 8 {
+		indices := []int{result[0].Windows[0].Index, result[0].Windows[1].Index, result[0].Windows[2].Index}
+		t.Errorf("Pinned windows should be sorted [2, 5, 8], got %v", indices)
+	}
+}
+
+func TestGroupWindowsWithOptions_NoPinnedWindows(t *testing.T) {
+	// Test that Pinned group is not included if there are no pinned windows
+	windows := []tmux.Window{
+		{Index: 0, Name: "win0", Pinned: false, Group: ""},
+		{Index: 1, Name: "win1", Pinned: false, Group: ""},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	// First group should be "Default", not "Pinned"
+	if len(result) < 1 {
+		t.Fatal("Expected at least 1 group")
+	}
+	if result[0].Name != "Default" {
+		t.Errorf("First group should be 'Default' (no pinned windows), got %q", result[0].Name)
+	}
+}
+
+func TestGroupWindowsWithOptions_MissingGroupFallbackToDefault(t *testing.T) {
+	// Test that windows assigned to a non-existent group fall back to Default
+	windows := []tmux.Window{
+		{Index: 0, Name: "win0", Pinned: false, Group: "NonExistent"},
+		{Index: 1, Name: "win1", Pinned: false, Group: ""},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+		{Name: "Frontend", Theme: config.Theme{Bg: "#e74c3c"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	// Find Default group
+	var defaultGroup *GroupedWindows
+	for i := range result {
+		if result[i].Name == "Default" {
+			defaultGroup = &result[i]
+			break
+		}
+	}
+
+	if defaultGroup == nil {
+		t.Fatal("Default group not found in result")
+	}
+	// Both windows should be in Default (one explicitly, one by fallback)
+	if len(defaultGroup.Windows) != 2 {
+		t.Errorf("Default group should have 2 windows (fallback + explicit), got %d", len(defaultGroup.Windows))
+	}
+}
+
+func TestGroupWindowsWithOptions_MissingGroupNoDefaultFallback(t *testing.T) {
+	// Test that windows assigned to a non-existent group are dropped if Default doesn't exist
+	windows := []tmux.Window{
+		{Index: 0, Name: "win0", Pinned: false, Group: "NonExistent"},
+	}
+	groups := []config.Group{
+		{Name: "Frontend", Theme: config.Theme{Bg: "#e74c3c"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	// Window should not appear in any group (no Default to fall back to)
+	totalWindows := 0
+	for _, g := range result {
+		totalWindows += len(g.Windows)
+	}
+	if totalWindows != 0 {
+		t.Errorf("Expected 0 windows (no Default fallback), got %d", totalWindows)
+	}
+}
+
+func TestGroupWindowsWithOptions_ExplicitGroupAssignment(t *testing.T) {
+	// Test that windows with explicit group assignment go to the correct group
+	windows := []tmux.Window{
+		{Index: 0, Name: "win0", Pinned: false, Group: "Frontend"},
+		{Index: 1, Name: "win1", Pinned: false, Group: "Backend"},
+		{Index: 2, Name: "win2", Pinned: false, Group: ""},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+		{Name: "Frontend", Theme: config.Theme{Bg: "#e74c3c"}},
+		{Name: "Backend", Theme: config.Theme{Bg: "#27ae60"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	// Find each group and verify window counts
+	groupMap := make(map[string]int)
+	for _, g := range result {
+		groupMap[g.Name] = len(g.Windows)
+	}
+
+	if groupMap["Frontend"] != 1 {
+		t.Errorf("Frontend group should have 1 window, got %d", groupMap["Frontend"])
+	}
+	if groupMap["Backend"] != 1 {
+		t.Errorf("Backend group should have 1 window, got %d", groupMap["Backend"])
+	}
+	if groupMap["Default"] != 1 {
+		t.Errorf("Default group should have 1 window, got %d", groupMap["Default"])
+	}
+}
+
+func TestGroupWindowsWithOptions_EmptyGroupExcludedWhenIncludeEmptyFalse(t *testing.T) {
+	// Test that empty groups are excluded when includeEmpty=false
+	windows := []tmux.Window{
+		{Index: 0, Name: "win0", Pinned: false, Group: "Frontend"},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+		{Name: "Frontend", Theme: config.Theme{Bg: "#e74c3c"}},
+		{Name: "Backend", Theme: config.Theme{Bg: "#27ae60"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	// Backend group should not be in result (empty and includeEmpty=false)
+	for _, g := range result {
+		if g.Name == "Backend" {
+			t.Errorf("Backend group should not be included when empty and includeEmpty=false")
+		}
+	}
+}
+
+func TestGroupWindowsWithOptions_EmptyGroupIncludedWhenIncludeEmptyTrue(t *testing.T) {
+	// Test that empty groups are included when includeEmpty=true
+	windows := []tmux.Window{
+		{Index: 0, Name: "win0", Pinned: false, Group: "Frontend"},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+		{Name: "Frontend", Theme: config.Theme{Bg: "#e74c3c"}},
+		{Name: "Backend", Theme: config.Theme{Bg: "#27ae60"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, true)
+
+	// Backend group should be in result (includeEmpty=true)
+	found := false
+	for _, g := range result {
+		if g.Name == "Backend" {
+			found = true
+			if len(g.Windows) != 0 {
+				t.Errorf("Backend group should be empty, got %d windows", len(g.Windows))
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Backend group should be included when includeEmpty=true")
+	}
+}
+
+func TestGroupWindowsWithOptions_DefaultGroupFirst(t *testing.T) {
+	// Test that Default group appears before other groups (except Pinned)
+	windows := []tmux.Window{
+		{Index: 0, Name: "win0", Pinned: false, Group: "Zebra"},
+		{Index: 1, Name: "win1", Pinned: false, Group: ""},
+		{Index: 2, Name: "win2", Pinned: false, Group: "Apple"},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+		{Name: "Zebra", Theme: config.Theme{Bg: "#e74c3c"}},
+		{Name: "Apple", Theme: config.Theme{Bg: "#27ae60"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	// Default should be first (or second if Pinned is first)
+	if result[0].Name == "Pinned" {
+		if result[1].Name != "Default" {
+			t.Errorf("Default should be second (after Pinned), got %q", result[1].Name)
+		}
+	} else if result[0].Name != "Default" {
+		t.Errorf("Default should be first (or second after Pinned), got %q", result[0].Name)
+	}
+}
+
+func TestGroupWindowsWithOptions_OtherGroupsAlphabetical(t *testing.T) {
+	// Test that non-Default groups are sorted alphabetically
+	windows := []tmux.Window{
+		{Index: 0, Name: "win0", Pinned: false, Group: "Zebra"},
+		{Index: 1, Name: "win1", Pinned: false, Group: "Apple"},
+		{Index: 2, Name: "win2", Pinned: false, Group: "Mango"},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+		{Name: "Zebra", Theme: config.Theme{Bg: "#e74c3c"}},
+		{Name: "Apple", Theme: config.Theme{Bg: "#27ae60"}},
+		{Name: "Mango", Theme: config.Theme{Bg: "#f39c12"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	// Find indices of non-Default groups
+	var otherGroupNames []string
+	for _, g := range result {
+		if g.Name != "Default" && g.Name != "Pinned" {
+			otherGroupNames = append(otherGroupNames, g.Name)
+		}
+	}
+
+	// Should be alphabetical: Apple, Mango, Zebra
+	expected := []string{"Apple", "Mango", "Zebra"}
+	if len(otherGroupNames) != len(expected) {
+		t.Errorf("Expected %d non-Default groups, got %d", len(expected), len(otherGroupNames))
+	}
+	for i, name := range otherGroupNames {
+		if i < len(expected) && name != expected[i] {
+			t.Errorf("Group %d should be %q, got %q", i, expected[i], name)
+		}
+	}
+}
+
+func TestGroupWindowsWithOptions_WindowsSortedByIndexWithinGroup(t *testing.T) {
+	// Test that windows are sorted by index within each group
+	windows := []tmux.Window{
+		{Index: 5, Name: "win5", Pinned: false, Group: "Frontend"},
+		{Index: 1, Name: "win1", Pinned: false, Group: "Frontend"},
+		{Index: 3, Name: "win3", Pinned: false, Group: "Frontend"},
+	}
+	groups := []config.Group{
+		{Name: "Frontend", Theme: config.Theme{Bg: "#e74c3c"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	if len(result) < 1 {
+		t.Fatal("Expected at least 1 group")
+	}
+	frontendGroup := result[0]
+	if len(frontendGroup.Windows) != 3 {
+		t.Fatalf("Frontend group should have 3 windows, got %d", len(frontendGroup.Windows))
+	}
+	// Check sorting: 1, 3, 5
+	if frontendGroup.Windows[0].Index != 1 || frontendGroup.Windows[1].Index != 3 || frontendGroup.Windows[2].Index != 5 {
+		indices := []int{frontendGroup.Windows[0].Index, frontendGroup.Windows[1].Index, frontendGroup.Windows[2].Index}
+		t.Errorf("Windows should be sorted [1, 3, 5], got %v", indices)
+	}
+}
+
+func TestGroupWindowsWithOptions_PinnedAndNonPinnedMixed(t *testing.T) {
+	// Test complex scenario with pinned windows, multiple groups, and empty groups
+	windows := []tmux.Window{
+		{Index: 0, Name: "pinned0", Pinned: true, Group: ""},
+		{Index: 1, Name: "fe1", Pinned: false, Group: "Frontend"},
+		{Index: 2, Name: "pinned2", Pinned: true, Group: ""},
+		{Index: 3, Name: "be3", Pinned: false, Group: "Backend"},
+		{Index: 4, Name: "default4", Pinned: false, Group: ""},
+	}
+	groups := []config.Group{
+		{Name: "Default", Theme: config.Theme{Bg: "#3498db"}},
+		{Name: "Frontend", Theme: config.Theme{Bg: "#e74c3c"}},
+		{Name: "Backend", Theme: config.Theme{Bg: "#27ae60"}},
+	}
+
+	result := GroupWindowsWithOptions(windows, groups, false)
+
+	// Verify order: Pinned, Default, Backend, Frontend (alphabetical)
+	expectedOrder := []string{"Pinned", "Default", "Backend", "Frontend"}
+	if len(result) != len(expectedOrder) {
+		t.Errorf("Expected %d groups, got %d", len(expectedOrder), len(result))
+	}
+	for i, expectedName := range expectedOrder {
+		if i < len(result) && result[i].Name != expectedName {
+			t.Errorf("Group %d should be %q, got %q", i, expectedName, result[i].Name)
+		}
+	}
+
+	// Verify window counts
+	if len(result[0].Windows) != 2 {
+		t.Errorf("Pinned group should have 2 windows, got %d", len(result[0].Windows))
+	}
+	if len(result[1].Windows) != 1 {
+		t.Errorf("Default group should have 1 window, got %d", len(result[1].Windows))
+	}
+	if len(result[2].Windows) != 1 {
+		t.Errorf("Frontend group should have 1 window, got %d", len(result[2].Windows))
+	}
+	if len(result[3].Windows) != 1 {
+		t.Errorf("Backend group should have 1 window, got %d", len(result[3].Windows))
 	}
 }

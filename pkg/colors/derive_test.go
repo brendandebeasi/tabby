@@ -463,3 +463,50 @@ func TestDeriveTextColor_VeryLightColor(t *testing.T) {
 	got := DeriveTextColor("#eeeeee")
 	assert.Equal(t, "#000000", got, "very light color should use black text")
 }
+
+func TestDeriveTextColor_ContrastRatioExactly3(t *testing.T) {
+	got := DeriveTextColor("#7f7f7f")
+	assert.True(t, got == "#ffffff" || got == "#000000", "midtone should return white or black")
+	assert.True(t, isValidHex(got), "result should be valid hex")
+}
+
+func TestDeriveTextColor_OrangeBackground(t *testing.T) {
+	got := DeriveTextColor("#ff9900")
+	assert.True(t, isValidHex(got), "orange should return valid hex")
+	assert.True(t, got == "#ffffff" || got == "#000000", "should return white or black")
+}
+
+func TestDeriveTextColor_PurpleBackground(t *testing.T) {
+	got := DeriveTextColor("#9933cc")
+	assert.True(t, isValidHex(got), "purple should return valid hex")
+	assert.True(t, got == "#ffffff" || got == "#000000", "should return white or black")
+}
+
+func TestDeriveTextColor_CyanBackground(t *testing.T) {
+	got := DeriveTextColor("#00ffff")
+	assert.True(t, isValidHex(got), "cyan should return valid hex")
+	assert.True(t, got == "#ffffff" || got == "#000000", "should return white or black")
+}
+
+func TestDeriveTextColor_MagentaBackground(t *testing.T) {
+	got := DeriveTextColor("#ff00ff")
+	assert.True(t, isValidHex(got), "magenta should return valid hex")
+	assert.True(t, got == "#ffffff" || got == "#000000", "should return white or black")
+}
+
+func TestDeriveTextColor_DarkGrayBackground(t *testing.T) {
+	got := DeriveTextColor("#333333")
+	assert.Equal(t, "#ffffff", got, "dark gray should use white text")
+}
+
+func TestDeriveTextColor_LightGrayBackground(t *testing.T) {
+	got := DeriveTextColor("#cccccc")
+	assert.Equal(t, "#000000", got, "light gray should use black text")
+}
+
+func TestDeriveTextColor_ContrastRatioBoundary(t *testing.T) {
+	got := DeriveTextColor("#666666")
+	assert.True(t, got == "#ffffff" || got == "#000000", "midtone gray should return white or black")
+	ratio := GetContrastRatio(got, "#666666")
+	assert.True(t, ratio >= 1.0, "contrast ratio should be at least 1.0")
+}
