@@ -293,3 +293,129 @@ func TestEnsureContrast_InvalidBackground(t *testing.T) {
 		t.Errorf("EnsureContrast with invalid bg should return valid hex, got %s", got)
 	}
 }
+
+func TestEnsureContrast_AdjustmentStep01(t *testing.T) {
+	fg := "#999999"
+	bg := "#000000"
+	ratio := 6.5
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 0.1 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_AdjustmentStep02(t *testing.T) {
+	fg := "#888888"
+	bg := "#000000"
+	ratio := 7.0
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 0.2 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_AdjustmentStep05(t *testing.T) {
+	fg := "#777777"
+	bg := "#000000"
+	ratio := 8.0
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 0.5 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_AdjustmentStep10(t *testing.T) {
+	fg := "#666666"
+	bg := "#000000"
+	ratio := 9.0
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 1.0 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_DarkenAdjustmentStep01(t *testing.T) {
+	fg := "#666666"
+	bg := "#ffffff"
+	ratio := 6.5
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f through darken at 0.1 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_DarkenAdjustmentStep05(t *testing.T) {
+	fg := "#777777"
+	bg := "#ffffff"
+	ratio := 8.0
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f through darken at 0.5 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_FallbackBlackOnVeryLight(t *testing.T) {
+	fg := "#dddddd"
+	bg := "#ffffff"
+	ratio := 21.0
+	got := EnsureContrast(fg, bg, ratio)
+	if got != "#000000" {
+		t.Errorf("EnsureContrast should fall back to black on very light bg, got %s", got)
+	}
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("Fallback should meet ratio %.1f, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_FallbackWhiteOnVeryDark(t *testing.T) {
+	fg := "#222222"
+	bg := "#000000"
+	ratio := 21.0
+	got := EnsureContrast(fg, bg, ratio)
+	if got != "#ffffff" {
+		t.Errorf("EnsureContrast should fall back to white on very dark bg, got %s", got)
+	}
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("Fallback should meet ratio %.1f, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_HighRatioRequirement(t *testing.T) {
+	fg := "#555555"
+	bg := "#000000"
+	ratio := 12.0
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet high ratio %.1f, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_LowRatioRequirement(t *testing.T) {
+	fg := "#cccccc"
+	bg := "#000000"
+	ratio := 2.0
+	got := EnsureContrast(fg, bg, ratio)
+	if got != fg {
+		t.Errorf("EnsureContrast with low ratio should return original, got %s", got)
+	}
+}
+
+func TestEnsureContrast_MidtoneAdjustment(t *testing.T) {
+	fg := "#808080"
+	bg := "#000000"
+	ratio := 6.0
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should adjust midtone to meet ratio %.1f, got %.1f", ratio, gotRatio)
+	}
+}
