@@ -419,3 +419,69 @@ func TestEnsureContrast_MidtoneAdjustment(t *testing.T) {
 		t.Errorf("EnsureContrast should adjust midtone to meet ratio %.1f, got %.1f", ratio, gotRatio)
 	}
 }
+
+func TestEnsureContrast_AdjustmentStep03(t *testing.T) {
+	fg := "#888888"
+	bg := "#000000"
+	ratio := 7.2
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 0.3 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_AdjustmentStep04(t *testing.T) {
+	fg := "#888888"
+	bg := "#000000"
+	ratio := 7.5
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 0.4 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_AdjustmentStep06(t *testing.T) {
+	fg := "#777777"
+	bg := "#000000"
+	ratio := 8.2
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 0.6 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_AdjustmentStep07(t *testing.T) {
+	fg := "#777777"
+	bg := "#000000"
+	ratio := 8.5
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 0.7 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_AdjustmentStep08(t *testing.T) {
+	fg := "#666666"
+	bg := "#000000"
+	ratio := 8.8
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 0.8 step, got %.1f", ratio, gotRatio)
+	}
+}
+
+func TestEnsureContrast_AdjustmentStep09(t *testing.T) {
+	fg := "#666666"
+	bg := "#000000"
+	ratio := 8.9
+	got := EnsureContrast(fg, bg, ratio)
+	gotRatio := GetContrastRatio(got, bg)
+	if gotRatio < ratio {
+		t.Errorf("EnsureContrast should meet ratio %.1f at 0.9 step, got %.1f", ratio, gotRatio)
+	}
+}

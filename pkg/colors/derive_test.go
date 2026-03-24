@@ -510,3 +510,115 @@ func TestDeriveTextColor_ContrastRatioBoundary(t *testing.T) {
 	ratio := GetContrastRatio(got, "#666666")
 	assert.True(t, ratio >= 1.0, "contrast ratio should be at least 1.0")
 }
+
+func TestDeriveTextColor_WhiteContrastExactly3(t *testing.T) {
+	color := "#b3b3b3"
+	ratio := GetContrastRatio("#ffffff", color)
+	if ratio >= 3.0 {
+		got := DeriveTextColor(color)
+		assert.Equal(t, "#ffffff", got, "should return white when white contrast >= 3.0")
+	}
+}
+
+func TestDeriveTextColor_BlackContrastExactly3(t *testing.T) {
+	color := "#4d4d4d"
+	ratio := GetContrastRatio("#000000", color)
+	if ratio >= 3.0 {
+		got := DeriveTextColor(color)
+		assert.Equal(t, "#000000", got, "should return black when black contrast >= 3.0")
+	}
+}
+
+func TestDeriveTextColor_WhiteFailsBlackSucceeds(t *testing.T) {
+	color := "#ffff99"
+	whiteRatio := GetContrastRatio("#ffffff", color)
+	blackRatio := GetContrastRatio("#000000", color)
+	if whiteRatio < 3.0 && blackRatio >= 3.0 {
+		got := DeriveTextColor(color)
+		assert.Equal(t, "#000000", got, "should return black when white fails but black succeeds")
+	}
+}
+
+func TestDeriveTextColor_BothFailLightColor(t *testing.T) {
+	color := "#e6e6e6"
+	whiteRatio := GetContrastRatio("#ffffff", color)
+	blackRatio := GetContrastRatio("#000000", color)
+	if whiteRatio < 3.0 && blackRatio < 3.0 {
+		got := DeriveTextColor(color)
+		assert.Equal(t, "#000000", got, "should return black for light color when both contrast ratios fail")
+	}
+}
+
+func TestDeriveTextColor_BothFailDarkColor(t *testing.T) {
+	color := "#1a1a1a"
+	whiteRatio := GetContrastRatio("#ffffff", color)
+	blackRatio := GetContrastRatio("#000000", color)
+	if whiteRatio < 3.0 && blackRatio < 3.0 {
+		got := DeriveTextColor(color)
+		assert.Equal(t, "#ffffff", got, "should return white for dark color when both contrast ratios fail")
+	}
+}
+
+func TestDeriveTextColor_IsLightColorBranch(t *testing.T) {
+	lightColors := []string{"#ffff00", "#ffff99", "#ffffcc", "#e6e6e6"}
+	for _, color := range lightColors {
+		if IsLightColor(color) {
+			got := DeriveTextColor(color)
+			assert.Equal(t, "#000000", got, "light color %s should return black text", color)
+		}
+	}
+}
+
+func TestDeriveTextColor_IsDarkColorBranch(t *testing.T) {
+	darkColors := []string{"#000000", "#1a1a1a", "#333333", "#003366"}
+	for _, color := range darkColors {
+		if !IsLightColor(color) {
+			got := DeriveTextColor(color)
+			assert.Equal(t, "#ffffff", got, "dark color %s should return white text", color)
+		}
+	}
+}
+
+func TestDeriveTextColor_ContrastRatioJustBelow3(t *testing.T) {
+	color := "#b8b8b8"
+	whiteRatio := GetContrastRatio("#ffffff", color)
+	if whiteRatio < 3.0 && whiteRatio > 2.9 {
+		got := DeriveTextColor(color)
+		assert.True(t, got == "#ffffff" || got == "#000000", "should return valid color when white contrast just below 3.0")
+	}
+}
+
+func TestDeriveTextColor_ContrastRatioJustAbove3(t *testing.T) {
+	color := "#b0b0b0"
+	whiteRatio := GetContrastRatio("#ffffff", color)
+	if whiteRatio >= 3.0 && whiteRatio < 3.1 {
+		got := DeriveTextColor(color)
+		assert.Equal(t, "#ffffff", got, "should return white when white contrast just above 3.0")
+	}
+}
+
+func TestDeriveTextColor_InvalidColorFallback(t *testing.T) {
+	invalidColors := []string{"", "xyz", "#gg0000", "notahex", "#12345"}
+	for _, color := range invalidColors {
+		got := DeriveTextColor(color)
+		assert.True(t, got == "#ffffff" || got == "#000000", "invalid color %s should return white or black", color)
+	}
+}
+
+func TestDeriveTextColor_NoHashPrefix(t *testing.T) {
+	got := DeriveTextColor("ff0000")
+	assert.True(t, isValidHex(got), "color without # prefix should return valid hex")
+	assert.True(t, got == "#ffffff" || got == "#000000", "should return white or black")
+}
+
+func TestDeriveTextColor_UppercaseHex(t *testing.T) {
+	got := DeriveTextColor("#FF0000")
+	assert.True(t, isValidHex(got), "uppercase hex should return valid hex")
+	assert.True(t, got == "#ffffff" || got == "#000000", "should return white or black")
+}
+
+func TestDeriveTextColor_MixedCaseHex(t *testing.T) {
+	got := DeriveTextColor("#Ff00Ff")
+	assert.True(t, isValidHex(got), "mixed case hex should return valid hex")
+	assert.True(t, got == "#ffffff" || got == "#000000", "should return white or black")
+}
