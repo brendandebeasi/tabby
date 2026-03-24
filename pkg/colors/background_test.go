@@ -292,3 +292,71 @@ func TestCheckGhosttyConfig_WithComment(t *testing.T) {
 	assert.True(t, isDark, "dark color should be detected as dark")
 	assert.Equal(t, "#1a1a2e", d.GetDetectedColor())
 }
+
+func TestDetectDarkBackground_AllMethodsFail(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("COLORFGBG", "")
+	t.Setenv("ITERM_PROFILE", "")
+	t.Setenv("TERM_PROGRAM", "")
+	isDark := d.detectDarkBackground()
+	assert.True(t, isDark, "should default to dark when all methods fail")
+}
+
+func TestIsDarkBackground_CachedValue(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeDark)
+	first := d.IsDarkBackground()
+	second := d.IsDarkBackground()
+	assert.Equal(t, first, second, "cached value should be consistent")
+	assert.True(t, first, "dark mode should return true")
+}
+
+func TestCheckGhosttyConfig_LightColor(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	configDir := tmpDir + "/.config/ghostty"
+	err := os.MkdirAll(configDir, 0755)
+	if err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+	configFile := configDir + "/config"
+	content := "background = ffffff\n"
+	err = os.WriteFile(configFile, []byte(content), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	isDark, ok := d.checkGhosttyConfig()
+	assert.True(t, ok, "valid ghostty config should return ok=true")
+	assert.False(t, isDark, "white color should be detected as light")
+}
+
+func TestCheckGhosttyConfig_NoConfig(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	isDark, ok := d.checkGhosttyConfig()
+	assert.False(t, ok, "missing ghostty config should return ok=false")
+	assert.False(t, isDark)
+}
+
+func TestCheckGhosttyConfig_InvalidColor(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	configDir := tmpDir + "/.config/ghostty"
+	err := os.MkdirAll(configDir, 0755)
+	if err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+	configFile := configDir + "/config"
+	content := "background = invalid\n"
+	err = os.WriteFile(configFile, []byte(content), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	isDark, ok := d.checkGhosttyConfig()
+	assert.True(t, ok, "invalid color should still return ok=true (config found)")
+	assert.True(t, isDark, "invalid hex is treated as dark (luminance=0)")
+}
