@@ -35,8 +35,6 @@ rm -f /tmp/tabby-daemon-*.pid \
       /tmp/tabby-daemon-*-input.log \
       /tmp/tabby-ensure-debounce-* 2>/dev/null || true
 
-tmux set-option -g @tabby_view_mode "current" 2>/dev/null || true
-
 # --- 4. Kill any zombie Tabby panes that survived restore ---
 # The save hook strips these, but belt-and-suspenders.
 

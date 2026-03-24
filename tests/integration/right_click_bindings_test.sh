@@ -35,10 +35,10 @@ else
     exit 1
 fi
 
-if echo "$LEFT_CLICK_BINDING" | grep -q 'pane_click_handler.sh'; then
-    echo "✓ Pane header clicks use pane_click_handler.sh for button actions"
+if echo "$LEFT_CLICK_BINDING" | grep -q 'pane-header'; then
+    echo "✓ Pane header clicks use direct send-keys -M passthrough"
 else
-    echo "✗ Pane header click handler missing (pane header buttons may not work)"
+    echo "✗ Pane header mouse passthrough missing (pane header buttons may not work)"
     echo "  Binding: $LEFT_CLICK_BINDING"
     exit 1
 fi

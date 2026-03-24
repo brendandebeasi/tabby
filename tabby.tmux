@@ -638,11 +638,6 @@ if [ -z "$KEY" ]; then KEY="Tab"; fi
 
 tmux bind-key "$KEY" run-shell -b "$CURRENT_DIR/scripts/toggle_sidebar.sh"
 
-# Overview / all-windows mode toggle (Alt+a)
-TOGGLE_VIEW_MODE_SCRIPT="$CURRENT_DIR/scripts/toggle_view_mode.sh"
-chmod +x "$TOGGLE_VIEW_MODE_SCRIPT"
-tmux bind-key -n 'M-a' run-shell -b "$TOGGLE_VIEW_MODE_SCRIPT"
-
 # Sidebar collapse/expand keybindings (shrink to 1 col / restore width)
 TOGGLE_COLLAPSE_SCRIPT="$CURRENT_DIR/scripts/toggle_sidebar_collapse.sh"
 chmod +x "$TOGGLE_COLLAPSE_SCRIPT"

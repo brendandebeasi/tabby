@@ -88,9 +88,9 @@ fi
 # ─── Test 4: @tabby_new_window_id cleared after delay ───
 
 echo ""
-echo "--- Test 4: @tabby_new_window_id auto-clears after 1.2s ---"
+echo "--- Test 4: @tabby_new_window_id auto-clears after 2s ---"
 
-sleep 1.5
+sleep 2.5
 NEW_WIN_ID_AFTER=$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo "")
 if [ -z "$NEW_WIN_ID_AFTER" ]; then
   pass "@tabby_new_window_id cleared after delay"
@@ -128,34 +128,34 @@ else
   fail "@tabby_new_window_group still set to '$SAVED_GROUP_AFTER'"
 fi
 
-# ─── Test 6: @tabby_spawning cleared BEFORE USR1 (timing test) ───
+# ─── Test 6: @tabby_spawning guard check precedes USR1 in ensure_sidebar.sh ───
 
 echo ""
 echo "--- Test 6: Spawning flag ordering (cleared before USR1) ---"
 
-# Verify the script clears spawning before signalling:
-# grep the script to confirm line order (static analysis).
-CLEAR_LINE=$(grep -n 'set-option -gu @tabby_spawning' "$PROJECT_ROOT/scripts/new_window_with_group.sh" | head -1 | cut -d: -f1)
-USR1_LINE=$(grep -n 'kill -USR1' "$PROJECT_ROOT/scripts/new_window_with_group.sh" | head -1 | cut -d: -f1)
+# @tabby_spawning is owned by the daemon (Go), not new_window_with_group.sh.
+# The guard that prevents signals during spawning lives in ensure_sidebar.sh:
+# it reads @tabby_spawning early and bails, and only signals USR1 later.
+GUARD_LINE=$(grep -n 'tabby_spawning' "$PROJECT_ROOT/scripts/ensure_sidebar.sh" | head -1 | cut -d: -f1)
+USR1_LINE=$(grep -n 'kill -USR1' "$PROJECT_ROOT/scripts/ensure_sidebar.sh" | head -1 | cut -d: -f1)
 
-if [ -n "$CLEAR_LINE" ] && [ -n "$USR1_LINE" ] && [ "$CLEAR_LINE" -lt "$USR1_LINE" ]; then
-  pass "@tabby_spawning clear (line $CLEAR_LINE) is before USR1 signal (line $USR1_LINE)"
+if [ -n "$GUARD_LINE" ] && [ -n "$USR1_LINE" ] && [ "$GUARD_LINE" -lt "$USR1_LINE" ]; then
+  pass "@tabby_spawning guard (line $GUARD_LINE) is before USR1 signal (line $USR1_LINE) in ensure_sidebar.sh"
 else
-  fail "@tabby_spawning clear (line ${CLEAR_LINE:-?}) should be before USR1 signal (line ${USR1_LINE:-?})"
+  fail "@tabby_spawning guard (line ${GUARD_LINE:-?}) should be before USR1 signal (line ${USR1_LINE:-?}) in ensure_sidebar.sh"
 fi
 
-# ─── Test 7: Script always uses -d flag ───
+# ─── Test 7: Script uses -P -F to capture new window ID ───
 
 echo ""
-echo "--- Test 7: Always creates detached window ---"
+echo "--- Test 7: Captures new window ID via -P -F ---"
 
-DETACHED=$(grep -c 'NEW_WINDOW_ARGS=(new-window -d' "$PROJECT_ROOT/scripts/new_window_with_group.sh")
-NON_DETACHED=$(grep 'NEW_WINDOW_ARGS=(new-window ' "$PROJECT_ROOT/scripts/new_window_with_group.sh" | grep -cv '\-d' || true)
-
-if [ "$DETACHED" -ge 1 ] && [ "$NON_DETACHED" -eq 0 ]; then
-  pass "Script always uses -d flag for new-window"
+# The script no longer uses -d; focus is handled explicitly via select-window/switch-client.
+# It does use -P -F to capture the new window ID for group assignment and focus.
+if grep -q 'new-window -P -F' "$PROJECT_ROOT/scripts/new_window_with_group.sh"; then
+  pass "Script captures new window ID with -P -F"
 else
-  fail "Found non-detached new-window args (detached=$DETACHED, non-detached=$NON_DETACHED)"
+  fail "Script missing -P -F for window ID capture"
 fi
 
 # ─── Test 8: No duplicate exit statements ───
