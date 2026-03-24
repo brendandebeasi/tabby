@@ -585,7 +585,7 @@ tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-
 # Instead, we set @tabby_name_locked directly in each user-facing rename path.
 tmux bind-key , command-prompt -I "#W" "rename-window '%%' ; set-window-option @tabby_name_locked 1"
 
-# Refresh sidebar and pane bar when pane focus changes
+# Refresh sidebar when pane focus changes
 ON_PANE_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_pane_select.sh"
 chmod +x "$ON_PANE_SELECT_SCRIPT"
 # Use -b flag to run scripts in background so focus happens immediately
@@ -594,7 +594,7 @@ chmod +x "$ON_PANE_SELECT_SCRIPT"
 tmux set-hook -g after-select-pane "run-shell -b '$ON_PANE_SELECT_SCRIPT \"#{session_id}\"; $SAVE_LAYOUT_SCRIPT \"#{window_id}\" \"#{window_layout}\"; [ -x \"$CYCLE_PANE_BIN\" ] && \"$CYCLE_PANE_BIN\" --dim-only'"
 # pane-focus-in is redundant/unreliable, using after-select-pane is sufficient
 # tmux set-hook -g pane-focus-in "run-shell '$ON_PANE_SELECT_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT'"
-# Update pane bar when panes are split, and preserve group prefixes
+# Signal sidebar when panes are split, and preserve window name
 PRESERVE_NAME_SCRIPT="$CURRENT_DIR/scripts/preserve_window_name.sh"
 chmod +x "$PRESERVE_NAME_SCRIPT"
 tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_SIDEBAR_SCRIPT #{session_id}'; run-shell '$PRESERVE_NAME_SCRIPT'; run-shell '$SAVE_LAYOUT_SCRIPT #{window_id} #{window_layout}'"
