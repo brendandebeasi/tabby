@@ -18,7 +18,7 @@ pick_above_or_next() {
     local best_above_id=""
     local best_below_idx=999999
     local best_below_id=""
-    local row widx wid
+    local widx wid
     while IFS='|' read -r widx wid; do
         [ -z "$widx" ] && continue
         [ -z "$wid" ] && continue

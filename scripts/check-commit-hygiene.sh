@@ -33,6 +33,7 @@ tmpfile=$(mktemp)
 trap 'rm -f "$tmpfile"' EXIT
 printf '%s\n' "$candidate_files" > "$tmpfile"
 
+# shellcheck disable=SC2046
 diff_text=$(git diff --cached --unified=0 --no-color -- $(cat "$tmpfile") || true)
 
 if [ -z "$diff_text" ]; then

@@ -55,7 +55,6 @@ fi
 # Apply saved width to all sidebar panes across all windows
 tmux list-panes -a -F '#{pane_id}:#{pane_current_command}:#{pane_start_command}' 2>/dev/null | grep -E ':(sidebar|sidebar-renderer)' | while IFS=: read -r pane_id _; do
     TARGET_WIDTH="$SIDEBAR_WIDTH"
-    CURRENT_WIDTH=$(tmux display-message -p -t "$pane_id" '#{pane_width}' 2>/dev/null || echo "")
 
     WINDOW_WIDTH=$(tmux display-message -p -t "$pane_id" '#{window_width}' 2>/dev/null || echo "")
     if [ -n "$WINDOW_WIDTH" ] && [ "$WINDOW_WIDTH" -gt 0 ] 2>/dev/null; then

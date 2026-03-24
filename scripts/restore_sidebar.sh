@@ -70,8 +70,6 @@ if [ -z "$SIDEBAR_POSITION" ]; then SIDEBAR_POSITION="left"; fi
 SIDEBAR_MODE=$(tmux show-option -gqv @tabby_sidebar_mode)
 if [ -z "$SIDEBAR_MODE" ]; then SIDEBAR_MODE="full"; fi
 
-DAEMON_BIN="$CURRENT_DIR/bin/tabby-daemon"
-RENDERER_BIN="$CURRENT_DIR/bin/sidebar-renderer"
 WATCHDOG_SCRIPT="$CURRENT_DIR/scripts/watchdog_daemon.sh"
 
 if [ "$MODE" = "enabled" ]; then
@@ -102,7 +100,7 @@ if [ "$MODE" = "enabled" ]; then
             "$WATCHDOG_SCRIPT" -session "$SESSION_ID" &
         fi
         # Wait for socket
-        for i in $(seq 1 20); do
+        for _ in $(seq 1 20); do
             [ -S "$DAEMON_SOCK" ] && break
             sleep 0.1
         done

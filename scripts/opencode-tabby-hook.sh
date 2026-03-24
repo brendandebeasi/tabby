@@ -6,7 +6,9 @@ PROJECT_NAME="${2:-}"
 SESSION_TITLE="${3:-}"
 NOTIFIER_MESSAGE="${4:-}"
 SESSION_ID_ARG="${5:-}"
+# shellcheck disable=SC1007
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck disable=SC1007
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INDICATOR="$SCRIPT_DIR/set-tabby-indicator.sh"
 LOG_FILE="/tmp/tabby-opencode-hook.log"

@@ -19,14 +19,14 @@ EXIT_CODE="${2:-1}"
 RESTART_COUNT="${3:-1}"
 MAX_RESTARTS="${4:-5}"
 
+# shellcheck disable=SC1007
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck disable=SC1007
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INDICATOR="$SCRIPT_DIR/set-tabby-indicator.sh"
 LOG="/tmp/tabby-crash-handler.log"
 CRASH_LOG="/tmp/tabby-daemon-${SESSION_ID}-crash.log"
 EVENTS_LOG="/tmp/tabby-daemon-${SESSION_ID}.events.log"
-
-TMUX_CMD="tmux"
 
 # ── Logging ───────────────────────────────────────────────────────────────
 log() {
@@ -214,7 +214,8 @@ create_github_issue() {
     local git_rev
     git_rev=$(git -C "$TABBY_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-    local title="Crash: ${REASON} (${git_rev}, $(date '+%Y-%m-%d %H:%M'))"
+    local title
+    title="Crash: ${REASON} (${git_rev}, $(date '+%Y-%m-%d %H:%M'))"
     local body
     body=$(collect_crash_context 120)
 

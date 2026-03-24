@@ -11,7 +11,9 @@
 
 set -euo pipefail
 
+# shellcheck disable=SC1007
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)"
+# shellcheck disable=SC1007
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INDICATOR="$TABBY_DIR/scripts/set-tabby-indicator.sh"
 

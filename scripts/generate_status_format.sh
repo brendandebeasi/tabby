@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 source "$(dirname "${BASH_SOURCE[0]}")/_config_path.sh"
 CONFIG_FILE="$TABBY_CONFIG_FILE"
 

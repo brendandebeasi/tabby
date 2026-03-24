@@ -14,7 +14,7 @@ is_aux_cmd() {
 }
 
 pick_content_pane() {
-    local line pane cmd startcmd active
+    local pane cmd startcmd active
     while IFS='|' read -r pane cmd startcmd active; do
         [ -z "$pane" ] && continue
         if ! is_aux_cmd "$cmd" && ! is_aux_cmd "$startcmd"; then

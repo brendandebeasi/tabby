@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 tmux set-option -g mouse on
 
 tmux set-window-option -g window-status-format "#[fg=colour245]#I:#W#F"
