@@ -647,3 +647,239 @@ func TestListWindowsWithPanes(t *testing.T) {
 		}
 	})
 }
+
+func TestListWindowsWithPanes_WindowNotBusyByDefault(t *testing.T) {
+	t.Run("window is not busy by default", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")
+		paneOutput := listPanesFields(
+			"%0", "0", "0", "bash", "Shell",
+			"99990", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "0",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) {
+			assert.False(t, windows[0].Busy)
+		}
+	})
+}
+
+func TestListWindowsWithPanes_FiltersSidebarStartCommand(t *testing.T) {
+	t.Run("filters out panes with sidebar in start_command", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")
+		paneOutput := fields(
+			"0", "%0", "0", "1", "bash", "Sidebar",
+			"99990", "1700000000", "", "0", "0",
+			"/home", "0", "", "sidebar", "80", "24",
+		) + "\n" + fields(
+			"0", "%1", "1", "0", "bash", "Shell",
+			"99991", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "80", "24",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) {
+			assert.Len(t, windows[0].Panes, 1)
+			assert.Equal(t, "bash", windows[0].Panes[0].Command)
+		}
+	})
+}
+
+func TestListWindowsWithPanes_FiltersPaneHeaderStartCommand(t *testing.T) {
+	t.Run("filters out panes with pane-header in start_command", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")
+		paneOutput := fields(
+			"0", "%0", "0", "1", "bash", "Header",
+			"99990", "1700000000", "", "0", "0",
+			"/home", "0", "", "pane-header", "80", "24",
+		) + "\n" + fields(
+			"0", "%1", "1", "0", "bash", "Shell",
+			"99991", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "80", "24",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) {
+			assert.Len(t, windows[0].Panes, 1)
+			assert.Equal(t, "bash", windows[0].Panes[0].Command)
+		}
+	})
+}
+
+func TestListWindowsWithPanes_SortsPanesByTopThenLeft(t *testing.T) {
+	t.Run("sorts panes by top position then left position", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")
+		paneOutput := fields(
+			"0", "%0", "0", "1", "bash", "Pane0",
+			"99990", "1700000000", "", "1", "0",
+			"/home", "0", "", "bash", "80", "24",
+		) + "\n" + fields(
+			"0", "%1", "1", "0", "bash", "Pane1",
+			"99991", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "80", "24",
+		) + "\n" + fields(
+			"0", "%2", "2", "0", "bash", "Pane2",
+			"99992", "1700000000", "", "0", "5",
+			"/home", "0", "", "bash", "80", "24",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) && assert.Len(t, windows[0].Panes, 3) {
+			assert.Equal(t, "Pane1", windows[0].Panes[0].Title)
+			assert.Equal(t, "Pane2", windows[0].Panes[1].Title)
+			assert.Equal(t, "Pane0", windows[0].Panes[2].Title)
+			assert.Equal(t, 0, windows[0].Panes[0].Index)
+			assert.Equal(t, 1, windows[0].Panes[1].Index)
+			assert.Equal(t, 2, windows[0].Panes[2].Index)
+		}
+	})
+}
+
+func TestListWindowsWithPanes_MultipleWindowsWithDifferentPanes(t *testing.T) {
+	t.Run("handles multiple windows with different pane configurations", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "") + "\n" +
+			fields("%1", "1", "window1", "0", "", "", "", "", "")
+		paneOutput := fields(
+			"0", "%0", "0", "1", "bash", "W0P0",
+			"99990", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "80", "24",
+		) + "\n" + fields(
+			"0", "%1", "1", "0", "bash", "W0P1",
+			"99991", "1700000000", "", "0", "5",
+			"/home", "0", "", "bash", "80", "24",
+		) + "\n" + fields(
+			"1", "%2", "0", "1", "bash", "W1P0",
+			"99992", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "80", "24",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 2) {
+			assert.Len(t, windows[0].Panes, 2)
+			assert.Len(t, windows[1].Panes, 1)
+		}
+	})
+}
+
+func TestListWindowsWithPanes_ReindexesPanesSequentially(t *testing.T) {
+	t.Run("reindexes panes sequentially after filtering and sorting", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")
+		paneOutput := fields(
+			"0", "%0", "5", "1", "bash", "Pane0",
+			"99990", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "80", "24",
+		) + "\n" + fields(
+			"0", "%1", "10", "0", "bash", "Pane1",
+			"99991", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "80", "24",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) && assert.Len(t, windows[0].Panes, 2) {
+			assert.Equal(t, 0, windows[0].Panes[0].Index)
+			assert.Equal(t, 1, windows[0].Panes[1].Index)
+		}
+	})
+}
+
+func TestListWindowsWithPanes_EmptyWindowList(t *testing.T) {
+	t.Run("handles empty window list", func(t *testing.T) {
+		windowOutput := ""
+		paneOutput := ""
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		assert.Len(t, windows, 0)
+	})
+}
+
+func TestListWindowsWithPanes_AllPanesFiltered(t *testing.T) {
+	t.Run("handles window with all panes filtered out", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")
+		paneOutput := fields(
+			"0", "%0", "0", "1", "bash", "Sidebar",
+			"99990", "1700000000", "", "0", "0",
+			"/home", "0", "", "sidebar", "80", "24",
+		) + "\n" + fields(
+			"0", "%1", "1", "0", "bash", "Header",
+			"99991", "1700000000", "", "0", "0",
+			"/home", "0", "", "pane-header", "80", "24",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) {
+			assert.Len(t, windows[0].Panes, 0)
+		}
+	})
+}
