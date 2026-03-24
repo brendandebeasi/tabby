@@ -1265,6 +1265,65 @@ func TestShadeColorByIndex_HighIndexCapped(t *testing.T) {
 	}
 }
 
+func TestShadeColorByIndex_Index2(t *testing.T) {
+	got := ShadeColorByIndex("#ff0000", 2)
+	expected := ShadeColorByIndex("#ff0000", 2)
+	if got != expected {
+		t.Errorf("ShadeColorByIndex with index=2 should be consistent, got %q", got)
+	}
+}
+
+func TestShadeColorByIndex_Index5(t *testing.T) {
+	got := ShadeColorByIndex("#00ff00", 5)
+	expected := ShadeColorByIndex("#00ff00", 5)
+	if got != expected {
+		t.Errorf("ShadeColorByIndex with index=5 should be consistent, got %q", got)
+	}
+}
+
+func TestShadeColorByIndex_LargeIndex(t *testing.T) {
+	got := ShadeColorByIndex("#ffffff", 100)
+	expected := "#999999"
+	if got != expected {
+		t.Errorf("ShadeColorByIndex with large index (capped at 0.40) should be %q, got %q", expected, got)
+	}
+}
+
+func TestShadeColorByIndex_DarkColor(t *testing.T) {
+	got := ShadeColorByIndex("#333333", 1)
+	if got == "#333333" {
+		t.Errorf("ShadeColorByIndex should darken even dark colors, got %q", got)
+	}
+}
+
+func TestShadeColorByIndex_InvalidLength(t *testing.T) {
+	got := ShadeColorByIndex("#fff", 1)
+	if got != "#fff" {
+		t.Errorf("ShadeColorByIndex with invalid length should return unchanged, got %q", got)
+	}
+}
+
+func TestShadeColorByIndex_InvalidHex(t *testing.T) {
+	got := ShadeColorByIndex("#gggggg", 1)
+	if got != "#gggggg" {
+		t.Errorf("ShadeColorByIndex with invalid hex should return unchanged, got %q", got)
+	}
+}
+
+func TestShadeColorByIndex_Index3(t *testing.T) {
+	got := ShadeColorByIndex("#cccccc", 3)
+	if got == "#cccccc" {
+		t.Errorf("ShadeColorByIndex with index=3 should darken, got %q", got)
+	}
+}
+
+func TestShadeColorByIndex_Index7(t *testing.T) {
+	got := ShadeColorByIndex("#aabbcc", 7)
+	if got == "#aabbcc" {
+		t.Errorf("ShadeColorByIndex with index=7 should darken, got %q", got)
+	}
+}
+
 // Tests for GroupWindowsWithOptions to cover missing branches
 func TestGroupWindowsWithOptions_PinnedWindowsFirst(t *testing.T) {
 	// Test that pinned windows are placed in a special "Pinned" group at the start
