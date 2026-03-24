@@ -788,3 +788,7 @@ Contributions welcome! Please:
 ## License
 
 MIT License - see LICENSE file for details
+
+## Links
+
+[![Hypercommit](https://img.shields.io/badge/Hypercommit-DB2475)](https://hypercommit.com/tabby)
