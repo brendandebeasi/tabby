@@ -439,3 +439,42 @@ func TestDetectDarkBackground_TermenvFallback(t *testing.T) {
 	isDark := d.detectDarkBackground()
 	assert.True(t, isDark, "should fallback through chain when COLORFGBG is invalid")
 }
+
+func TestDetectDarkBackground_COLORFGBGBoundary7(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	t.Setenv("COLORFGBG", "7;7")
+	isDark := d.detectDarkBackground()
+	assert.True(t, isDark, "COLORFGBG with bg=7 (dark boundary) should be dark")
+}
+
+func TestDetectDarkBackground_COLORFGBGBoundary8(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	t.Setenv("COLORFGBG", "8;8")
+	isDark := d.detectDarkBackground()
+	assert.False(t, isDark, "COLORFGBG with bg=8 (light boundary) should be light")
+}
+
+func TestDetectDarkBackground_COLORFGBGMultipleParts(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	t.Setenv("COLORFGBG", "1;2;3;4")
+	isDark := d.detectDarkBackground()
+	assert.True(t, isDark, "COLORFGBG with multiple parts should use last part (4=dark)")
+}
+
+func TestDetectDarkBackground_TerminalHintsITermDark(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	t.Setenv("COLORFGBG", "")
+	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("ITERM_PROFILE", "Dark")
+	isDark := d.detectDarkBackground()
+	assert.True(t, isDark, "ITERM_PROFILE containing 'dark' should be detected as dark")
+}
+
+func TestDetectDarkBackground_TerminalHintsITermLight(t *testing.T) {
+	d := NewBackgroundDetector(ThemeModeAuto)
+	t.Setenv("COLORFGBG", "")
+	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("ITERM_PROFILE", "Light")
+	isDark := d.detectDarkBackground()
+	assert.False(t, isDark, "ITERM_PROFILE containing 'light' should be detected as light")
+}

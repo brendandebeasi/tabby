@@ -1095,10 +1095,80 @@ func TestSaturateColor_InvalidHexPassthrough(t *testing.T) {
 	}
 }
 
+func TestSaturateColor_LowSaturationColor(t *testing.T) {
+	got := SaturateColor("#999999")
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("SaturateColor(low saturation) should return valid hex, got %s", got)
+	}
+}
+
+func TestSaturateColor_HighLightnessColor(t *testing.T) {
+	got := SaturateColor("#e6e6e6")
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("SaturateColor(high lightness) should return valid hex, got %s", got)
+	}
+}
+
+func TestSaturateColor_LowLightnessColor(t *testing.T) {
+	got := SaturateColor("#1a1a1a")
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("SaturateColor(low lightness) should return valid hex, got %s", got)
+	}
+}
+
+func TestSaturateColor_MidtoneColor(t *testing.T) {
+	got := SaturateColor("#4d7a99")
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("SaturateColor(midtone) should return valid hex, got %s", got)
+	}
+}
+
+func TestSaturateColor_NoHashPrefix(t *testing.T) {
+	got := SaturateColor("3498db")
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("SaturateColor(no hash) should return valid hex with hash, got %s", got)
+	}
+}
+
 func TestInactiveTabColor_InvalidHexPassthrough(t *testing.T) {
 	got := InactiveTabColor("#gg", 0.1, 0.1)
 	if got != "#gg" {
 		t.Errorf("InactiveTabColor invalid hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestInactiveTabColor_DefaultLightenValue(t *testing.T) {
+	got := InactiveTabColor("#336699", 0, 0.85)
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("InactiveTabColor with default lighten should return valid hex, got %s", got)
+	}
+}
+
+func TestInactiveTabColor_DefaultSaturateValue(t *testing.T) {
+	got := InactiveTabColor("#336699", 0.04, 0)
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("InactiveTabColor with default saturate should return valid hex, got %s", got)
+	}
+}
+
+func TestInactiveTabColor_BothDefaultValues(t *testing.T) {
+	got := InactiveTabColor("#336699", 0, 0)
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("InactiveTabColor with both defaults should return valid hex, got %s", got)
+	}
+}
+
+func TestInactiveTabColor_HighLightenValue(t *testing.T) {
+	got := InactiveTabColor("#336699", 0.5, 0.85)
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("InactiveTabColor with high lighten should return valid hex, got %s", got)
+	}
+}
+
+func TestInactiveTabColor_NoHashPrefix(t *testing.T) {
+	got := InactiveTabColor("336699", 0.1, 0.85)
+	if len(got) != 7 || got[0] != '#' {
+		t.Errorf("InactiveTabColor(no hash) should return valid hex with hash, got %s", got)
 	}
 }
 
@@ -1238,6 +1308,36 @@ func TestRgbToHsl_HighLightness(t *testing.T) {
 	}
 	if s < 0 || s > 1 {
 		t.Errorf("rgbToHsl should have valid saturation, got %f", s)
+	}
+}
+
+func TestRgbToHsl_LowLightness(t *testing.T) {
+	_, s, lightness := rgbToHsl(0.2, 0.1, 0.1)
+	if lightness >= 0.5 {
+		t.Errorf("rgbToHsl dark color should have l <= 0.5, got %f", lightness)
+	}
+	if s < 0 || s > 1 {
+		t.Errorf("rgbToHsl should have valid saturation, got %f", s)
+	}
+}
+
+func TestRgbToHsl_PureCyan(t *testing.T) {
+	h, s, _ := rgbToHsl(0, 1, 1)
+	if h < 179 || h > 181 {
+		t.Errorf("rgbToHsl cyan should have h ~180, got %f", h)
+	}
+	if s < 0.99 {
+		t.Errorf("rgbToHsl cyan should have high saturation, got %f", s)
+	}
+}
+
+func TestRgbToHsl_PureMagenta(t *testing.T) {
+	h, s, _ := rgbToHsl(1, 0, 1)
+	if h < 299 || h > 301 {
+		t.Errorf("rgbToHsl magenta should have h ~300, got %f", h)
+	}
+	if s < 0.99 {
+		t.Errorf("rgbToHsl magenta should have high saturation, got %f", s)
 	}
 }
 
