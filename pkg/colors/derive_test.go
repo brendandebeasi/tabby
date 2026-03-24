@@ -245,3 +245,201 @@ func TestDeriveActiveBg_LightnessConstraints(t *testing.T) {
 	lightResult := DeriveActiveBg("#ffffff", false)
 	assert.True(t, isValidHex(lightResult), "pure white on light terminal should produce valid hex")
 }
+
+func TestDeriveTextColor_DarkBlue(t *testing.T) {
+	got := DeriveTextColor("#003366")
+	assert.Equal(t, "#ffffff", got, "dark blue should get white text")
+}
+
+func TestDeriveTextColor_LightGreen(t *testing.T) {
+	got := DeriveTextColor("#90ee90")
+	assert.Equal(t, "#000000", got, "light green should get black text")
+}
+
+func TestDeriveTextColor_MidtoneColor(t *testing.T) {
+	got := DeriveTextColor("#808080")
+	assert.True(t, got == "#ffffff" || got == "#000000", "midtone should return white or black")
+	assert.True(t, isValidHex(got), "result should be valid hex")
+}
+
+func TestDeriveTextColor_InvalidColor(t *testing.T) {
+	got := DeriveTextColor("notahex")
+	assert.True(t, got == "#ffffff" || got == "#000000", "invalid color should still return white or black")
+}
+
+func TestDeriveTextColor_Red(t *testing.T) {
+	got := DeriveTextColor("#ff0000")
+	assert.True(t, isValidHex(got), "red should return valid hex")
+}
+
+func TestDeriveTextColor_Blue(t *testing.T) {
+	got := DeriveTextColor("#0000ff")
+	assert.True(t, isValidHex(got), "blue should return valid hex")
+}
+
+func TestDeriveTextColor_Green(t *testing.T) {
+	got := DeriveTextColor("#00ff00")
+	assert.True(t, isValidHex(got), "green should return valid hex")
+}
+
+func TestDeriveActiveBg_DarkTerminalLightness(t *testing.T) {
+	result := DeriveActiveBg("#404040", true)
+	assert.True(t, isValidHex(result), "dark gray on dark terminal should produce valid hex")
+}
+
+func TestDeriveActiveBg_LightTerminalLightness(t *testing.T) {
+	result := DeriveActiveBg("#c0c0c0", false)
+	assert.True(t, isValidHex(result), "light gray on light terminal should produce valid hex")
+}
+
+func TestDeriveActiveBg_DarkTerminalMinLightness(t *testing.T) {
+	result := DeriveActiveBg("#000000", true)
+	assert.True(t, isValidHex(result), "pure black on dark terminal should clamp to min lightness")
+}
+
+func TestDeriveActiveBg_DarkTerminalMaxLightness(t *testing.T) {
+	result := DeriveActiveBg("#ffffff", true)
+	assert.True(t, isValidHex(result), "pure white on dark terminal should clamp to max lightness")
+}
+
+func TestDeriveActiveBg_LightTerminalMinLightness(t *testing.T) {
+	result := DeriveActiveBg("#000000", false)
+	assert.True(t, isValidHex(result), "pure black on light terminal should clamp to min lightness")
+}
+
+func TestDeriveActiveBg_LightTerminalMaxLightness(t *testing.T) {
+	result := DeriveActiveBg("#ffffff", false)
+	assert.True(t, isValidHex(result), "pure white on light terminal should clamp to max lightness")
+}
+
+func TestDeriveActiveBg_SaturationClamping(t *testing.T) {
+	result := DeriveActiveBg("#ff0000", true)
+	assert.True(t, isValidHex(result), "pure red should clamp saturation to 1.0")
+}
+
+func TestHexToHSL_Black(t *testing.T) {
+	h, _, l := hexToHSL("#000000")
+	assert.True(t, h >= 0, "black should have valid hue")
+	assert.Equal(t, 0.0, l, "black should have lightness 0")
+}
+
+func TestHexToHSL_White(t *testing.T) {
+	h, _, l := hexToHSL("#ffffff")
+	assert.True(t, h >= 0, "white should have valid hue")
+	assert.Equal(t, 1.0, l, "white should have lightness 1")
+}
+
+func TestHexToHSL_Red(t *testing.T) {
+	h, s, _ := hexToHSL("#ff0000")
+	assert.True(t, h >= 0 && h < 360, "red should have hue in range")
+	assert.Equal(t, 1.0, s, "pure red should have saturation 1")
+}
+
+func TestHexToHSL_Green(t *testing.T) {
+	h, s, _ := hexToHSL("#00ff00")
+	assert.True(t, h >= 0 && h < 360, "green should have hue in range")
+	assert.Equal(t, 1.0, s, "pure green should have saturation 1")
+}
+
+func TestHexToHSL_Blue(t *testing.T) {
+	h, s, _ := hexToHSL("#0000ff")
+	assert.True(t, h >= 0 && h < 360, "blue should have hue in range")
+	assert.Equal(t, 1.0, s, "pure blue should have saturation 1")
+}
+
+func TestHexToRGBInternal_Black(t *testing.T) {
+	r, g, b := hexToRGBInternal("#000000")
+	assert.Equal(t, int64(0), r)
+	assert.Equal(t, int64(0), g)
+	assert.Equal(t, int64(0), b)
+}
+
+func TestHexToRGBInternal_White(t *testing.T) {
+	r, g, b := hexToRGBInternal("#ffffff")
+	assert.Equal(t, int64(255), r)
+	assert.Equal(t, int64(255), g)
+	assert.Equal(t, int64(255), b)
+}
+
+func TestHexToRGBInternal_Red(t *testing.T) {
+	r, g, b := hexToRGBInternal("#ff0000")
+	assert.Equal(t, int64(255), r)
+	assert.Equal(t, int64(0), g)
+	assert.Equal(t, int64(0), b)
+}
+
+func TestHexToRGBInternal_Green(t *testing.T) {
+	r, g, b := hexToRGBInternal("#00ff00")
+	assert.Equal(t, int64(0), r)
+	assert.Equal(t, int64(255), g)
+	assert.Equal(t, int64(0), b)
+}
+
+func TestHexToRGBInternal_Blue(t *testing.T) {
+	r, g, b := hexToRGBInternal("#0000ff")
+	assert.Equal(t, int64(0), r)
+	assert.Equal(t, int64(0), g)
+	assert.Equal(t, int64(255), b)
+}
+
+func TestHexToRGBInternal_Gray(t *testing.T) {
+	r, g, b := hexToRGBInternal("#808080")
+	assert.Equal(t, int64(128), r)
+	assert.Equal(t, int64(128), g)
+	assert.Equal(t, int64(128), b)
+}
+
+func TestHexToRGBInternal_NoHash(t *testing.T) {
+	r, g, b := hexToRGBInternal("ff0000")
+	assert.Equal(t, int64(255), r)
+	assert.Equal(t, int64(0), g)
+	assert.Equal(t, int64(0), b)
+}
+
+func TestHexToRGBInternal_TooShort(t *testing.T) {
+	r, g, b := hexToRGBInternal("#fff")
+	assert.Equal(t, int64(-1), r)
+	assert.Equal(t, int64(-1), g)
+	assert.Equal(t, int64(-1), b)
+}
+
+func TestHexToRGBInternal_TooLong(t *testing.T) {
+	r, g, b := hexToRGBInternal("#fffffff")
+	assert.Equal(t, int64(-1), r)
+	assert.Equal(t, int64(-1), g)
+	assert.Equal(t, int64(-1), b)
+}
+
+func TestHexToRGBInternal_InvalidChars(t *testing.T) {
+	r, g, b := hexToRGBInternal("#gggggg")
+	assert.Equal(t, int64(-1), r)
+	assert.Equal(t, int64(-1), g)
+	assert.Equal(t, int64(-1), b)
+}
+
+func TestHexToHSL_Cyan(t *testing.T) {
+	h, s, l := hexToHSL("#00ffff")
+	assert.True(t, h >= 0 && h < 360, "cyan should have valid hue")
+	assert.Equal(t, 1.0, s, "pure cyan should have saturation 1")
+	assert.Equal(t, 0.5, l, "cyan should have lightness 0.5")
+}
+
+func TestHexToHSL_Magenta(t *testing.T) {
+	h, s, l := hexToHSL("#ff00ff")
+	assert.True(t, h >= 0 && h < 360, "magenta should have valid hue")
+	assert.Equal(t, 1.0, s, "pure magenta should have saturation 1")
+	assert.Equal(t, 0.5, l, "magenta should have lightness 0.5")
+}
+
+func TestHexToHSL_Yellow(t *testing.T) {
+	h, s, l := hexToHSL("#ffff00")
+	assert.True(t, h >= 0 && h < 360, "yellow should have valid hue")
+	assert.Equal(t, 1.0, s, "pure yellow should have saturation 1")
+	assert.Equal(t, 0.5, l, "yellow should have lightness 0.5")
+}
+
+func TestDeriveTextColor_LuminanceFallback(t *testing.T) {
+	got := DeriveTextColor("#777777")
+	assert.True(t, got == "#ffffff" || got == "#000000", "luminance fallback should return white or black")
+	assert.True(t, isValidHex(got), "result should be valid hex")
+}

@@ -1,6 +1,7 @@
 package grouping
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/brendandebeasi/tabby/pkg/config"
@@ -851,5 +852,82 @@ func TestResolveThemeColors_EmptyTheme(t *testing.T) {
 	}
 	if resolved.Fg == "" {
 		t.Errorf("expected auto-filled Fg, got empty")
+	}
+}
+
+func TestLightenColor_InvalidHexPassthrough(t *testing.T) {
+	got := LightenColor("#gg", 0.5)
+	if got != "#gg" {
+		t.Errorf("LightenColor invalid hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestLightenColor_ShortHexPassthrough(t *testing.T) {
+	got := LightenColor("#fff", 0.5)
+	if got != "#fff" {
+		t.Errorf("LightenColor short hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestDarkenColor_InvalidHexPassthrough(t *testing.T) {
+	got := DarkenColor("#gg", 0.5)
+	if got != "#gg" {
+		t.Errorf("DarkenColor invalid hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestDarkenColor_ShortHexPassthrough(t *testing.T) {
+	got := DarkenColor("#fff", 0.5)
+	if got != "#fff" {
+		t.Errorf("DarkenColor short hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestShadeColorByIndex_CapAt40Percent(t *testing.T) {
+	result := ShadeColorByIndex("#ffffff", 6)
+	if result == "" {
+		t.Errorf("ShadeColorByIndex with index=6 should return valid hex, got empty")
+	}
+	hex := result
+	if len(hex) > 0 && hex[0] == '#' {
+		hex = hex[1:]
+	}
+	if len(hex) != 6 {
+		t.Errorf("ShadeColorByIndex with index=6 should return valid hex, got %q", result)
+		return
+	}
+	r, _ := strconv.ParseInt(hex[0:2], 16, 64)
+	g, _ := strconv.ParseInt(hex[2:4], 16, 64)
+	b, _ := strconv.ParseInt(hex[4:6], 16, 64)
+	_, _, l := rgbToHsl(float64(r)/255.0, float64(g)/255.0, float64(b)/255.0)
+	if l > 0.60 {
+		t.Errorf("ShadeColorByIndex with index=6 should darken significantly, got lightness %f", l)
+	}
+}
+
+func TestSaturateColor_InvalidHexPassthrough(t *testing.T) {
+	got := SaturateColor("#gg")
+	if got != "#gg" {
+		t.Errorf("SaturateColor invalid hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestInactiveTabColor_InvalidHexPassthrough(t *testing.T) {
+	got := InactiveTabColor("#gg", 0.1, 0.1)
+	if got != "#gg" {
+		t.Errorf("InactiveTabColor invalid hex should pass through unchanged, got %q", got)
+	}
+}
+
+func TestRgbToHsl_AchromaticGray(t *testing.T) {
+	h, s, l := rgbToHsl(0.5, 0.5, 0.5)
+	if h != 0 {
+		t.Errorf("rgbToHsl achromatic gray should have h=0, got %f", h)
+	}
+	if s != 0 {
+		t.Errorf("rgbToHsl achromatic gray should have s=0, got %f", s)
+	}
+	if l != 0.5 {
+		t.Errorf("rgbToHsl achromatic gray should have l=0.5, got %f", l)
 	}
 }
