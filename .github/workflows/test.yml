@@ -1,0 +1,45 @@
+name: Test
+
+on:
+  push:
+    branches: [main, "test/**", "fix/**", "feat/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Go Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with race detector and coverage
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Coverage report
+        run: go tool cover -func=coverage.out
+
+      - name: Check minimum coverage
+        run: |
+          TOTAL=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${TOTAL}%"
+          # Fail if overall coverage drops below 10%
+          if awk "BEGIN {exit !($TOTAL < 10)}"; then
+            echo "ERROR: Coverage ${TOTAL}% is below minimum threshold of 10%"
+            exit 1
+          fi
+          echo "Coverage check passed: ${TOTAL}% >= 10%"

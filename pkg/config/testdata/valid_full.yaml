@@ -1,0 +1,72 @@
+sidebar:
+  icon_style: ""
+  header:
+    text: "MY TABBY"
+    height: 4
+    padding_bottom: 2
+  colors:
+    bg: "#1a1a2e"
+    inactive_fg: "#cccccc"
+    active_fg: "#ffffff"
+    disclosure_expanded: "⊟"
+    disclosure_collapsed: "⊞"
+    tree_branch: "├─"
+    tree_branch_last: "└─"
+    tree_connector: "─"
+    tree_connector_panes: "┬"
+    tree_continue: "│"
+    active_indicator_frames:
+      - "▶"
+      - "▶"
+      - "▶"
+      - "▶"
+      - "▶"
+      - " "
+
+groups:
+  - name: Work
+    pattern: "^work\\|"
+    theme:
+      bg: "#3498db"
+      fg: "#ffffff"
+      active_bg: "#2980b9"
+      active_fg: "#ffffff"
+      icon: "💼"
+  - name: Default
+    pattern: ".*"
+    theme:
+      bg: "#2c3e50"
+      fg: "#ecf0f1"
+      active_bg: "#34495e"
+      active_fg: "#ffffff"
+      icon: ""
+
+indicators:
+  activity:
+    icon: "●"
+    color: "#f39c12"
+  bell:
+    icon: "◆"
+    color: "#e74c3c"
+  silence:
+    icon: "○"
+    color: "#95a5a6"
+  last:
+    icon: "-"
+    color: "#3498db"
+
+pane_header:
+  active_fg: "#ffffff"
+  active_bg: "#3498db"
+  resize_grow_icon: ">"
+  resize_shrink_icon: "<"
+  resize_vertical_grow_icon: "↓"
+  resize_vertical_shrink_icon: "↑"
+  resize_separator: "¦"
+  collapse_expanded_icon: "▾"
+  collapse_collapsed_icon: "▸"
+
+web:
+  enabled: false
+  host: "127.0.0.1"
+  port: 8080

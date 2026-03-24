@@ -1,0 +1,5 @@
+groups:
+  - name: Default
+    pattern: ".*"
+    theme:
+      bg: "#2c3e50"

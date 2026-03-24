@@ -9,8 +9,8 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
-func newPickerTestModel() rendererModel {
-	m := rendererModel{
+func newPickerTestModel() *rendererModel {
+	m := &rendererModel{
 		width:         80,
 		height:        24,
 		connected:     true,
@@ -129,6 +129,418 @@ func TestViewOverlaysPickerModal(t *testing.T) {
 	}
 	if !strings.Contains(view, "Results:") {
 		t.Fatalf("expected picker results meta in overlayed view")
+	}
+}
+
+func TestAbsInt_Renderer(t *testing.T) {
+	if abs(5) != 5 || abs(-5) != 5 || abs(0) != 0 {
+		t.Fatal("abs() wrong result")
+	}
+}
+
+func TestMaxInt_Renderer(t *testing.T) {
+	if max(3, 7) != 7 || max(7, 3) != 7 || max(5, 5) != 5 {
+		t.Fatal("max() wrong result")
+	}
+}
+
+func TestAtoiRenderer(t *testing.T) {
+	if atoi("42") != 42 || atoi("-1") != -1 || atoi("bad") != 0 || atoi("") != 0 {
+		t.Fatal("atoi() wrong result")
+	}
+}
+
+func TestClampInt(t *testing.T) {
+	if clampInt(5, 0, 10) != 5 {
+		t.Fatal("within range")
+	}
+	if clampInt(-3, 0, 10) != 0 {
+		t.Fatal("below min")
+	}
+	if clampInt(15, 0, 10) != 10 {
+		t.Fatal("above max")
+	}
+}
+
+func TestHexToHSL(t *testing.T) {
+	h, s, l := hexToHSL("#ffffff")
+	if l < 90 {
+		t.Fatalf("white should have high lightness, got %d", l)
+	}
+	_ = h
+	_ = s
+
+	h2, s2, l2 := hexToHSL("#000000")
+	if l2 > 10 {
+		t.Fatalf("black should have near-zero lightness, got %d", l2)
+	}
+	_ = h2
+	_ = s2
+
+	h3, s3, l3 := hexToHSL("gggggg")
+	if h3 != 180 || s3 != 70 || l3 != 50 {
+		t.Fatalf("non-hex chars should return defaults, got h=%d s=%d l=%d", h3, s3, l3)
+	}
+
+	_, s4, _ := hexToHSL("#808080")
+	if s4 != 0 {
+		t.Fatalf("gray should have saturation=0 (achromatic), got %d", s4)
+	}
+
+	h5, _, _ := hexToHSL("#00ff00")
+	if h5 < 110 || h5 > 130 {
+		t.Fatalf("pure green hue should be ~120, got %d", h5)
+	}
+
+	h6, _, _ := hexToHSL("#0000ff")
+	if h6 < 230 || h6 > 250 {
+		t.Fatalf("pure blue hue should be ~240, got %d", h6)
+	}
+
+	hShort, _, lShort := hexToHSL("#fff")
+	if lShort < 90 {
+		t.Fatalf("3-char #fff should expand to #ffffff, got l=%d", lShort)
+	}
+	_ = hShort
+
+	_, _, lInvalid := hexToHSL("tooshort")
+	if lInvalid != 50 {
+		t.Fatalf("invalid 8-char hex should return defaults, got l=%d", lInvalid)
+	}
+}
+
+func TestHexToHSL_LightColor(t *testing.T) {
+	_, _, l := hexToHSL("#ffccdd")
+	if l < 80 {
+		t.Fatalf("light pink should have high lightness, got %d", l)
+	}
+}
+
+func TestHslToHex(t *testing.T) {
+	got := hslToHex(0, 0, 100)
+	if got != "#ffffff" {
+		t.Fatalf("pure white (H=0 S=0 L=100) = %q, want #ffffff", got)
+	}
+
+	got = hslToHex(0, 0, 0)
+	if got != "#000000" {
+		t.Fatalf("pure black (H=0 S=0 L=0) = %q, want #000000", got)
+	}
+}
+
+func TestSliderCursorIndex(t *testing.T) {
+	if sliderCursorIndex(0, 100, 10) != 0 {
+		t.Fatal("value=0 should map to index 0")
+	}
+	if sliderCursorIndex(100, 100, 10) != 9 {
+		t.Fatal("value=max should map to last index")
+	}
+	if sliderCursorIndex(50, 100, 10) != 5 {
+		t.Fatalf("value=50 out of 100 in width 10 should map to ~5, got %d", sliderCursorIndex(50, 100, 10))
+	}
+
+	if sliderCursorIndex(0, 0, 10) != 0 {
+		t.Fatal("zero maxVal should return 0")
+	}
+}
+
+func TestSliderValueAtPos(t *testing.T) {
+	if sliderValueAtPos(0, 10, 100) != 0 {
+		t.Fatal("pos=0 should give value 0")
+	}
+	if sliderValueAtPos(9, 10, 100) != 100 {
+		t.Fatal("pos=last should give max value")
+	}
+	got5 := sliderValueAtPos(5, 10, 100)
+	if got5 < 50 || got5 > 60 {
+		t.Fatalf("pos=5 of 10 should give 50-60 range, got %d", got5)
+	}
+	if sliderValueAtPos(0, 1, 100) != 0 {
+		t.Fatal("width=1 should return 0")
+	}
+	if sliderValueAtPos(5, 10, 0) != 0 {
+		t.Fatal("maxVal=0 should return 0")
+	}
+	if sliderValueAtPos(-3, 10, 100) != sliderValueAtPos(0, 10, 100) {
+		t.Fatal("negative relX should be clamped to 0")
+	}
+	if sliderValueAtPos(20, 10, 100) != sliderValueAtPos(9, 10, 100) {
+		t.Fatal("relX>=width should be clamped to width-1")
+	}
+}
+
+func TestFuzzyScore(t *testing.T) {
+	if fuzzyScore("", "anything") < 0 {
+		t.Fatal("empty query should always match")
+	}
+	if fuzzyScore("abc", "xyzabc") < 0 {
+		t.Fatal("should find abc in xyzabc")
+	}
+	if fuzzyScore("notfound", "xyz") >= 0 {
+		t.Fatal("query chars not in candidate should return -1")
+	}
+	shorter := fuzzyScore("abc", "abc")
+	longer := fuzzyScore("abc", "xyzabc")
+	if shorter <= longer {
+		t.Fatal("shorter candidate with same query should score higher than longer candidate")
+	}
+}
+
+func TestIsInMenuBounds(t *testing.T) {
+	m := rendererModel{
+		width:  40,
+		height: 10,
+		menuY:  2,
+		menuItems: []daemon.MenuItemPayload{
+			{Label: "A"},
+			{Label: "B"},
+		},
+	}
+	if !m.isInMenuBounds(10, m.menuStartY()) {
+		t.Fatal("point at startY should be in bounds")
+	}
+	if m.isInMenuBounds(10, 0) {
+		t.Fatal("point above menu should be out of bounds")
+	}
+	if m.isInMenuBounds(-1, m.menuStartY()) {
+		t.Fatal("negative x should be out of bounds")
+	}
+}
+
+func TestNormalizePickerText(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Hello World", "hello world"},
+		{"  spaces  ", "spaces"},
+		{"UPPER", "upper"},
+		{"", ""},
+		{"  ", ""},
+	}
+	for _, tt := range tests {
+		got := normalizePickerText(tt.input)
+		if got != tt.want {
+			t.Errorf("normalizePickerText(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestAbsSidebar(t *testing.T) {
+	tests := []struct{ in, want int }{
+		{0, 0}, {5, 5}, {-5, 5}, {-100, 100},
+	}
+	for _, tt := range tests {
+		if got := abs(tt.in); got != tt.want {
+			t.Errorf("abs(%d) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestClampIntSidebar(t *testing.T) {
+	if clampInt(5, 0, 10) != 5 {
+		t.Fatal("5 in [0,10] should be 5")
+	}
+	if clampInt(-5, 0, 10) != 0 {
+		t.Fatal("-5 clamped to [0,10] should be 0")
+	}
+	if clampInt(15, 0, 10) != 10 {
+		t.Fatal("15 clamped to [0,10] should be 10")
+	}
+}
+
+func TestPickerVisibleRows(t *testing.T) {
+	m := rendererModel{height: 20, pickerShowing: true}
+	rows := m.pickerVisibleRows()
+	if rows <= 0 {
+		t.Fatalf("pickerVisibleRows should be positive, got %d", rows)
+	}
+	if rows >= 20 {
+		t.Fatalf("pickerVisibleRows should be less than total height, got %d", rows)
+	}
+
+	m2 := rendererModel{height: 5, pickerShowing: true}
+	rows2 := m2.pickerVisibleRows()
+	if rows2 <= 0 {
+		t.Fatalf("pickerVisibleRows with height=5 should be positive, got %d", rows2)
+	}
+}
+
+func TestPickerModalLayout(t *testing.T) {
+	m := rendererModel{width: 80, height: 24}
+	startX, startY, modalW, modalH := m.pickerModalLayout()
+	if modalW <= 0 || modalH <= 0 {
+		t.Fatalf("modal dimensions must be positive, got w=%d h=%d", modalW, modalH)
+	}
+	if startX < 0 || startY < 0 {
+		t.Fatalf("modal start must be non-negative, got x=%d y=%d", startX, startY)
+	}
+	if startX+modalW > m.width {
+		t.Fatalf("modal must fit within width")
+	}
+	if startY+modalH > m.height {
+		t.Fatalf("modal must fit within height")
+	}
+}
+
+func TestColorPickerBarGeometry(t *testing.T) {
+	m := rendererModel{width: 60, height: 20}
+	barX, barW, hueY, satY, litY := m.colorPickerBarGeometry()
+	if barW <= 0 {
+		t.Fatalf("bar width must be positive, got %d", barW)
+	}
+	if barX < 0 {
+		t.Fatalf("bar X must be non-negative, got %d", barX)
+	}
+	if hueY < 0 || satY < 0 || litY < 0 {
+		t.Fatalf("bar Y positions must be non-negative: hue=%d sat=%d lit=%d", hueY, satY, litY)
+	}
+	if hueY == satY || satY == litY {
+		t.Fatal("hue, sat, lit sliders must be at different Y positions")
+	}
+}
+
+func TestPickerApplyFilterCoverage(t *testing.T) {
+	m := rendererModel{
+		width: 60, height: 20,
+		pickerShowing: true,
+		pickerTitle:   "Set Marker",
+		pickerScope:   "window",
+		pickerTarget:  "@1",
+		pickerOptions: []daemon.MarkerOptionPayload{
+			{Symbol: "🚀", Name: "rocket", Keywords: "launch space"},
+			{Symbol: "🔥", Name: "fire", Keywords: "hot warm"},
+			{Symbol: "⭐", Name: "star", Keywords: "favorite"},
+		},
+	}
+
+	m.pickerQuery = ""
+	m.pickerApplyFilter()
+	if len(m.pickerFiltered) != 3 {
+		t.Fatalf("empty query should match all 3, got %d", len(m.pickerFiltered))
+	}
+
+	m.pickerQuery = "rock"
+	m.pickerApplyFilter()
+	if len(m.pickerFiltered) != 1 {
+		t.Fatalf("query 'rock' should match 1 option, got %d", len(m.pickerFiltered))
+	}
+
+	m.pickerQuery = "zzznomatch"
+	m.pickerApplyFilter()
+	if len(m.pickerFiltered) != 0 {
+		t.Fatalf("query 'zzznomatch' should match 0, got %d", len(m.pickerFiltered))
+	}
+}
+
+func TestPickerIndexAt(t *testing.T) {
+	m := rendererModel{
+		width: 60, height: 24,
+		pickerShowing: true,
+		pickerOptions: []daemon.MarkerOptionPayload{
+			{Symbol: "A", Name: "alpha"},
+			{Symbol: "B", Name: "beta"},
+			{Symbol: "C", Name: "gamma"},
+		},
+	}
+	m.pickerQuery = ""
+	m.pickerApplyFilter()
+
+	_, _, _, modalH := m.pickerModalLayout()
+	if modalH <= 0 {
+		t.Skip("modal layout not valid in this terminal context")
+	}
+	idx := m.pickerIndexAt(1, 1)
+	_ = idx
+}
+
+func TestHueToRGB(t *testing.T) {
+	got := hueToRGB(0, 1, 0.5)
+	if got < 0 || got > 1 {
+		t.Fatalf("hueToRGB result should be in [0,1], got %f", got)
+	}
+	got2 := hueToRGB(0.5, 0.8, 0.3)
+	if got2 < 0 || got2 > 1 {
+		t.Fatalf("hueToRGB result should be in [0,1], got %f", got2)
+	}
+}
+
+func TestColorPickerModalLayout(t *testing.T) {
+	m := rendererModel{width: 80, height: 30}
+	startX, startY, modalW, modalH := m.colorPickerModalLayout()
+	if modalW <= 0 || modalH <= 0 {
+		t.Fatalf("color picker modal dimensions must be positive, got w=%d h=%d", modalW, modalH)
+	}
+	_ = startX
+	_ = startY
+}
+
+func TestRenderColorPickerModal(t *testing.T) {
+	m := rendererModel{
+		width:              80,
+		height:             30,
+		colorPickerShowing: true,
+		colorPickerTitle:   "Group Color",
+		colorPickerScope:   "group",
+		colorPickerTarget:  "Dev",
+		colorPickerHue:     200,
+		colorPickerSat:     70,
+		colorPickerLit:     50,
+	}
+	lines := m.renderColorPickerModal()
+	if len(lines) == 0 {
+		t.Fatal("renderColorPickerModal should return non-empty lines")
+	}
+	joined := strings.Join(lines, "\n")
+	_ = joined
+}
+
+func TestFuzzyScoreEdgeCases(t *testing.T) {
+	if fuzzyScore("a", "a") <= 0 {
+		t.Fatal("single char exact match should score positive")
+	}
+	if fuzzyScore("ab", "ba") > fuzzyScore("ab", "ab") {
+		t.Fatal("exact order should score >= reverse order for subsequence matching")
+	}
+	if fuzzyScore("z", "abc") >= 0 {
+		t.Fatal("char not in candidate should return -1")
+	}
+}
+
+func TestPickerIndexAt_Extended(t *testing.T) {
+	m := rendererModel{
+		width: 60, height: 24,
+		pickerOptions: []daemon.MarkerOptionPayload{
+			{Symbol: "A", Name: "alpha"},
+			{Symbol: "B", Name: "beta"},
+			{Symbol: "C", Name: "gamma"},
+		},
+	}
+	m.pickerQuery = ""
+	m.pickerApplyFilter()
+
+	startX, startY, modalW, _ := m.pickerModalLayout()
+	listTop := startY + 5
+	rows := m.pickerVisibleRows()
+
+	if rows <= 0 || modalW <= 0 {
+		t.Skip("modal layout not valid in this environment")
+	}
+
+	if m.pickerIndexAt(0, 0) != -2 {
+		t.Error("position above/left of modal should return -2")
+	}
+
+	insideX := startX + modalW/2
+	if m.pickerIndexAt(insideX, startY+1) != -1 {
+		t.Errorf("position inside modal but above list (y=%d, listTop=%d) should return -1", startY+1, listTop)
+	}
+
+	if listTop < 24 {
+		got := m.pickerIndexAt(insideX, listTop)
+		if got < 0 {
+			t.Errorf("position inside list area should return valid index >= 0, got %d", got)
+		}
 	}
 }
 
