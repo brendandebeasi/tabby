@@ -298,8 +298,6 @@ func TestPaneIsSystemPane(t *testing.T) {
 		{"", "sidebar-renderer"},
 		{"tabby-daemon", ""},
 		{"pane-header", ""},
-		{"tabbar", ""},
-		{"pane-bar", ""},
 		{"my-renderer", ""},
 	}
 	for _, tt := range trueTests {

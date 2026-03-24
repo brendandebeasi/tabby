@@ -305,7 +305,7 @@ func TestRenderWidgetZone_WithEntry(t *testing.T) {
 
 func TestGenerateWidgetZones_NoWidgets(t *testing.T) {
 	c := newRenderCoordinator(t)
-	top, topR, bottom, bottomR := c.generateWidgetZones(30)
+	top, topR, bottom, bottomR := c.generateWidgetZones(30, false)
 	assert.Empty(t, top)
 	assert.Empty(t, topR)
 	assert.NotEmpty(t, bottom)
@@ -328,12 +328,6 @@ func TestRenderPinnedActionButtons_WideWidth(t *testing.T) {
 	c := newRenderCoordinator(t)
 	result := c.renderPinnedActionButtons(40)
 	_ = result
-}
-
-func TestRenderTouchButton(t *testing.T) {
-	c := newRenderCoordinator(t)
-	result := c.renderTouchButton(30, "Test", "#3498db")
-	assert.NotEmpty(t, result)
 }
 
 func TestRenderClaudeWidget_Disabled(t *testing.T) {
@@ -438,7 +432,7 @@ func TestRenderGitWidget_DirtyRepo(t *testing.T) {
 func TestCollectWidgetEntries_WithClockEnabled(t *testing.T) {
 	c := newRenderCoordinator(t)
 	c.config.Widgets.Clock.Enabled = true
-	entries := c.collectWidgetEntries(30)
+	entries := c.collectWidgetEntries(30, false)
 	found := false
 	for _, e := range entries {
 		if e.name == "clock" {
@@ -452,7 +446,7 @@ func TestCollectWidgetEntries_WithClockEnabled(t *testing.T) {
 func TestCollectWidgetEntries_WithSessionEnabled(t *testing.T) {
 	c := newRenderCoordinator(t)
 	c.config.Widgets.Session.Enabled = true
-	entries := c.collectWidgetEntries(30)
+	entries := c.collectWidgetEntries(30, false)
 	found := false
 	for _, e := range entries {
 		if e.name == "session" {

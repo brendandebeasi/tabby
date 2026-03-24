@@ -54,9 +54,6 @@ func testConfig() *config.Config {
 	cfg.PaneHeader.ResizeSeparator = "¦"
 	cfg.PaneHeader.CollapseExpandedIcon = "▾"
 	cfg.PaneHeader.CollapseCollapsedIcon = "▸"
-	// Web
-	cfg.Web.Host = "127.0.0.1"
-	cfg.Web.Port = 8080
 	return cfg
 }
 

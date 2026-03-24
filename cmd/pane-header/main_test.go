@@ -250,10 +250,9 @@ func TestUpdate_RenderMsg(t *testing.T) {
 func TestUpdate_RenderMsg_SetsRegionsAndFlags(t *testing.T) {
 	m := rendererModel{}
 	payload := &daemon.RenderPayload{
-		Content:     "header",
-		SidebarBg:   "#1e1e1e",
-		TerminalBg:  "#000000",
-		IsTouchMode: true,
+		Content:    "header",
+		SidebarBg:  "#1e1e1e",
+		TerminalBg: "#000000",
 		Regions: []daemon.ClickableRegion{
 			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 40, Action: "select_window", Target: "1"},
 		},
@@ -387,7 +386,7 @@ func TestHandleMouse_NotConnected(t *testing.T) {
 }
 
 func TestHandleMouse_PressLeftNonTouch(t *testing.T) {
-	m := rendererModel{connected: true, width: 80, isTouchMode: false}
+	m := rendererModel{connected: true, width: 80}
 	msg := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 5, Y: 0}
 	result, cmd := m.handleMouse(msg)
 	if result == nil {
@@ -406,7 +405,7 @@ func TestHandleMouse_PressRight(t *testing.T) {
 }
 
 func TestHandleMouse_PressShiftLeft(t *testing.T) {
-	m := rendererModel{connected: true, width: 80, isTouchMode: false}
+	m := rendererModel{connected: true, width: 80}
 	msg := tea.MouseMsg{
 		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Shift: true, X: 5, Y: 0,
 	}
@@ -417,7 +416,7 @@ func TestHandleMouse_PressShiftLeft(t *testing.T) {
 }
 
 func TestHandleMouse_PressCtrlLeft(t *testing.T) {
-	m := rendererModel{connected: true, width: 80, isTouchMode: false}
+	m := rendererModel{connected: true, width: 80}
 	msg := tea.MouseMsg{
 		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Ctrl: true, X: 5, Y: 0,
 	}
@@ -441,7 +440,7 @@ func TestHandleMouse_ReleaseSkipNextRelease(t *testing.T) {
 }
 
 func TestHandleMouse_ReleaseNonTouchNoDownTime(t *testing.T) {
-	m := rendererModel{connected: true, isTouchMode: false}
+	m := rendererModel{connected: true}
 	msg := tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 5, Y: 0}
 	result, cmd := m.handleMouse(msg)
 	if result == nil {
@@ -503,25 +502,22 @@ func TestProcessMouseClick_MiddleButton(t *testing.T) {
 }
 
 func TestHandleMouse_TouchModeLeftPress_FirstTap(t *testing.T) {
-	m := rendererModel{connected: true, width: 80, isTouchMode: true}
+	m := rendererModel{connected: true, width: 80}
 	msg := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 5, Y: 0}
 	result, cmd := m.handleMouse(msg)
 	if result == nil {
-		t.Fatal("touch left press should return non-nil model")
+		t.Fatal("left press should return non-nil model")
 	}
-	if cmd == nil {
-		t.Fatal("touch left press should return a long-press tick cmd")
-	}
+	_ = cmd
 	result2, _ := result.Update(longPressMsg{X: 5, Y: 0})
 	if result2 == nil {
-		t.Error("longPressMsg after touch press should return non-nil model")
+		t.Error("longPressMsg after press should return non-nil model")
 	}
 }
 
 func TestHandleMouse_NonTouchReleaseWithDownTime(t *testing.T) {
 	m := rendererModel{
 		connected:    true,
-		isTouchMode:  false,
 		width:        80,
 		mouseDownPos: struct{ X, Y int }{5, 0},
 	}
