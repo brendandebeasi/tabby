@@ -142,7 +142,13 @@ SCRIPT_EOF
 chmod +x "$NEW_WINDOW_SCRIPT"
 
 # Override 'c' to capture group and create new window
-tmux bind-key 'c' run-shell "$NEW_WINDOW_SCRIPT '#{client_tty}'"
+# Use atomic Go binary if built; fall back to shell script for fresh clones
+NEW_WINDOW_BIN="$CURRENT_DIR/bin/new-window"
+if [ -x "$NEW_WINDOW_BIN" ]; then
+    tmux bind-key 'c' run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
+else
+    tmux bind-key 'c' run-shell "$NEW_WINDOW_SCRIPT '#{client_tty}'"
+fi
 
 # Enable automatic window renaming by default (shows running command/SSH host)
 # Windows with group prefixes or manual names get locked via @tabby_locked
