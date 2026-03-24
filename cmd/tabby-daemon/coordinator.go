@@ -5191,11 +5191,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	activeIndFgConfig := c.config.Sidebar.Colors.ActiveIndicatorFg
 	activeIndBgConfig := c.config.Sidebar.Colors.ActiveIndicatorBg
 
-	// Prefix mode: render windows flat with group prefixes instead of hierarchy
-	// TODO: Implement generatePrefixModeContent method
-	// if c.config.Sidebar.PrefixMode {
-	// 	return c.generatePrefixModeContent(clientID, width, height, treeBranchChar, treeBranchLastChar, treeContinueChar, treeConnectorChar, expandedIcon, collapsedIcon, treeStyle, disclosureColor, activeIndicator, activeIndFgConfig, activeIndBgConfig)
-	// }
+	if c.config.Sidebar.PrefixMode {
+		return c.generatePrefixModeContent(clientID, width, height, treeBranchChar, treeBranchLastChar, treeContinueChar, treeConnectorChar, expandedIcon, collapsedIcon, treeStyle, disclosureColor, activeIndicator, activeIndFgConfig, activeIndBgConfig)
+	}
 
 	// Iterate over grouped windows
 	numGroups := len(c.grouped)
