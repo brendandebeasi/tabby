@@ -237,7 +237,7 @@ else
     fi
 
     SOCKET_READY=false
-    for i in $(seq 1 20); do
+    for _ in $(seq 1 20); do
         if [ -S "$DAEMON_SOCK" ]; then
             SOCKET_READY=true
             break
@@ -260,7 +260,9 @@ else
     SIGNAL_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/signal_sidebar.sh"
     ENSURE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/ensure_sidebar.sh"
     STATUS_GUARD_SCRIPT="$CURRENT_DIR/scripts/status_guard.sh"
+    # shellcheck disable=SC2016
     tmux set-hook -g after-resize-pane 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
+    # shellcheck disable=SC2016
     tmux set-hook -g after-resize-window 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     tmux set-hook -g client-resized "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
