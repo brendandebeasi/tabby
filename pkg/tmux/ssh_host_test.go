@@ -22,6 +22,8 @@ func TestParseSSHHost(t *testing.T) {
 		{"vim", ""},
 		{"", ""},
 		{"ssh -p", ""},
+		{"ssh myhost:path", "myhost"},
+		{"ssh user@myhost:22", "myhost"},
 	}
 	for _, tt := range tests {
 		got := parseSSHHost(tt.cmdline)
