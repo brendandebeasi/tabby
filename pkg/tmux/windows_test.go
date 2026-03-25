@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -1044,6 +1045,145 @@ func TestListWindowsWithPanes_AllPanesFiltered(t *testing.T) {
 		assert.NoError(t, err)
 		if assert.Len(t, windows, 1) {
 			assert.Len(t, windows[0].Panes, 0)
+		}
+	})
+}
+
+func TestListAllPanes_RemoteActivityDetection(t *testing.T) {
+	restoreState(t)
+	t.Run("detects remote command activity within 3 seconds", func(t *testing.T) {
+		mock := newMock()
+		now := time.Now().Unix()
+		recentActivity := now - 2 // 2 seconds ago
+		mock.set("list-panes", fields(
+			"0", "%0", "0", "0", "ssh", "Shell",
+			"99990", fmt.Sprintf("%d", recentActivity), "", "0", "0",
+			"/home", "0", "", "ssh", "80", "24")+"\n", nil)
+		DefaultRunner = mock
+
+		result, err := ListAllPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, result[0], 1) {
+			assert.True(t, result[0][0].Busy, "remote pane with recent activity should be busy")
+		}
+	})
+}
+
+func TestListAllPanes_CollapsedPaneDetection(t *testing.T) {
+	restoreState(t)
+	t.Run("detects collapsed pane from parts[12]", func(t *testing.T) {
+		mock := newMock()
+		mock.set("list-panes", fields(
+			"0", "%0", "0", "0", "bash", "Shell",
+			"99990", "1700000000", "", "0", "0",
+			"/home", "1", "", "bash", "80", "24")+"\n", nil)
+		DefaultRunner = mock
+
+		result, err := ListAllPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, result[0], 1) {
+			assert.True(t, result[0][0].Collapsed)
+		}
+	})
+}
+
+func TestListWindowsWithPanes_SortsPanesByPosition(t *testing.T) {
+	restoreState(t)
+	t.Run("sorts panes by top then left position", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")
+		// Create panes with different positions: (top=1,left=0), (top=0,left=0), (top=0,left=1)
+		// Use 17-field format: window_index, pane_id, pane_index, pane_active, pane_current_command, pane_title,
+		// pane_pid, pane_last_activity, @tabby_pane_title, pane_top, pane_left,
+		// pane_current_path, @tabby_pane_collapsed, @tabby_pane_prev_height, pane_start_command, pane_width, pane_height
+		paneOutput := fields(
+			"0", "%0", "0", "1", "bash", "Shell",
+			"99990", "1700000000", "", "1", "0",
+			"/home", "0", "", "bash", "80", "24",
+		) + "\n" + fields(
+			"0", "%1", "1", "0", "bash", "Shell",
+			"99991", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "80", "24",
+		) + "\n" + fields(
+			"0", "%2", "2", "0", "bash", "Shell",
+			"99992", "1700000000", "", "0", "1",
+			"/home", "0", "", "bash", "80", "24",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) && assert.Len(t, windows[0].Panes, 3) {
+			// After sorting by top then left, order should be: (0,0), (0,1), (1,0)
+			assert.Equal(t, 0, windows[0].Panes[0].Top)
+			assert.Equal(t, 0, windows[0].Panes[0].Left)
+			assert.Equal(t, 0, windows[0].Panes[1].Top)
+			assert.Equal(t, 1, windows[0].Panes[1].Left)
+			assert.Equal(t, 1, windows[0].Panes[2].Top)
+			assert.Equal(t, 0, windows[0].Panes[2].Left)
+		}
+	})
+}
+
+func TestListWindowsWithPanes_PropagatesWindowBusyFromPane(t *testing.T) {
+	restoreState(t)
+	t.Run("sets window busy when any pane is busy", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")
+		paneOutput := fields(
+			"0", "%0", "0", "1", "make", "Shell",
+			"99990", "1700000000", "", "0", "0",
+			"/home", "0", "", "make", "80", "24",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) {
+			assert.True(t, windows[0].Busy)
+		}
+	})
+}
+
+func TestListWindowsWithPanes_FiltersSidebarPanes(t *testing.T) {
+	restoreState(t)
+	t.Run("filters out sidebar-renderer panes", func(t *testing.T) {
+		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")
+		paneOutput := fields(
+			"0", "%0", "0", "1", "bash", "Shell",
+			"99990", "1700000000", "", "0", "0",
+			"/home", "0", "", "bash", "80", "24",
+		) + "\n" + fields(
+			"0", "%1", "1", "0", "sidebar-renderer", "Sidebar",
+			"99991", "1700000000", "", "0", "1",
+			"/home", "0", "", "sidebar-renderer", "80", "24",
+		)
+		mock := &mockRunner{
+			responses: map[string]mockResp{
+				"list-windows": {output: []byte(windowOutput), err: nil},
+				"list-panes":   {output: []byte(paneOutput), err: nil},
+			},
+		}
+		DefaultRunner = mock
+		defer restoreState(t)
+
+		windows, err := ListWindowsWithPanes()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) {
+			assert.Len(t, windows[0].Panes, 1, "sidebar pane should be filtered out")
+			assert.Equal(t, "bash", windows[0].Panes[0].Command)
 		}
 	})
 }
