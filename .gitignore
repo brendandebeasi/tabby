@@ -66,6 +66,15 @@ web/tsconfig.tsbuildinfo
 .archive/
 .entire/
 
+# Zellij port (lives in its own repo: github.com/brendandebeasi/tabby-zj)
+tabby-zj/
+tabby-zj-spike/
+
+# Go test coverage artifacts
+coverage.html
+coverage.out
+test_coverage.out
+
 # Local scratch and logs
 tmux-*.log
 *.hup
