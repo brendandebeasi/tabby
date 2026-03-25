@@ -855,6 +855,170 @@ func TestListWindowsWithPanes_EmptyWindowList(t *testing.T) {
 	})
 }
 
+// ── Additional branch-coverage tests ─────────────────────────────────────────
+
+// funcRunner implements Runner via a closure — useful for call-count-based dispatch.
+type funcRunner struct {
+	fn func(args ...string) ([]byte, error)
+}
+
+func (f *funcRunner) Run(args ...string) ([]byte, error) { return f.fn(args...) }
+
+// ListWindows: invalid window index (parts[1] not a number) → window skipped
+func TestListWindows_InvalidWindowIndex(t *testing.T) {
+	restoreState(t)
+	mock := newMock()
+	bad := fields("@1", "bad", "win", "1", "0", "0", "0", "0",
+		"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+	good := fields("@2", "1", "win2", "0", "0", "0", "0", "0",
+		"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+	mock.set("list-windows", bad+"\n"+good+"\n", nil)
+	DefaultRunner = mock
+
+	windows, err := ListWindows()
+	assert.NoError(t, err)
+	if assert.Len(t, windows, 1) {
+		assert.Equal(t, 1, windows[0].Index)
+	}
+}
+
+// ListWindows: @tabby_activity (parts[12]="1") sets Activity=true
+func TestListWindows_TabbyActivitySetsActivity(t *testing.T) {
+	restoreState(t)
+	mock := newMock()
+	line := fields("@1", "0", "win", "1", "0", "0", "0", "0",
+		"", "", "0", "", "1", "", "", "", "", "1", "$0", "", "", "")
+	mock.set("list-windows", line+"\n", nil)
+	DefaultRunner = mock
+
+	windows, err := ListWindows()
+	assert.NoError(t, err)
+	if assert.Len(t, windows, 1) {
+		assert.True(t, windows[0].Activity)
+	}
+}
+
+// ListWindows: @tabby_silence (parts[13]="1") sets Silence=true
+func TestListWindows_TabbySilenceSetsSilence(t *testing.T) {
+	restoreState(t)
+	mock := newMock()
+	line := fields("@1", "0", "win", "1", "0", "0", "0", "0",
+		"", "", "0", "", "", "1", "", "", "", "1", "$0", "", "", "")
+	mock.set("list-windows", line+"\n", nil)
+	DefaultRunner = mock
+
+	windows, err := ListWindows()
+	assert.NoError(t, err)
+	if assert.Len(t, windows, 1) {
+		assert.True(t, windows[0].Silence)
+	}
+}
+
+// ListPanesForWindow: invalid pane index (parts[1] not a number) → pane skipped
+func TestListPanesForWindow_InvalidPaneIndex(t *testing.T) {
+	restoreState(t)
+	mock := newMock()
+	bad := listPanesFields("%0", "bad", "1", "bash", "Shell",
+		"99990", "1700000000", "", "0", "0", "/home", "", "", "bash", "0")
+	good := listPanesFields("%1", "1", "0", "bash", "Shell2",
+		"99991", "1700000000", "", "0", "0", "/home", "", "", "bash", "0")
+	mock.set("list-panes", bad+"\n"+good+"\n", nil)
+	DefaultRunner = mock
+
+	panes, err := ListPanesForWindow(0)
+	assert.NoError(t, err)
+	if assert.Len(t, panes, 1) {
+		assert.Equal(t, 1, panes[0].Index)
+	}
+}
+
+// ListAllPanes: session target → uses -s -t flags instead of -a
+func TestListAllPanes_SessionTargetUsesDashS(t *testing.T) {
+	restoreState(t)
+	mock := newMock()
+	SetSessionTarget("$1")
+	paneLine := fields("0", "%0", "0", "1", "bash", "Shell",
+		"99990", "1700000000", "", "0", "0", "/home", "", "", "bash", "80", "24")
+	mock.set("list-panes", paneLine+"\n", nil)
+	DefaultRunner = mock
+
+	_, err := ListAllPanes()
+	assert.NoError(t, err)
+
+	found := false
+	for _, call := range mock.calls {
+		for _, arg := range call {
+			if arg == "-s" {
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "session target should use -s flag")
+}
+
+// ListAllPanes: invalid pane index (parts[2] not a number) → line skipped
+func TestListAllPanes_InvalidPaneIndex(t *testing.T) {
+	restoreState(t)
+	mock := newMock()
+	bad := fields("0", "%0", "bad", "1", "bash", "Shell",
+		"99990", "1700000000", "", "0", "0", "/home", "", "", "bash", "80", "24")
+	good := fields("0", "%1", "1", "0", "bash", "Shell2",
+		"99991", "1700000000", "", "0", "0", "/home", "", "", "bash", "80", "24")
+	mock.set("list-panes", bad+"\n"+good+"\n", nil)
+	DefaultRunner = mock
+
+	result, err := ListAllPanes()
+	assert.NoError(t, err)
+	if assert.Contains(t, result, 0) {
+		assert.Len(t, result[0], 1)
+	}
+}
+
+// ListWindowsWithPanes: ListWindows error → propagated
+func TestListWindowsWithPanes_ListWindowsError(t *testing.T) {
+	restoreState(t)
+	mock := newMock()
+	mock.set("list-windows", "", fmt.Errorf("tmux died"))
+	DefaultRunner = mock
+
+	_, err := ListWindowsWithPanes()
+	assert.Error(t, err)
+}
+
+// ListWindowsWithPanes: ListAllPanes failure → falls back to per-window ListPanesForWindow
+func TestListWindowsWithPanes_ListAllPanesFallback(t *testing.T) {
+	restoreState(t)
+	winLine := fields("@1", "0", "window0", "1", "0", "0", "0", "0",
+		"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+	// ListPanesForWindow format (15 fields, no window_index)
+	paneLine := listPanesFields("%0", "0", "1", "bash", "Shell",
+		"99990", "1700000000", "", "0", "0", "/home", "", "", "bash", "0")
+
+	callCount := 0
+	DefaultRunner = &funcRunner{fn: func(args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "list-windows" {
+			return []byte(winLine + "\n"), nil
+		}
+		if len(args) > 0 && args[0] == "list-panes" {
+			callCount++
+			if callCount == 1 {
+				// First call is ListAllPanes → fail
+				return nil, fmt.Errorf("bulk query failed")
+			}
+			// Subsequent calls are ListPanesForWindow → succeed
+			return []byte(paneLine + "\n"), nil
+		}
+		return []byte(""), nil
+	}}
+
+	windows, err := ListWindowsWithPanes()
+	assert.NoError(t, err)
+	if assert.Len(t, windows, 1) {
+		assert.Len(t, windows[0].Panes, 1)
+		assert.Equal(t, "bash", windows[0].Panes[0].Command)
+	}
+}
+
 func TestListWindowsWithPanes_AllPanesFiltered(t *testing.T) {
 	t.Run("handles window with all panes filtered out", func(t *testing.T) {
 		windowOutput := fields("%0", "0", "window0", "0", "", "", "", "", "")

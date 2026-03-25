@@ -105,3 +105,31 @@ func TestEnsureStateDir_Creates(t *testing.T) {
 		t.Errorf("EnsureStateDir() did not create directory %q", expected)
 	}
 }
+
+func TestEnsureConfigDir_Error(t *testing.T) {
+	tmp := setupTestDirs(t)
+	// Create a file where the parent directory should be
+	blockingFile := filepath.Join(tmp, ".config")
+	if err := os.WriteFile(blockingFile, []byte(""), 0644); err != nil {
+		t.Fatalf("setup: failed to create blocking file: %v", err)
+	}
+
+	_, err := EnsureConfigDir()
+	if err == nil {
+		t.Errorf("EnsureConfigDir() expected error when parent is a file, got nil")
+	}
+}
+
+func TestEnsureStateDir_Error(t *testing.T) {
+	tmp := setupTestDirs(t)
+	// Create a file where the parent directory should be
+	blockingFile := filepath.Join(tmp, ".local")
+	if err := os.WriteFile(blockingFile, []byte(""), 0644); err != nil {
+		t.Fatalf("setup: failed to create blocking file: %v", err)
+	}
+
+	_, err := EnsureStateDir()
+	if err == nil {
+		t.Errorf("EnsureStateDir() expected error when parent is a file, got nil")
+	}
+}
