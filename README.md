@@ -773,6 +773,10 @@ Tabby only sets the resurrect hook options if they are unset or already owned by
 - Verify the toggle key binding: `tmux list-keys | grep toggle_sidebar`
 - Check if the sidebar binary is running: `ps aux | grep sidebar`
 
+## Zellij Port
+
+**[tabby-zj](https://github.com/brendandebeasi/tabby-zj)** — A port of Tabby to Zellij as a single Rust WASM plugin. Same grouped tab/pane sidebar, context menus, indicators, and widgets — no tmux required.
+
 ## Similar Projects
 
 - [cmux](https://github.com/manaflow-ai/cmux) — AI-powered tmux session manager with intelligent window organization
