@@ -427,16 +427,18 @@ const (
 )
 
 type adventureState struct {
-	Active        bool
-	Phase         adventurePhase
-	PhaseStart    time.Time
-	PhaseDuration time.Duration
-	Biome         string
-	SceneOffset   int // How far cat has traveled (for scenery scrolling)
-	Wildlife      *wildlifeEncounter
-	CatX          int // Cat position during adventure (relative to play area)
-	LastThought   string
-	TotalCatches  int
+	Active            bool
+	Phase             adventurePhase
+	PhaseStart        time.Time
+	PhaseDuration     time.Duration
+	Biome             string
+	SceneOffset       int // How far cat has traveled (for scenery scrolling)
+	Wildlife          *wildlifeEncounter
+	CatX              int  // Cat position during adventure (relative to play area)
+	HomeX             int  // Cat's original position before adventure started
+	ManuallyTriggered bool // True if started via debug button, ignores config disable
+	LastThought       string
+	TotalCatches      int
 }
 
 type wildlifeEncounter struct {
@@ -1136,6 +1138,16 @@ func (c *Coordinator) loadPetState() {
 		return
 	}
 	json.Unmarshal(data, &c.pet)
+	// Don't resume in-progress adventures after restart — PhaseStart times
+	// are stale and would cause every phase to immediately complete.
+	if c.pet.Adventure.Active {
+		c.pet.Adventure = adventureState{
+			TotalCatches: c.pet.Adventure.TotalCatches,
+		}
+		if c.pet.State == "walking" || c.pet.State == "jumping" {
+			c.pet.State = "idle"
+		}
+	}
 }
 
 // savePetStateData saves the given pet state snapshot to the shared file.
@@ -2465,7 +2477,7 @@ func (c *Coordinator) UpdatePetState() bool {
 		maxX = 1
 	}
 
-	if c.pet.Adventure.Active && !adventureEnabled {
+	if c.pet.Adventure.Active && !adventureEnabled && !c.pet.Adventure.ManuallyTriggered {
 		c.pet.Adventure = adventureState{}
 		if c.pet.State == "walking" || c.pet.State == "jumping" {
 			c.pet.State = "idle"
@@ -3087,19 +3099,31 @@ func (c *Coordinator) UpdatePetState() bool {
 
 // startAdventure initiates a new adventure sequence
 func (c *Coordinator) startAdventure(maxX int) {
+	c.startAdventureWithOptions(maxX, false)
+}
+
+// startAdventureManual initiates a new adventure sequence manually (debug button)
+func (c *Coordinator) startAdventureManual(maxX int) {
+	c.startAdventureWithOptions(maxX, true)
+}
+
+// startAdventureWithOptions initiates a new adventure sequence
+func (c *Coordinator) startAdventureWithOptions(maxX int, manual bool) {
 	// Pick a random biome
 	biomes := []string{"forest", "meadow", "garden", "backyard"}
 	biome := biomes[rand.Intn(len(biomes))]
 
 	c.pet.Adventure = adventureState{
-		Active:        true,
-		Phase:         advPhaseDeparting,
-		PhaseStart:    time.Now(),
-		PhaseDuration: time.Duration(2+rand.Intn(2)) * time.Second,
-		Biome:         biome,
-		SceneOffset:   0,
-		CatX:          c.pet.Pos.X,
-		LastThought:   "adventure calls...",
+		Active:            true,
+		Phase:             advPhaseDeparting,
+		PhaseStart:        time.Now(),
+		PhaseDuration:     time.Duration(2+rand.Intn(2)) * time.Second,
+		Biome:             biome,
+		SceneOffset:       0,
+		CatX:              c.pet.Pos.X,
+		HomeX:             c.pet.Pos.X,
+		ManuallyTriggered: manual,
+		LastThought:       "adventure calls...",
 	}
 	c.pet.State = "walking"
 	c.pet.Direction = 1 // Walking right (departing)
@@ -3167,6 +3191,14 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 				c.pet.Direction = -1
 				c.pet.LastThought = "heading home..."
 			}
+		} else if elapsed >= adv.PhaseDuration*2 {
+			// Encounter timed out without resolution — give up and return home
+			adv.Phase = advPhaseReturning
+			adv.PhaseStart = now
+			adv.PhaseDuration = time.Duration(3+rand.Intn(3)) * time.Second
+			adv.Wildlife = nil
+			c.pet.Direction = -1
+			c.pet.LastThought = "heading home..."
 		}
 
 	case advPhaseReturning:
@@ -3175,7 +3207,9 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 			adv.SceneOffset--
 		}
 
-		if elapsed >= adv.PhaseDuration || adv.SceneOffset <= 0 {
+		// Only use timer to transition — SceneOffset may be small if encounter
+		// happened early in exploration, which would otherwise skip this phase.
+		if elapsed >= adv.PhaseDuration {
 			adv.Phase = advPhaseArriving
 			adv.PhaseStart = now
 			adv.PhaseDuration = time.Duration(1+rand.Intn(2)) * time.Second
@@ -3183,12 +3217,12 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 		}
 
 	case advPhaseArriving:
-		// Cat walks back to normal position
-		if c.pet.AnimFrame%3 == 0 && adv.CatX > c.pet.Pos.X {
+		// Cat walks back to home position
+		if c.pet.AnimFrame%3 == 0 && adv.CatX > adv.HomeX {
 			adv.CatX--
 		}
 
-		if elapsed >= adv.PhaseDuration || adv.CatX <= c.pet.Pos.X {
+		if elapsed >= adv.PhaseDuration || adv.CatX <= adv.HomeX {
 			// Adventure complete!
 			c.pet.Adventure = adventureState{
 				TotalCatches: adv.TotalCatches,
@@ -7778,9 +7812,9 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 	// Determine which debug line was clicked
 	if clickY == layout.DebugLine1 {
 		if clickedToken(line1, "[adv]") {
-			coordinatorDebugLog.Printf("Debug bar: [adv] clicked, starting adventure")
+			coordinatorDebugLog.Printf("Debug bar: [adv] clicked, starting manual adventure")
 			c.stateMu.Lock()
-			c.startAdventure(safeWidth)
+			c.startAdventureManual(safeWidth)
 			c.stateMu.Unlock()
 			return true
 		}
