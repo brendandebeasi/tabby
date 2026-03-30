@@ -4379,9 +4379,12 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 	}
 
-	// Detect which resize directions apply to this pane based on neighbors
+	// Detect which resize directions apply to this pane based on neighbors,
+	// and whether borders exist below/to-the-right (for arrow direction mapping).
 	canResizeH := false // horizontal neighbors (side by side) -> left/right (←→)
 	canResizeV := false // vertical neighbors (stacked) -> up/down (↑↓)
+	hasBorderBelow := false
+	hasBorderRight := false
 	for _, op := range foundWindow.Panes {
 		if isAuxiliaryPane(op) || op.ID == foundPane.ID {
 			continue
@@ -4389,10 +4392,18 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		// Horizontal neighbor: vertical ranges overlap -> panes are side by side
 		if max(foundPane.Top, op.Top) < min(foundPane.Top+foundPane.Height, op.Top+op.Height) {
 			canResizeH = true
+			// Neighbor to the right?
+			if op.Left >= foundPane.Left+foundPane.Width {
+				hasBorderRight = true
+			}
 		}
 		// Vertical neighbor: horizontal ranges overlap -> panes are stacked
 		if max(foundPane.Left, op.Left) < min(foundPane.Left+foundPane.Width, op.Left+op.Width) {
 			canResizeV = true
+			// Neighbor below?
+			if op.Top >= foundPane.Top+foundPane.Height {
+				hasBorderBelow = true
+			}
 		}
 	}
 
@@ -4725,34 +4736,54 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		if showVerticalResize {
 			vGrowEnd := cursor + 2
 			vShrinkEnd := vGrowEnd + 2
+			// Arrow icons are ↓ and ↑. They represent border movement direction:
+			// ↓ = "move border down", ↑ = "move border up".
+			// For topmost/middle panes (border below): ↓=grow, ↑=shrink.
+			// For bottommost panes (no border below): ↓=shrink, ↑=grow (swapped).
+			vDownAction := "pane_grow_v"
+			vUpAction := "pane_shrink_v"
+			if !hasBorderBelow {
+				vDownAction = "pane_shrink_v"
+				vUpAction = "pane_grow_v"
+			}
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
 				StartCol: cursor, EndCol: vGrowEnd,
-				Action: "pane_grow_v", Target: paneID,
+				Action: vDownAction, Target: paneID,
 			})
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
 				StartCol: vGrowEnd, EndCol: vShrinkEnd,
-				Action: "pane_shrink_v", Target: paneID,
+				Action: vUpAction, Target: paneID,
 			})
 			cursor = vShrinkEnd
 		}
 		if showHorizontalResize {
 			hGrowEnd := cursor + 2
 			hShrinkEnd := hGrowEnd + 2
+			// Arrow icons are → and ←. They represent border movement direction:
+			// → = "move border right", ← = "move border left".
+			// For leftmost/middle panes (border right): →=grow, ←=shrink.
+			// For rightmost panes (no border right): →=shrink, ←=grow (swapped).
+			hRightAction := "pane_grow_h"
+			hLeftAction := "pane_shrink_h"
+			if !hasBorderRight {
+				hRightAction = "pane_shrink_h"
+				hLeftAction = "pane_grow_h"
+			}
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
 				StartCol: cursor, EndCol: hGrowEnd,
-				Action: "pane_grow_h", Target: paneID,
+				Action: hRightAction, Target: paneID,
 			})
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
 				StartCol: hGrowEnd, EndCol: hShrinkEnd,
-				Action: "pane_shrink_h", Target: paneID,
+				Action: hLeftAction, Target: paneID,
 			})
 			cursor = hShrinkEnd
 		}
-		cursor += 2 // extra space for group gap before close
+		cursor += 1 // account for the extra " " separator before close (line 4543 in buttonsStr)
 	}
 	if showInlineClose {
 		regions = append(regions, daemon.ClickableRegion{
@@ -8781,22 +8812,26 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		paneID := input.ResolvedTarget
 		action := input.ResolvedAction
 
-		if action == "pane_grow" || action == "pane_shrink" {
-			// Backward compatibility: legacy actions use inferred dominant split axis.
-			c.stateMu.RLock()
-			var targetWin *tmux.Window
-			for i := range c.windows {
-				for _, p := range c.windows[i].Panes {
-					if p.ID == paneID {
-						targetWin = &c.windows[i]
-						break
-					}
-				}
-				if targetWin != nil {
+		// Look up window and pane for position-aware resize logic.
+		c.stateMu.RLock()
+		var targetWin *tmux.Window
+		var targetPane *tmux.Pane
+		for i := range c.windows {
+			for j := range c.windows[i].Panes {
+				if c.windows[i].Panes[j].ID == paneID {
+					targetWin = &c.windows[i]
+					targetPane = &c.windows[i].Panes[j]
 					break
 				}
 			}
-			c.stateMu.RUnlock()
+			if targetWin != nil {
+				break
+			}
+		}
+		c.stateMu.RUnlock()
+
+		if action == "pane_grow" || action == "pane_shrink" {
+			// Backward compatibility: legacy actions use inferred dominant split axis.
 			if targetWin != nil && c.isVerticalStackedPane(targetWin, paneID) {
 				if action == "pane_grow" {
 					action = "pane_grow_v"
@@ -8812,18 +8847,42 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			}
 		}
 
-		switch action {
-		case "pane_grow_v":
-			exec.Command("tmux", "resize-pane", "-t", paneID, "-D", "5").Run()
-		case "pane_shrink_v":
-			exec.Command("tmux", "resize-pane", "-t", paneID, "-U", "5").Run()
-		case "pane_grow_h":
-			exec.Command("tmux", "resize-pane", "-t", paneID, "-R", "5").Run()
-		case "pane_shrink_h":
-			wOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_width}").Output()
-			if w, err := strconv.Atoi(strings.TrimSpace(string(wOut))); err == nil && w > 10 {
-				exec.Command("tmux", "resize-pane", "-t", paneID, "-x", fmt.Sprintf("%d", w-5)).Run()
+		// Use absolute sizing (-y/-x) instead of directional flags (-D/-U/-R/-L).
+		// Directional flags move the "nearest" border, which for content panes
+		// may be the 1-line header pane border rather than the adjacent content
+		// pane border, causing unexpected or no-op resizes. Absolute sizing
+		// tells tmux the desired result and lets it figure out which borders
+		// to adjust.
+		const resizeStep = 5
+		if targetPane != nil {
+			logEvent("RESIZE_DEBUG pane=%s action=%s cachedW=%d cachedH=%d top=%d left=%d",
+				paneID, action, targetPane.Width, targetPane.Height, targetPane.Top, targetPane.Left)
+			switch action {
+			case "pane_grow_v":
+				newSize := targetPane.Height + resizeStep
+				logEvent("RESIZE_EXEC grow_v pane=%s -y %d", paneID, newSize)
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-y", fmt.Sprint(newSize)).Run()
+			case "pane_shrink_v":
+				newH := targetPane.Height - resizeStep
+				if newH < 2 {
+					newH = 2
+				}
+				logEvent("RESIZE_EXEC shrink_v pane=%s -y %d", paneID, newH)
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-y", fmt.Sprint(newH)).Run()
+			case "pane_grow_h":
+				newSize := targetPane.Width + resizeStep
+				logEvent("RESIZE_EXEC grow_h pane=%s -x %d", paneID, newSize)
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-x", fmt.Sprint(newSize)).Run()
+			case "pane_shrink_h":
+				newW := targetPane.Width - resizeStep
+				if newW < 2 {
+					newW = 2
+				}
+				logEvent("RESIZE_EXEC shrink_h pane=%s -x %d", paneID, newW)
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-x", fmt.Sprint(newW)).Run()
 			}
+		} else {
+			logEvent("RESIZE_DEBUG targetPane is nil for pane=%s", paneID)
 		}
 
 		fixHeaderHeightsInWindow(paneID)
