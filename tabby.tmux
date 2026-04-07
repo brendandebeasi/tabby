@@ -83,6 +83,7 @@ cat > "$NEW_WINDOW_SCRIPT" << SCRIPT_EOF
 set -u
 
 CLIENT_TTY="\${1:-}"
+CURRENT_DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")/.." && pwd)"
 
 SAVED_GROUP=\$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
 SAVED_PATH=\$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
@@ -131,6 +132,7 @@ if [ -n "\$NEW_WINDOW_ID" ]; then
     else
         tmux select-window -t "\$NEW_WINDOW_ID" 2>/dev/null || true
     fi
+    "\$CURRENT_DIR/scripts/focus_new_window.sh" "\$NEW_WINDOW_ID" "\$CLIENT_TTY" >/dev/null 2>&1 &
     ( sleep 2; PENDING=\$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo ""); [ "\$PENDING" = "\$NEW_WINDOW_ID" ] && tmux set-option -gu @tabby_new_window_id 2>/dev/null || true ) &
 fi
 

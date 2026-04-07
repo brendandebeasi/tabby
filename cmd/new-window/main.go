@@ -53,6 +53,7 @@ func main() {
 		debugLog("failed to set @tabby_spawning=1: %v", err)
 	}
 	spawnGuardSet := true
+
 	defer func() {
 		if spawnGuardSet {
 			if _, err := runTmuxOutput("set-option", "-gu", "@tabby_spawning"); err != nil {
@@ -61,14 +62,14 @@ func main() {
 		}
 	}()
 
-	args := []string{"new-window", "-d", "-P", "-F", "#{window_id}", "-t", sessionID + ":"}
+	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", sessionID + ":"}
 	if windowPath != "" {
 		args = append(args, "-c", windowPath)
 	}
 	newWindowID, err := runTmuxOutput(args...)
 	newWindowID = firstMatchingToken(newWindowID, "@")
 	if err != nil || newWindowID == "" {
-		fmt.Fprintf(os.Stderr, "new-window: failed to create detached window: %v\n", err)
+		fmt.Fprintf(os.Stderr, "new-window: failed to create window: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -132,23 +133,29 @@ func main() {
 		}
 	}
 
-	if strings.TrimSpace(*flagClientTTY) != "" {
-		if _, err := runTmuxOutput("switch-client", "-c", strings.TrimSpace(*flagClientTTY), "-t", newWindowID); err != nil {
-			debugLog("switch-client failed for tty %s: %v", strings.TrimSpace(*flagClientTTY), err)
+	clientTTY := strings.TrimSpace(*flagClientTTY)
+	if clientTTY != "" {
+		if _, err := runTmuxOutput("switch-client", "-c", clientTTY, "-t", newWindowID); err != nil {
+			debugLog("switch-client failed for tty %s: %v", clientTTY, err)
 		}
+		debugLog("switch-client completed")
 	} else {
 		if _, err := runTmuxOutput("select-window", "-t", newWindowID); err != nil {
 			debugLog("select-window failed for %s: %v", newWindowID, err)
 		}
+		debugLog("select-window completed")
 	}
 
 	if firstPane != "" {
 		if _, err := runTmuxOutput("select-pane", "-t", firstPane); err != nil {
 			debugLog("select-pane failed for first pane %s: %v", firstPane, err)
 		}
+		debugLog("select-pane firstPane completed")
 	} else {
 		focusFirstContentPane(newWindowID)
+		debugLog("focusFirstContentPane completed")
 	}
+	scheduleFocusRecovery(newWindowID, clientTTY)
 
 	if _, err := runTmuxOutput("set-option", "-gu", "@tabby_new_window_group"); err != nil {
 		debugLog("failed clearing @tabby_new_window_group: %v", err)
@@ -333,6 +340,28 @@ func sendWinchToContentPanes(windowID string) {
 		if err := syscall.Kill(pid, syscall.SIGWINCH); err != nil {
 			debugLog("failed SIGWINCH pid=%d pane=%s: %v", pid, strings.TrimSpace(parts[0]), err)
 		}
+	}
+}
+
+func scheduleFocusRecovery(windowID, clientTTY string) {
+	if windowID == "" {
+		return
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		debugLog("focus recovery path resolution failed: %v", err)
+		return
+	}
+
+	scriptPath := filepath.Clean(filepath.Join(filepath.Dir(exe), "..", "scripts", "focus_new_window.sh"))
+	args := []string{windowID}
+	if clientTTY != "" {
+		args = append(args, clientTTY)
+	}
+	cmd := exec.Command(scriptPath, args...)
+	if err := cmd.Start(); err != nil {
+		debugLog("failed starting focus recovery for %s: %v", windowID, err)
 	}
 }
 

@@ -2,9 +2,18 @@
 set -u
 
 NEW_ID="${1:-}"
+CLIENT_TTY="${2:-}"
 if [ -z "$NEW_ID" ]; then
     exit 0
 fi
+
+focus_window() {
+    if [ -n "$CLIENT_TTY" ]; then
+        tmux switch-client -c "$CLIENT_TTY" -t "$NEW_ID" 2>/dev/null || tmux select-window -t "$NEW_ID" 2>/dev/null || true
+    else
+        tmux select-window -t "$NEW_ID" 2>/dev/null || true
+    fi
+}
 
 is_aux_cmd() {
     case "$1" in
@@ -40,7 +49,7 @@ if [ "$PENDING_NEW" != "$NEW_ID" ]; then
     exit 0
 fi
 
-tmux select-window -t "$NEW_ID" 2>/dev/null || true
+focus_window
 CONTENT_PANE=$(pick_content_pane || true)
 [ -n "$CONTENT_PANE" ] && tmux select-pane -t "$CONTENT_PANE" 2>/dev/null || true
 
@@ -49,6 +58,7 @@ sleep 0.15
 PENDING_NEW=$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo "")
 CURRENT_WIN=$(tmux display-message -p '#{window_id}' 2>/dev/null || echo "")
 if [ "$PENDING_NEW" = "$NEW_ID" ] && [ "$CURRENT_WIN" = "$NEW_ID" ]; then
+    focus_window
     CONTENT_PANE=$(pick_content_pane || true)
     [ -n "$CONTENT_PANE" ] && tmux select-pane -t "$CONTENT_PANE" 2>/dev/null || true
     tmux set-option -g @tabby_last_window "$NEW_ID" 2>/dev/null || true
