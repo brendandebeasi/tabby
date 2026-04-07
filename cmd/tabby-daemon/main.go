@@ -336,7 +336,9 @@ func responsiveSidebarWidth(windowID string, globalWidth int) int {
 
 // spawnRenderersForNewWindows checks for windows without renderers and spawns them.
 // Returns true if any renderer was spawned (caller should restore focus afterward).
-func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window) bool {
+// The coordinator is used to compute the bounded sidebar width, ensuring the spawn
+// uses the same width calculation as RunWidthSync (prevents resize churn on startup).
+func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window, coordinator *Coordinator) bool {
 	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
 		logEvent("SPAWN_SKIP script_lock_active")
 		return false
@@ -347,13 +349,10 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 	}
 	spawned := false
 
-	// Get saved sidebar width or default
-	globalWidth := 25
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width").Output(); err == nil {
-		if w, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && w > 0 {
-			globalWidth = w
-		}
-	}
+	// Use coordinator's globalWidth for consistency with RunWidthSync.
+	// This ensures sidebars spawn at the same width that RunWidthSync will use,
+	// preventing resize churn on startup.
+	globalWidth := coordinator.GetGlobalWidth()
 
 	// Get the currently active window so we only select-pane in it
 	// We can't easily cache this as it changes frequently, but one query is better than N
@@ -425,8 +424,10 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		}
 		firstPane := win.Panes[0].ID
 
-		// Compute responsive width for this window
-		width := responsiveSidebarWidth(windowID, globalWidth)
+		// Compute bounded width for this window using coordinator's logic.
+		// This ensures the spawn uses the same width calculation as RunWidthSync,
+		// preventing resize churn during startup.
+		width := coordinator.boundedSidebarWidthForWindow(windowID, globalWidth)
 
 		// Spawn renderer in this window
 		// Log active pane before spawn for debugging focus issues
@@ -1430,10 +1431,13 @@ func main() {
 		if needsRefresh {
 			// Immediate optimistic render: HandleInput already updated the
 			// coordinator state (e.g. SetActiveWindowOptimistic for select_window)
-			// so rendering NOW gives the sidebar the correct header color
-			// without waiting for the full RefreshWindows round-trip.
-			server.BroadcastRender()
-			// Also signal the main refresh loop for the full state sync
+			// so rendering NOW gives the requesting client the correct header
+			// color without waiting for the full BroadcastRender round-trip.
+			server.SendRenderToClient(clientID)
+			// Broadcast to remaining clients asynchronously so the input
+			// goroutine is not blocked by O(n) renders before returning.
+			go server.BroadcastRender()
+			// Signal the main refresh loop for full state sync
 			// (spawn/cleanup renderers, update pane colors, etc.)
 			select {
 			case refreshCh <- struct{}{}:
@@ -1704,6 +1708,9 @@ func main() {
 					logEvent("SIGNAL_REFRESH session=%s", *sessionID)
 
 					updateActiveWindow()
+					// Sync client sizes first (only clears hash if sizes changed)
+					syncClientSizesFromTmux(server)
+
 					// Optimistic render: flip the active window flag and render
 					// immediately so the sidebar highlights the correct window
 					// before the slow RefreshWindows round-trip completes.
@@ -1716,7 +1723,6 @@ func main() {
 
 					// Full render after RefreshWindows to pick up any state changes
 					// (pane titles, AI indicators, git status, etc.).
-					syncClientSizesFromTmux(server)
 					server.BroadcastRender()
 					t1b := time.Now()
 					// Width sync runs off the render path to prevent deadlocks
@@ -1729,7 +1735,7 @@ func main() {
 					// the fast path above (RefreshWindows + BroadcastRender).
 					if time.Since(lastFullRefresh) >= fullRefreshCooldown {
 						windows := coordinator.GetWindows()
-						spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows)
+						spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows, coordinator)
 						t2 := time.Now()
 
 						cleanupOrphanedSidebars(windows)
@@ -1792,7 +1798,7 @@ func main() {
 					// tmux round-trip that caused lock contention and task stalls under load.
 					windows := coordinator.GetWindows()
 
-					spawnedFallback := spawnRenderersForNewWindows(server, *sessionID, windows)
+					spawnedFallback := spawnRenderersForNewWindows(server, *sessionID, windows, coordinator)
 					cleanupOrphanedSidebars(windows)
 					cleanupOrphanWindowsByTmux(*sessionID)
 					cleanupSidebarsForClosedWindows(server, windows)

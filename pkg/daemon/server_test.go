@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -16,10 +17,12 @@ func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	return &Server{
-		pidPath:    filepath.Join(dir, "test.pid"),
-		socketPath: filepath.Join(dir, "test.sock"),
-		clients:    make(map[string]*ClientInfo),
-		done:       make(chan struct{}),
+		pidPath:          filepath.Join(dir, "test.pid"),
+		socketPath:       filepath.Join(dir, "test.sock"),
+		clients:          make(map[string]*ClientInfo),
+		done:             make(chan struct{}),
+		renderPending:    make(map[string]bool),
+		renderBatchDelay: 5 * time.Millisecond, // short delay for tests
 	}
 }
 

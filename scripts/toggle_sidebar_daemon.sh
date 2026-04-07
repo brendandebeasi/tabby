@@ -160,8 +160,8 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
         fi
     done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}|#{pane_pid}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|pane-header)" || true)
 
-    # Wait for renderers to cleanup gracefully
-    sleep 0.5
+    # Brief wait for renderers to start graceful cleanup
+    sleep 0.1
 
     reset_mouse_escape_sequences
 
@@ -181,6 +181,10 @@ if [ "$CURRENT_STATE" = "enabled" ]; then
     tmux set-hook -gu after-resize-pane 2>/dev/null || true
     tmux set-hook -gu after-resize-window 2>/dev/null || true
     tmux set-hook -gu client-resized 2>/dev/null || true
+    
+    # Remove after-select-window hook to prevent auto-relaunch
+    # The hook calls ensure_sidebar.sh which would re-enable the sidebar
+    tmux set-hook -gu after-select-window 2>/dev/null || true
 
     echo "disabled" > "$SIDEBAR_STATE_FILE"
     tmux set-option @tabby_sidebar "disabled"
@@ -210,8 +214,8 @@ else
         fi
     done < <(tmux list-panes -s -F "#{pane_current_command}|#{pane_id}|#{pane_pid}" 2>/dev/null | grep -E "^(sidebar|sidebar-renderer|pane-header)" || true)
 
-    # Wait for cleanup
-    sleep 0.5
+    # Brief wait for cleanup
+    sleep 0.1
 
     reset_mouse_escape_sequences
 
@@ -242,7 +246,7 @@ else
             SOCKET_READY=true
             break
         fi
-        sleep 0.1
+        sleep 0.02
     done
 
     if [ "$SOCKET_READY" = "false" ]; then
@@ -259,20 +263,28 @@ else
     # (not just USR1-only stubs) to keep signal_sidebar + ensure_sidebar working.
     SIGNAL_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/signal_sidebar.sh"
     ENSURE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/ensure_sidebar.sh"
-    STATUS_GUARD_SCRIPT="$CURRENT_DIR/scripts/status_guard.sh"
+    STATUS_GUARD_SCRIPT="$CURRENT_DIR/scripts/enforce_status_exclusivity.sh"
     # shellcheck disable=SC2016
     tmux set-hook -g after-resize-pane 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     # shellcheck disable=SC2016
     tmux set-hook -g after-resize-window 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     tmux set-hook -g client-resized "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+    
+    # Restore after-select-window hook (matches tabby.tmux line 581)
+    ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"
+    REFRESH_STATUS_SCRIPT="$CURRENT_DIR/scripts/refresh_status.sh"
+    TRACK_WINDOW_HISTORY_SCRIPT="$CURRENT_DIR/scripts/track_window_history.sh"
+    CYCLE_PANE_BIN="$CURRENT_DIR/bin/cycle-pane"
+    tmux set-hook -g after-select-window "run-shell '$ON_WINDOW_SELECT_SCRIPT'; run-shell '$REFRESH_STATUS_SCRIPT'; run-shell -b '$TRACK_WINDOW_HISTORY_SCRIPT'; run-shell -b '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell -b '$STATUS_GUARD_SCRIPT \"#{session_id}\"'; run-shell -b '[ -x \"$CYCLE_PANE_BIN\" ] && \"$CYCLE_PANE_BIN\" --dim-only'"
 
-    # Wait for daemon to spawn renderers (poll instead of fixed sleep).
-    RENDERER_WAIT_MAX=20  # 20 * 0.1s = 2s max
+    # Brief wait for daemon to start spawning renderers, then let it work asynchronously.
+    # The daemon will spawn renderers via its ticker loop, and ensure_sidebar.sh will
+    # catch any missing ones. No need to block the toggle for full renderer startup.
+    RENDERER_WAIT_MAX=10  # 10 * 0.05s = 0.5s max
     RENDERER_WAIT_COUNT=0
     RENDERERS_READY=false
     
     while [ $RENDERER_WAIT_COUNT -lt $RENDERER_WAIT_MAX ]; do
-        # Check if any sidebar-renderer panes exist in any window
         RENDERER_COUNT=$(tmux list-panes -s -F "#{pane_current_command}|#{pane_start_command}" 2>/dev/null | \
             grep -cE "(sidebar-renderer|sidebar)" || true)
         RENDERER_COUNT="${RENDERER_COUNT:-0}"
@@ -283,12 +295,12 @@ else
             break
         fi
         
-        sleep 0.1
+        sleep 0.05
         RENDERER_WAIT_COUNT=$((RENDERER_WAIT_COUNT + 1))
     done
     
     if [ "${TABBY_DEBUG:-}" = "1" ]; then
-        echo "Renderers ready: $RENDERERS_READY (waited ${RENDERER_WAIT_COUNT}*0.1s)" >&2
+        echo "Renderers ready: $RENDERERS_READY (waited ${RENDERER_WAIT_COUNT}*0.05s)" >&2
     fi
 
     # Restore content pane layouts — re-spawning system panes disrupts saved ratios.
@@ -326,7 +338,6 @@ else
     fi
 
     # Clear activity flags that may have been set during sidebar setup
-    sleep 0.1
     for window_id in $WINDOWS; do
         tmux set-window-option -t "$window_id" -q monitor-activity off 2>/dev/null || true
         tmux set-window-option -t "$window_id" -q monitor-activity on 2>/dev/null || true

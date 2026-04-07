@@ -2,17 +2,12 @@
 set -u
 
 NEW_ID="${1:-}"
-CLIENT_TTY="${2:-}"
 if [ -z "$NEW_ID" ]; then
     exit 0
 fi
 
 focus_window() {
-    if [ -n "$CLIENT_TTY" ]; then
-        tmux switch-client -c "$CLIENT_TTY" -t "$NEW_ID" 2>/dev/null || tmux select-window -t "$NEW_ID" 2>/dev/null || true
-    else
-        tmux select-window -t "$NEW_ID" 2>/dev/null || true
-    fi
+    tmux select-window -t "$NEW_ID" 2>/dev/null || true
 }
 
 is_aux_cmd() {

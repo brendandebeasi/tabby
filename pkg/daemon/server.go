@@ -21,8 +21,9 @@ type ClientInfo struct {
 	Width           int
 	Height          int
 	ViewportOffset  int
-	ColorProfile    string // "Ascii", "ANSI", "ANSI256", "TrueColor"
-	lastContentHash uint32 // hash of last sent content to deduplicate renders
+	ColorProfile    string     // "Ascii", "ANSI", "ANSI256", "TrueColor"
+	lastContentHash uint32     // hash of last sent content to deduplicate renders
+	writeMu         sync.Mutex // serialises concurrent writes to Conn
 }
 
 // Server is the daemon server that manages connected renderers
@@ -37,6 +38,18 @@ type Server struct {
 	// Render state
 	sequenceNum uint64
 	seqMu       sync.Mutex
+
+	// Resize debouncing - prevents rapid resize events from causing multiple renders
+	resizePending  map[string]*ResizePayload // pending resize per client
+	resizeTimers   map[string]*time.Timer    // debounce timer per client
+	resizeDebounce time.Duration             // debounce window
+	resizeMu       sync.Mutex                // protects resize maps
+
+	// Render batching - coalesces rapid render requests into single frames
+	renderPending    map[string]bool // clients with pending render
+	renderBatchTimer *time.Timer     // single timer for batch flush
+	renderBatchDelay time.Duration   // batch window (e.g., 16ms for ~60fps)
+	renderBatchMu    sync.Mutex      // protects render batching state
 
 	// Callback for rendering - called when a client needs content
 	// The callback receives clientID, width, height and returns RenderPayload
@@ -54,7 +67,6 @@ type Server struct {
 	// Callback for client disconnect
 	OnDisconnect func(clientID string)
 
-
 	// Debug logging callback (set by daemon for diagnostics)
 	DebugLog func(format string, args ...interface{})
 }
@@ -62,11 +74,16 @@ type Server struct {
 // NewServer creates a new daemon server
 func NewServer(sessionID string) *Server {
 	return &Server{
-		socketPath:  SocketPath(sessionID),
-		pidPath:     PidPath(sessionID),
-		clients:     make(map[string]*ClientInfo),
-		done:        make(chan struct{}),
-		sequenceNum: 1,
+		socketPath:       SocketPath(sessionID),
+		pidPath:          PidPath(sessionID),
+		clients:          make(map[string]*ClientInfo),
+		done:             make(chan struct{}),
+		sequenceNum:      1,
+		resizePending:    make(map[string]*ResizePayload),
+		resizeTimers:     make(map[string]*time.Timer),
+		resizeDebounce:   50 * time.Millisecond,
+		renderPending:    make(map[string]bool),
+		renderBatchDelay: 16 * time.Millisecond, // ~60fps
 	}
 }
 
@@ -127,6 +144,15 @@ func (s *Server) Stop() {
 	if s.listener != nil {
 		s.listener.Close()
 	}
+
+	// Stop render batch timer
+	s.renderBatchMu.Lock()
+	if s.renderBatchTimer != nil {
+		s.renderBatchTimer.Stop()
+		s.renderBatchTimer = nil
+	}
+	s.renderBatchMu.Unlock()
+
 	s.clientsMu.Lock()
 	for id, client := range s.clients {
 		client.Conn.Close()
@@ -248,6 +274,18 @@ func (s *Server) handleClient(conn net.Conn) {
 				payloadBytes, _ := json.Marshal(msg.Payload)
 				var resize ResizePayload
 				if json.Unmarshal(payloadBytes, &resize) == nil {
+					// Check if size actually changed before debouncing
+					s.clientsMu.RLock()
+					client, exists := s.clients[clientID]
+					sameSize := exists && client.Width == resize.Width && client.Height == resize.Height
+					s.clientsMu.RUnlock()
+
+					if sameSize {
+						// No change, skip entirely
+						continue
+					}
+
+					// Update client dimensions immediately (so queries see current size)
 					s.clientsMu.Lock()
 					if client, ok := s.clients[clientID]; ok {
 						client.Width = resize.Width
@@ -257,11 +295,36 @@ func (s *Server) handleClient(conn net.Conn) {
 						}
 					}
 					s.clientsMu.Unlock()
-					// Notify and re-render
-					if s.OnResize != nil {
-						s.OnResize(clientID, resize.Width, resize.Height, resize.PaneID)
+
+					// Debounce the render: store pending resize and reset timer
+					s.resizeMu.Lock()
+					s.resizePending[clientID] = &resize
+
+					// Cancel existing timer if any
+					if timer, ok := s.resizeTimers[clientID]; ok {
+						timer.Stop()
 					}
-					s.SendRenderToClient(clientID)
+
+					// Start new debounce timer
+					cid := clientID // capture for closure
+					s.resizeTimers[clientID] = time.AfterFunc(s.resizeDebounce, func() {
+						s.resizeMu.Lock()
+						pending, hasPending := s.resizePending[cid]
+						delete(s.resizePending, cid)
+						delete(s.resizeTimers, cid)
+						s.resizeMu.Unlock()
+
+						if !hasPending {
+							return
+						}
+
+						// Now apply the final resize: notify callback and render
+						if s.OnResize != nil {
+							s.OnResize(cid, pending.Width, pending.Height, pending.PaneID)
+						}
+						s.SendRenderToClient(cid)
+					})
+					s.resizeMu.Unlock()
 				}
 			}
 
@@ -301,12 +364,31 @@ func (s *Server) handleClient(conn net.Conn) {
 			}
 
 		case MsgPing:
-			s.sendMessage(conn, Message{Type: MsgPong})
+			s.clientsMu.RLock()
+			var writeMu *sync.Mutex
+			if client, ok := s.clients[clientID]; ok {
+				writeMu = &client.writeMu
+			}
+			s.clientsMu.RUnlock()
+			if writeMu != nil {
+				writeMu.Lock()
+				s.sendMessage(conn, Message{Type: MsgPong})
+				writeMu.Unlock()
+			}
 		}
 	}
 
 	// Client disconnected
 	if clientID != "" {
+		// Clean up any pending resize timer for this client
+		s.resizeMu.Lock()
+		if timer, ok := s.resizeTimers[clientID]; ok {
+			timer.Stop()
+			delete(s.resizeTimers, clientID)
+		}
+		delete(s.resizePending, clientID)
+		s.resizeMu.Unlock()
+
 		s.clientsMu.Lock()
 		delete(s.clients, clientID)
 		s.clientsMu.Unlock()
@@ -317,7 +399,8 @@ func (s *Server) handleClient(conn net.Conn) {
 	}
 }
 
-// BroadcastRender sends render payloads to all connected renderers
+// BroadcastRender queues render payloads for all connected renderers.
+// Renders are batched and sent after renderBatchDelay to coalesce rapid requests.
 func (s *Server) BroadcastRender() {
 	t := perf.Start("BroadcastRender")
 	defer t.Stop()
@@ -333,9 +416,13 @@ func (s *Server) BroadcastRender() {
 		s.DebugLog("BROADCAST_RENDER clients=%d ids=%v", len(clientIDs), clientIDs)
 	}
 
+	// Queue all clients for batched render
+	s.renderBatchMu.Lock()
 	for _, id := range clientIDs {
-		s.SendRenderToClient(id)
+		s.renderPending[id] = true
 	}
+	s.scheduleRenderFlushLocked()
+	s.renderBatchMu.Unlock()
 }
 
 // RenderActiveWindowOnly sends render only to the active window's sidebar and headers.
@@ -363,8 +450,56 @@ func (s *Server) RenderActiveWindowOnly(activeWindowID string) {
 	}
 }
 
-// SendRenderToClient generates and sends render content to a specific client
+// scheduleRenderFlushLocked starts the batch timer if not already running.
+// Must be called with renderBatchMu held.
+func (s *Server) scheduleRenderFlushLocked() {
+	if s.renderBatchTimer != nil {
+		return // timer already running
+	}
+	s.renderBatchTimer = time.AfterFunc(s.renderBatchDelay, s.flushPendingRenders)
+}
+
+// flushPendingRenders sends renders to all clients with pending requests.
+// Called by the batch timer.
+func (s *Server) flushPendingRenders() {
+	s.renderBatchMu.Lock()
+	s.renderBatchTimer = nil
+	pending := s.renderPending
+	s.renderPending = make(map[string]bool)
+	s.renderBatchMu.Unlock()
+
+	if len(pending) == 0 {
+		return
+	}
+
+	if s.DebugLog != nil {
+		s.DebugLog("RENDER_BATCH_FLUSH clients=%d", len(pending))
+	}
+
+	// Render all pending clients in parallel
+	var wg sync.WaitGroup
+	for clientID := range pending {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			s.sendRenderToClientImmediate(id)
+		}(clientID)
+	}
+	wg.Wait()
+}
+
+// SendRenderToClient queues a render for a specific client.
+// The actual render is batched and sent after renderBatchDelay.
 func (s *Server) SendRenderToClient(clientID string) {
+	s.renderBatchMu.Lock()
+	s.renderPending[clientID] = true
+	s.scheduleRenderFlushLocked()
+	s.renderBatchMu.Unlock()
+}
+
+// sendRenderToClientImmediate generates and sends render content to a specific client immediately.
+// This is the internal implementation called by flushPendingRenders.
+func (s *Server) sendRenderToClientImmediate(clientID string) {
 	s.clientsMu.RLock()
 	client, ok := s.clients[clientID]
 	if !ok {
@@ -408,12 +543,11 @@ func (s *Server) SendRenderToClient(clientID string) {
 	}
 	if client.lastContentHash == contentHash {
 		s.clientsMu.RUnlock()
-		// Don't log dedup skips - too noisy
 		return
 	}
 	s.clientsMu.RUnlock()
 
-	// Update hash and get fresh conn reference under lock
+	// Update hash and get fresh conn + writeMu reference under lock
 	s.clientsMu.Lock()
 	client, ok = s.clients[clientID]
 	if !ok {
@@ -422,6 +556,7 @@ func (s *Server) SendRenderToClient(clientID string) {
 	}
 	client.lastContentHash = contentHash
 	conn := client.Conn
+	writeMu := &client.writeMu
 	s.clientsMu.Unlock()
 
 	// Set sequence number
@@ -435,7 +570,11 @@ func (s *Server) SendRenderToClient(clientID string) {
 		ClientID: clientID,
 		Payload:  render,
 	}
+	// Serialise writes per-client so parallel BroadcastRender goroutines
+	// cannot interleave bytes on the same connection.
+	writeMu.Lock()
 	s.sendMessage(conn, msg)
+	writeMu.Unlock()
 }
 
 // hashContent returns a simple FNV-like hash of content for deduplication
@@ -480,9 +619,12 @@ func (s *Server) UpdateClientSize(clientID string, width, height int) {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
 	if client, ok := s.clients[clientID]; ok {
-		client.Width = width
-		client.Height = height
-		client.lastContentHash = 0
+		// Only clear content hash if size actually changed
+		if client.Width != width || client.Height != height {
+			client.Width = width
+			client.Height = height
+			client.lastContentHash = 0
+		}
 	}
 }
 
@@ -490,8 +632,11 @@ func (s *Server) UpdateClientWidth(clientID string, width int) {
 	s.clientsMu.Lock()
 	defer s.clientsMu.Unlock()
 	if client, ok := s.clients[clientID]; ok {
-		client.Width = width
-		client.lastContentHash = 0
+		// Only clear content hash if width actually changed
+		if client.Width != width {
+			client.Width = width
+			client.lastContentHash = 0
+		}
 	}
 }
 
@@ -504,6 +649,7 @@ func (s *Server) SendMenuToClient(clientID string, menu *MenuPayload) {
 		return
 	}
 	conn := client.Conn
+	writeMu := &client.writeMu
 	s.clientsMu.RUnlock()
 
 	msg := Message{
@@ -511,7 +657,9 @@ func (s *Server) SendMenuToClient(clientID string, menu *MenuPayload) {
 		ClientID: clientID,
 		Payload:  menu,
 	}
+	writeMu.Lock()
 	s.sendMessage(conn, msg)
+	writeMu.Unlock()
 }
 
 func (s *Server) SendMarkerPickerToClient(clientID string, picker *MarkerPickerPayload) {
@@ -522,6 +670,7 @@ func (s *Server) SendMarkerPickerToClient(clientID string, picker *MarkerPickerP
 		return
 	}
 	conn := client.Conn
+	writeMu := &client.writeMu
 	s.clientsMu.RUnlock()
 
 	msg := Message{
@@ -529,7 +678,9 @@ func (s *Server) SendMarkerPickerToClient(clientID string, picker *MarkerPickerP
 		ClientID: clientID,
 		Payload:  picker,
 	}
+	writeMu.Lock()
 	s.sendMessage(conn, msg)
+	writeMu.Unlock()
 }
 
 func (s *Server) SendColorPickerToClient(clientID string, picker *ColorPickerPayload) {
@@ -540,6 +691,7 @@ func (s *Server) SendColorPickerToClient(clientID string, picker *ColorPickerPay
 		return
 	}
 	conn := client.Conn
+	writeMu := &client.writeMu
 	s.clientsMu.RUnlock()
 
 	msg := Message{
@@ -547,7 +699,9 @@ func (s *Server) SendColorPickerToClient(clientID string, picker *ColorPickerPay
 		ClientID: clientID,
 		Payload:  picker,
 	}
+	writeMu.Lock()
 	s.sendMessage(conn, msg)
+	writeMu.Unlock()
 }
 
 // colorProfileOrder defines the capability order (lowest to highest)

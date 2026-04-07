@@ -16,11 +16,20 @@ fi
 # re-expands to the shell executable name instead of the tmux session ID.
 SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
 
-# Bail out if we can't determine the session — this happens during very early
-# startup (tabby.tmux run-shell -b) before tmux is fully initialized.
-# Hooks will call us again once the session is ready.
+# On first tmux startup (cold boot), the async run-shell -b in tabby.tmux
+# may fire before tmux is fully initialized. Retry a few times with backoff
+# rather than bailing — the session-created hook won't fire for the initial
+# session (it was created before the plugin loaded), so this is our only
+# chance to bootstrap the sidebar on first launch.
 if [ -z "$SESSION_ID" ]; then
-    exit 0
+    for _retry in 1 2 3 4 5; do
+        sleep 0.2
+        SESSION_ID=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
+        [ -n "$SESSION_ID" ] && break
+    done
+    if [ -z "$SESSION_ID" ]; then
+        exit 0
+    fi
 fi
 
 WINDOW_ID="${2:-}"

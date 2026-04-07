@@ -127,12 +127,8 @@ fi
 
 if [ -n "\$NEW_WINDOW_ID" ]; then
     tmux set-option -g @tabby_new_window_id "\$NEW_WINDOW_ID" 2>/dev/null || true
-    if [ -n "\$CLIENT_TTY" ]; then
-        tmux switch-client -c "\$CLIENT_TTY" -t "\$NEW_WINDOW_ID" 2>/dev/null || tmux select-window -t "\$NEW_WINDOW_ID" 2>/dev/null || true
-    else
-        tmux select-window -t "\$NEW_WINDOW_ID" 2>/dev/null || true
-    fi
-    "\$CURRENT_DIR/scripts/focus_new_window.sh" "\$NEW_WINDOW_ID" "\$CLIENT_TTY" >/dev/null 2>&1 &
+    tmux select-window -t "\$NEW_WINDOW_ID" 2>/dev/null || true
+    "\$CURRENT_DIR/scripts/focus_new_window.sh" "\$NEW_WINDOW_ID" >/dev/null 2>&1 &
     ( sleep 2; PENDING=\$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo ""); [ "\$PENDING" = "\$NEW_WINDOW_ID" ] && tmux set-option -gu @tabby_new_window_id 2>/dev/null || true ) &
 fi
 
@@ -646,22 +642,9 @@ if [ -z "$KEY" ]; then KEY="Tab"; fi
 
 tmux bind-key "$KEY" run-shell -b "$CURRENT_DIR/scripts/toggle_sidebar.sh"
 
-# Sidebar collapse/expand keybindings (shrink to 1 col / restore width)
-TOGGLE_COLLAPSE_SCRIPT="$CURRENT_DIR/scripts/toggle_sidebar_collapse.sh"
-chmod +x "$TOGGLE_COLLAPSE_SCRIPT"
-# Alt+< to toggle collapse/expand
-tmux bind-key -n 'M-<' run-shell -b "$TOGGLE_COLLAPSE_SCRIPT"
-# Ctrl+Shift+\ (CSI u encoded) — requires extended-keys in tmux.conf
-tmux bind-key -n 'C-S-\' run-shell -b "$TOGGLE_COLLAPSE_SCRIPT" 2>/dev/null || true
-# Double-click sidebar pane or border toggles collapse/expand
+# Double-click on pane or border: pass through mouse events normally
 tmux bind-key -T root DoubleClick1Pane \
-    if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
-        "run-shell -b '$TOGGLE_COLLAPSE_SCRIPT'" \
-        "select-pane -t = ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send-keys -M } { copy-mode -H ; send-keys -X select-word ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }"
-tmux bind-key -T root DoubleClick1Border \
-    if-shell "tmux list-panes -F '#{pane_current_command}' | grep -q sidebar-render" \
-        "run-shell -b '$TOGGLE_COLLAPSE_SCRIPT'" \
-        ""
+    "select-pane -t = ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send-keys -M } { copy-mode -H ; send-keys -X select-word ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }"
 
 normalize_global_key() {
 	local key="$1"

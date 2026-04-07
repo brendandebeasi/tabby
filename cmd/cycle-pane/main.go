@@ -279,6 +279,9 @@ func clamp(v int) int {
 }
 
 func signalDaemon() {
+	if isSpawning() {
+		return
+	}
 	out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
 	if err != nil {
 		return

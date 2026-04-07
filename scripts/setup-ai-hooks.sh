@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=true; shift ;;
         --tool)    TOOL_FILTER="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 [--dry-run] [--tool claude|gemini|codex|aider|opencode]"
+            echo "Usage: $0 [--dry-run] [--tool claude|gemini|codex|aider|opencode|kilo]"
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -429,6 +429,108 @@ NOTIFIEREOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Kilo -- Plugin-based hooks via kilo.json
+# ─────────────────────────────────────────────────────────────────────────────
+setup_kilo() {
+    local config_global="$HOME/.config/kilo/kilo.json"
+    local config_local=".kilo/kilo.json"
+    local plugin_path=".kilo/tabby-hooks-plugin.js"
+    
+    info "[*] Kilo: $config_global and $config_local"
+    
+    if ! command -v kilo &>/dev/null; then
+        skip "  kilo not found, skipping"
+        return
+    fi
+    
+    # Check if plugin already configured
+    if [[ -f "$config_local" ]] && grep -q "tabby-hooks-plugin" "$config_local" 2>/dev/null; then
+        ok "  Already configured (found tabby-hooks-plugin in config)"
+        return
+    fi
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        info "  [dry-run] Would create Tabby hooks plugin"
+        return
+    fi
+    
+    # Create plugin directory if needed
+    mkdir -p "$(dirname "$plugin_path")"
+    
+    # Create the plugin file
+    cat > "$plugin_path" << 'PLUGINEOF'
+// Kilo plugin to add Tabby status indicator hooks
+const { execSync } = require('child_process');
+
+const INDICATOR_SCRIPT = '/Users/b/git/tabby/scripts/set-tabby-indicator.sh';
+
+function setIndicator(type, value) {
+  try {
+    execSync(`"${INDICATOR_SCRIPT}" ${type} ${value}`, { stdio: 'ignore' });
+  } catch (error) {
+    // Silently fail if Tabby not available
+  }
+}
+
+module.exports = {
+  name: 'tabby-hooks',
+  version: '1.0.0',
+  
+  onUserPromptSubmit() {
+    setIndicator('busy', '1');
+    setIndicator('input', '0');
+  },
+  
+  onAssistantComplete() {
+    setIndicator('busy', '0');
+    setIndicator('bell', '1');
+  }
+};
+PLUGINEOF
+    
+    # Add plugin to config if not already present
+    if [[ -f "$config_local" ]]; then
+        # Add plugin to existing config
+        python3 -c "
+import json
+import sys
+
+try:
+    with open('$config_local', 'r') as f:
+        config = json.load(f)
+except:
+    config = {}
+
+if 'plugin' not in config:
+    config['plugin'] = []
+
+plugin_path = 'file://$plugin_path'
+if plugin_path not in config['plugin']:
+    config['plugin'].append(plugin_path)
+
+with open('$config_local', 'w') as f:
+    json.dump(config, f, indent=2)
+" 2>/dev/null || {
+            echo "  Warning: Could not update config automatically"
+            echo "  Please add this to your $config_local:"
+            echo '    "plugin": ["file://'$plugin_path'"]'
+        }
+    else
+        # Create new config with plugin
+        cat > "$config_local" << CONFIGEOF
+{
+  "\$schema": "https://app.kilo.ai/config.json",
+  "plugin": [
+    "file://$plugin_path"
+  ]
+}
+CONFIGEOF
+    fi
+    
+    ok "  Kilo configured (plugin created at $plugin_path)"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Tabby AI Hook Setup"
@@ -441,6 +543,7 @@ should_run "gemini"   && setup_gemini
 should_run "codex"    && setup_codex
 should_run "aider"    && setup_aider
 should_run "opencode" && setup_opencode
+should_run "kilo"     && setup_kilo
 
 echo ""
 echo "Done. Restart your AI tools to pick up the new hooks."

@@ -91,6 +91,28 @@ func tmuxOutputCtx(args ...string) ([]byte, error) {
 	return out, err
 }
 
+func tmuxOutputTrimmed(args ...string) string {
+	out, err := tmuxOutputCtx(args...)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func preferredWindowFocusTarget(activeWindowID string) string {
+	if pending := tmuxOutputTrimmed("show-option", "-gqv", "@tabby_new_window_id"); pending != "" {
+		return pending
+	}
+	return activeWindowID
+}
+
+func restoreWindowFocus(windowID string) {
+	if windowID == "" {
+		return
+	}
+	_ = tmuxRun("select-window", "-t", windowID)
+}
+
 // StartDeadlockWatchdog starts a goroutine that monitors for deadlocks
 func StartDeadlockWatchdog() {
 	deadlockWatchdog = true
@@ -276,6 +298,19 @@ func (c *Coordinator) GetWindows() []tmux.Window {
 	result := make([]tmux.Window, len(c.windows))
 	copy(result, c.windows)
 	return result
+}
+
+// GetGlobalWidth returns the coordinator's current global sidebar width.
+// This is the source of truth for sidebar width, used by RunWidthSync.
+// Spawn operations should use this instead of reading @tabby_sidebar_width
+// directly to ensure consistency.
+func (c *Coordinator) GetGlobalWidth() int {
+	c.widthSyncMu.Lock()
+	defer c.widthSyncMu.Unlock()
+	if c.globalWidth <= 0 {
+		return 25 // Default
+	}
+	return c.globalWidth
 }
 
 func (c *Coordinator) collapseWindowPanes(windowTarget string, win *tmux.Window) {
@@ -1401,6 +1436,8 @@ func (c *Coordinator) RefreshWindows() {
 
 	c.windows = windows
 
+	activeWindowID := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+
 	// Auto-sync window names from active pane title, unless name is locked.
 	// Collects pending rename ops for execution after unlock.
 	pendingRenames := c.syncWindowNames()
@@ -1449,6 +1486,7 @@ func (c *Coordinator) RefreshWindows() {
 	for _, op := range pendingMoves {
 		tmuxRun("move-window", "-s", op.src, "-t", op.dst)
 	}
+	restoreWindowFocus(preferredWindowFocusTarget(activeWindowID))
 }
 
 // SetActiveWindowOptimistic flips the Active flag on c.windows so the next
@@ -3686,6 +3724,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 				parts := strings.Split(line, " ")
 				if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+					coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (inactive sync)", parts[0], targetWidth)
 					resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 					exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
 					resizeCancel()
@@ -3735,6 +3774,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.Split(line, " ")
 			if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+				coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (active sync)", parts[0], targetWidth)
 				resizeCtx2, resizeCancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 				exec.CommandContext(resizeCtx2, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
 				resizeCancel2()
@@ -3848,6 +3888,7 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.Split(line, " ")
 			if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+				coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (batch sync)", parts[0], op.targetWidth)
 				resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 				exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", op.targetWidth)).Run()
 				resizeCancel()
@@ -10639,6 +10680,7 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 	case "R":
 		cfg, err := config.LoadConfig(config.DefaultConfigPath())
 		if err == nil {
+			activeWindowID := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 			c.stateMu.Lock()
 			c.config = cfg
 			c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
@@ -10649,6 +10691,7 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			for _, op := range moves {
 				tmuxRun("move-window", "-s", op.src, "-t", op.dst)
 			}
+			restoreWindowFocus(preferredWindowFocusTarget(activeWindowID))
 		}
 	case "m":
 		// Open marker picker for active window
