@@ -73,16 +73,18 @@ else
   fail "@tabby_spawning is still set to 1"
 fi
 
-# ─── Test 3: @tabby_new_window_id is set immediately after script ───
+# ─── Test 3: New window becomes active during handoff ───
 
 echo ""
-echo "--- Test 3: @tabby_new_window_id set during window creation ---"
+echo "--- Test 3: New window becomes active during handoff ---"
 
-NEW_WIN_ID=$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo "")
-if [ -n "$NEW_WIN_ID" ]; then
-  pass "@tabby_new_window_id is set ($NEW_WIN_ID)"
+ACTIVE_WINDOW=$(tmux display-message -p -t "$TEST_SESSION" '#{window_id}' 2>/dev/null || echo "")
+NEWEST_WINDOW=$(tmux list-windows -t "$TEST_SESSION" -F '#{window_id}' | tail -1)
+
+if [ -n "$NEWEST_WINDOW" ] && [ "$ACTIVE_WINDOW" = "$NEWEST_WINDOW" ]; then
+  pass "New window becomes active during handoff ($ACTIVE_WINDOW)"
 else
-  fail "@tabby_new_window_id is not set"
+  fail "Active window is '$ACTIVE_WINDOW', expected newest window '$NEWEST_WINDOW'"
 fi
 
 # ─── Test 4: @tabby_new_window_id cleared after delay ───
@@ -128,21 +130,18 @@ else
   fail "@tabby_new_window_group still set to '$SAVED_GROUP_AFTER'"
 fi
 
-# ─── Test 6: @tabby_spawning guard check precedes USR1 in ensure_sidebar.sh ───
+# ─── Test 6: Pending-window marker is set before focus helper runs ───
 
 echo ""
-echo "--- Test 6: Spawning flag ordering (cleared before USR1) ---"
+echo "--- Test 6: Pending window ID is set before focus helper starts ---"
 
-# @tabby_spawning is owned by the daemon (Go), not new_window_with_group.sh.
-# The guard that prevents signals during spawning lives in ensure_sidebar.sh:
-# it reads @tabby_spawning early and bails, and only signals USR1 later.
-GUARD_LINE=$(grep -n 'tabby_spawning' "$PROJECT_ROOT/scripts/ensure_sidebar.sh" | head -1 | cut -d: -f1)
-USR1_LINE=$(grep -n 'kill -USR1' "$PROJECT_ROOT/scripts/ensure_sidebar.sh" | head -1 | cut -d: -f1)
+SET_PENDING_LINE=$(grep -n 'set-option -g @tabby_new_window_id "$NEW_WINDOW_ID"' "$PROJECT_ROOT/scripts/new_window_with_group.sh" | head -1 | cut -d: -f1 || true)
+FOCUS_HELPER_LINE=$(grep -n 'focus_new_window.sh' "$PROJECT_ROOT/scripts/new_window_with_group.sh" | head -1 | cut -d: -f1 || true)
 
-if [ -n "$GUARD_LINE" ] && [ -n "$USR1_LINE" ] && [ "$GUARD_LINE" -lt "$USR1_LINE" ]; then
-  pass "@tabby_spawning guard (line $GUARD_LINE) is before USR1 signal (line $USR1_LINE) in ensure_sidebar.sh"
+if [ -n "$SET_PENDING_LINE" ] && [ -n "$FOCUS_HELPER_LINE" ] && [ "$SET_PENDING_LINE" -lt "$FOCUS_HELPER_LINE" ]; then
+  pass "@tabby_new_window_id is set (line $SET_PENDING_LINE) before focus helper starts (line $FOCUS_HELPER_LINE)"
 else
-  fail "@tabby_spawning guard (line ${GUARD_LINE:-?}) should be before USR1 signal (line ${USR1_LINE:-?}) in ensure_sidebar.sh"
+  fail "Expected @tabby_new_window_id assignment before focus helper (set=${SET_PENDING_LINE:-?}, helper=${FOCUS_HELPER_LINE:-?})"
 fi
 
 # ─── Test 7: Script uses -P -F to capture new window ID ───
@@ -170,16 +169,16 @@ else
   fail "Found $EXIT_COUNT 'exit 0' statements (expected 1)"
 fi
 
-# ─── Test 9: No duplicate focus blocks ───
+# ─── Test 9: Single focus helper invocation ───
 
 echo ""
-echo "--- Test 9: Single focus block (no duplication) ---"
+echo "--- Test 9: Single focus helper invocation ---"
 
-FOCUS_BLOCKS=$(grep -c 'switch-client.*CLIENT_TTY.*NEW_WINDOW_ID' "$PROJECT_ROOT/scripts/new_window_with_group.sh" || echo "0")
+FOCUS_BLOCKS=$(grep -c 'focus_new_window.sh' "$PROJECT_ROOT/scripts/new_window_with_group.sh" || true)
 if [ "$FOCUS_BLOCKS" -eq 1 ]; then
-  pass "Single focus block (count=$FOCUS_BLOCKS)"
+  pass "Single focus helper invocation (count=$FOCUS_BLOCKS)"
 else
-  fail "Found $FOCUS_BLOCKS focus blocks (expected 1)"
+  fail "Found $FOCUS_BLOCKS focus helper invocations (expected 1)"
 fi
 
 # ─── Test 10: Working directory respected ───

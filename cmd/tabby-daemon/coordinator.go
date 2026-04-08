@@ -99,11 +99,15 @@ func tmuxOutputTrimmed(args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func preferredWindowFocusTarget(activeWindowID string) string {
-	if pending := tmuxOutputTrimmed("show-option", "-gqv", "@tabby_new_window_id"); pending != "" {
-		return pending
+func windowFocusRestoreTarget(activeWindowID, pendingNewWindowID string) string {
+	if pendingNewWindowID == "" || pendingNewWindowID == activeWindowID {
+		return ""
 	}
-	return activeWindowID
+	return pendingNewWindowID
+}
+
+func preferredWindowFocusTarget(activeWindowID string) string {
+	return windowFocusRestoreTarget(activeWindowID, tmuxOutputTrimmed("show-option", "-gqv", "@tabby_new_window_id"))
 }
 
 func restoreWindowFocus(windowID string) {
@@ -1508,7 +1512,17 @@ func (c *Coordinator) RefreshWindows() {
 	for _, op := range pendingMoves {
 		tmuxRun("move-window", "-s", op.src, "-t", op.dst)
 	}
-	restoreWindowFocus(preferredWindowFocusTarget(activeWindowID))
+	// Only restore window focus when a new window is pending (to ensure the
+	// newly created window stays active after tmux renumbering via move-window).
+	// Unconditionally calling restoreWindowFocus(activeWindowID) on every
+	// RefreshWindows causes spurious window switches: if a stale USR1 signal
+	// (queued before a Cmd+[/] key press) triggers RefreshWindows, the
+	// activeWindowID captured inside will be the OLD window, and select-window
+	// jumps back to it. See: Tabby issue "meta+[/] sometimes skips back".
+	if focusTarget := preferredWindowFocusTarget(activeWindowID); focusTarget != "" {
+		restoreWindowFocus(focusTarget)
+		logEvent("RESTORE_WINDOW_FOCUS target=%s active=%s", focusTarget, activeWindowID)
+	}
 }
 
 // SetActiveWindowOptimistic flips the Active flag on c.windows so the next
@@ -10935,7 +10949,9 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			for _, op := range moves {
 				tmuxRun("move-window", "-s", op.src, "-t", op.dst)
 			}
-			restoreWindowFocus(preferredWindowFocusTarget(activeWindowID))
+			if focusTarget := preferredWindowFocusTarget(activeWindowID); focusTarget != "" {
+				restoreWindowFocus(focusTarget)
+			}
 		}
 	case "m":
 		// Open marker picker for active window
