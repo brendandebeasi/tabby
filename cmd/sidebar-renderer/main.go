@@ -400,7 +400,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case renderMsg:
 		if inputLog != nil && isInputLogEnabled() {
-			inputLog.Printf("RENDER_APPLY seq=%d lines=%d regions=%d", msg.payload.SequenceNum, msg.payload.TotalLines, len(msg.payload.Regions))
+			inputLog.Printf("RENDER_APPLY seq=%d payload_w=%d payload_h=%d model_w=%d model_h=%d lines=%d regions=%d", msg.payload.SequenceNum, msg.payload.Width, msg.payload.Height, m.width, m.height, msg.payload.TotalLines, len(msg.payload.Regions))
 		}
 		m.content = msg.payload.Content
 		m.regions = msg.payload.Regions
@@ -522,6 +522,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		if m.connected {
+			if inputLog != nil && isInputLogEnabled() {
+				inputLog.Printf("WINDOW_SIZE width=%d height=%d client=%s", m.width, m.height, m.clientID)
+			}
 			m.sendResize()
 		}
 		return m, nil
@@ -2171,6 +2174,9 @@ func (m *rendererModel) sendUnsubscribe() {
 }
 
 func (m *rendererModel) sendResize() {
+	if inputLog != nil && isInputLogEnabled() {
+		inputLog.Printf("SEND_RESIZE client=%s width=%d height=%d pane=%s", m.clientID, m.width, m.height, m.sidebarPaneID)
+	}
 	m.sendMessage(daemon.Message{
 		Type:     daemon.MsgResize,
 		ClientID: m.clientID,

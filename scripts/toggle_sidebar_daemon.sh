@@ -268,7 +268,10 @@ else
     tmux set-hook -g after-resize-pane 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     # shellcheck disable=SC2016
     tmux set-hook -g after-resize-window 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
-    tmux set-hook -g client-resized "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+    SIGNAL_CLIENT_RESIZE_SCRIPT="$CURRENT_DIR/scripts/signal_client_resize.sh"
+    tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+    tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+    tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
     
     # Restore after-select-window hook (matches tabby.tmux line 581)
     ON_WINDOW_SELECT_SCRIPT="$CURRENT_DIR/scripts/on_window_select.sh"

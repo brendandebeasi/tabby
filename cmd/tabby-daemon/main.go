@@ -427,7 +427,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		// Compute bounded width for this window using coordinator's logic.
 		// This ensures the spawn uses the same width calculation as RunWidthSync,
 		// preventing resize churn during startup.
-		width := coordinator.boundedSidebarWidthForWindow(windowID, globalWidth)
+		width := coordinator.boundedSidebarWidthForWindow(windowID, globalWidth, 0)
 
 		// Spawn renderer in this window
 		// Log active pane before spawn for debugging focus issues
@@ -1016,6 +1016,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		expectedHeight := 1
 		if hdr.height > expectedHeight {
 			debugLog.Printf("Header %s height=%d, forcing to %d", hdr.paneID, hdr.height, expectedHeight)
+			logEvent("HEADER_HEIGHT_ADJUST trigger=cleanup pane=%s height=%d expected=%d", hdr.paneID, hdr.height, expectedHeight)
 			exec.Command("tmux", "resize-pane", "-t", hdr.paneID, "-y", fmt.Sprintf("%d", expectedHeight)).Run()
 		}
 
@@ -1060,6 +1061,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 
 	// Restore sidebar widths if we killed any headers (layout may have shifted)
 	if killed {
+		logEvent("WIDTH_SYNC_REQUEST trigger=cleanup_orphan_headers active=%s force=1", activeWindowID)
 		coordinator.RunWidthSync(activeWindowID, true)
 	}
 }
@@ -1262,46 +1264,241 @@ func shouldRestoreFocus() bool {
 		strings.Contains(cmd, "pane-header")
 }
 
-// syncClientSizesFromTmux updates all client widths/heights from actual tmux pane sizes
-// This ensures background sidebars get correct dimensions on resize events
-func syncClientSizesFromTmux(server *daemon.Server) {
+// syncClientSizesFromTmux updates all client widths/heights from actual tmux pane sizes.
+// Returns true when any tracked sidebar size changed.
+func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, trigger string) bool {
+	start := time.Now()
+
 	// Get all panes with their sizes and commands
 	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{window_id}\x1f#{pane_id}\x1f#{pane_width}\x1f#{pane_height}\x1f#{pane_current_command}").Output()
+		"#{window_id}\x1f#{pane_id}\x1f#{pane_width}\x1f#{pane_height}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
 	if err != nil {
-		return
+		logEvent("GEOM_SYNC_ERROR trigger=%s err=%v", trigger, err)
+		return false
 	}
 
 	// Build a map of window ID -> sidebar pane dimensions
-	sidebarSizes := make(map[string]struct{ width, height int })
+	type paneSize struct {
+		width  int
+		height int
+		paneID string
+	}
+
+	sidebarSizes := make(map[string]paneSize)
+	headerSizes := make(map[string]paneSize)
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x1f", 5)
-		if len(parts) < 5 {
+		parts := strings.SplitN(line, "\x1f", 6)
+		if len(parts) < 6 {
 			continue
 		}
 		windowID := parts[0]
-		// paneID := parts[1]
+		paneID := parts[1]
 		width, _ := strconv.Atoi(parts[2])
 		height, _ := strconv.Atoi(parts[3])
 		cmd := parts[4]
+		startCmd := parts[5]
 
 		// Check if this is a sidebar/renderer pane
 		if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") {
-			sidebarSizes[windowID] = struct{ width, height int }{width, height}
+			sidebarSizes[windowID] = paneSize{width: width, height: height, paneID: paneID}
+			continue
+		}
+
+		if strings.Contains(cmd, "pane-header") || strings.Contains(startCmd, "pane-header") {
+			targetPane := paneTargetFromStartCmd(startCmd)
+			if targetPane == "" {
+				targetPane = paneID
+			}
+			headerSizes["header:"+targetPane] = paneSize{width: width, height: height, paneID: paneID}
 		}
 	}
 
-	// Update server client sizes
+	sizesChanged := false
+	changeCount := 0
+
+	// Update server client sizes and coordinator width snapshots.
 	for windowID, size := range sidebarSizes {
 		// Skip clearly invalid widths (e.g. pane collapsed to 0 or 1)
 		if size.width < 5 {
+			logEvent("GEOM_SYNC_SKIP trigger=%s client=%s width=%d height=%d reason=too_small", trigger, windowID, size.width, size.height)
 			continue
 		}
+		if info := server.GetClientInfo(windowID); info != nil {
+			if info.Width != size.width || info.Height != size.height {
+				sizesChanged = true
+				changeCount++
+				logEvent("GEOM_SYNC_SIDEBAR trigger=%s client=%s prev=%dx%d new=%dx%d delta_w=%d delta_h=%d",
+					trigger, windowID, info.Width, info.Height, size.width, size.height, size.width-info.Width, size.height-info.Height)
+			}
+		} else {
+			sizesChanged = true
+			changeCount++
+			logEvent("GEOM_SYNC_SIDEBAR trigger=%s client=%s prev=none new=%dx%d", trigger, windowID, size.width, size.height)
+		}
 		server.UpdateClientSize(windowID, size.width, size.height)
+		if coordinator != nil {
+			coordinator.UpdateClientSizeSnapshot(windowID, size.width, size.height)
+		}
+	}
+
+	for clientID, size := range headerSizes {
+		if info := server.GetClientInfo(clientID); info != nil {
+			if info.Width != size.width || info.Height != size.height {
+				sizesChanged = true
+				changeCount++
+				logEvent("HEADER_SIZE_SYNC trigger=%s client=%s prev=%dx%d new=%dx%d",
+					trigger, clientID, info.Width, info.Height, size.width, size.height)
+			}
+		} else {
+			if size.width > 0 || size.height > 0 {
+				changeCount++
+				sizesChanged = true
+				logEvent("HEADER_SIZE_SYNC trigger=%s client=%s prev=none new=%dx%d", trigger, clientID, size.width, size.height)
+			}
+		}
+		if size.height > 1 {
+			logEvent("HEADER_HEIGHT_ANOMALY trigger=%s client=%s height=%d", trigger, clientID, size.height)
+			exec.Command("tmux", "resize-pane", "-t", size.paneID, "-y", "1").Run()
+		}
+		server.UpdateClientSize(clientID, size.width, size.height)
+	}
+
+	if changeCount > 0 {
+		logEvent("GEOM_SYNC_APPLY trigger=%s changed=%d duration_ms=%d", trigger, changeCount, time.Since(start).Milliseconds())
+	}
+
+	return sizesChanged
+}
+
+func activeClientGeometry() (width int, height int, tty string, activity int64, ok bool) {
+	const idleWindow = int64(1500)
+	now := time.Now().Unix()
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}\x1f#{client_width}\x1f#{client_height}\x1f#{client_flags}\x1f#{client_activity}").Output()
+	if err != nil {
+		return 0, 0, "", 0, false
+	}
+
+	type clientInfo struct {
+		tty      string
+		width    int
+		height   int
+		focused  bool
+		activity int64
+	}
+
+	var attachedClients []clientInfo
+	focusedCount := 0
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\x1f")
+		if len(parts) < 5 {
+			continue
+		}
+		w, errW := strconv.Atoi(parts[1])
+		h, errH := strconv.Atoi(parts[2])
+		if errW != nil || errH != nil || w <= 0 || h <= 0 {
+			continue
+		}
+		flags := parts[3]
+		activity, _ := strconv.ParseInt(parts[4], 10, 64)
+		info := clientInfo{
+			tty:      parts[0],
+			width:    w,
+			height:   h,
+			focused:  strings.Contains(flags, "focused"),
+			activity: activity,
+		}
+		if strings.Contains(flags, "attached") {
+			attachedClients = append(attachedClients, info)
+			if info.focused {
+				focusedCount++
+			}
+		}
+	}
+
+	if len(attachedClients) == 0 {
+		return 0, 0, "", 0, false
+	}
+
+	bestIdx := 0
+	for i := 1; i < len(attachedClients); i++ {
+		c := attachedClients[i]
+		deltaBest := now - attachedClients[bestIdx].activity
+		deltaCur := now - c.activity
+		bestActive := deltaBest <= idleWindow
+		curActive := deltaCur <= idleWindow
+		if bestActive != curActive {
+			if curActive {
+				bestIdx = i
+			}
+			continue
+		}
+		if c.activity > attachedClients[bestIdx].activity {
+			bestIdx = i
+			continue
+		}
+		if c.activity == attachedClients[bestIdx].activity {
+			if c.focused && !attachedClients[bestIdx].focused {
+				bestIdx = i
+			}
+		}
+	}
+
+	best := attachedClients[bestIdx]
+	reason := "activity"
+	if now-best.activity > idleWindow {
+		reason = "stale_activity"
+	}
+	if best.focused {
+		reason = reason + "+focused"
+	}
+	logEvent("CLIENT_GEOM_SELECT tty=%s size=%dx%d reason=%s activity=%d attached=%d focused=%d", best.tty, best.width, best.height, reason, best.activity, len(attachedClients), focusedCount)
+	return best.width, best.height, best.tty, best.activity, true
+}
+
+// resizeAllHeaderPanes forces every pane-header pane back to 1 row after
+// a window resize may have given it extra height.
+func resizeAllHeaderPanes() {
+	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
+		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "\x1f", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		paneID, cmd, startCmd := parts[0], parts[1], parts[2]
+		if strings.Contains(cmd, "pane-header") || strings.Contains(startCmd, "pane-header") {
+			logEvent("HEADER_HEIGHT_ADJUST trigger=bulk pane=%s", paneID)
+			exec.Command("tmux", "resize-pane", "-t", paneID, "-y", "1").Run()
+		}
+	}
+}
+
+func resizeAllWindowsToClient(width, height int) {
+	if width <= 0 || height <= 0 {
+		return
+	}
+	out, err := exec.Command("tmux", "list-windows", "-F", "#{window_id}").Output()
+	if err != nil {
+		return
+	}
+	for _, wid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		wid = strings.TrimSpace(wid)
+		if wid == "" {
+			continue
+		}
+		exec.Command("tmux", "resize-window", "-x", fmt.Sprintf("%d", width), "-y", fmt.Sprintf("%d", height), "-t", wid).Run()
 	}
 }
 
@@ -1463,6 +1660,14 @@ func main() {
 		}
 	}
 	server.OnResize = func(clientID string, width, height int, paneID string) {
+		coordinator.UpdateClientSizeSnapshot(clientID, width, height)
+		if clientID != "" && !strings.HasPrefix(clientID, "header:") {
+			go func(id string) {
+				logEvent("WIDTH_SYNC_REQUEST trigger=renderer_resize active=%s force=1", id)
+				coordinator.RunWidthSync(id, true)
+				server.BroadcastRender()
+			}(clientID)
+		}
 		if paneID != "" {
 			coordinator.ApplyThemeToPane(paneID)
 		}
@@ -1514,6 +1719,24 @@ func main() {
 				}
 				logEvent("SIGNAL_USR1 queue=full action=coalesced")
 			}
+		}
+	}()
+
+	// SIGUSR2 = client-resized: immediately force a full width sync across all windows.
+	// Using a separate signal bypasses the 500ms debounce on the normal USR1 path.
+	clientResizedCh := make(chan os.Signal, 5)
+	signal.Notify(clientResizedCh, syscall.SIGUSR2)
+	go func() {
+		for range clientResizedCh {
+			logEvent("SIGNAL_USR2_CLIENT_RESIZED session=%s", *sessionID)
+			go func() {
+				syncClientSizesFromTmux(server, coordinator, "sigusr2")
+				activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+				logEvent("WIDTH_SYNC_REQUEST trigger=sigusr2 active=%s force=1", activeWin)
+				coordinator.RunWidthSync(activeWin, true /* force */)
+				server.BroadcastRender()
+				logEvent("SIGNAL_USR2_DONE session=%s active=%s", *sessionID, activeWin)
+			}()
 		}
 	}()
 
@@ -1618,19 +1841,22 @@ func main() {
 			}
 		}
 
-		refreshTicker := time.NewTicker(30 * time.Second)         // Window list poll (fallback, signal_refresh handles real-time)
-		windowCheckTicker := time.NewTicker(3 * time.Second)      // Spawn/cleanup poll (fallback, reduced from 10s for faster new-window response)
-		animationTicker := time.NewTicker(100 * time.Millisecond) // Combined spinner + pet animation (was two separate tickers)
-		gitTicker := time.NewTicker(5 * time.Second)              // Git status
-		watchdogTicker := time.NewTicker(5 * time.Second)         // Watchdog: check renderer health
+		refreshTicker := time.NewTicker(30 * time.Second)              // Window list poll (fallback, signal_refresh handles real-time)
+		windowCheckTicker := time.NewTicker(3 * time.Second)           // Spawn/cleanup poll (fallback, reduced from 10s for faster new-window response)
+		clientGeometryTicker := time.NewTicker(250 * time.Millisecond) // Fallback for client switches that do not emit hooks
+		animationTicker := time.NewTicker(100 * time.Millisecond)      // Combined spinner + pet animation (was two separate tickers)
+		gitTicker := time.NewTicker(5 * time.Second)                   // Git status
+		watchdogTicker := time.NewTicker(5 * time.Second)              // Watchdog: check renderer health
 		defer refreshTicker.Stop()
 		defer windowCheckTicker.Stop()
+		defer clientGeometryTicker.Stop()
 		defer animationTicker.Stop()
 		defer gitTicker.Stop()
 		defer watchdogTicker.Stop()
 
 		lastWindowsHash := ""
 		lastGitState := ""
+		lastClientGeometry := ""
 		activeWindowID := "" // Track active window for optimized rendering
 
 		// Helper to get current active window ID (cached, updated on events)
@@ -1708,8 +1934,9 @@ func main() {
 					logEvent("SIGNAL_REFRESH session=%s", *sessionID)
 
 					updateActiveWindow()
-					// Sync client sizes first (only clears hash if sizes changed)
-					syncClientSizesFromTmux(server)
+					// Sync client sizes first so width sync sees real tmux dimensions
+					// for both active and inactive windows after a client resize.
+					sizesChanged := syncClientSizesFromTmux(server, coordinator, "signal_refresh")
 
 					// Optimistic render: flip the active window flag and render
 					// immediately so the sidebar highlights the correct window
@@ -1725,8 +1952,11 @@ func main() {
 					// (pane titles, AI indicators, git status, etc.).
 					server.BroadcastRender()
 					t1b := time.Now()
-					// Width sync runs off the render path to prevent deadlocks
-					coordinator.RunWidthSync(activeWindowID, false)
+					// Force a coordinated width sync when tmux reported actual pane
+					// size changes; this prevents inactive windows from catching up
+					// one by one as the user later visits them.
+					logEvent("WIDTH_SYNC_REQUEST trigger=signal_refresh active=%s force=%v", activeWindowID, sizesChanged)
+					coordinator.RunWidthSync(activeWindowID, sizesChanged)
 
 					// Heavy ops (spawn/cleanup/layout) only if enough time has
 					// passed since the last full refresh. This breaks the feedback
@@ -1758,7 +1988,7 @@ func main() {
 						// Second broadcast only if structure changed (new/removed renderers)
 						structureChanged := spawnedRenderer || currentHash != lastWindowsHash
 						if structureChanged {
-							syncClientSizesFromTmux(server)
+							syncClientSizesFromTmux(server, coordinator, "structure_refresh")
 							server.BroadcastRender()
 						}
 						lastWindowsHash = currentHash
@@ -1807,7 +2037,26 @@ func main() {
 					// Persist current layouts to disk for restart recovery
 					saveLayoutsToDisk(windows)
 					// Width sync as fallback for missed events
+					logEvent("WIDTH_SYNC_REQUEST trigger=window_check active=%s force=0", activeWindowID)
 					coordinator.RunWidthSync(activeWindowID, false)
+				})
+			case <-clientGeometryTicker.C:
+				runLoopTaskNonFatal("client_geometry_tick", 2*time.Second, func() {
+					w, h, tty, activity, ok := activeClientGeometry()
+					if !ok {
+						return
+					}
+					geomKey := fmt.Sprintf("%s:%dx%d:%d", tty, w, h, activity)
+					if geomKey == lastClientGeometry {
+						return
+					}
+					lastClientGeometry = geomKey
+					logEvent("CLIENT_GEOMETRY_CHANGE tty=%s size=%dx%d activity=%d", tty, w, h, activity)
+					syncClientSizesFromTmux(server, coordinator, "geometry_tick")
+					activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+					logEvent("WIDTH_SYNC_REQUEST trigger=geometry_tick active=%s force=1", activeWin)
+					coordinator.RunWidthSync(activeWin, true)
+					server.BroadcastRender()
 				})
 			case <-watchdogTicker.C:
 				ok := runLoopTask("watchdog", 6*time.Second, func() {

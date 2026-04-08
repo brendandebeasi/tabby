@@ -237,8 +237,10 @@ type Coordinator struct {
 	widthSyncMu            sync.Mutex
 
 	// Per-client widths for accurate click detection
-	clientWidths   map[string]int
-	clientWidthsMu sync.RWMutex
+	clientWidths      map[string]int
+	clientHeights     map[string]int
+	keyboardHoldUntil map[string]time.Time
+	clientWidthsMu    sync.RWMutex
 
 	// Sidebar collapse state
 	sidebarCollapsed     bool
@@ -289,6 +291,8 @@ type Coordinator struct {
 	theme *colors.Theme
 }
 
+const mobileKeyboardHoldDuration = 4 * time.Second
+
 // GetWindows returns the current list of windows
 func (c *Coordinator) GetWindows() []tmux.Window {
 	c.stateMu.RLock()
@@ -298,6 +302,22 @@ func (c *Coordinator) GetWindows() []tmux.Window {
 	result := make([]tmux.Window, len(c.windows))
 	copy(result, c.windows)
 	return result
+}
+
+func (c *Coordinator) UpdateClientSizeSnapshot(clientID string, width int, height int) {
+	if clientID == "" || strings.HasPrefix(clientID, "header:") || width <= 0 {
+		return
+	}
+	c.clientWidthsMu.Lock()
+	c.clientWidths[clientID] = width
+	if height > 0 {
+		if c.clientHeights == nil {
+			c.clientHeights = make(map[string]int)
+		}
+		c.clientHeights[clientID] = height
+	}
+	c.updateKeyboardHoldLocked(clientID, height)
+	c.clientWidthsMu.Unlock()
 }
 
 // GetGlobalWidth returns the coordinator's current global sidebar width.
@@ -727,6 +747,8 @@ func NewCoordinator(sessionID string) *Coordinator {
 		cwdColors:          make(map[string]CWDColorMapping),
 		collapsedGroups:    make(map[string]bool),
 		clientWidths:       make(map[string]int),
+		clientHeights:      make(map[string]int),
+		keyboardHoldUntil:  make(map[string]time.Time),
 		pendingMenus:       make(map[string][]menuItemDef),
 		lastWindowSelect:   make(map[string]time.Time),
 		lastWindowByClient: make(map[string]time.Time),
@@ -3750,7 +3772,19 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		return
 	}
 
-	targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth)
+	currentHeight := 0
+	c.clientWidthsMu.RLock()
+	if c.clientHeights != nil {
+		currentHeight = c.clientHeights[clientID]
+	}
+	c.clientWidthsMu.RUnlock()
+	targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth, currentHeight)
+	if currentHeight > 0 {
+		keyboardWidth, keyboardThreshold := c.getMobileKeyboardSettings()
+		if currentHeight <= keyboardThreshold && targetWidth > keyboardWidth {
+			targetWidth = keyboardWidth
+		}
+	}
 	if currentWidth == targetWidth {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
@@ -3789,19 +3823,32 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 // to avoid blocking BroadcastRender with tmux subprocess calls.
 // When force=true, skips the 500ms debounce (used for immediate restoration after layout changes).
 func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
+	start := time.Now()
 	if c.sidebarCollapsed {
+		logEvent("WIDTH_SYNC_SKIP reason=sidebar_collapsed active=%s force=%v", activeWindowID, force)
 		return
 	}
 
-	// Snapshot client widths
+	// Snapshot client widths/heights
 	c.clientWidthsMu.RLock()
 	clientSnapshot := make(map[string]int, len(c.clientWidths))
+	clientHeightSnapshot := make(map[string]int, len(c.clientWidths))
+	keyboardHoldSnapshot := make(map[string]time.Time, len(c.keyboardHoldUntil))
 	for id, w := range c.clientWidths {
 		clientSnapshot[id] = w
+		if c.clientHeights != nil {
+			clientHeightSnapshot[id] = c.clientHeights[id]
+		}
+	}
+	if c.keyboardHoldUntil != nil {
+		for id, expiry := range c.keyboardHoldUntil {
+			keyboardHoldSnapshot[id] = expiry
+		}
 	}
 	c.clientWidthsMu.RUnlock()
 
 	if len(clientSnapshot) == 0 {
+		logEvent("WIDTH_SYNC_SKIP reason=no_clients active=%s force=%v duration_ms=%d", activeWindowID, force, time.Since(start).Milliseconds())
 		return
 	}
 
@@ -3814,6 +3861,10 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	}
 	c.stateMu.RUnlock()
 
+	keyboardWidth, keyboardThreshold := c.getMobileKeyboardSettings()
+	expiredHolds := make([]string, 0)
+	extendHolds := make([]string, 0)
+
 	trackLock("widthSyncMu", "RunWidthSync")
 	c.widthSyncMu.Lock()
 
@@ -3825,13 +3876,16 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	}
 
 	// Debounce: ignore resize events within 500ms of our last sync (unless forced)
-	if !force {
-		sinceLast := time.Since(c.lastWidthSync)
-		if sinceLast < 500*time.Millisecond {
-			untrackLock("widthSyncMu")
-			c.widthSyncMu.Unlock()
-			return
-		}
+	var sinceLast time.Duration
+	hasLast := !c.lastWidthSync.IsZero()
+	if hasLast {
+		sinceLast = time.Since(c.lastWidthSync)
+	}
+	if !force && hasLast && sinceLast < 500*time.Millisecond {
+		logEvent("WIDTH_SYNC_SKIP reason=debounce active=%s force=%v since_last_ms=%d", activeWindowID, force, sinceLast.Milliseconds())
+		untrackLock("widthSyncMu")
+		c.widthSyncMu.Unlock()
+		return
 	}
 
 	// Build list of panes to resize (compute under lock, execute after unlock)
@@ -3842,6 +3896,7 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	var ops []resizeOp
 
 	for clientID, currentWidth := range clientSnapshot {
+		currentHeight := clientHeightSnapshot[clientID]
 		// Skip header clients
 		if strings.HasPrefix(clientID, "header:") {
 			continue
@@ -3856,17 +3911,55 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 			c.globalWidth = currentWidth
 		}
 
+		expiry, holdActive := keyboardHoldSnapshot[clientID]
+		now := time.Now()
+		applyKeyboardClamp := false
+		if currentHeight > 0 && currentHeight <= keyboardThreshold {
+			applyKeyboardClamp = true
+		}
+		if holdActive {
+			if now.After(expiry) {
+				expiredHolds = append(expiredHolds, clientID)
+			} else {
+				applyKeyboardClamp = true
+			}
+		}
+
 		if currentWidth < 10 {
 			coordinatorDebugLog.Printf("Width sync: %s below minimum (%d), restoring to global %d", clientID, currentWidth, c.globalWidth)
-			targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth)
+			targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth, currentHeight)
+			if applyKeyboardClamp && targetWidth > keyboardWidth {
+				targetWidth = keyboardWidth
+			}
+			if applyKeyboardClamp {
+				extendHolds = append(extendHolds, clientID)
+			}
+			logEvent("WIDTH_SYNC_PLAN client=%s active=%s current=%d target=%d reason=min_guard", clientID, activeWindowID, currentWidth, targetWidth)
 			ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
 			continue
 		}
 
-		targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth)
+		targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth, currentHeight)
+		if applyKeyboardClamp && targetWidth > keyboardWidth {
+			targetWidth = keyboardWidth
+		}
 		if currentWidth != targetWidth {
 			coordinatorDebugLog.Printf("Width sync: window=%s current=%d target=%d", clientID, currentWidth, targetWidth)
+			logEvent("WIDTH_SYNC_PLAN client=%s active=%s current=%d target=%d", clientID, activeWindowID, currentWidth, targetWidth)
 			ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
+			if applyKeyboardClamp {
+				extendHolds = append(extendHolds, clientID)
+			}
+			continue
+		}
+
+		if force {
+			coordinatorDebugLog.Printf("Width sync (force): window=%s current=%d target=%d", clientID, currentWidth, targetWidth)
+			logEvent("WIDTH_SYNC_PLAN client=%s active=%s current=%d target=%d reason=force_reapply", clientID, activeWindowID, currentWidth, targetWidth)
+			ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
+			if applyKeyboardClamp {
+				extendHolds = append(extendHolds, clientID)
+			}
 		}
 	}
 
@@ -3876,6 +3969,34 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 
 	untrackLock("widthSyncMu")
 	c.widthSyncMu.Unlock()
+
+	if len(expiredHolds) > 0 || len(extendHolds) > 0 {
+		now := time.Now()
+		c.clientWidthsMu.Lock()
+		if len(expiredHolds) > 0 {
+			for _, id := range expiredHolds {
+				if expiry, ok := c.keyboardHoldUntil[id]; ok && now.After(expiry) {
+					delete(c.keyboardHoldUntil, id)
+				}
+			}
+		}
+		if len(extendHolds) > 0 {
+			if c.keyboardHoldUntil == nil {
+				c.keyboardHoldUntil = make(map[string]time.Time)
+			}
+			for _, id := range extendHolds {
+				c.keyboardHoldUntil[id] = now.Add(mobileKeyboardHoldDuration)
+			}
+		}
+		c.clientWidthsMu.Unlock()
+	}
+
+	elapsed := time.Since(start)
+	if len(ops) == 0 {
+		logEvent("WIDTH_SYNC_NOOP active=%s force=%v duration_ms=%d since_last_ms=%d", activeWindowID, force, elapsed.Milliseconds(), sinceLast.Milliseconds())
+	} else {
+		logEvent("WIDTH_SYNC_EXEC active=%s force=%v ops=%d duration_ms=%d since_last_ms=%d", activeWindowID, force, len(ops), elapsed.Milliseconds(), sinceLast.Milliseconds())
+	}
 
 	// Execute tmux resize operations AFTER releasing all locks
 	for _, op := range ops {
@@ -3889,6 +4010,7 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 			parts := strings.Split(line, " ")
 			if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
 				coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (batch sync)", parts[0], op.targetWidth)
+				logEvent("WIDTH_SYNC_RESIZE client=%s pane=%s width=%d", op.clientID, parts[0], op.targetWidth)
 				resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 				exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", op.targetWidth)).Run()
 				resizeCancel()
@@ -3940,7 +4062,7 @@ func (c *Coordinator) isLikelyAutoConstrainedSidebarWidth(windowID string, curre
 		return false
 	}
 
-	maxReasonable, ok := c.sidebarReasonableMaxForWindow(windowID)
+	maxReasonable, ok := c.sidebarReasonableMaxForWindow(windowID, 0)
 	if !ok {
 		return false
 	}
@@ -3948,11 +4070,11 @@ func (c *Coordinator) isLikelyAutoConstrainedSidebarWidth(windowID string, curre
 	return currentWidth <= maxReasonable && maxReasonable < c.globalWidth
 }
 
-func (c *Coordinator) boundedSidebarWidthForWindow(windowID string, requested int) int {
+func (c *Coordinator) boundedSidebarWidthForWindow(windowID string, requested int, clientHeight int) int {
 	if requested <= 0 {
 		return requested
 	}
-	maxReasonable, ok := c.sidebarReasonableMaxForWindow(windowID)
+	maxReasonable, ok := c.sidebarReasonableMaxForWindow(windowID, clientHeight)
 	if !ok {
 		return requested
 	}
@@ -3962,7 +4084,61 @@ func (c *Coordinator) boundedSidebarWidthForWindow(windowID string, requested in
 	return requested
 }
 
-func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string) (int, bool) {
+func (c *Coordinator) getMobileKeyboardSettings() (int, int) {
+	keyboardWidth := 0
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_mobile_keyboard").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 6 {
+			keyboardWidth = v
+		}
+	}
+	if keyboardWidth <= 0 {
+		if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_mobile").Output(); err == nil {
+			if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
+				keyboardWidth = v
+			}
+		}
+	}
+	if keyboardWidth <= 0 {
+		keyboardWidth = 15
+	}
+	if keyboardWidth < 10 {
+		keyboardWidth = 10
+	}
+
+	keyboardThreshold := 38
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_keyboard_rows").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
+			keyboardThreshold = v
+		}
+	}
+	return keyboardWidth, keyboardThreshold
+}
+
+func (c *Coordinator) updateKeyboardHoldLocked(clientID string, reportedHeight int) {
+	if clientID == "" || strings.HasPrefix(clientID, "header:") {
+		return
+	}
+	_, keyboardThreshold := c.getMobileKeyboardSettings()
+	height := reportedHeight
+	if height <= 0 && c.clientHeights != nil {
+		if h, ok := c.clientHeights[clientID]; ok {
+			height = h
+		}
+	}
+	now := time.Now()
+	if height > 0 && height <= keyboardThreshold {
+		if c.keyboardHoldUntil == nil {
+			c.keyboardHoldUntil = make(map[string]time.Time)
+		}
+		c.keyboardHoldUntil[clientID] = now.Add(mobileKeyboardHoldDuration)
+	} else if c.keyboardHoldUntil != nil {
+		if expiry, ok := c.keyboardHoldUntil[clientID]; ok && now.After(expiry) {
+			delete(c.keyboardHoldUntil, clientID)
+		}
+	}
+}
+
+func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeight int) (int, bool) {
 	if windowID == "" {
 		return 0, false
 	}
@@ -3989,6 +4165,15 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string) (int, bool)
 	windowWidth, err := strconv.Atoi(strings.TrimSpace(string(windowWidthOut)))
 	if err != nil || windowWidth <= 0 {
 		return 0, false
+	}
+
+	height := clientHeight
+	if height <= 0 {
+		if windowHeightOut, err := exec.Command("tmux", "display-message", "-p", "-t", windowID, "#{window_height}").Output(); err == nil {
+			if v, err := strconv.Atoi(strings.TrimSpace(string(windowHeightOut))); err == nil && v > 0 {
+				height = v
+			}
+		}
 	}
 
 	maxPercent := 20
@@ -4052,6 +4237,30 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string) (int, bool)
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
 			widthMobile = v
 		}
+	}
+
+	widthMobileKeyboard := widthMobile
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_mobile_keyboard").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 6 {
+			widthMobileKeyboard = v
+		}
+	}
+
+	keyboardThreshold := 0
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_keyboard_rows").Output(); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
+			keyboardThreshold = v
+		}
+	}
+	if keyboardThreshold == 0 {
+		keyboardThreshold = 38
+	}
+	if height > 0 && height <= keyboardThreshold {
+		maxWidth := widthMobileKeyboard
+		if maxWidth < 10 {
+			maxWidth = 10
+		}
+		return maxWidth, true
 	}
 
 	maxByFraction := windowWidth * maxPercent / 100
@@ -4142,10 +4351,8 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	// Track width for pet physics (safe to update outside lock - advisory)
 	c.lastWidth = width
 
-	// Store per-client width for accurate click detection on resize
-	c.clientWidthsMu.Lock()
-	c.clientWidths[clientID] = width
-	c.clientWidthsMu.Unlock()
+	// Store per-client size for accurate click detection on resize
+	c.UpdateClientSizeSnapshot(clientID, width, height)
 
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
@@ -4918,6 +5125,46 @@ func hashContent(s string) uint32 {
 // Used for button clicks (grow/shrink) where we want to resize ALL sidebars.
 func syncAllSidebarWidths(newWidth int) {
 	syncSidebarWidthsExcept(newWidth, "")
+}
+
+// ResizeAllWindowsNow immediately resizes every sidebar pane to its
+// correct bounded width. Called on client-resized so all windows settle
+// at once rather than lazily as the user visits each one.
+func (c *Coordinator) ResizeAllWindowsNow() {
+	if c.sidebarCollapsed {
+		return
+	}
+
+	targetWidth := c.globalWidth
+	if targetWidth < 10 {
+		targetWidth = 25
+	}
+
+	out, err := tmuxOutputCtx("list-panes", "-a", "-F",
+		"#{pane_id}|#{window_id}|#{?@tabby_sync_width,#{@tabby_sync_width},1}|#{pane_current_command}")
+	if err != nil {
+		return
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.Split(line, "|")
+		if len(parts) < 4 || !strings.HasPrefix(parts[3], "sidebar") {
+			continue
+		}
+		paneID := parts[0]
+		windowID := parts[1]
+		syncSetting := parts[2]
+		if syncSetting != "1" && syncSetting != "true" {
+			continue
+		}
+
+		w := c.boundedSidebarWidthForWindow(windowID, targetWidth, 0)
+		if w < 1 {
+			w = 1
+		}
+		coordinatorDebugLog.Printf("ResizeAllWindowsNow: pane=%s window=%s width=%d", paneID, windowID, w)
+		tmuxRun("resize-pane", "-t", paneID, "-x", fmt.Sprintf("%d", w))
+	}
 }
 
 // syncOtherSidebarWidths resizes all sidebar panes EXCEPT the one in skipWindowID.
@@ -8183,6 +8430,9 @@ func (c *Coordinator) getClientWidth(clientID string) int {
 func (c *Coordinator) RemoveClient(clientID string) {
 	c.clientWidthsMu.Lock()
 	delete(c.clientWidths, clientID)
+	if c.clientHeights != nil {
+		delete(c.clientHeights, clientID)
+	}
 	c.clientWidthsMu.Unlock()
 	coordinatorDebugLog.Printf("Removed client: %s (remaining: %d)", clientID, len(c.clientWidths))
 }
@@ -8717,9 +8967,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.persistSidebarWidthProfile(clientID, newWidth)
 		go syncAllSidebarWidths(newWidth)
 		// Update client width tracking
-		c.clientWidthsMu.Lock()
-		c.clientWidths[clientID] = newWidth
-		c.clientWidthsMu.Unlock()
+		c.UpdateClientSizeSnapshot(clientID, newWidth, 0)
 		coordinatorDebugLog.Printf("Sidebar shrink: %d -> %d (syncing all)", currentWidth, newWidth)
 		return false
 
@@ -8735,9 +8983,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.persistSidebarWidthProfile(clientID, newWidth)
 		go syncAllSidebarWidths(newWidth)
 		// Update client width tracking
-		c.clientWidthsMu.Lock()
-		c.clientWidths[clientID] = newWidth
-		c.clientWidthsMu.Unlock()
+		c.UpdateClientSizeSnapshot(clientID, newWidth, 0)
 		coordinatorDebugLog.Printf("Sidebar grow: %d -> %d (syncing all)", currentWidth, newWidth)
 		return false
 
@@ -8766,13 +9012,11 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if newWidth < 15 {
 			newWidth = 25
 		}
-		newWidth = c.boundedSidebarWidthForWindow(clientID, newWidth)
+		newWidth = c.boundedSidebarWidthForWindow(clientID, newWidth, 0)
 		exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_collapsed").Run()
 		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
 		syncAllSidebarWidths(newWidth)
-		c.clientWidthsMu.Lock()
-		c.clientWidths[clientID] = newWidth
-		c.clientWidthsMu.Unlock()
+		c.UpdateClientSizeSnapshot(clientID, newWidth, 0)
 		if c.OnSyncSidebarClientWidths != nil {
 			c.OnSyncSidebarClientWidths(newWidth)
 		}

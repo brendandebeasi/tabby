@@ -525,6 +525,9 @@ chmod +x "$RESTORE_SIDEBAR_SCRIPT"
 STABILIZE_CLIENT_RESIZE_SCRIPT="$CURRENT_DIR/scripts/stabilize_client_resize.sh"
 chmod +x "$STABILIZE_CLIENT_RESIZE_SCRIPT"
 
+SIGNAL_CLIENT_RESIZE_SCRIPT="$CURRENT_DIR/scripts/signal_client_resize.sh"
+chmod +x "$SIGNAL_CLIENT_RESIZE_SCRIPT"
+
 # Helper script to enforce status/tabby mutual exclusivity
 STATUS_GUARD_SCRIPT="$CURRENT_DIR/scripts/enforce_status_exclusivity.sh"
 chmod +x "$STATUS_GUARD_SCRIPT"
@@ -608,13 +611,19 @@ tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_SCRIPT \"#{window_
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'; run-shell '$STABILIZE_CLIENT_RESIZE_SCRIPT \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
+# When switching between already-attached clients of different sizes, tmux may
+# not emit client-resized for the newly active client. Hook the activation/focus
+# paths as well so all windows adopt the new client geometry immediately.
+tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+
 # Ensure sidebar panes exist for newly created sessions/windows
 # (do not toggle global mode on session creation)
 tmux set-hook -g session-created "run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
 # Maintain sidebar width after terminal resize
 # (daemon's RunWidthSync handles all resize logic via USR1 signal)
-tmux set-hook -g client-resized "run-shell '$SIGNAL_SIDEBAR_SCRIPT'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
 # tmux-resurrect integration (options are inert if resurrect is not installed)
 RESURRECT_SAVE_HOOK="$CURRENT_DIR/scripts/resurrect_save_hook.sh"

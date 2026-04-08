@@ -34,6 +34,34 @@ var (
 
 var debugLog *log.Logger
 var crashLog *log.Logger
+var inputLog *log.Logger
+
+var inputLogEnabled bool
+var inputLogCheckTime time.Time
+
+func initInputLog() {
+	inputLogPath := fmt.Sprintf("/tmp/pane-header-%s-input.log", *paneID)
+	f, err := os.OpenFile(inputLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		inputLog = log.New(os.Stderr, "[INPUT] ", log.LstdFlags)
+		return
+	}
+	inputLog = log.New(f, "[input] ", log.LstdFlags|log.Lmicroseconds)
+}
+
+func isInputLogEnabled() bool {
+	if time.Since(inputLogCheckTime) > 10*time.Second {
+		out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_input_log").Output()
+		if err != nil {
+			inputLogEnabled = false
+		} else {
+			val := strings.TrimSpace(string(out))
+			inputLogEnabled = val == "on" || val == "1" || val == "true"
+		}
+		inputLogCheckTime = time.Now()
+	}
+	return inputLogEnabled
+}
 
 const (
 	longPressThreshold = 350 * time.Millisecond
@@ -195,6 +223,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case renderMsg:
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("RENDER_APPLY seq=%d payload_w=%d payload_h=%d model_w=%d model_h=%d", msg.payload.SequenceNum, msg.payload.Width, msg.payload.Height, m.width, m.height)
+		}
 		m.content = msg.payload.Content
 		m.regions = msg.payload.Regions
 		m.sequenceNum = msg.payload.SequenceNum
@@ -244,6 +275,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		if m.connected {
+			if inputLog != nil && isInputLogEnabled() {
+				inputLog.Printf("WINDOW_SIZE width=%d height=%d client=%s", m.width, m.height, m.clientID)
+			}
 			m.sendResize()
 		}
 		return m, nil
@@ -489,6 +523,9 @@ func (m *rendererModel) receiveLoop() {
 				payloadBytes, _ := json.Marshal(msg.Payload)
 				var payload daemon.RenderPayload
 				if json.Unmarshal(payloadBytes, &payload) == nil {
+					if inputLog != nil && isInputLogEnabled() {
+						inputLog.Printf("RENDER_RECV seq=%d payload_w=%d payload_h=%d", payload.SequenceNum, payload.Width, payload.Height)
+					}
 					// Send to the tea program
 					if globalProgram != nil {
 						globalProgram.Send(renderMsg{payload: &payload})
@@ -546,6 +583,9 @@ func (m *rendererModel) sendUnsubscribe() {
 }
 
 func (m *rendererModel) sendResize() {
+	if inputLog != nil && isInputLogEnabled() {
+		inputLog.Printf("SEND_RESIZE client=%s width=%d height=%d pane=%s", m.clientID, m.width, m.height, m.headerPaneID)
+	}
 	m.sendMessage(daemon.Message{
 		Type:     daemon.MsgResize,
 		ClientID: m.clientID,
@@ -580,6 +620,7 @@ func main() {
 
 	// Initialize crash logging early
 	initCrashLog()
+	initInputLog()
 	defer recoverAndLog("main")
 
 	if *debugMode {

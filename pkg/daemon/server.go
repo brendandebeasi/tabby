@@ -319,6 +319,9 @@ func (s *Server) handleClient(conn net.Conn) {
 						}
 
 						// Now apply the final resize: notify callback and render
+						if s.DebugLog != nil {
+							s.DebugLog("RESIZE_APPLY client=%s width=%d height=%d pane=%s", cid, pending.Width, pending.Height, pending.PaneID)
+						}
 						if s.OnResize != nil {
 							s.OnResize(cid, pending.Width, pending.Height, pending.PaneID)
 						}
@@ -527,6 +530,9 @@ func (s *Server) sendRenderToClientImmediate(clientID string) {
 			s.DebugLog("RENDER_SKIP client=%s reason=nil_payload", clientID)
 		}
 		return
+	}
+	if s.DebugLog != nil {
+		s.DebugLog("RENDER_SEND client=%s client_w=%d client_h=%d payload_w=%d payload_h=%d seq=%d", clientID, width, height, render.Width, render.Height, render.SequenceNum)
 	}
 
 	// Deduplicate: skip sending if content hasn't changed
