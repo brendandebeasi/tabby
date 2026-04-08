@@ -9,8 +9,19 @@ if [ ! -d "$ROOT_DIR/.git" ]; then
 fi
 
 mkdir -p "$ROOT_DIR/.git/hooks"
-ln -sf "../../.githooks/pre-commit" "$ROOT_DIR/.git/hooks/pre-commit"
-chmod +x "$ROOT_DIR/.githooks/pre-commit" "$ROOT_DIR/scripts/check-commit-hygiene.sh"
+for hook in pre-commit commit-msg prepare-commit-msg post-commit pre-push; do
+  ln -sf "../../.githooks/$hook" "$ROOT_DIR/.git/hooks/$hook"
+done
 
-echo "Installed pre-commit hook -> .git/hooks/pre-commit"
-echo "Hook runs scripts/check-commit-hygiene.sh before each commit."
+chmod +x \
+  "$ROOT_DIR/.githooks/pre-commit" \
+  "$ROOT_DIR/.githooks/commit-msg" \
+  "$ROOT_DIR/.githooks/prepare-commit-msg" \
+  "$ROOT_DIR/.githooks/post-commit" \
+  "$ROOT_DIR/.githooks/pre-push" \
+  "$ROOT_DIR/scripts/check-commit-hygiene.sh"
+
+echo "Installed tracked git hooks in .git/hooks:"
+echo "  - pre-commit -> scripts/check-commit-hygiene.sh"
+echo "  - commit-msg, prepare-commit-msg, post-commit, pre-push -> repo-local no-ops"
+echo "This also replaces any stale external hook manager hooks (for example, old Entire-managed hooks)."

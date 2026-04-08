@@ -470,12 +470,14 @@ cd ~/.tmux/plugins/tabby
 
 ### Commit Hygiene Guardrails
 ```bash
-# Install the local pre-commit guard
+# Install the local git hooks
 ./scripts/install-git-hooks.sh
 ```
 
-This installs a pre-commit hook that blocks committing logs, local agent state,
-temporary files, and likely hardcoded secrets.
+This installs the tracked repo hooks, including the pre-commit guard that blocks
+committing logs, local agent state, temporary files, and likely hardcoded
+secrets. It also replaces any stale external hook-manager wrappers with local
+repo hooks so commits and pushes do not depend on extra binaries.
 
 ### Running Tests
 ```bash

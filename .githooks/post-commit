@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Reserved for repo-local post-commit automation.
+# Kept as a tracked no-op so local installs do not depend on external hook managers.
+exit 0
