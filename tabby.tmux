@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Tabby plugin entry point
 # Fixes: BUG-003 (hook signal targeting)
+#
+# Two-phase init for instant sidebar:
+#   Phase 1 (sync):  pre-start daemon + split sidebar pane (~20ms)
+#   Phase 2 (async): hooks, bindings, options via TABBY_DEFERRED=1 re-entry
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Resolve config path via XDG helper (never read $CURRENT_DIR/config.yaml directly)
-source "$CURRENT_DIR/scripts/_config_path.sh"
-CONFIG_FILE="$TABBY_CONFIG_FILE"
-
 # Optional kill-switch for troubleshooting.
-# Tabby is enabled by default unless explicitly disabled.
 TABBY_ENABLED=$(tmux show-option -gqv "@tabby_enabled")
 if [ "$TABBY_ENABLED" = "0" ]; then
     exit 0
@@ -20,35 +19,68 @@ if [ ! -f "$CURRENT_DIR/bin/render-status" ]; then
     "$CURRENT_DIR/scripts/install.sh" || true
 fi
 
-# --- Early daemon pre-start (cold-boot optimization) ---
-# Start the watchdog+daemon as early as possible so the Go binary warms up
-# while we parse config, set options, and wire hooks below.  By the time
-# ensure_sidebar runs (async, at the bottom) the socket should already exist.
-_TABBY_PRESTART_SESSION=$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")
-_TABBY_PRESTART_MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
-# Default mode is "enabled", so pre-start when mode is enabled OR not yet set
-if [ -n "$_TABBY_PRESTART_SESSION" ] && { [ "$_TABBY_PRESTART_MODE" = "enabled" ] || [ -z "$_TABBY_PRESTART_MODE" ]; }; then
-    _TABBY_PRESTART_SOCK="/tmp/tabby-daemon-${_TABBY_PRESTART_SESSION}.sock"
-    _TABBY_PRESTART_PIDF="/tmp/tabby-daemon-${_TABBY_PRESTART_SESSION}.pid"
-    _TABBY_PRESTART_WD="/tmp/tabby-daemon-${_TABBY_PRESTART_SESSION}.watchdog.pid"
-    _TABBY_DAEMON_ALIVE=false
-    if [ -S "$_TABBY_PRESTART_SOCK" ] && [ -f "$_TABBY_PRESTART_PIDF" ]; then
-        _TPID=$(cat "$_TABBY_PRESTART_PIDF" 2>/dev/null || echo "")
-        [ -n "$_TPID" ] && kill -0 "$_TPID" 2>/dev/null && _TABBY_DAEMON_ALIVE=true
-    fi
-    if [ "$_TABBY_DAEMON_ALIVE" = "false" ]; then
-        _TABBY_WD_ALIVE=false
-        if [ -f "$_TABBY_PRESTART_WD" ]; then
-            _WP=$(cat "$_TABBY_PRESTART_WD" 2>/dev/null || echo "")
-            [ -n "$_WP" ] && kill -0 "$_WP" 2>/dev/null && _TABBY_WD_ALIVE=true
+# --- Phase 1: Fast path (daemon pre-start + instant sidebar pane) ---
+# Minimize tmux round-trips for speed. Batch queries where possible.
+# The daemon's width sync will correct the sidebar width on connect.
+if [ "${TABBY_DEFERRED:-}" != "1" ]; then
+    # Single tmux call for session + window + sidebar mode (3 values, 1 round-trip)
+    _TMUX_INFO=$(tmux display-message -p '#{session_id}|#{window_id}' 2>/dev/null || echo "|")
+    _SESSION="${_TMUX_INFO%%|*}"
+    _WINDOW="${_TMUX_INFO#*|}"
+    _MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
+
+    # Default mode is "enabled", so act when enabled OR not yet set
+    if [ -n "$_SESSION" ] && { [ "$_MODE" = "enabled" ] || [ -z "$_MODE" ]; }; then
+        # Pre-start daemon if not already running
+        _SOCK="/tmp/tabby-daemon-${_SESSION}.sock"
+        _PIDF="/tmp/tabby-daemon-${_SESSION}.pid"
+        _WDF="/tmp/tabby-daemon-${_SESSION}.watchdog.pid"
+        _ALIVE=false
+        if [ -S "$_SOCK" ] && [ -f "$_PIDF" ]; then
+            _PID=$(cat "$_PIDF" 2>/dev/null || echo "")
+            [ -n "$_PID" ] && kill -0 "$_PID" 2>/dev/null && _ALIVE=true
         fi
-        if [ "$_TABBY_WD_ALIVE" = "false" ]; then
-            rm -f "$_TABBY_PRESTART_SOCK" "$_TABBY_PRESTART_PIDF"
-            "$CURRENT_DIR/scripts/watchdog_daemon.sh" -session "$_TABBY_PRESTART_SESSION" &
+        if [ "$_ALIVE" = "false" ]; then
+            _WD_ALIVE=false
+            if [ -f "$_WDF" ]; then
+                _WP=$(cat "$_WDF" 2>/dev/null || echo "")
+                [ -n "$_WP" ] && kill -0 "$_WP" 2>/dev/null && _WD_ALIVE=true
+            fi
+            if [ "$_WD_ALIVE" = "false" ]; then
+                rm -f "$_SOCK" "$_PIDF"
+                "$CURRENT_DIR/scripts/watchdog_daemon.sh" -session "$_SESSION" &
+            fi
+        fi
+
+        # Instant sidebar pane — single list-panes call for both check and pane ID
+        _SIDEBAR_BIN="$CURRENT_DIR/bin/sidebar-renderer"
+        if [ -x "$_SIDEBAR_BIN" ]; then
+            _PANES=$(tmux list-panes -F "#{pane_id}|#{pane_current_command}|#{pane_start_command}" 2>/dev/null)
+            _HAS_SIDEBAR=$(echo "$_PANES" | grep -qE "sidebar" && echo "y" || echo "")
+            if [ -z "$_HAS_SIDEBAR" ]; then
+                _FIRST_PANE=$(echo "$_PANES" | head -1 | cut -d'|' -f1)
+                if [ -n "$_FIRST_PANE" ] && [ -n "$_WINDOW" ]; then
+                    _DBG=""; [ "${TABBY_DEBUG:-}" = "1" ] && _DBG="-debug"
+                    tmux split-window -d -t "$_FIRST_PANE" -h -b -f -l 25 \
+                        "printf '\\033[?25l\\033[2J\\033[H' && exec '$_SIDEBAR_BIN' -session '$_SESSION' -window '$_WINDOW' $_DBG"
+                fi
+            fi
         fi
     fi
+
+    # Async handoff: defer 106 tmux set-option/bind-key/set-hook calls to background
+    tmux run-shell -b "TABBY_DEFERRED=1 '$CURRENT_DIR/tabby.tmux'"
+    exit 0
 fi
 
+# ============================================================
+# Phase 2: Deferred init (hooks, bindings, options)
+# Runs async — tmux has already rendered the sidebar pane.
+# ============================================================
+
+# Resolve config path (only needed for deferred init, not fast path)
+source "$CURRENT_DIR/scripts/_config_path.sh"
+CONFIG_FILE="$TABBY_CONFIG_FILE"
 
 # Auto-renumber windows when one is closed (keeps indices sequential)
 tmux set-option -g renumber-windows on

@@ -1929,6 +1929,17 @@ func main() {
 		// by preserve_pane_ratios.sh, corrupting the live pane geometry.
 		restoreLayoutsFromDisk()
 
+		// Eager initial spawn: don't wait for the 3s windowCheckTicker.
+		// The coordinator already has windows from NewCoordinator, so spawn
+		// renderers immediately to cut cold-boot sidebar latency.
+		{
+			windows := coordinator.GetWindows()
+			if spawnRenderersForNewWindows(server, *sessionID, windows, coordinator) {
+				logEvent("INITIAL_SPAWN_COMPLETE")
+				server.BroadcastRender()
+			}
+		}
+
 		doPaneLayoutOps := func() {
 			now := time.Now()
 			if now.Sub(lastPaneLayoutOps) < paneLayoutCooldown {
