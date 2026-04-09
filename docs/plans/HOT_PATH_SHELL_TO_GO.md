@@ -230,20 +230,125 @@ This script MUST run synchronously in the hook because tmux reflows pane geometr
 | Hook processing latency if daemon is busy | USR1 queued behind long operation | Daemon already has timeout watchdog for stalled tasks. USR1 handler is fast (just writes to channel). Processing happens in the main loop which has stall detection. |
 | tmux option state divergence | Daemon's cached state disagrees with tmux | Periodic reconciliation via existing `refreshTicker` (30s) and `windowCheckTicker` (3s). Same risk exists today with shell scripts. |
 
+## Testing Strategy
+
+Each migration step ships with automated tests that verify the migrated behavior. Tests use the existing e2e framework (`tests/e2e/test_utils.sh`) with isolated tmux sessions via `-L` socket, ensuring no interference with the user's live session.
+
+### Test file: `tests/e2e/test_hot_path_migration.sh`
+
+Created alongside Step 1 and expanded with each subsequent step. Tests run against a fresh daemon in an isolated tmux session.
+
+### Per-Step Test Coverage
+
+| Step | Test | Assertion |
+|------|------|-----------|
+| 1 (dimming) | Switch windows, check per-pane `window-style` | Inactive content panes have `bg=<dim>`, active pane has no `window-style`, sidebar/header panes never dimmed |
+| 1 (dimming) | Rapid window switching (10 switches in <1s) | No zombie dim styles, final state correct |
+| 2 (history) | Visit windows 1,3,5,2,4 then close 4 | Active window becomes 2. Close 2 -> becomes 5. |
+| 2 (history) | Close all but one window | No crash, remaining window is active |
+| 3 (layout) | Create 3 panes, resize, kill middle pane | Remaining panes preserve relative sizes (layout string matches within tolerance) |
+| 3 (layout) | Kill pane during spawning guard | Layout save skipped, no corruption |
+| 4 (border) | Switch between windows with different group colors | `pane-active-border-style` fg matches expected group color |
+| 4 (border) | Switch to ungrouped window | Border reverts to default color |
+| 5 (status) | Toggle sidebar mode off | `tmux show-option -g status` returns `on` |
+| 5 (status) | Toggle sidebar mode on | `tmux show-option -g status` returns `off` |
+| 6 (ensure) | Create new window | Sidebar renderer pane exists within 1s |
+| 6 (ensure) | Kill sidebar renderer pane | Respawns within daemon tick (3s) |
+| 7 (hooks) | Verify hook registrations | Each hook has exactly 1 `run-shell` (no chained scripts) |
+| 8 (name) | Split a grouped window | Window name still contains group prefix |
+| 9 (group) | Create window with active group set | New window inherits group via `@tabby_group` |
+| 10 (cleanup) | Grep for deleted script references | Zero matches in `tabby.tmux` and hook registrations |
+
+### Go Unit Tests
+
+Each `handle*` method added to the Coordinator gets a pure unit test in `cmd/tabby-daemon/coordinator_test.go` (or a new `coordinator_hotpath_test.go`). These test the logic without tmux:
+
+- `TestWindowHistoryTracking` -- push/dedup/cap/evict logic
+- `TestSavedLayoutStore` -- save/restore/skip-during-spawning
+- `TestPaneDimmingFilter` -- correctly identifies content vs system panes
+- `TestBorderColorFromGroup` -- color lookup and fallback to default
+- `TestStatusExclusivity` -- mode -> status mapping
+
+### Performance Benchmark
+
+A benchmark test (`tests/e2e/bench_hot_path.sh`) measures:
+1. **Hook-to-daemon latency:** Timestamp in `run-shell` vs `SIGNAL_USR1` event log entry. Target: < 15ms.
+2. **tmux round-trips per window switch:** Count `tmux` substrings in event log between two consecutive `SIGNAL_USR1` entries. Target: 2-3 (down from 23-35).
+3. **Process spawns:** Count `run-shell` invocations per hook via `tmux show-hooks -g` output. Target: 1 per hook.
+
+### Running Tests
+
+```bash
+# Full e2e suite (includes hot path tests)
+./tests/e2e/run_e2e.sh
+
+# Hot path migration tests only
+./tests/e2e/test_hot_path_migration.sh
+
+# Go unit tests
+go test ./cmd/tabby-daemon/... -run 'TestWindowHistory|TestSavedLayout|TestPaneDimming|TestBorderColor|TestStatusExclusivity'
+
+# Performance benchmark
+./tests/e2e/bench_hot_path.sh
+```
+
 ## Verification Steps
 
 After each step:
 1. Build: `go build -o bin/tabby-daemon ./cmd/tabby-daemon`
-2. Restart sidebar: `pkill -f tabby-daemon; sleep 0.5; rm -f /tmp/tabby-daemon-*; bash tabby.tmux`
-3. Manual test the specific behavior (listed per step above)
-4. Regression test: rapid window switching (Cmd+1 through Cmd+5), pane splitting/killing, client resize
+2. Run Go unit tests: `go test ./cmd/tabby-daemon/...`
+3. Run e2e tests: `./tests/e2e/test_hot_path_migration.sh`
+4. Restart sidebar: `pkill -f tabby-daemon; sleep 0.5; rm -f /tmp/tabby-daemon-*; bash tabby.tmux`
+5. Manual smoke test the specific behavior (listed per step)
 
 After full migration (Step 10):
-1. Profile hot-path latency: time from keypress to visual update using daemon event log timestamps
-2. Count tmux round-trips per window switch in event log (target: 2-3, down from 23-35)
-3. Count process spawns per window switch (target: 1 run-shell, down from 6)
-4. Test with multiple clients attached simultaneously
-5. Test cold boot (new tmux session) still works via Phase 1 instant start
+1. Run full e2e suite: `./tests/e2e/run_e2e.sh`
+2. Run performance benchmark: `./tests/e2e/bench_hot_path.sh`
+3. Profile hot-path latency in daemon event log (target: < 15ms hook-to-signal)
+4. Verify tmux round-trips per window switch (target: 2-3, down from 23-35)
+5. Verify process spawns per hook (target: 1, down from 6)
+6. Test with multiple clients attached simultaneously
+7. Test cold boot (new tmux session) still works via Phase 1 instant start
+
+---
+
+## Roadmap
+
+This plan is Phase 1 of a broader performance and UI flexibility initiative.
+
+### Phase 1: Hot Path Shell-to-Go (this plan)
+**Goal:** Eliminate shell script overhead on every user navigation event.
+**Scope:** ~14 hot-path scripts consolidated into daemon. Single-signal hooks.
+**Outcome:** < 15ms hook latency, daemon as single source of truth for navigation state.
+
+### Phase 2: Mobile Client Support (existing PRs 1-3)
+**Goal:** Make tabby usable on narrow mobile clients (Blink on iOS).
+**Scope:** Client profiles, profile-aware pane headers, hamburger menu, auto-zoom, pane carousel, pane picker popup.
+**Depends on:** Phase 1 (client profile detection plugs into consolidated daemon methods).
+**Plans:** `docs/plans/MOBILE_PR1_PROFILE_AND_HAMBURGER.md`, `MOBILE_PR2_AUTOZOOM_AND_CAROUSEL.md`, `MOBILE_PR3_PANE_PICKER.md`
+
+### Phase 3: Remaining Shell Consolidation
+**Goal:** Move non-hot-path shell scripts into Go where it improves reliability.
+**Scope:** `toggle_sidebar.sh`, `toggle_sidebar_daemon.sh`, group management scripts, `kill_window.sh`, `kill_pane_wrapper.sh`, `split_from_content_pane.sh`.
+**Rationale:** These run on user commands (not hooks) so latency is less critical, but consolidation reduces the shell script surface area and makes the daemon the authoritative controller of all UI state.
+
+### Phase 4: tmux Control Mode Integration
+**Goal:** Replace signal-based IPC with tmux control mode (`tmux -C`) for synchronous event handling.
+**Scope:** Daemon subscribes to tmux events directly instead of receiving USR1 from hooks. Eliminates the last `run-shell` overhead. Enables synchronous layout restoration (finally replaces `preserve_pane_ratios.sh`).
+**Risk:** Control mode is a different programming model. Needs careful prototyping.
+**Outcome:** Zero shell scripts in the hot path. All hooks replaced by control mode subscriptions.
+
+### Phase 5: Renderer Abstraction
+**Goal:** Decouple rendering from tmux pane split-window.
+**Scope:** Define a renderer interface in the daemon. Current tmux-pane renderers (sidebar-renderer, pane-header) implement this interface. Future renderers (single overlay pane, web UI, Kitty graphics protocol) can plug in without changing the daemon's core logic.
+**Depends on:** Phase 1-3 (all UI state centralized in daemon). Phase 4 helpful but not required.
+**Enables:** The "more control over window borders, headers, and layout" vision -- including attaching the same pane to multiple windows, custom border rendering, and non-tmux frontends.
+
+### Phase 6: Advanced Layout Control
+**Goal:** Go beyond tmux's built-in layout constraints.
+**Scope:** Shared panes across windows (via `link-window` or daemon-managed virtual panes), custom border rendering, flexible header placement, responsive layouts that adapt beyond simple width thresholds.
+**Depends on:** Phase 5 (renderer abstraction), Phase 2 (client profiles).
+**Open questions:** Whether to fork/extend tmux vs build an overlay system. Deferred until Phases 1-5 reveal what tmux can't do.
 
 ## UI Flexibility Enablement
 
