@@ -54,7 +54,7 @@ Click a notification to jump directly to the right tmux session, window, and pan
 ```bash
 # Example: notification that deep-links back to tmux
 terminal-notifier -title "Build Done" -message "Click to return" \
-  -execute "~/.tmux/plugins/tabby/scripts/focus_pane.sh main:2.1"
+  -execute "~/.tmux/plugins/tabby/bin/tabby-hook focus-pane main:2.1"
 ```
 
 ## All Features
@@ -517,17 +517,17 @@ terminal_app: Ghostty
 
 ### Basic Usage
 
-The `focus_pane.sh` script activates your terminal and navigates tmux:
+The `tabby-hook focus-pane` script activates your terminal and navigates tmux:
 
 ```bash
 # Focus window 2, pane 0
-~/.tmux/plugins/tabby/scripts/focus_pane.sh 2
+~/.tmux/plugins/tabby/bin/tabby-hook focus-pane 2
 
 # Focus window 1, pane 2
-~/.tmux/plugins/tabby/scripts/focus_pane.sh 1.2
+~/.tmux/plugins/tabby/bin/tabby-hook focus-pane 1.2
 
 # Focus specific session, window, and pane
-~/.tmux/plugins/tabby/scripts/focus_pane.sh main:2.1
+~/.tmux/plugins/tabby/bin/tabby-hook focus-pane main:2.1
 ```
 
 ### Sending Notifications with Deep Links
@@ -535,12 +535,12 @@ The `focus_pane.sh` script activates your terminal and navigates tmux:
 ```bash
 # Simple notification that jumps to window 2
 terminal-notifier -title "Build Complete" -message "Click to view" \
-  -execute "$HOME/.tmux/plugins/tabby/scripts/focus_pane.sh 2"
+  -execute "$HOME/.tmux/plugins/tabby/bin/tabby-hook focus-pane 2"
 
 # Notification with current location (useful in scripts/hooks)
 TARGET=$(tmux display-message -p '#{window_index}.#{pane_index}')
 terminal-notifier -title "Task Done" -message "Click to return" \
-  -execute "$HOME/.tmux/plugins/tabby/scripts/focus_pane.sh $TARGET"
+  -execute "$HOME/.tmux/plugins/tabby/bin/tabby-hook focus-pane $TARGET"
 ```
 
 ### Integration with Claude Code
@@ -562,11 +562,11 @@ Add to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "<tabby-dir>/scripts/set-tabby-indicator.sh busy 1"
+            "command": "<tabby-dir>/bin/tabby-hook set-indicator busy 1"
           },
           {
             "type": "command",
-            "command": "<tabby-dir>/scripts/set-tabby-indicator.sh input 0"
+            "command": "<tabby-dir>/bin/tabby-hook set-indicator input 0"
           }
         ]
       }
@@ -600,8 +600,8 @@ Add to `~/.claude/settings.json`:
 Notification scripts should:
 - Read hook JSON from stdin (`jq -r '.transcript_path'` for transcript)
 - Use `TMUX_PANE` env var to query the originating pane (not current focus)
-- Call `focus_pane.sh` for click-to-navigate deep links
-- Set tabby indicators (`set-tabby-indicator.sh busy 0`, `bell 1`, etc.)
+- Call `tabby-hook focus-pane` for click-to-navigate deep links
+- Set tabby indicators (`tabby-hook set-indicator busy 0`, `bell 1`, etc.)
 - Use growlrrr with `--image` for emoji group icon thumbnails
 
 See the [example hook scripts](https://github.com/brendandebeasi/tabby/blob/main/README.md#example-hook-script) or use the built-in OpenCode hook as a reference.
@@ -614,7 +614,7 @@ See the [example hook scripts](https://github.com/brendandebeasi/tabby/blob/main
 set -u
 
 TABBY_DIR="${HOME}/.tmux/plugins/tabby"
-INDICATOR="$TABBY_DIR/scripts/set-tabby-indicator.sh"
+INDICATOR="$TABBY_DIR/bin/tabby-hook set-indicator"
 
 # Read hook JSON from stdin (Claude provides session info)
 HOOK_JSON=$(cat)
@@ -645,11 +645,11 @@ fi
 if command -v growlrrr &>/dev/null; then
     growlrrr send --appId ClaudeCode --title "$WINDOW_NAME" \
         --subtitle "Task complete" --sound default \
-        --execute "$TABBY_DIR/scripts/focus_pane.sh $TMUX_TARGET" \
+        --execute "$TABBY_DIR/bin/tabby-hook focus-pane $TMUX_TARGET" \
         "$MESSAGE" &>/dev/null &
 elif command -v terminal-notifier &>/dev/null; then
     terminal-notifier -title "$WINDOW_NAME" -message "$MESSAGE" \
-        -sound default -execute "$TABBY_DIR/scripts/focus_pane.sh $TMUX_TARGET" &>/dev/null &
+        -sound default -execute "$TABBY_DIR/bin/tabby-hook focus-pane $TMUX_TARGET" &>/dev/null &
 fi
 
 # Set tabby indicators
@@ -757,7 +757,7 @@ Tabby only sets the resurrect hook options if they are unset or already owned by
 #!/usr/bin/env bash
 # my-resurrect-restore-wrapper.sh
 /path/to/your/custom-hook.sh
-~/.tmux/plugins/tabby/scripts/resurrect_restore_hook.sh
+~/.tmux/plugins/tabby/bin/tabby-hook resurrect-restore
 ```
 
 ## Known Limitations

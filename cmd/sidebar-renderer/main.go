@@ -319,21 +319,19 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonRestartTriggered = true
 			debugLog.Printf("Daemon appears dead after %d reconnect attempts, triggering restart", m.reconnectAttempts)
 			go func() {
-				scriptDir := filepath.Dir(os.Args[0])
-				scriptPath := filepath.Join(scriptDir, "..", "scripts", "ensure_sidebar.sh")
-				if _, err := os.Stat(scriptPath); err != nil {
-					// Fallback: try relative to CURRENT_DIR (tabby plugin root)
+				hookBin := filepath.Join(filepath.Dir(os.Args[0]), "tabby-hook")
+				if _, err := os.Stat(hookBin); err != nil {
 					if home, err := os.UserHomeDir(); err == nil {
-						scriptPath = filepath.Join(home, ".tmux", "plugins", "tabby", "scripts", "ensure_sidebar.sh")
+						hookBin = filepath.Join(home, ".tmux", "plugins", "tabby", "bin", "tabby-hook")
 					}
 				}
-				debugLog.Printf("Running ensure_sidebar.sh: %s", scriptPath)
-				cmd := exec.Command("bash", scriptPath)
+				debugLog.Printf("Running tabby-hook ensure-sidebar: %s", hookBin)
+				cmd := exec.Command(hookBin, "ensure-sidebar")
 				cmd.Env = append(os.Environ(), fmt.Sprintf("TMUX_PANE=%s", os.Getenv("TMUX_PANE")))
 				if out, err := cmd.CombinedOutput(); err != nil {
-					debugLog.Printf("ensure_sidebar.sh failed: %v: %s", err, string(out))
+					debugLog.Printf("tabby-hook ensure-sidebar failed: %v: %s", err, string(out))
 				} else {
-					debugLog.Printf("ensure_sidebar.sh succeeded")
+					debugLog.Printf("tabby-hook ensure-sidebar succeeded")
 				}
 			}()
 		}

@@ -7,7 +7,7 @@ echo "Testing sidebar window tracking..."
 echo ""
 
 echo "Opening sidebar..."
-"$PROJECT_ROOT/scripts/toggle_sidebar.sh"
+"$PROJECT_ROOT/bin/tabby-toggle"
 sleep 1
 
 SIDEBAR_PANE=$(tmux list-panes -F "#{pane_current_command}|#{pane_id}" | grep "^sidebar" | cut -d'|' -f2)
@@ -48,4 +48,4 @@ echo ""
 echo "Cleaning up..."
 tmux kill-window -t "sidebar-test-1" 2>/dev/null || true
 tmux kill-window -t "sidebar-test-3" 2>/dev/null || true
-"$PROJECT_ROOT/scripts/toggle_sidebar.sh"
+"$PROJECT_ROOT/bin/tabby-toggle"

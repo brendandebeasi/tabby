@@ -78,7 +78,7 @@ test_vertical_sidebar() {
     echo "=== VERTICAL SIDEBAR TEST ==="
     
     echo "1. Opening sidebar..."
-    "$PROJECT_ROOT/scripts/toggle_sidebar.sh"
+    "$PROJECT_ROOT/bin/tabby-toggle"
     sleep 1
     
     SIDEBAR_PANE=$(tmux list-panes -F "#{pane_current_command}|#{pane_id}" | grep -E "^(sidebar|sidebar-renderer)\|" | cut -d'|' -f2)
@@ -134,7 +134,7 @@ test_vertical_sidebar() {
         echo "   - Killed window, sidebar should update"
         
         echo "7. Closing sidebar..."
-        "$PROJECT_ROOT/scripts/toggle_sidebar.sh"
+        "$PROJECT_ROOT/bin/tabby-toggle"
         sleep 0.5
         
         if ! tmux list-panes -F "#{pane_current_command}" | grep -Eq "^(sidebar|sidebar-renderer)$"; then

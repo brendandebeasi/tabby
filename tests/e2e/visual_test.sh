@@ -83,7 +83,7 @@ sleep 0.5
 capture_screenshot "02_active_window" "Active window highlighting"
 
 # Test 3: Sidebar open
-tmux run-shell -t "$TEST_SESSION" "$PROJECT_ROOT/scripts/toggle_sidebar.sh"
+tmux run-shell -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle"
 sleep 1
 capture_screenshot "03_sidebar_open" "Sidebar view"
 
@@ -93,7 +93,7 @@ sleep 0.5
 capture_screenshot "04_sidebar_active_change" "Sidebar with different active window"
 
 # Test 5: Close sidebar
-tmux run-shell -t "$TEST_SESSION" "$PROJECT_ROOT/scripts/toggle_sidebar.sh"
+tmux run-shell -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle"
 sleep 0.5
 capture_screenshot "05_sidebar_closed" "Sidebar closed"
 

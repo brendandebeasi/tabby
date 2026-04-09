@@ -1,0 +1,75 @@
+#!/bin/bash
+# Kilo wrapper that adds Tabby status indicator hooks
+# Usage: Use this script instead of 'kilo' command
+
+set -u
+
+TABBY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INDICATOR="$TABBY_DIR/bin/tabby-hook set-indicator"
+
+# Function to set indicators
+set_indicator() {
+    $INDICATOR "$1" "$2" 2>/dev/null || true
+}
+
+# Set up signal handlers for cleanup
+cleanup() {
+    set_indicator busy 0
+    set_indicator bell 0
+    exit 0
+}
+trap cleanup EXIT INT TERM
+
+# Clear any existing indicators
+set_indicator busy 0
+set_indicator bell 0
+
+# Start Kilo with a wrapper that monitors for activity
+echo "Starting Kilo with Tabby integration..."
+
+# Create a named pipe for communication
+PIPE="/tmp/kilo-tabby-$$"
+mkfifo "$PIPE" 2>/dev/null || true
+
+# Monitor the pipe in background
+{
+    while read -r event < "$PIPE"; do
+        case "$event" in
+            "start") set_indicator busy 1 ;;
+            "stop")  set_indicator busy 0; set_indicator bell 1 ;;
+            "clear") set_indicator busy 0; set_indicator bell 0 ;;
+        esac
+    done
+} &
+MONITOR_PID=$!
+
+# Function to send events to the pipe
+send_event() {
+    echo "$1" > "$PIPE" 2>/dev/null || true
+}
+
+# Set up a simple activity monitor
+# This is a basic approach - monitors for user input/output patterns
+{
+    sleep 1
+    while kill -0 $$ 2>/dev/null; do
+        # Check if user is likely typing (basic heuristic)
+        if pgrep -f "kilo" >/dev/null 2>&1; then
+            # Kilo is running, assume activity
+            send_event "start"
+            sleep 5  # Wait a bit before checking again
+            send_event "stop"
+            sleep 2
+        else
+            break
+        fi
+    done
+} &
+ACTIVITY_PID=$!
+
+# Start the actual Kilo process
+exec kilo "$@"
+
+# Cleanup (this won't be reached due to exec, but trap will handle it)
+kill $MONITOR_PID $ACTIVITY_PID 2>/dev/null || true
+rm -f "$PIPE"

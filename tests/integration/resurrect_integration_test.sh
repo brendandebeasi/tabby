@@ -8,8 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TABBY_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SAVE_HOOK="$TABBY_ROOT/scripts/resurrect_save_hook.sh"
-RESTORE_HOOK="$TABBY_ROOT/scripts/resurrect_restore_hook.sh"
+SAVE_HOOK="$TABBY_ROOT/bin/tabby-hook resurrect-save"
+RESTORE_HOOK_BIN="$TABBY_ROOT/bin/tabby-hook"
 FAILED=0
 
 pass() { echo "✓ $1"; }
@@ -27,7 +27,7 @@ printf 'pane\tmain\t0\tcode\t1\t*\t2\t/home\t0\tpane-header\tpane-header --pane 
 printf 'pane\tmain\t1\tnotes\t0\t-\t0\t/home\t1\tvim\tvim notes.md\n' >> "$TMPFILE"
 printf 'state\tsome_state_data\n' >> "$TMPFILE"
 
-bash "$SAVE_HOOK" "$TMPFILE"
+$SAVE_HOOK "$TMPFILE"
 
 REMAINING_PANES=$(grep '^pane' "$TMPFILE" | wc -l | tr -d ' ')
 if [ "$REMAINING_PANES" -eq 2 ]; then
@@ -57,7 +57,7 @@ printf 'pane\tmain\t0\tcode\t1\t*\t0\t/home\t1\tbash\tbash\n' > "$TMPFILE"
 printf 'pane\tmain\t0\tcode\t1\t*\t1\t/home\t0\tsidebar-rendere\tsidebar-rendere\n' >> "$TMPFILE"
 printf 'pane\tmain\t0\tcode\t1\t*\t2\t/home\t1\tvim\tvim\n' >> "$TMPFILE"
 
-bash "$SAVE_HOOK" "$TMPFILE"
+$SAVE_HOOK "$TMPFILE"
 
 REMAINING_PANES=$(grep '^pane' "$TMPFILE" | wc -l | tr -d ' ')
 if [ "$REMAINING_PANES" -eq 2 ]; then
@@ -69,8 +69,8 @@ rm -f "$TMPFILE"
 
 # --- Test 2: Save hook handles missing/empty file gracefully ---
 
-bash "$SAVE_HOOK" "" 2>/dev/null && pass "Save hook handles empty path" || fail "Save hook crashed on empty path"
-bash "$SAVE_HOOK" "/nonexistent/file" 2>/dev/null && pass "Save hook handles missing file" || fail "Save hook crashed on missing file"
+$SAVE_HOOK "" 2>/dev/null && pass "Save hook handles empty path" || fail "Save hook crashed on empty path"
+$SAVE_HOOK "/nonexistent/file" 2>/dev/null && pass "Save hook handles missing file" || fail "Save hook crashed on missing file"
 
 # --- Test 3: Save hook is idempotent (no Tabby panes = no change) ---
 
@@ -78,7 +78,7 @@ TMPFILE=$(mktemp)
 printf 'pane\tmain\t0\tcode\t1\t*\t0\t/home\t1\tbash\tbash\n' > "$TMPFILE"
 printf 'pane\tmain\t1\tnotes\t0\t-\t0\t/home\t1\tvim\tvim\n' >> "$TMPFILE"
 BEFORE=$(cat "$TMPFILE")
-bash "$SAVE_HOOK" "$TMPFILE"
+$SAVE_HOOK "$TMPFILE"
 AFTER=$(cat "$TMPFILE")
 
 if [ "$BEFORE" = "$AFTER" ]; then
@@ -88,28 +88,26 @@ else
 fi
 rm -f "$TMPFILE"
 
-# --- Test 4: Restore hook script is valid and executable ---
+# --- Test 4: Restore hook binary exists and is executable ---
 
-if [ -x "$RESTORE_HOOK" ]; then
-    pass "Restore hook is executable"
+if [ -x "$RESTORE_HOOK_BIN" ]; then
+    pass "Restore hook binary is executable"
 else
-    fail "Restore hook is not executable"
+    fail "Restore hook binary not found"
 fi
-
-bash -n "$RESTORE_HOOK" 2>/dev/null && pass "Restore hook passes syntax check" || fail "Restore hook has syntax errors"
 
 # --- Test 5: Hook options are wired in tmux ---
 
 SAVE_OPT=$(tmux show-option -gqv @resurrect-hook-post-save-layout 2>/dev/null || echo "")
 RESTORE_OPT=$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null || echo "")
 
-if echo "$SAVE_OPT" | grep -q "resurrect_save_hook"; then
+if echo "$SAVE_OPT" | grep -q "tabby-hook resurrect-save"; then
     pass "Save hook wired in tmux options"
 else
     fail "Save hook not found in @resurrect-hook-post-save-layout (got: '$SAVE_OPT')"
 fi
 
-if echo "$RESTORE_OPT" | grep -q "resurrect_restore_hook"; then
+if echo "$RESTORE_OPT" | grep -q "tabby-hook resurrect-restore"; then
     pass "Restore hook wired in tmux options"
 else
     fail "Restore hook not found in @resurrect-hook-post-restore-all (got: '$RESTORE_OPT')"

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	tmuxpkg "github.com/brendandebeasi/tabby/pkg/tmux"
 )
@@ -341,21 +342,65 @@ func scheduleFocusRecovery(windowID, clientTTY string) {
 		return
 	}
 
-	exe, err := os.Executable()
-	if err != nil {
-		debugLog("focus recovery path resolution failed: %v", err)
-		return
-	}
+	go func() {
+		// Check if this window is still the pending new window
+		pending, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output()
+		if strings.TrimSpace(string(pending)) != windowID {
+			return
+		}
 
-	scriptPath := filepath.Clean(filepath.Join(filepath.Dir(exe), "..", "scripts", "focus_new_window.sh"))
-	args := []string{windowID}
-	if clientTTY != "" {
-		args = append(args, clientTTY)
+		exec.Command("tmux", "select-window", "-t", windowID).Run()
+		contentPane := pickContentPane(windowID)
+		if contentPane != "" {
+			exec.Command("tmux", "select-pane", "-t", contentPane).Run()
+		}
+
+		time.Sleep(150 * time.Millisecond)
+
+		// Re-verify and set last-window/last-pane tracking
+		pending2, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output()
+		curWin, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+		if strings.TrimSpace(string(pending2)) == windowID && strings.TrimSpace(string(curWin)) == windowID {
+			exec.Command("tmux", "select-window", "-t", windowID).Run()
+			contentPane = pickContentPane(windowID)
+			if contentPane != "" {
+				exec.Command("tmux", "select-pane", "-t", contentPane).Run()
+				exec.Command("tmux", "set-option", "-g", "@tabby_last_pane", contentPane).Run()
+			}
+			exec.Command("tmux", "set-option", "-g", "@tabby_last_window", windowID).Run()
+		}
+
+		// Clear pending flag
+		pending3, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output()
+		if strings.TrimSpace(string(pending3)) == windowID {
+			exec.Command("tmux", "set-option", "-gu", "@tabby_new_window_id").Run()
+		}
+	}()
+}
+
+func pickContentPane(windowID string) string {
+	out, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+		"#{pane_id}|#{pane_current_command}|#{pane_start_command}|#{pane_active}").Output()
+	var first string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) != 4 {
+			continue
+		}
+		pID, cmd, startCmd, active := parts[0], parts[1], parts[2], parts[3]
+		combined := strings.ToLower(cmd + "|" + startCmd)
+		if strings.Contains(combined, "sidebar") || strings.Contains(combined, "renderer") ||
+			strings.Contains(combined, "pane-header") || strings.Contains(combined, "tabby-daemon") {
+			continue
+		}
+		if active == "1" {
+			return pID
+		}
+		if first == "" {
+			first = pID
+		}
 	}
-	cmd := exec.Command(scriptPath, args...)
-	if err := cmd.Start(); err != nil {
-		debugLog("failed starting focus recovery for %s: %v", windowID, err)
-	}
+	return first
 }
 
 func shSingleQuote(s string) string {

@@ -249,7 +249,7 @@ func getPaneHeaderBin() string {
 }
 
 // saveLayoutBeforeKill saves the current window layout for a pane's window
-// so that preserve_pane_ratios.sh can restore it after the kill.
+// so that tabby-hook preserve-pane-ratios can restore it after the kill.
 // This MUST be called before user/content-pane kill-pane operations.
 func saveLayoutBeforeKill(paneID string) {
 	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}\x1f#{window_layout}").Output()
@@ -263,7 +263,7 @@ func saveLayoutBeforeKill(paneID string) {
 	exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_layout_%s", parts[0]), parts[1]).Run()
 }
 
-// markSkipPreserveForWindow tells preserve_pane_ratios.sh to skip exactly once
+// markSkipPreserveForWindow tells tabby-hook preserve-pane-ratios to skip exactly once
 // for a specific window. Use this for daemon-managed system-pane cleanup
 // (headers/sidebar) where restoring a saved layout can corrupt mixed splits.
 func markSkipPreserveForWindow(paneID string) {
@@ -304,7 +304,7 @@ func saveLayoutsToDisk(windows []tmux.Window) {
 }
 
 // restoreLayoutsFromDisk loads saved layouts and sets them as tmux options
-// so that preserve_pane_ratios.sh can use them after header spawning.
+// so that tabby-hook preserve-pane-ratios can use them after header spawning.
 func restoreLayoutsFromDisk() {
 	data, err := os.ReadFile(layoutStatePath())
 	if err != nil {
@@ -1933,9 +1933,9 @@ func main() {
 
 		// Restore saved layouts once at startup, before the main event loop.
 		// Must not run inside doPaneLayoutOps: spawnPaneHeaders sets @tabby_spawning=1
-		// which blocks save_pane_layout.sh from updating @tabby_layout_<windowID>,
+		// which blocks layout updates to @tabby_layout_<windowID>,
 		// so any stale layout written after the split would persist and be applied
-		// by preserve_pane_ratios.sh, corrupting the live pane geometry.
+		// by tabby-hook preserve-pane-ratios, corrupting the live pane geometry.
 		restoreLayoutsFromDisk()
 
 		// Eager initial spawn: don't wait for the 3s windowCheckTicker.

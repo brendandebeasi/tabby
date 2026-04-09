@@ -36,7 +36,7 @@ Core runtime files (per session id `$N`):
 tmux source ~/.tmux.conf
 
 # Verify current session daemon is latest build
-./scripts/dev-status.sh
+./bin/tabby-dev status
 ```
 
 If status is `STALE`, restart daemon for the target session:
@@ -63,10 +63,10 @@ set -g @tabby_test 0
 tmux set-option -g @tabby_dev_reload_enabled 1
 
 # Rebuild + restart runtime (when sidebar is enabled)
-./scripts/dev-reload.sh
+./bin/tabby-dev reload
 ```
 
-`dev-reload.sh` fails non-zero and shows a loud tmux message when runtime stays stale.
+`tabby-dev reload` fails non-zero and shows a loud tmux message when runtime stays stale.
 
 ## Canonical Test Commands
 
@@ -91,7 +91,7 @@ go test ./cmd/tabby-daemon
 - Pane header buttons are handled via direct mouse pass-through to `pane-header` (`send-keys -M`), not focus replay.
 - Window/group marker search opens an in-app picker modal (Bubble Tea overlay) with fuzzy matching.
 - Window close flow restores focus using tracked window history (`track_window_history.sh` + `select_previous_window.sh`).
-- Pane layout/ratio continuity is maintained via `save_pane_layout.sh` and `preserve_pane_ratios.sh` hooks.
+- Pane layout/ratio continuity is maintained via `save_pane_layout.sh` and `tabby-hook preserve-pane-ratios` hooks.
 
 ## Compatibility Notes
 

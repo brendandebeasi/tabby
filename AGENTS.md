@@ -114,15 +114,15 @@ TABBY_USE_RENDERER=1 /Users/b/git/tabby/scripts/toggle_sidebar_daemon.sh
 | `pkg/paths/paths.go` | XDG config/state path resolution |
 | `scripts/_config_path.sh` | Config path resolver for shell scripts |
 | `scripts/toggle_sidebar.sh` | Main user toggle entrypoint |
-| `scripts/dev-status.sh` | Fresh/stale runtime verification |
-| `scripts/dev-reload.sh` | Rebuild + restart workflow (opt-in) |
+| `bin/tabby-dev status` | Fresh/stale runtime verification |
+| `bin/tabby-dev reload` | Rebuild + restart workflow (opt-in) |
 | `tabby.tmux` | Hooks, keybindings, mode setup |
-| `scripts/focus_pane.sh` | Deep link: activate terminal + navigate to pane |
-| `scripts/set-tabby-indicator.sh` | Set sidebar indicators (busy, bell, input) |
+| `bin/tabby-hook focus-pane` | Deep link: activate terminal + navigate to pane |
+| `bin/tabby-hook set-indicator` | Set sidebar indicators (busy, bell, input) |
 | `scripts/opencode-tabby-hook.sh` | Built-in OpenCode notification hook |
 | `scripts/ensure_sidebar.sh` | Sidebar recovery + `@tabby_spawning` guard |
-| `scripts/resurrect_save_hook.sh` | tmux-resurrect post-save: strips Tabby panes from save file |
-| `scripts/resurrect_restore_hook.sh` | tmux-resurrect post-restore: cleans state + re-inits Tabby |
+| `bin/tabby-hook resurrect-save` | tmux-resurrect post-save: strips Tabby panes from save file |
+| `bin/tabby-hook resurrect-restore` | tmux-resurrect post-restore: cleans state + re-inits Tabby |
 
 ## Testing and Verification
 
@@ -139,12 +139,12 @@ bash tests/e2e/run_e2e.sh stale_renderer_recovery
 bash tests/e2e/run_e2e.sh window_close_removes
 
 # Runtime freshness check after rebuild/reload
-./scripts/dev-status.sh
+./bin/tabby-dev status
 ```
 
 ## Common Issues
 
-1. Runtime is stale after rebuild: run `./scripts/dev-status.sh`, then restart per the sidebar restart command above.
+1. Runtime is stale after rebuild: run `./bin/tabby-dev status`, then restart per the sidebar restart command above.
 2. Click handling seems wrong: verify `tabby.tmux` root mouse bindings and pane-header pass-through behavior.
 3. Sidebar duplication: ensure mode state is correct in `@tabby_sidebar` and run `scripts/ensure_sidebar.sh`.
 4. Wrong process targeted: use `pgrep -a tabby-daemon` and `pgrep -a sidebar-renderer` to confirm what is running and which session/window it owns.
@@ -159,7 +159,7 @@ bash tests/e2e/run_e2e.sh window_close_removes
 ## Notification Hooks
 
 Tabby supports deep-link notifications for both Claude Code and OpenCode.
-Hook scripts use `focus_pane.sh` for click-to-navigate and `set-tabby-indicator.sh`
+Hook scripts use `tabby-hook focus-pane` for click-to-navigate and `tabby-hook set-indicator`
 for sidebar activity indicators.
 
 - CC hooks live outside the repo (e.g. `~/scripts/claude-stop-notify.sh`), wired via `~/.claude/settings.json`

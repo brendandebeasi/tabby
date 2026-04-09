@@ -12,7 +12,7 @@
 Before deep debugging, confirm the session is running the latest daemon build:
 
 ```bash
-./scripts/dev-status.sh
+./bin/tabby-dev status
 ```
 
 If output shows `STALE`, restart sidebar daemon for the target session:

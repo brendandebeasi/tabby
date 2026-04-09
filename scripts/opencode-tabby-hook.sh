@@ -10,7 +10,7 @@ SESSION_ID_ARG="${5:-}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck disable=SC1007
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-INDICATOR="$SCRIPT_DIR/set-tabby-indicator.sh"
+INDICATOR="$TABBY_DIR/bin/tabby-hook set-indicator"
 LOG_FILE="/tmp/tabby-opencode-hook.log"
 
 # Use tmux from PATH — never hardcode a specific installation path
@@ -271,12 +271,12 @@ send_notification() {
     local message="${NOTIFIER_MESSAGE:-${db_text:-$fallback_message}}"
 
     # Deep-link strategy:
-    # 1. If we have tmux context → focus_pane.sh to jump to the correct pane (CLI mode)
+    # 1. If we have tmux context → tabby-hook focus-pane to jump to the correct pane (CLI mode)
     # 2. Otherwise → opencode:// URL scheme to open the desktop app
     local focus_cmd=""
     local open_url=""
     if [ -n "$TMUX_TARGET" ]; then
-        focus_cmd="$TABBY_DIR/scripts/focus_pane.sh $TMUX_TARGET"
+        focus_cmd="$TABBY_DIR/bin/tabby-hook focus-pane $TMUX_TARGET"
     elif [ -n "$session_dir" ]; then
         open_url="opencode://open-project?directory=${session_dir}"
     fi
@@ -352,35 +352,35 @@ send_notification() {
 # ── Set indicators + notify ───────────────────────────────────────────────
 case "$EVENT" in
     start|busy|prompt|working|user_prompt_submit)
-        "$INDICATOR" input 0
-        "$INDICATOR" busy 1
+        $INDICATOR input 0
+        $INDICATOR busy 1
         ;;
     complete|stop|done)
-        "$INDICATOR" busy 0
-        "$INDICATOR" input 1
+        $INDICATOR busy 0
+        $INDICATOR input 1
         send_notification "Task complete" "complete"
         ;;
     permission|question)
-        "$INDICATOR" busy 0
-        "$INDICATOR" input 1
+        $INDICATOR busy 0
+        $INDICATOR input 1
         send_notification "Needs input" "permission"
         ;;
     subagent_complete)
-        "$INDICATOR" busy 0
-        "$INDICATOR" input 1
+        $INDICATOR busy 0
+        $INDICATOR input 1
         # No notification for subagent — only notify on final complete
         ;;
     error|failed)
-        "$INDICATOR" busy 0
-        "$INDICATOR" bell 1
+        $INDICATOR busy 0
+        $INDICATOR bell 1
         send_notification "Error occurred" "error"
         ;;
     *)
         # Unknown event — log but don't change state aggressively.
         # Only clear busy if we have a valid pane; otherwise skip entirely.
         if [ -n "${TMUX_PANE:-}" ]; then
-            "$INDICATOR" busy 0
-            "$INDICATOR" input 1
+            $INDICATOR busy 0
+            $INDICATOR input 1
         fi
         ;;
 esac

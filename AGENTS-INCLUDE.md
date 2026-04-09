@@ -42,16 +42,16 @@ Tabby shows per-window status indicators. AI agents can set these via hooks:
 
 ```bash
 # Mark window as busy (agent is working)
-~/git/tabby/scripts/set-tabby-indicator.sh busy 1
+~/git/tabby/bin/tabby-hook set-indicator busy 1
 
 # Clear busy indicator (agent stopped)
-~/git/tabby/scripts/set-tabby-indicator.sh busy 0
+~/git/tabby/bin/tabby-hook set-indicator busy 0
 
 # Show input-needed indicator
-~/git/tabby/scripts/set-tabby-indicator.sh input 1
+~/git/tabby/bin/tabby-hook set-indicator input 1
 
 # Clear input indicator
-~/git/tabby/scripts/set-tabby-indicator.sh input 0
+~/git/tabby/bin/tabby-hook set-indicator input 0
 ```
 
 These are typically wired into Claude Code hooks (UserPromptSubmit, Stop, Notification) in `~/.claude/settings.json`.

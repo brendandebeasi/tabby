@@ -1412,8 +1412,8 @@ func (c *Coordinator) HandleWindowSelect(activeWindowID string) {
 
 // SaveWindowLayouts saves the current layout string for each window to tmux
 // options (@tabby_layout_<WID>). Called on every signal_refresh after
-// RefreshWindows so that preserve_pane_ratios.sh has fresh data.
-// Replaces scripts/save_pane_layout.sh from hooks.
+// RefreshWindows so that tabby-hook preserve-pane-ratios has fresh data.
+// Replaces the former save_pane_layout.sh hook.
 // Skips during @tabby_spawning to avoid saving stale mid-creation layouts.
 func (c *Coordinator) SaveWindowLayouts() {
 	// Check spawning guard
@@ -9657,6 +9657,202 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.RefreshWindows()
 		return true
 
+	case "kill_window":
+		windowIndex := input.ResolvedTarget
+		if windowIndex == "" {
+			return false
+		}
+		// Validate numeric
+		for _, ch := range windowIndex {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+		// Find target window ID by index
+		listOut, _ := exec.Command("tmux", "list-windows", "-F", "#{window_index}|#{window_id}").Output()
+		var targetID, aboveID string
+		bestAboveIdx := -1
+		bestBelowIdx := 999999
+		var belowID string
+		for _, line := range strings.Split(strings.TrimSpace(string(listOut)), "\n") {
+			parts := strings.SplitN(line, "|", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			idx := 0
+			for _, ch := range parts[0] {
+				idx = idx*10 + int(ch-'0')
+			}
+			wIdx := 0
+			for _, ch := range windowIndex {
+				wIdx = wIdx*10 + int(ch-'0')
+			}
+			if parts[0] == windowIndex {
+				targetID = parts[1]
+			} else if idx < wIdx && idx > bestAboveIdx {
+				bestAboveIdx = idx
+				aboveID = parts[1]
+			} else if idx > wIdx && idx < bestBelowIdx {
+				bestBelowIdx = idx
+				belowID = parts[1]
+			}
+		}
+		if targetID == "" {
+			return false
+		}
+		if aboveID == "" {
+			aboveID = belowID
+		}
+		// If killing the active window, switch to neighbor first
+		activeOut, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+		activeID := strings.TrimSpace(string(activeOut))
+		if activeID == targetID && aboveID != "" {
+			exec.Command("tmux", "select-window", "-t", aboveID).Run()
+		}
+		exec.Command("tmux", "set-option", "-g", "@tabby_close_select_window", "1").Run()
+		exec.Command("tmux", "set-option", "-g", "@tabby_close_select_index", windowIndex).Run()
+		exec.Command("tmux", "kill-window", "-t", targetID).Run()
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			exec.Command("tmux", "set-option", "-gu", "@tabby_close_select_window").Run()
+			exec.Command("tmux", "set-option", "-gu", "@tabby_close_select_index").Run()
+		}()
+		return true
+
+	case "split_pane":
+		direction := input.ResolvedTarget // "v" or "h"
+		paneID := input.PickerValue
+		if direction != "v" && direction != "h" {
+			return false
+		}
+		if paneID == "" {
+			paneID = ":" // current pane
+		}
+		// If current pane is a pane-header, find the underlying content pane
+		metaOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p",
+			"#{pane_current_command}|#{pane_start_command}|#{window_id}").Output()
+		meta := strings.TrimSpace(string(metaOut))
+		metaParts := strings.SplitN(meta, "|", 3)
+		if len(metaParts) == 3 {
+			curCmd, startCmd, winID := metaParts[0], metaParts[1], metaParts[2]
+			if strings.Contains(curCmd, "pane-header") || strings.Contains(startCmd, "pane-header") {
+				// Extract the -pane argument from start command
+				extracted := extractPaneArg(startCmd)
+				if extracted != "" {
+					paneID = extracted
+				} else if winID != "" {
+					// Fallback: find first content pane in window
+					paneID = findContentPane(winID, paneID)
+				}
+			}
+		}
+		// Validate target pane exists
+		if out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_id}").Output(); err == nil {
+			paneID = strings.TrimSpace(string(out))
+		}
+		// Get pane's current path
+		pathOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_current_path}").Output()
+		panePath := strings.TrimSpace(string(pathOut))
+		if panePath == "" {
+			pathOut, _ = exec.Command("tmux", "display-message", "-p", "#{pane_current_path}").Output()
+			panePath = strings.TrimSpace(string(pathOut))
+		}
+		// Get pane dimensions for half-size split
+		var sizeFlag string
+		if direction == "v" {
+			hOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_height}").Output()
+			h := strings.TrimSpace(string(hOut))
+			if hi, err := strconv.Atoi(h); err == nil && hi > 0 {
+				half := hi / 2
+				if half < 2 {
+					half = 2
+				}
+				sizeFlag = strconv.Itoa(half)
+			}
+		} else {
+			wOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_width}").Output()
+			w := strings.TrimSpace(string(wOut))
+			if wi, err := strconv.Atoi(w); err == nil && wi > 0 {
+				half := wi / 2
+				if half < 2 {
+					half = 2
+				}
+				sizeFlag = strconv.Itoa(half)
+			}
+		}
+		splitArgs := []string{"split-window", "-" + direction, "-t", paneID}
+		if sizeFlag != "" {
+			splitArgs = append(splitArgs, "-l", sizeFlag)
+		}
+		if panePath != "" {
+			splitArgs = append(splitArgs, "-c", panePath)
+		}
+		exec.Command("tmux", splitArgs...).Run()
+		return true
+
+	case "pane_click":
+		paneID := input.ResolvedTarget
+		coords := input.PickerValue // "mouseX,mouseY,paneLeft,paneTop"
+		if paneID == "" || coords == "" {
+			return false
+		}
+		parts := strings.Split(coords, ",")
+		if len(parts) != 4 {
+			return false
+		}
+		mouseX, _ := strconv.Atoi(parts[0])
+		mouseY, _ := strconv.Atoi(parts[1])
+		paneLeft, _ := strconv.Atoi(parts[2])
+		paneTop, _ := strconv.Atoi(parts[3])
+		localX := mouseX - paneLeft
+		localY := mouseY - paneTop
+		if localX < 0 {
+			localX = 0
+		}
+		if localY < 0 {
+			localY = 0
+		}
+		exec.Command("tmux", "set-option", "-g", "@tabby_last_click_x", strconv.Itoa(localX)).Run()
+		exec.Command("tmux", "set-option", "-g", "@tabby_last_click_y", strconv.Itoa(localY)).Run()
+		exec.Command("tmux", "set-option", "-g", "@tabby_last_click_pane", paneID).Run()
+		exec.Command("tmux", "select-pane", "-t", paneID).Run()
+		return true
+
+	case "exit_if_no_main_windows":
+		sessionIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+		sessID := strings.TrimSpace(string(sessionIDOut))
+		if sessID == "" {
+			return false
+		}
+		panesOut, _ := exec.Command("tmux", "list-panes", "-a", "-t", sessID, "-F",
+			"#{pane_current_command}|#{pane_start_command}|#{pane_dead}").Output()
+		hasMain := false
+		for _, line := range strings.Split(strings.TrimSpace(string(panesOut)), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "|", 3)
+			if len(parts) != 3 {
+				continue
+			}
+			cmd, startCmd, dead := parts[0], parts[1], parts[2]
+			if dead == "1" {
+				continue
+			}
+			combined := cmd + "|" + startCmd
+			if !strings.Contains(combined, "sidebar") &&
+				!strings.Contains(combined, "renderer") &&
+				!strings.Contains(combined, "pane-header") &&
+				!strings.Contains(combined, "tabby-daemon") {
+				hasMain = true
+				break
+			}
+		}
+		if !hasMain {
+			exec.Command("tmux", "kill-session", "-t", sessID).Run()
+		}
+		return true
+
 	case "delete_group":
 		name := input.ResolvedTarget
 		if name == "" {
@@ -10919,8 +11115,8 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	args = append(args, "", "", "")
 
 	exe, _ := os.Executable()
-	killWindowScript := filepath.Join(filepath.Dir(exe), "..", "scripts", "kill_window.sh")
-	killCmd := fmt.Sprintf("run-shell '%s %d'", killWindowScript, win.Index)
+	hookPath := filepath.Join(filepath.Dir(exe), "tabby-hook")
+	killCmd := fmt.Sprintf("run-shell '%s kill-window %d'", hookPath, win.Index)
 	args = append(args, "Kill", "k", killCmd)
 
 	c.executeOrSendMenu(clientID, args, pos)
@@ -11181,26 +11377,16 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	}
 	coordinatorDebugLog.Printf("showGroupContextMenu: final path=%s", newWindowPath)
 
-	newWindowScript := c.getScriptPath("new_window_with_group.sh")
+	exe2, _ := os.Executable()
+	newWindowBin := filepath.Join(filepath.Dir(exe2), "new-window")
 	groupEsc := strings.ReplaceAll(group.Name, "'", "'\"'\"'")
 	pathEsc := strings.ReplaceAll(newWindowPath, "'", "'\"'\"'")
-	if newWindowScript != "" {
-		if group.Name != "Default" {
-			newWindowCmd := fmt.Sprintf("set-option -g @tabby_new_window_group '%s' ; set-option -g @tabby_new_window_path '%s' ; run-shell '%s'", groupEsc, pathEsc, newWindowScript)
-			args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
-		} else {
-			newWindowCmd := fmt.Sprintf("set-option -g @tabby_new_window_group 'Default' ; set-option -g @tabby_new_window_path '%s' ; run-shell '%s'", pathEsc, newWindowScript)
-			args = append(args, "New Window", "n", newWindowCmd)
-		}
+	if group.Name != "Default" {
+		newWindowCmd := fmt.Sprintf("set-option -g @tabby_new_window_group '%s' ; set-option -g @tabby_new_window_path '%s' ; run-shell '%s'", groupEsc, pathEsc, newWindowBin)
+		args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
 	} else {
-		dirArg := fmt.Sprintf("'%s'", pathEsc)
-		if group.Name != "Default" {
-			newWindowCmd := fmt.Sprintf("new-window -c %s ; set-window-option @tabby_group '%s'", dirArg, groupEsc)
-			args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
-		} else {
-			newWindowCmd := fmt.Sprintf("new-window -c %s", dirArg)
-			args = append(args, "New Window", "n", newWindowCmd)
-		}
+		newWindowCmd := fmt.Sprintf("set-option -g @tabby_new_window_group 'Default' ; set-option -g @tabby_new_window_path '%s' ; run-shell '%s'", pathEsc, newWindowBin)
+		args = append(args, "New Window", "n", newWindowCmd)
 	}
 
 	hookPath := c.getHookPath()
@@ -11499,13 +11685,13 @@ func (c *Coordinator) showIndicatorContextMenu(clientID string, windowTarget str
 	c.executeOrSendMenu(clientID, args, pos)
 }
 
-// getToggleScript returns the path to the toggle_sidebar_daemon.sh script
+// getToggleScript returns the path to the tabby-toggle binary
 func (c *Coordinator) getToggleScript() string {
 	exe, err := os.Executable()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(exe), "..", "scripts", "toggle_sidebar_daemon.sh")
+	return filepath.Join(filepath.Dir(exe), "tabby-toggle")
 }
 
 func (c *Coordinator) getHookPath() string {
@@ -11843,6 +12029,59 @@ func isAuxiliaryPaneCommand(cmd string) bool {
 		return true
 	}
 	return false
+}
+
+// extractPaneArg extracts the -pane argument from a pane-header start command.
+// e.g. "pane-header -pane '%42'" -> "%42"
+func extractPaneArg(startCmd string) string {
+	// Try single-quoted
+	re := regexp.MustCompile(`-pane\s+'([^']+)'`)
+	if m := re.FindStringSubmatch(startCmd); len(m) > 1 {
+		return m[1]
+	}
+	// Try double-quoted
+	re2 := regexp.MustCompile(`-pane\s+"([^"]+)"`)
+	if m := re2.FindStringSubmatch(startCmd); len(m) > 1 {
+		return m[1]
+	}
+	// Try unquoted
+	re3 := regexp.MustCompile(`-pane\s+(\S+)`)
+	if m := re3.FindStringSubmatch(startCmd); len(m) > 1 {
+		return m[1]
+	}
+	return ""
+}
+
+// findContentPane finds the first non-auxiliary pane in a window, preferring the active one.
+func findContentPane(windowID, fallback string) string {
+	out, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+		"#{pane_id}|#{pane_current_command}|#{pane_start_command}|#{pane_active}").Output()
+	if err != nil {
+		return fallback
+	}
+	var firstContent string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) != 4 {
+			continue
+		}
+		pID, cmd, startCmd, active := parts[0], parts[1], parts[2], parts[3]
+		combined := cmd + "|" + startCmd
+		if strings.Contains(combined, "sidebar") || strings.Contains(combined, "renderer") ||
+			strings.Contains(combined, "pane-header") || strings.Contains(combined, "tabby-daemon") {
+			continue
+		}
+		if active == "1" {
+			return pID
+		}
+		if firstContent == "" {
+			firstContent = pID
+		}
+	}
+	if firstContent != "" {
+		return firstContent
+	}
+	return fallback
 }
 
 func isAuxiliaryPane(p tmux.Pane) bool {

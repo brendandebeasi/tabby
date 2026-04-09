@@ -188,7 +188,7 @@ test_sidebar_toggle_open() {
     fi
     
     # Toggle sidebar (run in test session context)
-    tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/scripts/toggle_sidebar.sh" 2>/dev/null || true
+    tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle" 2>/dev/null || true
     sleep 1
     
     if sidebar_exists; then
@@ -206,12 +206,12 @@ test_sidebar_toggle_close() {
     
     # Ensure sidebar exists first
     if ! sidebar_exists; then
-        tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/scripts/toggle_sidebar.sh" 2>/dev/null || true
+        tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle" 2>/dev/null || true
         sleep 1
     fi
     
     # Toggle again to close
-    tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/scripts/toggle_sidebar.sh" 2>/dev/null || true
+    tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle" 2>/dev/null || true
     sleep 1
     
     if ! sidebar_exists; then

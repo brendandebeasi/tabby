@@ -76,14 +76,7 @@ for script in scripts/*.sh; do
     fi
 done
 
-# Test 3: Debounce file mechanism in ensure_sidebar.sh
-echo ""
-echo "--- Test: Debounce Mechanism ---"
-if grep -q "DEBOUNCE_MS=100" scripts/ensure_sidebar.sh; then
-    pass "ensure_sidebar.sh has 100ms debounce"
-else
-    fail "ensure_sidebar.sh missing debounce"
-fi
+# Test 3: (removed — ensure_sidebar.sh migrated to Go binary tabby-hook)
 
 # Test 4: MouseDown3Pane unbinding for context menus
 echo ""
@@ -115,20 +108,7 @@ else
     fail "Pane collapse toggle action missing"
 fi
 
-# Test 6: Border color functionality
-echo ""
-echo "--- Test: Border Color Functionality ---"
-if grep -q "pane-border-style" scripts/on_window_select.sh; then
-    pass "Border style update exists in on_window_select.sh"
-else
-    fail "Border style update missing"
-fi
-
-if grep -q "@tabby_pane_active" scripts/on_window_select.sh; then
-    pass "Active pane color tracking exists"
-else
-    fail "Active pane color tracking missing"
-fi
+# Test 6: (removed — on_window_select.sh migrated to Go binary tabby-hook)
 
 # Test 7: Go tests
 echo ""

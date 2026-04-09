@@ -9,7 +9,7 @@
 - Enable: `tmux set-option -g @tabby_dev_reload_enabled 1`
 - Source config: `tmux source ~/.tmux.conf`
 - Trigger reload: `prefix + R`
-- Script: `scripts/dev-reload.sh` (rebuilds binaries, restarts sidebar only if enabled)
+- Script: `bin/tabby-dev reload` (rebuilds binaries, restarts sidebar only if enabled)
 
 ### Behavior
 

@@ -4,7 +4,7 @@
 # Usage: ./setup-ai-hooks.sh [--dry-run] [--tool TOOL]
 #
 # Configures hooks for: claude, gemini, codex, aider, opencode
-# Each tool calls set-tabby-indicator.sh on state transitions:
+# Each tool calls tabby-hook set-indicator on state transitions:
 #   UserPromptSubmit / BeforeAgent  -->  busy 1
 #   Stop / AfterAgent              -->  busy 0, input 1
 #   SessionEnd / exit              -->  bell 1
@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)"
 # shellcheck disable=SC1007
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-INDICATOR="$TABBY_DIR/scripts/set-tabby-indicator.sh"
+INDICATOR="$TABBY_DIR/bin/tabby-hook set-indicator"
 
 DRY_RUN=false
 TOOL_FILTER=""
@@ -462,11 +462,11 @@ setup_kilo() {
 // Kilo plugin to add Tabby status indicator hooks
 const { execSync } = require('child_process');
 
-const INDICATOR_SCRIPT = '/Users/b/git/tabby/scripts/set-tabby-indicator.sh';
+const INDICATOR_BIN = '__TABBY_DIR__/bin/tabby-hook';
 
 function setIndicator(type, value) {
   try {
-    execSync(`"${INDICATOR_SCRIPT}" ${type} ${value}`, { stdio: 'ignore' });
+    require('child_process').execFileSync(INDICATOR_BIN, ['set-indicator', type, String(value)], { stdio: 'ignore' });
   } catch (error) {
     // Silently fail if Tabby not available
   }
@@ -487,7 +487,8 @@ module.exports = {
   }
 };
 PLUGINEOF
-    
+    sed -i '' "s|__TABBY_DIR__|$TABBY_DIR|g" "$plugin_path"
+
     # Add plugin to config if not already present
     if [[ -f "$config_local" ]]; then
         # Add plugin to existing config

@@ -23,7 +23,7 @@ MAX_RESTARTS="${4:-5}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck disable=SC1007
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-INDICATOR="$SCRIPT_DIR/set-tabby-indicator.sh"
+INDICATOR="$TABBY_DIR/bin/tabby-hook set-indicator"
 LOG="/tmp/tabby-crash-handler.log"
 CRASH_LOG="/tmp/tabby-daemon-${SESSION_ID}-crash.log"
 EVENTS_LOG="/tmp/tabby-daemon-${SESSION_ID}.events.log"
@@ -169,9 +169,7 @@ collect_crash_context() {
 
 # ── Set indicators ────────────────────────────────────────────────────────
 set_indicator() {
-    if [ -x "$INDICATOR" ]; then
-        "$INDICATOR" "$1" "$2" 2>/dev/null || true
-    fi
+    $INDICATOR "$1" "$2" 2>/dev/null || true
 }
 
 # ── Tier 1: Transient crash (every crash) ─────────────────────────────────

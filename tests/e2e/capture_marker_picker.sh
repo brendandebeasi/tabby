@@ -37,7 +37,7 @@ sleep 0.5
 (cd "$PROJECT_ROOT" && go build -o bin/sidebar-renderer ./cmd/sidebar-renderer >/dev/null)
 (cd "$PROJECT_ROOT" && go build -o bin/tabby-daemon ./cmd/tabby-daemon >/dev/null)
 
-tmux run-shell -b -t "$TEST_SESSION" "TABBY_SKIP_BUILD=1 TABBY_SESSION_TARGET=$TEST_SESSION $PROJECT_ROOT/scripts/toggle_sidebar.sh"
+tmux run-shell -b -t "$TEST_SESSION" "TABBY_SKIP_BUILD=1 TABBY_SESSION_TARGET=$TEST_SESSION $PROJECT_ROOT/bin/tabby-toggle"
 sleep 2
 
 SIDEBAR_PANE=""

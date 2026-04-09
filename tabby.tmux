@@ -48,7 +48,7 @@ if [ "${TABBY_DEFERRED:-}" != "1" ]; then
             fi
             if [ "$_WD_ALIVE" = "false" ]; then
                 rm -f "$_SOCK" "$_PIDF"
-                "$CURRENT_DIR/scripts/watchdog_daemon.sh" -session "$_SESSION" &
+                "$CURRENT_DIR/bin/tabby-watchdog" -session "$_SESSION" &
             fi
         fi
 
@@ -106,84 +106,15 @@ tmux set-option -g aggressive-resize on
 
 # New panes/windows open in the current content pane's directory.
 # If focus is on a pane-header utility pane, split the underlying content pane.
-SPLIT_FROM_CONTENT_SCRIPT="$CURRENT_DIR/scripts/split_from_content_pane.sh"
-chmod +x "$SPLIT_FROM_CONTENT_SCRIPT"
-tmux bind-key '"' run-shell "$SPLIT_FROM_CONTENT_SCRIPT v"
-tmux bind-key '%' run-shell "$SPLIT_FROM_CONTENT_SCRIPT h"
-tmux bind-key '|' run-shell "$SPLIT_FROM_CONTENT_SCRIPT h"
-tmux bind-key '-' run-shell "$SPLIT_FROM_CONTENT_SCRIPT v"
+SPLIT_PANE_CMD="$CURRENT_DIR/bin/tabby-hook split-pane"
+tmux bind-key '"' run-shell "$SPLIT_PANE_CMD v"
+tmux bind-key '%' run-shell "$SPLIT_PANE_CMD h"
+tmux bind-key '|' run-shell "$SPLIT_PANE_CMD h"
+tmux bind-key '-' run-shell "$SPLIT_PANE_CMD v"
 
-# Create script to capture current window group/path before new-window.
-NEW_WINDOW_SCRIPT="$CURRENT_DIR/scripts/new_window_with_group.sh"
-cat > "$NEW_WINDOW_SCRIPT" << SCRIPT_EOF
-#!/usr/bin/env bash
-set -u
-
-CLIENT_TTY="\${1:-}"
-CURRENT_DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")/.." && pwd)"
-
-SAVED_GROUP=\$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
-SAVED_PATH=\$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
-CLIENT_SESSION_ID=""
-
-if [ -n "\$CLIENT_TTY" ]; then
-    CLIENT_SESSION_ID=\$(tmux display-message -p -c "\$CLIENT_TTY" "#{session_id}" 2>/dev/null || echo "")
-fi
-
-if [ -z "\$SAVED_GROUP" ]; then
-    if [ -n "\$CLIENT_TTY" ]; then
-        SAVED_GROUP=\$(tmux display-message -p -c "\$CLIENT_TTY" "#{@tabby_group}" 2>/dev/null || echo "")
-    fi
-    if [ -z "\$SAVED_GROUP" ]; then
-        SAVED_GROUP=\$(tmux show-window-options -v @tabby_group 2>/dev/null || echo "")
-    fi
-fi
-
-if [ -z "\$SAVED_PATH" ]; then
-    if [ -n "\$CLIENT_TTY" ]; then
-        SAVED_PATH=\$(tmux display-message -p -c "\$CLIENT_TTY" "#{pane_current_path}" 2>/dev/null || echo "")
-    fi
-    if [ -z "\$SAVED_PATH" ]; then
-        SAVED_PATH=\$(tmux display-message -p "#{pane_current_path}" 2>/dev/null || echo "")
-    fi
-fi
-
-NEW_WINDOW_ARGS=(new-window -P -F "#{window_id}")
-if [ -n "\$CLIENT_SESSION_ID" ]; then
-    NEW_WINDOW_ARGS+=( -t "\${CLIENT_SESSION_ID}:" )
-fi
-if [ -n "\$SAVED_PATH" ]; then
-    NEW_WINDOW_ARGS+=( -c "\$SAVED_PATH" )
-fi
-NEW_WINDOW_ID=\$(tmux "\${NEW_WINDOW_ARGS[@]}" 2>/dev/null || true)
-NEW_WINDOW_ID=\$(printf "%s" "\$NEW_WINDOW_ID" | tr -d '\r\n')
-
-if [ -n "\$NEW_WINDOW_ID" ] && [ -n "\$SAVED_GROUP" ] && [ "\$SAVED_GROUP" != "Default" ]; then
-    tmux set-window-option -t "\$NEW_WINDOW_ID" @tabby_group "\$SAVED_GROUP" 2>/dev/null || true
-fi
-
-if [ -n "\$NEW_WINDOW_ID" ]; then
-    tmux set-option -g @tabby_new_window_id "\$NEW_WINDOW_ID" 2>/dev/null || true
-    tmux select-window -t "\$NEW_WINDOW_ID" 2>/dev/null || true
-    "\$CURRENT_DIR/scripts/focus_new_window.sh" "\$NEW_WINDOW_ID" >/dev/null 2>&1 &
-    ( sleep 2; PENDING=\$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo ""); [ "\$PENDING" = "\$NEW_WINDOW_ID" ] && tmux set-option -gu @tabby_new_window_id 2>/dev/null || true ) &
-fi
-
-tmux set-option -gu @tabby_new_window_group 2>/dev/null || true
-tmux set-option -gu @tabby_new_window_path 2>/dev/null || true
-
-exit 0
-SCRIPT_EOF
-chmod +x "$NEW_WINDOW_SCRIPT"
-
-# Override 'c' to capture group and create new window
-# Use atomic Go binary if built; fall back to shell script for fresh clones
+# Override 'c' to capture group and create new window (Go binary)
 NEW_WINDOW_BIN="$CURRENT_DIR/bin/new-window"
-if [ -x "$NEW_WINDOW_BIN" ]; then
-    tmux bind-key 'c' run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
-else
-    tmux bind-key 'c' run-shell "$NEW_WINDOW_SCRIPT '#{client_tty}'"
-fi
+tmux bind-key 'c' run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 
 # Enable automatic window renaming by default (shows running command/SSH host)
 # Windows with group prefixes or manual names get locked via @tabby_locked
@@ -330,40 +261,6 @@ tmux bind-key -T root MouseDrag1Pane \
 # Architecture: Only intercept pane-header clicks. Let sidebar and normal panes use default tmux behavior.
 # Flow: MouseDown1Pane -> if pane-header: store click pos, select pane -> BubbleTea FocusMsg -> daemon handles action
 
-# Create click handler script for pane-header clicks only
-CLICK_HANDLER_SCRIPT="$CURRENT_DIR/scripts/pane_click_handler.sh"
-cat > "$CLICK_HANDLER_SCRIPT" << 'SCRIPT_EOF'
-#!/usr/bin/env bash
-# Handle click on pane-header panes. Store click position and select pane to trigger FocusMsg.
-# The pane-header's BubbleTea receives FocusMsg, reads stored position, sends to daemon.
-# Daemon handles all button logic (single source of truth).
-PANE_ID="$1"
-MOUSE_X="$2"
-MOUSE_Y="$3"
-PANE_LEFT="$4"
-PANE_TOP="$5"
-
-# Convert window-absolute mouse coordinates to pane-local coordinates.
-# BubbleTea hit testing uses local pane coordinates.
-LOCAL_X=$((MOUSE_X - PANE_LEFT))
-LOCAL_Y=$((MOUSE_Y - PANE_TOP))
-
-if [ "$LOCAL_X" -lt 0 ]; then
-    LOCAL_X=0
-fi
-if [ "$LOCAL_Y" -lt 0 ]; then
-    LOCAL_Y=0
-fi
-
-# Store click position for pane-header to read on focus gain
-tmux set-option -g @tabby_last_click_x "$LOCAL_X"
-tmux set-option -g @tabby_last_click_y "$LOCAL_Y"
-tmux set-option -g @tabby_last_click_pane "$PANE_ID"
-
-tmux select-pane -t "$PANE_ID"
-SCRIPT_EOF
-chmod +x "$CLICK_HANDLER_SCRIPT"
-
 # Bind MouseDown1Pane:
 # 1. Check target pane command
 # 2. If Sidebar or Header: send-keys -M (Pass mouse ONLY. Do not select-pane, let app handle it)
@@ -399,25 +296,8 @@ tmux bind-key -T root WheelDownPane \
 # Enable focus events
 tmux set-option -g focus-events on
 
-# Create wrapper script for kill-pane with single-pane fast window close
-KILL_PANE_SCRIPT="$CURRENT_DIR/scripts/kill_pane_wrapper.sh"
-cat > "$KILL_PANE_SCRIPT" << 'SCRIPT_EOF'
-#!/usr/bin/env bash
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-WINDOW_INDEX=$(tmux display-message -p '#{window_index}' 2>/dev/null || echo "")
-CONTENT_COUNT=$(tmux list-panes -F '#{pane_current_command}|#{pane_start_command}' 2>/dev/null | awk -F'|' '$1 !~ /(sidebar|renderer|pane-header|tabby-daemon)/ && $2 !~ /(sidebar|renderer|pane-header|tabby-daemon)/ {c++} END {print c+0}')
-
-if [ -n "$WINDOW_INDEX" ] && [ "$CONTENT_COUNT" -le 1 ]; then
-    "$CURRENT_DIR/scripts/kill_window.sh" "$WINDOW_INDEX"
-    exit 0
-fi
-
-"$CURRENT_DIR/scripts/save_pane_layout.sh"
-sleep 0.01
-tmux kill-pane "$@"
-SCRIPT_EOF
-chmod +x "$KILL_PANE_SCRIPT"
+# Kill-pane: daemon handles save-layout + kill, or kills window if last content pane
+KILL_PANE_SCRIPT="$CURRENT_DIR/bin/tabby-hook kill-pane"
 
 # Pane border mouse: left-click+drag resizes panes, right-click shows context menu
 # IMPORTANT: MouseDown1Border must stay bound for MouseDrag1Border (resize) to work
@@ -520,72 +400,30 @@ if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
     # Mouse bindings for tabs
     tmux set-option -g mouse on
     tmux bind-key -T root MouseDown1Status select-window -t =
-    tmux bind-key -T root MouseDown2Status run-shell "$CURRENT_DIR/scripts/kill_window.sh #{window_index}"
+    tmux bind-key -T root MouseDown2Status run-shell "$CURRENT_DIR/bin/tabby-hook kill-window #{window_index}"
     tmux bind-key -T root MouseDown3Status command-prompt -I "#W" "rename-window '%%' ; set-window-option @tabby_name_locked 1"
     tmux bind-key -T root MouseDown1StatusRight new-window
 fi
 
-# Helper script to signal sidebar refresh
-# Sends SIGUSR1 to sidebar process via PID file
-SIGNAL_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/signal_sidebar.sh"
+# Signal sidebar refresh: now inline via SIGNAL_CMD (USR1 to daemon PID)
+SIGNAL_SIDEBAR_SCRIPT="$SIGNAL_CMD"
 
-# Create the signal helper script
-cat > "$SIGNAL_SIDEBAR_SCRIPT" << 'SCRIPT_EOF'
-#!/usr/bin/env bash
-# Signal daemon to refresh window list (instant re-render + spawn new renderers)
-SESSION_ID="${1:-$(tmux display-message -p '#{session_id}')}"
-PID_FILE="/tmp/tabby-daemon-${SESSION_ID}.pid"
+# Refresh status bar: trivial inline command (replaces refresh_status.sh)
+REFRESH_STATUS_SCRIPT="tmux refresh-client -S"
 
-if [ -f "$PID_FILE" ]; then
-    kill -USR1 "$(cat "$PID_FILE")" 2>/dev/null || true
-fi
-SCRIPT_EOF
-chmod +x "$SIGNAL_SIDEBAR_SCRIPT"
+# All lifecycle scripts now handled by Go binaries via tabby-hook
+HOOK_BIN="$CURRENT_DIR/bin/tabby-hook"
+ENSURE_SIDEBAR_CMD="$HOOK_BIN ensure-sidebar"
+RESTORE_SIDEBAR_CMD="$HOOK_BIN ensure-sidebar"
+STABILIZE_CLIENT_RESIZE_CMD="$HOOK_BIN stabilize-client-resize"
+SIGNAL_CLIENT_RESIZE_CMD="$HOOK_BIN signal-client-resize"
+FOCUS_RECOVERY_CMD="$HOOK_BIN restore-input-focus"
 
-# Helper script to refresh status bar
-REFRESH_STATUS_SCRIPT="$CURRENT_DIR/scripts/refresh_status.sh"
+# Apply group to new window: now handled by daemon (createNewWindowInCurrentGroup)
 
-# Helper script to ensure sidebar persistence
-ENSURE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/ensure_sidebar.sh"
-
-# Helper script to restore sidebar on session reattach
-RESTORE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/restore_sidebar.sh"
-chmod +x "$RESTORE_SIDEBAR_SCRIPT"
-
-STABILIZE_CLIENT_RESIZE_SCRIPT="$CURRENT_DIR/scripts/stabilize_client_resize.sh"
-chmod +x "$STABILIZE_CLIENT_RESIZE_SCRIPT"
-
-SIGNAL_CLIENT_RESIZE_SCRIPT="$CURRENT_DIR/scripts/signal_client_resize.sh"
-chmod +x "$SIGNAL_CLIENT_RESIZE_SCRIPT"
-
-# Status exclusivity: now handled by tabby-daemon (EnforceStatusExclusivity on signal_refresh).
-
-FOCUS_RECOVERY_SCRIPT="$CURRENT_DIR/scripts/restore_input_focus.sh"
-chmod +x "$FOCUS_RECOVERY_SCRIPT"
-
-# Create script to apply saved group to new window
-APPLY_GROUP_SCRIPT="$CURRENT_DIR/scripts/apply_new_window_group.sh"
-cat > "$APPLY_GROUP_SCRIPT" << 'SCRIPT_EOF'
-#!/usr/bin/env bash
-# Apply saved group to newly created window
-SAVED_GROUP=$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
-NEW_WINDOW_ID=$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo "")
-if [ -n "$SAVED_GROUP" ] && [ -n "$NEW_WINDOW_ID" ]; then
-    tmux set-window-option -t "$NEW_WINDOW_ID" @tabby_group "$SAVED_GROUP" 2>/dev/null || true
-fi
-tmux set-option -gu @tabby_new_window_group 2>/dev/null || true
-SCRIPT_EOF
-chmod +x "$APPLY_GROUP_SCRIPT"
-
-# Window history tracking: now handled by tabby-daemon (TrackWindowHistory/SelectPreviousWindow).
-# The kill_window script is still needed for the keybinding.
-KILL_WINDOW_SCRIPT="$CURRENT_DIR/scripts/kill_window.sh"
-chmod +x "$KILL_WINDOW_SCRIPT"
-EXIT_IF_NO_MAIN_WINDOWS_SCRIPT="$CURRENT_DIR/scripts/exit_if_no_main_windows.sh"
-chmod +x "$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT"
-
-# Layout saving: now handled by tabby-daemon (SaveWindowLayouts on signal_refresh).
-# The save_pane_layout.sh script is still used by kill_pane_wrapper.sh for pre-kill saves.
+# Window kill and exit-if-no-main: now handled by tabby-hook -> daemon
+KILL_WINDOW_SCRIPT="$CURRENT_DIR/bin/tabby-hook kill-window"
+EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby-hook exit-if-no-main"
 
 # --- Hook registrations ---
 # Most hooks now signal the daemon (USR1) which handles all state internally:
@@ -594,9 +432,10 @@ chmod +x "$EXIT_IF_NO_MAIN_WINDOWS_SCRIPT"
 SIGNAL_CMD="kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true"
 
 tmux set-hook -g window-linked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S'"
-tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
+tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
 tmux set-hook -g after-new-window "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S'"
-tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S'"
+tmux set-hook -g after-resize-pane "run-shell -b '$HOOK_BIN on-pane-resize \"#{hook_pane}\"'"
+tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
 
 # Lock window name on manual rename via prefix+, keybinding
 # NOTE: We intentionally do NOT use after-rename-window hook because the daemon's
@@ -611,44 +450,34 @@ tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_CMD'"
 # When a pane is killed: preserve ratios synchronously (must happen before tmux
 # reflows), then signal daemon in background. The daemon's USR1 handler takes
 # care of orphan cleanup and sidebar spawning.
-PRESERVE_RATIOS_SCRIPT="$CURRENT_DIR/scripts/preserve_pane_ratios.sh"
-chmod +x "$PRESERVE_RATIOS_SCRIPT"
-tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_SCRIPT \"#{window_id}\"'; run-shell -b '$SIGNAL_CMD; $EXIT_IF_NO_MAIN_WINDOWS_SCRIPT'"
+PRESERVE_RATIOS_CMD="$HOOK_BIN preserve-pane-ratios"
+tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"'; run-shell -b '$SIGNAL_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
 
 # Restore sidebar when client reattaches to session
-tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'; run-shell '$STABILIZE_CLIENT_RESIZE_SCRIPT \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'"
+tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_CMD'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'"
 
-# When switching between already-attached clients of different sizes, tmux
-# does NOT auto-emit client-resized for the newly active client even with
-# `window-size latest`, so we drive an explicit resize-window pass via
-# signal_client_resize.sh. The prior flicker feedback loop is now prevented
-# by on_pane_resize.sh (filters after-resize-pane to sidebar panes only) and
-# RunWidthSync's active-client cap (second pass is a no-op).
-tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'"
-tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'"
+# Client resize: resize windows to client geometry, signal daemon
+tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
+tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
 
-# Ensure sidebar panes exist for newly created sessions/windows
-# (do not toggle global mode on session creation)
-# session-created: daemon handles sidebar spawning via spawnRenderersForNewWindows on USR1
-tmux set-hook -g session-created "run-shell -b 'kill -USR1 $(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'"
+# session-created: daemon handles sidebar spawning via USR1
+tmux set-hook -g session-created "run-shell -b '$SIGNAL_CMD'"
 
 # Maintain sidebar width after terminal resize
-# (daemon's RunWidthSync handles all resize logic via USR1 signal)
-tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'"
+tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
 
 # tmux-resurrect integration (options are inert if resurrect is not installed)
-RESURRECT_SAVE_HOOK="$CURRENT_DIR/scripts/resurrect_save_hook.sh"
-RESURRECT_RESTORE_HOOK="$CURRENT_DIR/scripts/resurrect_restore_hook.sh"
-chmod +x "$RESURRECT_SAVE_HOOK" "$RESURRECT_RESTORE_HOOK"
+RESURRECT_SAVE_CMD="$HOOK_BIN resurrect-save"
+RESURRECT_RESTORE_CMD="$HOOK_BIN resurrect-restore"
 
 EXISTING_SAVE_HOOK=$(tmux show-option -gqv @resurrect-hook-post-save-layout 2>/dev/null || echo "")
 if [ -z "$EXISTING_SAVE_HOOK" ] || echo "$EXISTING_SAVE_HOOK" | grep -q "tabby"; then
-    tmux set-option -g @resurrect-hook-post-save-layout "$RESURRECT_SAVE_HOOK"
+    tmux set-option -g @resurrect-hook-post-save-layout "$RESURRECT_SAVE_CMD"
 fi
 
 EXISTING_RESTORE_HOOK=$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null || echo "")
 if [ -z "$EXISTING_RESTORE_HOOK" ] || echo "$EXISTING_RESTORE_HOOK" | grep -q "tabby"; then
-    tmux set-option -g @resurrect-hook-post-restore-all "$RESURRECT_RESTORE_HOOK"
+    tmux set-option -g @resurrect-hook-post-restore-all "$RESURRECT_RESTORE_CMD"
 fi
 
 # Keep tmux native chooser shortcuts available
@@ -660,7 +489,7 @@ TOGGLE_KEY=$(grep "toggle_sidebar:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{pr
 KEY=${TOGGLE_KEY##*+ }
 if [ -z "$KEY" ]; then KEY="Tab"; fi
 
-tmux bind-key "$KEY" run-shell -b "$CURRENT_DIR/scripts/toggle_sidebar.sh"
+tmux bind-key "$KEY" run-shell -b "$CURRENT_DIR/bin/tabby-toggle"
 
 # Double-click on pane or border: pass through mouse events normally
 tmux bind-key -T root DoubleClick1Pane \
@@ -733,7 +562,7 @@ if [ -x "$CYCLE_PANE_BIN" ]; then
 fi
 
 # Optional: Also bind to a prefix-less key for quick access
-# tmux bind-key -n M-Tab run-shell "$CURRENT_DIR/scripts/toggle_sidebar.sh"
+# tmux bind-key -n M-Tab run-shell "$CURRENT_DIR/bin/tabby-toggle"
 
 # New Group shortcut (prefix + G)
 tmux bind-key G command-prompt -p 'New group name:' "run-shell '$CURRENT_DIR/bin/tabby-hook new-group %%'"
@@ -801,7 +630,7 @@ tmux bind-key -n M-% select-window -t :5
 # The daemon was pre-started at the top of this file, so by now the socket
 # should be ready (or nearly ready).  Hooks (session-created, after-new-window,
 # after-select-window) also call ensure_sidebar, providing redundancy.
-tmux run-shell -b "$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\""
+tmux run-shell -b "$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\""
 
 # Status exclusivity enforcement moved to daemon (EnforceStatusExclusivity)
-tmux run-shell -b "$FOCUS_RECOVERY_SCRIPT \"#{session_id}\""
+tmux run-shell -b "$FOCUS_RECOVERY_CMD \"#{session_id}\""

@@ -80,7 +80,7 @@ capture_sidebar_open() {
     log_info "Capturing: Sidebar Open"
     
     # Toggle sidebar open
-    tmux run-shell -t "$TEST_SESSION" "$PROJECT_ROOT/scripts/toggle_sidebar.sh" 2>/dev/null || true
+    tmux run-shell -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle" 2>/dev/null || true
     sleep 1
     
     # Find sidebar pane
