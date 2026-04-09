@@ -454,14 +454,6 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 
 		spawned = true
 		logEvent("SPAWN_COMPLETE window=%s pane=%s", windowID, newPaneID)
-
-		// Force SIGWINCH on content panes so TUI apps (OpenCode, etc.)
-		// re-detect their terminal size after the sidebar split changed dimensions.
-		for _, p := range win.Panes {
-			if p.PID > 0 {
-				exec.Command("kill", "-WINCH", strconv.Itoa(p.PID)).Run()
-			}
-		}
 	}
 	return spawned
 }
@@ -1659,15 +1651,15 @@ func main() {
 			coordinator.ApplyThemeToPane(paneID)
 		}
 	}
+	// OnResize: update the coordinator's size snapshot for rendering, but do
+	// NOT trigger width reconciliation. Width is determined deterministically
+	// by (globalWidth, activeClientWidth) and only changes via explicit
+	// triggers: user drag (after-resize-pane hook), active-client switch
+	// (clientGeometryTicker), new window spawn, or config change. Reacting to
+	// the renderer's own size reports here caused the tmux-reflow feedback
+	// loop on app launches.
 	server.OnResize = func(clientID string, width, height int, paneID string) {
 		coordinator.UpdateClientSizeSnapshot(clientID, width, height)
-		if clientID != "" && !strings.HasPrefix(clientID, "header:") {
-			go func(id string) {
-				logEvent("WIDTH_SYNC_REQUEST trigger=renderer_resize active=%s force=1", id)
-				coordinator.RunWidthSync(id, true)
-				server.BroadcastRender()
-			}(clientID)
-		}
 		if paneID != "" {
 			coordinator.ApplyThemeToPane(paneID)
 		}
@@ -1752,6 +1744,54 @@ func main() {
 	// Start heartbeat writer (detects hangs on next startup)
 	heartbeatDone := make(chan struct{})
 	go writeHeartbeatLoop(*sessionID, heartbeatDone)
+
+	// Idle-client reaper: opt-in via @tabby_client_idle_timeout_hours (>0).
+	// Detaches only clients idle longer than the threshold, never the currently
+	// active client, and never runs at startup (which was detaching legitimate
+	// passive viewers the moment the daemon booted).
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		reap := func() {
+			hours := 0
+			if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_client_idle_timeout_hours").Output(); err == nil {
+				if v, perr := strconv.Atoi(strings.TrimSpace(string(out))); perr == nil && v > 0 {
+					hours = v
+				}
+			}
+			if hours <= 0 {
+				return // opt-in only
+			}
+			threshold := time.Duration(hours) * time.Hour
+			activeTTY := strings.TrimSpace(tmuxOutputTrimmed("display-message", "-p", "#{client_tty}"))
+			out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|#{client_activity}").Output()
+			if err != nil {
+				return
+			}
+			now := time.Now()
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				parts := strings.SplitN(line, "|", 2)
+				if len(parts) != 2 || parts[0] == "" {
+					continue
+				}
+				if parts[0] == activeTTY {
+					continue
+				}
+				actSec, err := strconv.ParseInt(parts[1], 10, 64)
+				if err != nil {
+					continue
+				}
+				idle := now.Sub(time.Unix(actSec, 0))
+				if idle > threshold {
+					logEvent("CLIENT_IDLE_DETACH tty=%s idle=%s threshold=%s", parts[0], idle.Round(time.Second), threshold)
+					exec.Command("tmux", "detach-client", "-t", parts[0]).Run()
+				}
+			}
+		}
+		for range ticker.C {
+			reap()
+		}
+	}()
 
 	// Start deadlock watchdog
 	StartDeadlockWatchdog()
@@ -1943,7 +1983,7 @@ func main() {
 					// before the slow RefreshWindows round-trip completes.
 					// This cuts perceived lag from ~500ms to ~50ms on Cmd+[/].
 					coordinator.SetActiveWindowOptimistic(activeWindowID)
-					server.BroadcastRender()
+					server.SendRenderToClient(activeWindowID)
 
 					coordinator.RefreshWindows()
 					t1 := time.Now()
@@ -2052,6 +2092,7 @@ func main() {
 					}
 					lastClientGeometry = geomKey
 					logEvent("CLIENT_GEOMETRY_CHANGE tty=%s size=%dx%d activity=%d", tty, w, h, activity)
+					coordinator.SetActiveClientWidth(w)
 					syncClientSizesFromTmux(server, coordinator, "geometry_tick")
 					activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 					logEvent("WIDTH_SYNC_REQUEST trigger=geometry_tick active=%s force=1", activeWin)

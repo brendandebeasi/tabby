@@ -63,8 +63,13 @@ tmux set-option -g monitor-activity off
 tmux set-option -g monitor-bell on
 tmux set-option -g bell-action other  # Flag bells from non-active windows
 
-# Window sizing: resize all windows/panes together when terminal resizes
-tmux set-option -g window-size largest
+# Window sizing: resize all windows/panes together when terminal resizes.
+# NOTE: `window-size manual` segfaults homebrew tmux inside
+# clients_calculate_size during new-session spawn (null deref in
+# default_window_size). Do NOT use `manual` here. If flicker mitigation
+# in multi-client setups is needed, do it via explicit resize-window
+# calls from the daemon instead of via this global option.
+tmux set-option -g window-size latest
 tmux set-option -g aggressive-resize on
 
 # New panes/windows open in the current content pane's directory.
@@ -277,10 +282,6 @@ tmux set-option -ug window-active-style
 if [ -x "$CYCLE_PANE_BIN" ]; then
     "$CYCLE_PANE_BIN" --dim-only
 fi
-
-# Keep session windows sized to the most recently active client so mobile
-# attaches do not end up with off-screen sidebars in dual-client setups.
-tmux set-window-option -g window-size "latest"
 
 # Pane header format: hide for utility panes (sidebar, pane-header)
 
@@ -611,9 +612,12 @@ tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_SCRIPT \"#{window_
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_SCRIPT'; run-shell '$STABILIZE_CLIENT_RESIZE_SCRIPT \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 
-# When switching between already-attached clients of different sizes, tmux may
-# not emit client-resized for the newly active client. Hook the activation/focus
-# paths as well so all windows adopt the new client geometry immediately.
+# When switching between already-attached clients of different sizes, tmux
+# does NOT auto-emit client-resized for the newly active client even with
+# `window-size latest`, so we drive an explicit resize-window pass via
+# signal_client_resize.sh. The prior flicker feedback loop is now prevented
+# by on_pane_resize.sh (filters after-resize-pane to sidebar panes only) and
+# RunWidthSync's active-client cap (second pass is a no-op).
 tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
 

@@ -10,7 +10,6 @@ SESSION_ID="$(tmux display-message -p '#{session_id}' 2>/dev/null || echo "")"
 
 if [ -n "$CLIENT_WIDTH" ] && [ -n "$CLIENT_HEIGHT" ]; then
     if printf '%s' "$CLIENT_WIDTH" | grep -Eq '^[0-9]+$' && printf '%s' "$CLIENT_HEIGHT" | grep -Eq '^[0-9]+$'; then
-        tmux set-window-option -g window-size latest 2>/dev/null || true
         while IFS= read -r window_id; do
             [ -z "$window_id" ] && continue
             tmux resize-window -x "$CLIENT_WIDTH" -y "$CLIENT_HEIGHT" -t "$window_id" 2>/dev/null || true

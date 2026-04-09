@@ -265,11 +265,23 @@ else
     ENSURE_SIDEBAR_SCRIPT="$CURRENT_DIR/scripts/ensure_sidebar.sh"
     STATUS_GUARD_SCRIPT="$CURRENT_DIR/scripts/enforce_status_exclusivity.sh"
     # shellcheck disable=SC2016
-    tmux set-hook -g after-resize-pane 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
+    # Only signal when a *sidebar* pane gets resized (user dragged the border).
+    # Without this filter, every content-pane reflow (e.g. launching kilo/opencode
+    # inside tmux) fires USR1, which triggers signal_refresh -> RunWidthSync ->
+    # resize-pane on sidebars -> after-resize-pane again -> feedback loop/flicker.
+    ON_PANE_RESIZE_SCRIPT="$CURRENT_DIR/scripts/on_pane_resize.sh"
+    tmux set-hook -g after-resize-pane "run-shell -b '$ON_PANE_RESIZE_SCRIPT \"#{hook_pane}\"'"
     # shellcheck disable=SC2016
     tmux set-hook -g after-resize-window 'run-shell -b "kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true"'
     SIGNAL_CLIENT_RESIZE_SCRIPT="$CURRENT_DIR/scripts/signal_client_resize.sh"
     tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
+    # client-active / client-focus-in: force a resize-window pass to the
+    # newly-active client's geometry. tmux's `window-size latest` does NOT
+    # auto-resize on focus changes between already-attached clients, so we
+    # have to drive it explicitly. The previous flicker feedback loop is
+    # prevented by (a) after-resize-pane filtering to sidebar panes only via
+    # on_pane_resize.sh and (b) RunWidthSync's active-client cap making the
+    # second pass a no-op.
     tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
     tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_SCRIPT \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_SCRIPT \"#{session_id}\" \"#{window_id}\"'; run-shell '$STATUS_GUARD_SCRIPT \"#{session_id}\"'"
     

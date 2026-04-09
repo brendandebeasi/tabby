@@ -39,12 +39,6 @@ type Server struct {
 	sequenceNum uint64
 	seqMu       sync.Mutex
 
-	// Resize debouncing - prevents rapid resize events from causing multiple renders
-	resizePending  map[string]*ResizePayload // pending resize per client
-	resizeTimers   map[string]*time.Timer    // debounce timer per client
-	resizeDebounce time.Duration             // debounce window
-	resizeMu       sync.Mutex                // protects resize maps
-
 	// Render batching - coalesces rapid render requests into single frames
 	renderPending    map[string]bool // clients with pending render
 	renderBatchTimer *time.Timer     // single timer for batch flush
@@ -79,9 +73,6 @@ func NewServer(sessionID string) *Server {
 		clients:          make(map[string]*ClientInfo),
 		done:             make(chan struct{}),
 		sequenceNum:      1,
-		resizePending:    make(map[string]*ResizePayload),
-		resizeTimers:     make(map[string]*time.Timer),
-		resizeDebounce:   50 * time.Millisecond,
 		renderPending:    make(map[string]bool),
 		renderBatchDelay: 16 * time.Millisecond, // ~60fps
 	}
@@ -274,18 +265,17 @@ func (s *Server) handleClient(conn net.Conn) {
 				payloadBytes, _ := json.Marshal(msg.Payload)
 				var resize ResizePayload
 				if json.Unmarshal(payloadBytes, &resize) == nil {
-					// Check if size actually changed before debouncing
+					// Check if size actually changed
 					s.clientsMu.RLock()
 					client, exists := s.clients[clientID]
 					sameSize := exists && client.Width == resize.Width && client.Height == resize.Height
 					s.clientsMu.RUnlock()
 
 					if sameSize {
-						// No change, skip entirely
 						continue
 					}
 
-					// Update client dimensions immediately (so queries see current size)
+					// Update client dimensions
 					s.clientsMu.Lock()
 					if client, ok := s.clients[clientID]; ok {
 						client.Width = resize.Width
@@ -296,38 +286,13 @@ func (s *Server) handleClient(conn net.Conn) {
 					}
 					s.clientsMu.Unlock()
 
-					// Debounce the render: store pending resize and reset timer
-					s.resizeMu.Lock()
-					s.resizePending[clientID] = &resize
-
-					// Cancel existing timer if any
-					if timer, ok := s.resizeTimers[clientID]; ok {
-						timer.Stop()
+					if s.DebugLog != nil {
+						s.DebugLog("RESIZE_APPLY client=%s width=%d height=%d pane=%s", clientID, resize.Width, resize.Height, resize.PaneID)
 					}
-
-					// Start new debounce timer
-					cid := clientID // capture for closure
-					s.resizeTimers[clientID] = time.AfterFunc(s.resizeDebounce, func() {
-						s.resizeMu.Lock()
-						pending, hasPending := s.resizePending[cid]
-						delete(s.resizePending, cid)
-						delete(s.resizeTimers, cid)
-						s.resizeMu.Unlock()
-
-						if !hasPending {
-							return
-						}
-
-						// Now apply the final resize: notify callback and render
-						if s.DebugLog != nil {
-							s.DebugLog("RESIZE_APPLY client=%s width=%d height=%d pane=%s", cid, pending.Width, pending.Height, pending.PaneID)
-						}
-						if s.OnResize != nil {
-							s.OnResize(cid, pending.Width, pending.Height, pending.PaneID)
-						}
-						s.SendRenderToClient(cid)
-					})
-					s.resizeMu.Unlock()
+					if s.OnResize != nil {
+						s.OnResize(clientID, resize.Width, resize.Height, resize.PaneID)
+					}
+					s.SendRenderToClient(clientID)
 				}
 			}
 
@@ -383,15 +348,6 @@ func (s *Server) handleClient(conn net.Conn) {
 
 	// Client disconnected
 	if clientID != "" {
-		// Clean up any pending resize timer for this client
-		s.resizeMu.Lock()
-		if timer, ok := s.resizeTimers[clientID]; ok {
-			timer.Stop()
-			delete(s.resizeTimers, clientID)
-		}
-		delete(s.resizePending, clientID)
-		s.resizeMu.Unlock()
-
 		s.clientsMu.Lock()
 		delete(s.clients, clientID)
 		s.clientsMu.Unlock()

@@ -239,6 +239,11 @@ type Coordinator struct {
 	lastActiveWindowID     string    // Track which window was last active (for detecting window switch)
 	activeWindowChangeTime time.Time // When the active window changed (for grace period)
 	widthSyncMu            sync.Mutex
+	// Active physical tmux client terminal width (cols). Updated by clientGeometryTicker.
+	// Used to cap sidebar targetWidth so we never ask tmux for more cols than the
+	// active client can actually honor (prevents narrow-client resize thrash).
+	activeClientWidth   int
+	activeClientWidthMu sync.RWMutex
 
 	// Per-client widths for accurate click detection
 	clientWidths      map[string]int
@@ -3832,6 +3837,36 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	}
 }
 
+// SetActiveClientWidth records the currently-focused physical tmux client's
+// terminal width (in cols). RunWidthSync caps sidebar targets against this so
+// that we never ask tmux for more cols than the active client can honor.
+func (c *Coordinator) SetActiveClientWidth(w int) {
+	c.activeClientWidthMu.Lock()
+	c.activeClientWidth = w
+	c.activeClientWidthMu.Unlock()
+}
+
+// capTargetToActiveClient clamps a desired sidebar width so that the active
+// physical tmux client still has at least minContentPaneCols cols left for the
+// content pane. Returns target unchanged if no active client info is known.
+func (c *Coordinator) capTargetToActiveClient(target int) int {
+	const minContentPaneCols = 40
+	c.activeClientWidthMu.RLock()
+	acw := c.activeClientWidth
+	c.activeClientWidthMu.RUnlock()
+	if acw <= 0 {
+		return target
+	}
+	maxSidebar := acw - minContentPaneCols
+	if maxSidebar < 10 {
+		maxSidebar = 10
+	}
+	if target > maxSidebar {
+		return maxSidebar
+	}
+	return target
+}
+
 // RunWidthSync checks all connected sidebar clients and resizes any whose width
 // doesn't match the global target. Called from the main event loop (not the render path)
 // to avoid blocking BroadcastRender with tmux subprocess calls.
@@ -3939,42 +3974,36 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 			}
 		}
 
-		if currentWidth < 10 {
-			coordinatorDebugLog.Printf("Width sync: %s below minimum (%d), restoring to global %d", clientID, currentWidth, c.globalWidth)
-			targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth, currentHeight)
-			if applyKeyboardClamp && targetWidth > keyboardWidth {
-				targetWidth = keyboardWidth
-			}
-			if applyKeyboardClamp {
-				extendHolds = append(extendHolds, clientID)
-			}
-			logEvent("WIDTH_SYNC_PLAN client=%s active=%s current=%d target=%d reason=min_guard", clientID, activeWindowID, currentWidth, targetWidth)
-			ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
-			continue
-		}
-
+		// Compute target: preferred globalWidth, bounded by per-window constraints,
+		// keyboard clamp, then finally capped to what the active physical client
+		// can actually honor. The final cap is the key anti-thrash fix: tmux
+		// silently clamps resize-pane on narrow clients, and the clamped result
+		// comes back as a new MsgResize -> without this cap, we'd fight tmux in
+		// a loop.
 		targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth, currentHeight)
 		if applyKeyboardClamp && targetWidth > keyboardWidth {
 			targetWidth = keyboardWidth
 		}
-		if currentWidth != targetWidth {
-			coordinatorDebugLog.Printf("Width sync: window=%s current=%d target=%d", clientID, currentWidth, targetWidth)
-			logEvent("WIDTH_SYNC_PLAN client=%s active=%s current=%d target=%d", clientID, activeWindowID, currentWidth, targetWidth)
-			ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
-			if applyKeyboardClamp {
-				extendHolds = append(extendHolds, clientID)
-			}
+		targetWidth = c.capTargetToActiveClient(targetWidth)
+
+		// If current width already matches the capped target, nothing to do.
+		// In particular, a currentWidth < 10 is trusted as tmux's clamp and we
+		// do NOT try to restore to globalWidth (that caused the min_guard thrash).
+		if currentWidth == targetWidth {
+			logEvent("WIDTH_SYNC_SKIP_NOOP client=%s width=%d", clientID, currentWidth)
 			continue
 		}
 
-		if force {
-			coordinatorDebugLog.Printf("Width sync (force): window=%s current=%d target=%d", clientID, currentWidth, targetWidth)
-			logEvent("WIDTH_SYNC_PLAN client=%s active=%s current=%d target=%d reason=force_reapply", clientID, activeWindowID, currentWidth, targetWidth)
-			ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
-			if applyKeyboardClamp {
-				extendHolds = append(extendHolds, clientID)
-			}
+		// Only issue a resize when the target differs AND the active client can
+		// plausibly hold it. capTargetToActiveClient already enforces the cap,
+		// so reaching here means an honest resize is needed.
+		coordinatorDebugLog.Printf("Width sync: window=%s current=%d target=%d", clientID, currentWidth, targetWidth)
+		logEvent("WIDTH_SYNC_PLAN client=%s active=%s current=%d target=%d", clientID, activeWindowID, currentWidth, targetWidth)
+		ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
+		if applyKeyboardClamp {
+			extendHolds = append(extendHolds, clientID)
 		}
+		_ = force // no longer drives separate branch; targets are always honest now
 	}
 
 	if len(ops) > 0 {
