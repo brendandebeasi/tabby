@@ -1655,6 +1655,21 @@ func (c *Coordinator) saveCollapsedGroupsLocked() {
 	}
 }
 
+// getCollapsedGroupsJSON returns the collapsed groups as a JSON array string.
+func (c *Coordinator) getCollapsedGroupsJSON() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	names := make([]string, 0, len(c.collapsedGroups))
+	for name := range c.collapsedGroups {
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return "[]"
+	}
+	data, _ := json.Marshal(names)
+	return string(data)
+}
+
 // petStatePath returns the path to the shared pet state file
 func petStatePath() string {
 	paths.EnsureStateDir()
@@ -8999,9 +9014,19 @@ func (c *Coordinator) applyColorPickerSelection(scope, target, hexColor string) 
 	}
 
 	if scope == "group" {
-		colorScript := c.getScriptPath("set_group_color.sh")
-		if colorScript != "" {
-			exec.Command("bash", colorScript, target, hexColor).Run()
+		configPath := config.DefaultConfigPath()
+		cfg, err := config.LoadConfig(configPath)
+		if err == nil {
+			group := config.FindGroup(cfg, target)
+			if group != nil {
+				group.Theme.Bg = hexColor
+				group.Theme.ActiveBg = ""
+				group.Theme.Fg = ""
+				group.Theme.ActiveFg = ""
+				group.Theme.InactiveBg = ""
+				group.Theme.InactiveFg = ""
+				config.SaveConfig(configPath, cfg)
+			}
 		}
 		return true
 	}
@@ -9344,10 +9369,30 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "new_group":
+		// If a name was provided (from tabby-hook), create directly.
+		// Otherwise, prompt the user via tmux command-prompt.
+		if input.ResolvedTarget != "" {
+			configPath := config.DefaultConfigPath()
+			cfg, err := config.LoadConfig(configPath)
+			if err != nil {
+				exec.Command("tmux", "display-message", fmt.Sprintf("Error: %v", err)).Run()
+				return false
+			}
+			newGroup := config.DefaultGroupWithIndex(input.ResolvedTarget, len(cfg.Groups))
+			if err := config.AddGroup(cfg, newGroup); err != nil {
+				exec.Command("tmux", "display-message", fmt.Sprintf("Error: %v", err)).Run()
+				return false
+			}
+			if err := config.SaveConfig(configPath, cfg); err != nil {
+				exec.Command("tmux", "display-message", fmt.Sprintf("Error: %v", err)).Run()
+				return false
+			}
+			return true
+		}
+		// No name provided — prompt user, then call back via tabby-hook
 		exe, _ := os.Executable()
-		pluginDir := filepath.Join(filepath.Dir(exe), "..")
-		scriptPath := filepath.Join(pluginDir, "scripts", "new_group.sh")
-		cmd := fmt.Sprintf("command-prompt -p 'New group name:' \"run-shell '%s %%%% '\"", scriptPath)
+		hookPath := filepath.Join(filepath.Dir(exe), "tabby-hook")
+		cmd := fmt.Sprintf("command-prompt -p 'New group name:' \"run-shell '%s new-group %%%% '\"", hookPath)
 		exec.Command("tmux", strings.Split(cmd, " ")...).Run()
 		return false
 
@@ -9560,15 +9605,25 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath2).Run()
 		return true
 
-	case "header_close":
+	case "kill_pane", "header_close":
 		paneID := input.ResolvedTarget
-		killWrapper := c.getScriptPath("kill_pane_wrapper.sh")
-		if killWrapper != "" {
-			exec.Command("tmux", "run-shell", fmt.Sprintf("'%s' -t %s", killWrapper, paneID)).Run()
-			return true
+		// Count content panes — if only 1, kill the window instead
+		windowIDOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}").Output()
+		windowID := strings.TrimSpace(string(windowIDOut))
+		if windowID != "" {
+			panesOut, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_current_command}").Output()
+			contentCount := 0
+			for _, cmd := range strings.Split(strings.TrimSpace(string(panesOut)), "\n") {
+				if !isAuxiliaryPaneCommand(cmd) {
+					contentCount++
+				}
+			}
+			if contentCount <= 1 {
+				// Last content pane — kill the window
+				exec.Command("tmux", "kill-window", "-t", windowID).Run()
+				return true
+			}
 		}
-
-		// Fallback: preserve layout then close pane directly.
 		saveLayoutBeforeKill(paneID)
 		exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 		return true
@@ -9600,6 +9655,152 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		fixHeaderHeightsInWindow(input.ResolvedTarget)
 		exec.Command("tmux", "select-pane", "-t", input.ResolvedTarget).Run()
 		c.RefreshWindows()
+		return true
+
+	case "delete_group":
+		name := input.ResolvedTarget
+		if name == "" {
+			return false
+		}
+		configPath := config.DefaultConfigPath()
+		cfg, err := config.LoadConfig(configPath)
+		if err != nil {
+			exec.Command("tmux", "display-message", fmt.Sprintf("Error: %v", err)).Run()
+			return false
+		}
+		if err := config.DeleteGroup(cfg, name); err != nil {
+			exec.Command("tmux", "display-message", fmt.Sprintf("Error: %v", err)).Run()
+			return false
+		}
+		if err := config.SaveConfig(configPath, cfg); err != nil {
+			exec.Command("tmux", "display-message", fmt.Sprintf("Error: %v", err)).Run()
+			return false
+		}
+		return true
+
+	case "rename_group":
+		oldName := input.ResolvedTarget
+		newName := input.PickerValue
+		if oldName == "" || newName == "" {
+			return false
+		}
+		configPath := config.DefaultConfigPath()
+		cfg, err := config.LoadConfig(configPath)
+		if err != nil {
+			exec.Command("tmux", "display-message", fmt.Sprintf("Error: %v", err)).Run()
+			return false
+		}
+		group := config.FindGroup(cfg, oldName)
+		if group == nil {
+			exec.Command("tmux", "display-message", "Error: group not found").Run()
+			return false
+		}
+		if existing := config.FindGroup(cfg, newName); existing != nil {
+			exec.Command("tmux", "display-message", "Error: group already exists").Run()
+			return false
+		}
+		group.Name = newName
+		group.Pattern = fmt.Sprintf("^%s\\|", newName)
+		if err := config.SaveConfig(configPath, cfg); err != nil {
+			exec.Command("tmux", "display-message", fmt.Sprintf("Error: %v", err)).Run()
+			return false
+		}
+		return true
+
+	case "set_group_color":
+		name := input.ResolvedTarget
+		color := input.PickerValue
+		if name == "" || color == "" {
+			return false
+		}
+		configPath := config.DefaultConfigPath()
+		cfg, err := config.LoadConfig(configPath)
+		if err != nil {
+			return false
+		}
+		group := config.FindGroup(cfg, name)
+		if group == nil {
+			return false
+		}
+		group.Theme.Bg = color
+		group.Theme.ActiveBg = ""
+		group.Theme.Fg = ""
+		group.Theme.ActiveFg = ""
+		group.Theme.InactiveBg = ""
+		group.Theme.InactiveFg = ""
+		config.SaveConfig(configPath, cfg)
+		return true
+
+	case "set_group_marker":
+		name := input.ResolvedTarget
+		marker := input.PickerValue
+		if name == "" {
+			return false
+		}
+		configPath := config.DefaultConfigPath()
+		cfg, err := config.LoadConfig(configPath)
+		if err != nil {
+			return false
+		}
+		group := config.FindGroup(cfg, name)
+		if group == nil {
+			return false
+		}
+		group.Theme.Icon = marker
+		config.SaveConfig(configPath, cfg)
+		if marker != "" {
+			exec.Command("tmux", "display-message", "-d", "1500", fmt.Sprintf("Group marker -> %s", marker)).Run()
+		} else {
+			exec.Command("tmux", "display-message", "-d", "1500", "Group marker cleared").Run()
+		}
+		return true
+
+	case "set_group_working_dir":
+		name := input.ResolvedTarget
+		dir := input.PickerValue
+		if name == "" || dir == "" {
+			return false
+		}
+		configPath := config.DefaultConfigPath()
+		cfg, err := config.LoadConfig(configPath)
+		if err != nil {
+			return false
+		}
+		group := config.FindGroup(cfg, name)
+		if group == nil {
+			return false
+		}
+		group.WorkingDir = dir
+		config.SaveConfig(configPath, cfg)
+		return true
+
+	case "toggle_group_collapse":
+		name := input.ResolvedTarget
+		action := input.PickerValue // "collapse" or "expand"
+		if name == "" || action == "" {
+			return false
+		}
+		if action == "collapse" {
+			c.stateMu.Lock()
+			if c.collapsedGroups == nil {
+				c.collapsedGroups = make(map[string]bool)
+			}
+			c.collapsedGroups[name] = true
+			c.stateMu.Unlock()
+			// Persist to tmux option
+			collapsed := c.getCollapsedGroupsJSON()
+			exec.Command("tmux", "set-option", "@tabby_collapsed_groups", collapsed).Run()
+		} else {
+			c.stateMu.Lock()
+			delete(c.collapsedGroups, name)
+			c.stateMu.Unlock()
+			collapsed := c.getCollapsedGroupsJSON()
+			if collapsed == "[]" {
+				exec.Command("tmux", "set-option", "-u", "@tabby_collapsed_groups").Run()
+			} else {
+				exec.Command("tmux", "set-option", "@tabby_collapsed_groups", collapsed).Run()
+			}
+		}
 		return true
 
 	case "group_menu":
@@ -10848,15 +11049,15 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 		}
 	}
 	if contentCount > 1 {
-		collapseScript := c.getScriptPath("toggle_pane_collapse.sh")
-		if collapseScript != "" {
+		{
+			hookPath := c.getHookPath()
 			args = append(args, "", "", "")
 			collapsedVal, _ := exec.Command("tmux", "show-options", "-pqv", "-t", pane.ID, "@tabby_pane_collapsed").Output()
 			collapseLabel := "Collapse Pane"
 			if strings.TrimSpace(string(collapsedVal)) == "1" {
 				collapseLabel = "Expand Pane"
 			}
-			args = append(args, collapseLabel, "c", fmt.Sprintf("run-shell '%s -t %s'", collapseScript, pane.ID))
+			args = append(args, collapseLabel, "c", fmt.Sprintf("run-shell '%s toggle-pane-collapse -t %s'", hookPath, pane.ID))
 		}
 		args = append(args, "", "", "")
 		args = append(args, "Resize Down", "j", fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; resize-pane -D 5", windowIdx, pane.ID))
@@ -10924,9 +11125,10 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	args = append(args, "", "", "")
 
 	// Close pane (save layout first to preserve sibling ratios)
-	exe, _ := os.Executable()
-	killWrapper := filepath.Join(filepath.Dir(exe), "..", "scripts", "kill_pane_wrapper.sh")
-	args = append(args, "Close Pane", "x", fmt.Sprintf("run-shell '%s -t %s'", killWrapper, pane.ID))
+	{
+		hookPath := c.getHookPath()
+		args = append(args, "Close Pane", "x", fmt.Sprintf("run-shell '%s kill-pane -t %s'", hookPath, pane.ID))
+	}
 
 	c.executeOrSendMenu(clientID, args, pos)
 }
@@ -11001,75 +11203,58 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		}
 	}
 
-	toggleGroupScript := c.getScriptPath("toggle_group_collapse.sh")
-	if toggleGroupScript != "" {
-		if c.collapsedGroups[group.Name] {
-			expandCmd := fmt.Sprintf("run-shell '%s \"%s\" expand'", toggleGroupScript, group.Name)
-			args = append(args, "Expand Group", "e", expandCmd)
-		} else {
-			collapseCmd := fmt.Sprintf("run-shell '%s \"%s\" collapse'", toggleGroupScript, group.Name)
-			args = append(args, "Collapse Group", "c", collapseCmd)
-		}
+	hookPath := c.getHookPath()
+
+	if c.collapsedGroups[group.Name] {
+		expandCmd := fmt.Sprintf("run-shell '%s toggle-group-collapse \\\"%s\\\" expand'", hookPath, group.Name)
+		args = append(args, "Expand Group", "e", expandCmd)
+	} else {
+		collapseCmd := fmt.Sprintf("run-shell '%s toggle-group-collapse \\\"%s\\\" collapse'", hookPath, group.Name)
+		args = append(args, "Collapse Group", "c", collapseCmd)
 	}
 
 	// --- Group settings section ---
-	renameScript := c.getScriptPath("rename_group.sh")
-	colorScript := c.getScriptPath("set_group_color.sh")
-	markerScript := c.getScriptPath("set_group_marker.sh")
-	workingDirScript := c.getScriptPath("set_group_working_dir.sh")
-	newGroupScript := c.getScriptPath("new_group.sh")
-	deleteScript := c.getScriptPath("delete_group.sh")
+	args = append(args, "", "", "")
 
-	hasGroupSettings := renameScript != "" || colorScript != "" || markerScript != "" || workingDirScript != "" || newGroupScript != ""
-	if hasGroupSettings {
-		args = append(args, "", "", "")
+	renameCmd := fmt.Sprintf(
+		"command-prompt -I '%s' -p 'New name:' \"run-shell '%s rename-group \\\"%s\\\" \\\"%%%%\\\"'\"",
+		group.Name, hookPath, group.Name,
+	)
+	args = append(args, "Rename", "r", renameCmd)
+
+	args = append(args, "-Change Color", "", "")
+	colorOptions := []struct {
+		name string
+		hex  string
+		key  string
+	}{
+		{"Red", "#e74c3c", "r"},
+		{"Orange", "#e67e22", "o"},
+		{"Yellow", "#f1c40f", "y"},
+		{"Green", "#27ae60", "g"},
+		{"Blue", "#3498db", "b"},
+		{"Purple", "#9b59b6", "p"},
+		{"Pink", "#e91e63", "i"},
+		{"Cyan", "#00bcd4", "c"},
+		{"Gray", "#7f8c8d", "a"},
+		{"Transparent", "transparent", "t"},
 	}
-
-	if renameScript != "" {
-		renameCmd := fmt.Sprintf(
-			"command-prompt -I '%s' -p 'New name:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
-			group.Name,
-			renameScript,
-			group.Name,
-		)
-		args = append(args, "Rename", "r", renameCmd)
-	}
-
-	if colorScript != "" {
-		args = append(args, "-Change Color", "", "")
-		colorOptions := []struct {
-			name string
-			hex  string
-			key  string
-		}{
-			{"Red", "#e74c3c", "r"},
-			{"Orange", "#e67e22", "o"},
-			{"Yellow", "#f1c40f", "y"},
-			{"Green", "#27ae60", "g"},
-			{"Blue", "#3498db", "b"},
-			{"Purple", "#9b59b6", "p"},
-			{"Pink", "#e91e63", "i"},
-			{"Cyan", "#00bcd4", "c"},
-			{"Gray", "#7f8c8d", "a"},
-			{"Transparent", "transparent", "t"},
+	if !c.config.Sidebar.HidePredefinedColors {
+		for _, color := range colorOptions {
+			setColorCmd := fmt.Sprintf("run-shell '%s set-group-color \\\"%s\\\" \\\"%s\\\"'", hookPath, group.Name, color.hex)
+			args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
 		}
-		if !c.config.Sidebar.HidePredefinedColors {
-			for _, color := range colorOptions {
-				setColorCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"%s\\\"'", colorScript, group.Name, color.hex)
-				args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
-			}
-		}
-
-		groupColorTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
-		groupCurrentColor := group.Theme.Bg
-		colorPickerCmd := fmt.Sprintf("tabby-color-picker:group:%s:%s", groupColorTarget, groupCurrentColor)
-		args = append(args, "  Custom Color...", "h", colorPickerCmd)
-		customColorCmd := fmt.Sprintf(
-			"command-prompt -p 'Hex color (#rrggbb):' \"run-shell '%s \\\"%s\\\" \\\"%%%%%%%%\\\"'\"",
-			colorScript, group.Name,
-		)
-		args = append(args, "  Custom (Hex)...", "#", customColorCmd)
 	}
+
+	groupColorTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
+	groupCurrentColor := group.Theme.Bg
+	colorPickerCmd := fmt.Sprintf("tabby-color-picker:group:%s:%s", groupColorTarget, groupCurrentColor)
+	args = append(args, "  Custom Color...", "h", colorPickerCmd)
+	customColorCmd := fmt.Sprintf(
+		"command-prompt -p 'Hex color (#rrggbb):' \"run-shell '%s set-group-color \\\"%s\\\" \\\"%%%%%%%%\\\"'\"",
+		hookPath, group.Name,
+	)
+	args = append(args, "  Custom (Hex)...", "#", customColorCmd)
 
 	canShowMarkerPicker := c.OnSendMenu != nil && !strings.HasPrefix(clientID, "header:")
 	if canShowMarkerPicker {
@@ -11077,49 +11262,38 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
 		args = append(args, "Set Marker", "m", searchCmd)
 		currentIcon := strings.TrimSpace(group.Theme.Icon)
-		if currentIcon != "" && markerScript != "" {
-			removeIconCmd := fmt.Sprintf("run-shell '%s \\\"%s\\\" \\\"\\\"'", markerScript, group.Name)
+		if currentIcon != "" {
+			removeIconCmd := fmt.Sprintf("run-shell '%s set-group-marker \\\"%s\\\" \\\"\\\"'", hookPath, group.Name)
 			args = append(args, "Remove Marker", "0", removeIconCmd)
 		}
 	}
 
-	if workingDirScript != "" {
+	{
 		currentWorkingDir := workingDir
 		if currentWorkingDir == "" {
 			currentWorkingDir = "~"
 		}
 		setWorkingDirCmd := fmt.Sprintf(
-			"command-prompt -I '%s' -p 'Working directory:' \"run-shell '%s \\\"%s\\\" \\\"%%%%\\\"'\"",
-			currentWorkingDir,
-			workingDirScript,
-			group.Name,
+			"command-prompt -I '%s' -p 'Working directory:' \"run-shell '%s set-group-working-dir \\\"%s\\\" \\\"%%%%\\\"'\"",
+			currentWorkingDir, hookPath, group.Name,
 		)
 		args = append(args, "Set Working Directory", "w", setWorkingDirCmd)
 	}
 
-	if newGroupScript != "" {
-		newGroupCmd := fmt.Sprintf(
-			"command-prompt -p 'New group name:' \"run-shell '%s %%%%  '\"",
-			newGroupScript,
-		)
-		args = append(args, "Create New Group", "G", newGroupCmd)
-	}
+	newGroupCmd := fmt.Sprintf(
+		"command-prompt -p 'New group name:' \"run-shell '%s new-group %%%%  '\"",
+		hookPath,
+	)
+	args = append(args, "Create New Group", "G", newGroupCmd)
 
 	// --- Destructive actions ---
-	hasDestructive := deleteScript != "" || len(group.Windows) > 0
-	if hasDestructive {
-		args = append(args, "", "", "")
-	}
+	args = append(args, "", "", "")
 
-	if deleteScript != "" {
-		deleteCmd := fmt.Sprintf(
-			"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s \\\"%s\\\"'\"",
-			group.Name,
-			deleteScript,
-			group.Name,
-		)
-		args = append(args, "Delete Group", "d", deleteCmd)
-	}
+	deleteCmd := fmt.Sprintf(
+		"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s delete-group \\\"%s\\\"'\"",
+		group.Name, hookPath, group.Name,
+	)
+	args = append(args, "Delete Group", "d", deleteCmd)
 
 	// Close all windows in group (only if group has windows)
 	if len(group.Windows) > 0 {
@@ -11332,6 +11506,14 @@ func (c *Coordinator) getToggleScript() string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(exe), "..", "scripts", "toggle_sidebar_daemon.sh")
+}
+
+func (c *Coordinator) getHookPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "tabby-hook"
+	}
+	return filepath.Join(filepath.Dir(exe), "tabby-hook")
 }
 
 func (c *Coordinator) getScriptPath(name string) string {

@@ -736,7 +736,7 @@ fi
 # tmux bind-key -n M-Tab run-shell "$CURRENT_DIR/scripts/toggle_sidebar.sh"
 
 # New Group shortcut (prefix + G)
-tmux bind-key G command-prompt -p 'New group name:' "run-shell '$CURRENT_DIR/scripts/new_group.sh %%'"
+tmux bind-key G command-prompt -p 'New group name:' "run-shell '$CURRENT_DIR/bin/tabby-hook new-group %%'"
 
 # Override kill-pane to save layout first (preserves pane ratios)
 tmux bind-key x confirm-before -p 'Close pane? (y/n)' "run-shell '$KILL_PANE_SCRIPT'"
