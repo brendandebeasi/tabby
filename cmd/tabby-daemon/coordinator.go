@@ -238,6 +238,7 @@ type Coordinator struct {
 	lastWidthSync          time.Time // Last time we synced widths (for debouncing)
 	lastActiveWindowID     string    // Track which window was last active (for detecting window switch)
 	activeWindowChangeTime time.Time // When the active window changed (for grace period)
+	windowHistory          []string  // LIFO stack of recently visited window IDs (most recent first, max 20)
 	widthSyncMu            sync.Mutex
 	// Active physical tmux client terminal width (cols). Updated by clientGeometryTicker.
 	// Used to cap sidebar targetWidth so we never ask tmux for more cols than the
@@ -1036,6 +1037,474 @@ func (c *Coordinator) GetTerminalBg() string {
 		return c.theme.TerminalBg
 	}
 	return c.bgDetector.GetDefaultTerminalBg()
+}
+
+// clampColorByte clamps an int to the valid 0-255 range for color channels.
+func clampColorByte(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return v
+}
+
+// computeDimBG blends terminal background toward gray based on luminance and opacity.
+// Returns a hex color string like "#1a1a1a", or "" if terminalBG is empty.
+func computeDimBG(terminalBG string, opacity float64) string {
+	if terminalBG == "" {
+		return ""
+	}
+	hex := strings.TrimPrefix(terminalBG, "#")
+	if len(hex) != 6 {
+		return ""
+	}
+	tbR, _ := strconv.ParseInt(hex[0:2], 16, 32)
+	tbG, _ := strconv.ParseInt(hex[2:4], 16, 32)
+	tbB, _ := strconv.ParseInt(hex[4:6], 16, 32)
+
+	lum := (int(tbR)*299 + int(tbG)*587 + int(tbB)*114) / 1000
+
+	var grayR, grayG, grayB int
+	if lum >= 128 {
+		grayR, grayG, grayB = 176, 176, 176
+	} else {
+		grayR, grayG, grayB = 64, 64, 64
+	}
+
+	inv := 1.0 - opacity
+	dr := int(math.Round(float64(tbR)*opacity + float64(grayR)*inv))
+	dg := int(math.Round(float64(tbG)*opacity + float64(grayG)*inv))
+	db := int(math.Round(float64(tbB)*opacity + float64(grayB)*inv))
+	return fmt.Sprintf("#%02x%02x%02x", clampColorByte(dr), clampColorByte(dg), clampColorByte(db))
+}
+
+// extractStyleColor pulls a color value for a key ("fg" or "bg") from a
+// tmux style string like "fg=#56949f,bg=#56949f".
+func extractStyleColor(style, key string) string {
+	for _, part := range strings.Split(style, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, key+"=") {
+			return strings.TrimPrefix(part, key+"=")
+		}
+	}
+	return ""
+}
+
+// dimSkipCommands are pane commands that should never have dim styles applied (sidebar).
+var dimSkipCommands = []string{"sidebar-render"}
+
+// dimHeaderCommand identifies pane-header processes.
+const dimHeaderCommand = "pane-header"
+
+func isDimSkip(cmd string) bool {
+	lower := strings.ToLower(cmd)
+	for _, s := range dimSkipCommands {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDimHeader(cmd string) bool {
+	return strings.Contains(strings.ToLower(cmd), dimHeaderCommand)
+}
+
+func isDimUtility(cmd string) bool {
+	return isDimSkip(cmd) || isDimHeader(cmd)
+}
+
+// dimPaneInfo holds per-pane data needed for dimming decisions.
+type dimPaneInfo struct {
+	id      string
+	active  bool
+	command string
+	left    int
+}
+
+// listDimPanes queries tmux for panes in the given window, returning info needed for dimming.
+func listDimPanes(windowID string) []dimPaneInfo {
+	out, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}").Output()
+	if err != nil {
+		return nil
+	}
+	var panes []dimPaneInfo
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		left, _ := strconv.Atoi(parts[3])
+		panes = append(panes, dimPaneInfo{
+			id:      parts[0],
+			active:  parts[1] == "1",
+			command: parts[2],
+			left:    left,
+		})
+	}
+	return panes
+}
+
+// ApplyPaneDimming sets per-pane background styles on inactive content panes
+// and desaturates inactive border colors. This replaces the cycle-pane --dim-only
+// shell invocation with an in-process implementation on the daemon's fast path.
+//
+// Logic ported from cmd/cycle-pane/main.go applyDim().
+func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
+	// Check spawning guard — during pane creation, data is stale
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
+		if strings.TrimSpace(string(out)) == "1" {
+			return
+		}
+	}
+
+	cfg := c.GetConfig()
+	if cfg == nil {
+		return
+	}
+
+	panes := listDimPanes(activeWindowID)
+	if len(panes) == 0 {
+		return
+	}
+
+	if !cfg.PaneHeader.DimInactive {
+		// Dim disabled — clear any leftover styles and dim flags
+		for _, p := range panes {
+			if !isDimSkip(p.command) {
+				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
+			}
+			if !isDimUtility(p.command) {
+				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "@tabby_pane_dim").Run()
+			}
+		}
+		// Reset border style to match active border
+		if out, err := exec.Command("tmux", "show-options", "-gqv", "pane-active-border-style").Output(); err == nil {
+			if s := strings.TrimSpace(string(out)); s != "" {
+				exec.Command("tmux", "set-option", "-g", "pane-border-style", s).Run()
+			}
+		}
+		return
+	}
+
+	// Build map: pane_left → whether the content pane at that column is active
+	colActive := map[int]bool{}
+	hasActiveContent := false
+	for _, p := range panes {
+		if !isDimUtility(p.command) {
+			colActive[p.left] = p.active
+			if p.active {
+				hasActiveContent = true
+			}
+		}
+	}
+
+	// If no content pane is active (utility pane has focus), keep existing styles
+	if !hasActiveContent {
+		return
+	}
+
+	termBG := c.GetTerminalBg()
+	opacity := cfg.PaneHeader.DimOpacity
+	if opacity <= 0 || opacity > 1 {
+		opacity = 0.6
+	}
+	dimBG := computeDimBG(termBG, opacity)
+
+	for _, p := range panes {
+		if isDimSkip(p.command) {
+			continue
+		}
+
+		// For headers, use their content pane's active state (matched by pane_left)
+		active := p.active
+		if isDimHeader(p.command) {
+			active = colActive[p.left]
+		}
+
+		if isDimHeader(p.command) {
+			// Headers are rendered by the daemon — don't set window-style.
+			// The daemon reads @tabby_pane_dim from the content pane to decide colors.
+			continue
+		}
+
+		// Content pane: set window-style AND dim flag
+		if active {
+			exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
+			exec.Command("tmux", "set-option", "-p", "-t", p.id, "@tabby_pane_dim", "0").Run()
+		} else {
+			if dimBG == "" {
+				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
+			} else {
+				exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-style", fmt.Sprintf("bg=%s", dimBG)).Run()
+			}
+			exec.Command("tmux", "set-option", "-p", "-t", p.id, "@tabby_pane_dim", "1").Run()
+		}
+	}
+
+	// Dim borders: active = full color, inactive = desaturated
+	c.applyBorderDim(opacity)
+}
+
+// applyBorderDim reads the global pane-active-border-style fg color and sets
+// pane-border-style to a desaturated version so inactive borders look dimmed.
+func (c *Coordinator) applyBorderDim(opacity float64) {
+	out, err := exec.Command("tmux", "show-options", "-gqv", "pane-active-border-style").Output()
+	if err != nil {
+		return
+	}
+	styleStr := strings.TrimSpace(string(out))
+	if styleStr == "" {
+		return
+	}
+
+	fgColor := extractStyleColor(styleStr, "fg")
+	if fgColor == "" {
+		return
+	}
+
+	termBG := c.GetTerminalBg()
+	dimFg := desaturateHex(fgColor, opacity, termBG)
+	exec.Command("tmux", "set-option", "-g", "pane-border-style", "fg="+dimFg).Run()
+}
+
+// PreserveWindowNames locks automatic-rename for windows whose name contains "|"
+// (group prefix). Prevents tmux from overwriting group names after pane splits.
+// Replaces scripts/preserve_window_name.sh.
+func (c *Coordinator) PreserveWindowNames() {
+	c.stateMu.RLock()
+	var toLock []string
+	for _, w := range c.windows {
+		if strings.Contains(w.Name, "|") {
+			toLock = append(toLock, w.ID)
+		}
+	}
+	c.stateMu.RUnlock()
+
+	for _, id := range toLock {
+		exec.Command("tmux", "set-window-option", "-t", id, "automatic-rename", "off").Run()
+	}
+}
+
+// ApplyNewWindowGroup reads @tabby_new_window_group and @tabby_new_window_id,
+// applies the saved group to the new window, then clears the option.
+// Replaces scripts/apply_new_window_group.sh.
+func (c *Coordinator) ApplyNewWindowGroup() {
+	savedGroup := ""
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_group").Output(); err == nil {
+		savedGroup = strings.TrimSpace(string(out))
+	}
+	newWindowID := ""
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output(); err == nil {
+		newWindowID = strings.TrimSpace(string(out))
+	}
+
+	if savedGroup != "" && newWindowID != "" {
+		exec.Command("tmux", "set-window-option", "-t", newWindowID, "@tabby_group", savedGroup).Run()
+	}
+	// Always clear the pending group option
+	exec.Command("tmux", "set-option", "-gu", "@tabby_new_window_group").Run()
+}
+
+// EnforceStatusExclusivity ensures the tmux status bar is off when the sidebar
+// is active and on when the sidebar is disabled. Replaces
+// scripts/enforce_status_exclusivity.sh.
+func (c *Coordinator) EnforceStatusExclusivity(sessionID string) {
+	// Check spawning guard
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
+		if strings.TrimSpace(string(out)) == "1" {
+			return
+		}
+	}
+
+	// Read sidebar mode from tmux option
+	mode := ""
+	if out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_sidebar").Output(); err == nil {
+		mode = strings.TrimSpace(string(out))
+	}
+	if mode == "" {
+		if out, err := exec.Command("tmux", "show-options", "-qv", "@tabby_sidebar").Output(); err == nil {
+			mode = strings.TrimSpace(string(out))
+		}
+	}
+
+	switch mode {
+	case "disabled":
+		exec.Command("tmux", "set-option", "-g", "status", "on").Run()
+		return
+	case "enabled":
+		exec.Command("tmux", "set-option", "-g", "status", "off").Run()
+		return
+	}
+
+	// No explicit mode — check if tabby panes exist
+	hasTabbyPanes := false
+	if sessionID != "" {
+		if out, err := exec.Command("tmux", "list-panes", "-s", "-t", sessionID, "-F",
+			"#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				lower := strings.ToLower(line)
+				if strings.Contains(lower, "sidebar-renderer") || strings.Contains(lower, "sidebar") || strings.Contains(lower, "pane-header") {
+					hasTabbyPanes = true
+					break
+				}
+			}
+		}
+	}
+
+	if hasTabbyPanes {
+		exec.Command("tmux", "set-option", "-g", "status", "off").Run()
+	} else {
+		exec.Command("tmux", "set-option", "-g", "status", "on").Run()
+	}
+}
+
+// HandleWindowSelect performs window-switch housekeeping that was previously
+// done by scripts/on_window_select.sh:
+//   - Clears @tabby_input and @tabby_bell indicators (user acknowledged notification)
+//   - Updates global pane-active-border-style to match active window's tab color
+//     when border_from_tab is enabled
+//
+// Called from signal_refresh when activeWindowID changes.
+func (c *Coordinator) HandleWindowSelect(activeWindowID string) {
+	// Check spawning guard
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
+		if strings.TrimSpace(string(out)) == "1" {
+			return
+		}
+	}
+
+	// Clear AI tool input/bell indicators for the active window
+	exec.Command("tmux", "set-option", "-w", "-t", activeWindowID, "@tabby_input", "").Run()
+	exec.Command("tmux", "set-option", "-w", "-t", activeWindowID, "@tabby_bell", "").Run()
+
+	cfg := c.GetConfig()
+	if cfg == nil || !cfg.PaneHeader.BorderFromTab {
+		return
+	}
+
+	// Find active window's tab bg color from grouped state
+	c.stateMu.RLock()
+	var tabBg string
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.ID == activeWindowID {
+				tabBg = group.Theme.Bg
+				if win.CustomColor != "" {
+					tabBg = win.CustomColor
+				}
+				break
+			}
+		}
+		if tabBg != "" {
+			break
+		}
+	}
+	c.stateMu.RUnlock()
+
+	if tabBg != "" {
+		exec.Command("tmux", "set-option", "-g", "pane-active-border-style", "fg="+tabBg).Run()
+	}
+}
+
+// SaveWindowLayouts saves the current layout string for each window to tmux
+// options (@tabby_layout_<WID>). Called on every signal_refresh after
+// RefreshWindows so that preserve_pane_ratios.sh has fresh data.
+// Replaces scripts/save_pane_layout.sh from hooks.
+// Skips during @tabby_spawning to avoid saving stale mid-creation layouts.
+func (c *Coordinator) SaveWindowLayouts() {
+	// Check spawning guard
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
+		if strings.TrimSpace(string(out)) == "1" {
+			return
+		}
+	}
+
+	c.stateMu.RLock()
+	windows := make([]struct{ id, layout string }, 0, len(c.windows))
+	for _, w := range c.windows {
+		if w.Layout != "" {
+			windows = append(windows, struct{ id, layout string }{w.ID, w.Layout})
+		}
+	}
+	c.stateMu.RUnlock()
+
+	for _, w := range windows {
+		exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_layout_%s", w.id), w.layout).Run()
+	}
+}
+
+// TrackWindowHistory pushes windowID to the front of the history stack,
+// removing any duplicate. Caps at 20 entries. Thread-safe.
+// Replaces scripts/track_window_history.sh.
+func (c *Coordinator) TrackWindowHistory(windowID string) {
+	if windowID == "" {
+		return
+	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	// Remove duplicate
+	filtered := make([]string, 0, len(c.windowHistory))
+	for _, id := range c.windowHistory {
+		if id != windowID {
+			filtered = append(filtered, id)
+		}
+	}
+
+	// Prepend and cap at 20
+	c.windowHistory = append([]string{windowID}, filtered...)
+	if len(c.windowHistory) > 20 {
+		c.windowHistory = c.windowHistory[:20]
+	}
+}
+
+// SelectPreviousWindow finds the most recently visited window that still exists
+// and selects it. Called when a window is closed to restore focus to the last
+// visited window instead of tmux's default adjacent-window behavior.
+// Replaces scripts/select_previous_window.sh.
+func (c *Coordinator) SelectPreviousWindow() {
+	c.stateMu.RLock()
+	history := make([]string, len(c.windowHistory))
+	copy(history, c.windowHistory)
+
+	// Build set of existing window IDs
+	existing := make(map[string]bool, len(c.windows))
+	for _, w := range c.windows {
+		existing[w.ID] = true
+	}
+	c.stateMu.RUnlock()
+
+	// Find first surviving window in history
+	for _, id := range history {
+		if existing[id] {
+			exec.Command("tmux", "select-window", "-t", id).Run()
+			break
+		}
+	}
+
+	// Clean up history: remove dead windows
+	c.stateMu.Lock()
+	cleaned := make([]string, 0, len(c.windowHistory))
+	for _, id := range c.windowHistory {
+		if existing[id] {
+			cleaned = append(cleaned, id)
+		}
+	}
+	c.windowHistory = cleaned
+	c.stateMu.Unlock()
+}
+
+// GetWindowHistory returns a copy of the current window history (for testing).
+func (c *Coordinator) GetWindowHistory() []string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	result := make([]string, len(c.windowHistory))
+	copy(result, c.windowHistory)
+	return result
 }
 
 // getDividerFg returns divider color from config, theme, or detector

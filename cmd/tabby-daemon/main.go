@@ -1899,15 +1899,24 @@ func main() {
 		lastClientGeometry := ""
 		activeWindowID := "" // Track active window for optimized rendering
 
+		lastWindowCount := 0 // Track window count for close detection
+
 		// Helper to get current active window ID (cached, updated on events)
 		updateActiveWindow := func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			if out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
-				activeWindowID = strings.TrimSpace(string(out))
+				newID := strings.TrimSpace(string(out))
+				if newID != activeWindowID && newID != "" {
+					// Window changed — track in history and handle select
+					coordinator.TrackWindowHistory(newID)
+					coordinator.HandleWindowSelect(newID)
+				}
+				activeWindowID = newID
 			}
 		}
 		updateActiveWindow() // Initial fetch
+		lastWindowCount = len(coordinator.GetWindows())
 
 		// Initial call to set sidebar pane backgrounds (before any events)
 		go func() {
@@ -1999,6 +2008,18 @@ func main() {
 					coordinator.RefreshWindows()
 					t1 := time.Now()
 
+					// Detect window close: if window count decreased, select
+					// the most recently visited surviving window from history.
+					currentWindowCount := len(coordinator.GetWindows())
+					if currentWindowCount < lastWindowCount && lastWindowCount > 0 {
+						coordinator.SelectPreviousWindow()
+						updateActiveWindow() // Re-fetch after selecting
+					}
+					lastWindowCount = currentWindowCount
+
+					// Save window layouts inline (replaces save_pane_layout.sh hook)
+					coordinator.SaveWindowLayouts()
+
 					// Full render after RefreshWindows to pick up any state changes
 					// (pane titles, AI indicators, git status, etc.).
 					server.BroadcastRender()
@@ -2008,6 +2029,12 @@ func main() {
 					// one by one as the user later visits them.
 					logEvent("WIDTH_SYNC_REQUEST trigger=signal_refresh active=%s force=%v", activeWindowID, sizesChanged)
 					coordinator.RunWidthSync(activeWindowID, sizesChanged)
+
+					// Apply pane dimming inline (replaces cycle-pane --dim-only shell call)
+					coordinator.ApplyPaneDimming(activeWindowID)
+
+					// Enforce status bar exclusivity (replaces enforce_status_exclusivity.sh)
+					coordinator.EnforceStatusExclusivity(*sessionID)
 
 					// Heavy ops (spawn/cleanup/layout) only if enough time has
 					// passed since the last full refresh. This breaks the feedback
@@ -2030,6 +2057,11 @@ func main() {
 						t5 := time.Now()
 
 						_ = spawnedRenderer
+
+						// Apply new window group + preserve grouped window names
+						// (replaces apply_new_window_group.sh + preserve_window_name.sh)
+						coordinator.ApplyNewWindowGroup()
+						coordinator.PreserveWindowNames()
 
 						currentHash := coordinator.GetWindowsHash()
 						if currentHash != lastWindowsHash {
