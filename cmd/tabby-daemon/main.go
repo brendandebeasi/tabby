@@ -857,7 +857,11 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 					if strings.Contains(hLine, "pane-header") {
 						hParts := strings.SplitN(hLine, "\x1f", 3)
 						if len(hParts) >= 1 {
-							exec.Command("tmux", "resize-pane", "-t", hParts[0], "-y", "1").Run()
+							hTarget := "1"
+							if globalCoordinator != nil {
+								hTarget = fmt.Sprintf("%d", globalCoordinator.desiredPaneHeaderHeight())
+							}
+							exec.Command("tmux", "resize-pane", "-t", hParts[0], "-y", hTarget).Run()
 							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
 							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
 						}
@@ -1013,8 +1017,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		}
 
 		// Force header height to expected size if it's grown beyond it
-		// Expected: always 1 line (custom_border drag handle is rendered inline)
-		expectedHeight := 1
+		expectedHeight := coordinator.desiredPaneHeaderHeight()
 		if hdr.height > expectedHeight {
 			debugLog.Printf("Header %s height=%d, forcing to %d", hdr.paneID, hdr.height, expectedHeight)
 			logEvent("HEADER_HEIGHT_ADJUST trigger=cleanup pane=%s height=%d expected=%d", hdr.paneID, hdr.height, expectedHeight)
@@ -1361,9 +1364,10 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 				logEvent("HEADER_SIZE_SYNC trigger=%s client=%s prev=none new=%dx%d", trigger, clientID, size.width, size.height)
 			}
 		}
-		if size.height > 1 {
-			logEvent("HEADER_HEIGHT_ANOMALY trigger=%s client=%s height=%d", trigger, clientID, size.height)
-			exec.Command("tmux", "resize-pane", "-t", size.paneID, "-y", "1").Run()
+		desiredH := coordinator.desiredPaneHeaderHeight()
+		if size.height > desiredH {
+			logEvent("HEADER_HEIGHT_ANOMALY trigger=%s client=%s height=%d desired=%d", trigger, clientID, size.height, desiredH)
+			exec.Command("tmux", "resize-pane", "-t", size.paneID, "-y", fmt.Sprintf("%d", desiredH)).Run()
 		}
 		server.UpdateClientSize(clientID, size.width, size.height)
 	}
@@ -1442,6 +1446,14 @@ func activeClientGeometry() (width int, height int, tty string, activity int64, 
 			}
 			continue
 		}
+		// Both focused — use most recent activity (standard behavior).
+		// The phone only wins when it genuinely has the latest user input.
+		if bestActive && curActive {
+			if c.activity > attachedClients[bestIdx].activity {
+				bestIdx = i
+			}
+			continue
+		}
 		if c.activity > attachedClients[bestIdx].activity {
 			bestIdx = i
 			continue
@@ -1465,26 +1477,6 @@ func activeClientGeometry() (width int, height int, tty string, activity int64, 
 	return best.width, best.height, best.tty, best.activity, true
 }
 
-// resizeAllHeaderPanes forces every pane-header pane back to 1 row after
-// a window resize may have given it extra height.
-func resizeAllHeaderPanes() {
-	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "\x1f", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		paneID, cmd, startCmd := parts[0], parts[1], parts[2]
-		if strings.Contains(cmd, "pane-header") || strings.Contains(startCmd, "pane-header") {
-			logEvent("HEADER_HEIGHT_ADJUST trigger=bulk pane=%s", paneID)
-			exec.Command("tmux", "resize-pane", "-t", paneID, "-y", "1").Run()
-		}
-	}
-}
 
 func resizeAllWindowsToClient(width, height int) {
 	if width <= 0 || height <= 0 {
@@ -1570,6 +1562,7 @@ func main() {
 
 	// Create coordinator for centralized rendering
 	coordinator := NewCoordinator(*sessionID)
+	globalCoordinator = coordinator
 
 	// Enable coordinator debug logging if debug mode is on
 	if *debugMode {
@@ -2039,6 +2032,7 @@ func main() {
 					logEvent("WIDTH_SYNC_REQUEST trigger=signal_refresh active=%s force=%v", activeWindowID, sizesChanged)
 					coordinator.RunWidthSync(activeWindowID, sizesChanged)
 					coordinator.RunHeaderHeightSync(activeWindowID)
+					coordinator.RunZoomSync(activeWindowID)
 
 					// Apply pane dimming inline (replaces cycle-pane --dim-only shell call)
 					coordinator.ApplyPaneDimming(activeWindowID)
@@ -2151,6 +2145,7 @@ func main() {
 					logEvent("WIDTH_SYNC_REQUEST trigger=geometry_tick active=%s force=1", activeWin)
 					coordinator.RunWidthSync(activeWin, true)
 					coordinator.RunHeaderHeightSync(activeWin)
+					coordinator.RunZoomSync(activeWin)
 					server.BroadcastRender()
 				})
 			case <-watchdogTicker.C:

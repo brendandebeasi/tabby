@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,14 +34,20 @@ func main() {
 	stateFile := fmt.Sprintf("/tmp/tabby-sidebar-%s.state", sessionID)
 	sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
 	pidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
-	eventsLog := fmt.Sprintf("/tmp/tabby-daemon-%s-events.log", sessionID)
 	cleanStopSentinel := fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", sessionID)
 	watchdogPidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.watchdog.pid", sessionID)
 
-	// Concurrency guard
+	// Concurrency guard — remove stale locks older than 30s
 	toggleLock := fmt.Sprintf("/tmp/tabby-toggle-%s.lock", sessionID)
 	if err := os.Mkdir(toggleLock, 0755); err != nil {
-		return // another toggle running
+		if info, serr := os.Stat(toggleLock); serr == nil && time.Since(info.ModTime()) > 30*time.Second {
+			os.Remove(toggleLock)
+			if err2 := os.Mkdir(toggleLock, 0755); err2 != nil {
+				return
+			}
+		} else {
+			return // another toggle running
+		}
 	}
 	defer os.Remove(toggleLock)
 
@@ -58,16 +65,6 @@ func main() {
 		}
 	}
 
-	// If enabled but daemon dead, clean up and treat as disabled
-	if currentState == "enabled" {
-		restartDaemonIfUnresponsive(pidFile, sockPath, eventsLog)
-		if !isDaemonAlive(pidFile) {
-			currentState = "disabled"
-			run("tmux", "set-option", "@tabby_sidebar", "disabled")
-			killAuxPanes()
-		}
-	}
-
 	if currentState == "enabled" {
 		disable(sessionID, pidFile, sockPath, cleanStopSentinel, watchdogPidFile, stateFile)
 	} else {
@@ -76,7 +73,7 @@ func main() {
 
 	// Mouse reset
 	run("tmux", "set", "-g", "mouse", "off")
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 	run("tmux", "set", "-g", "mouse", "on")
 
 	// Refresh all clients
@@ -112,11 +109,16 @@ func disable(sessionID, pidFile, sockPath, sentinel, watchdogPidFile, stateFile 
 
 	run("tmux", "refresh-client", "-S")
 
-	// Remove resize hooks
-	run("tmux", "set-hook", "-gu", "after-resize-pane")
-	run("tmux", "set-hook", "-gu", "after-resize-window")
-	run("tmux", "set-hook", "-gu", "client-resized")
-	run("tmux", "set-hook", "-gu", "after-select-window")
+	// Remove resize hooks in parallel
+	var unhookWg sync.WaitGroup
+	for _, h := range []string{"after-resize-pane", "after-resize-window", "client-resized", "after-select-window", "client-active", "client-focus-in"} {
+		unhookWg.Add(1)
+		go func(name string) {
+			defer unhookWg.Done()
+			run("tmux", "set-hook", "-gu", name)
+		}(h)
+	}
+	unhookWg.Wait()
 
 	os.WriteFile(stateFile, []byte("disabled"), 0644)
 	run("tmux", "set-option", "@tabby_sidebar", "disabled")
@@ -185,22 +187,24 @@ func enable(sessionID, baseDir, binDir, pidFile, sockPath, watchdogPidFile, stat
 	// shellcheck disable equivalent: these use $() which tmux expands at hook time
 	signalCmd := `kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true`
 
-	run("tmux", "set-hook", "-g", "after-resize-pane",
-		fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{hook_pane}\"'", hookBin))
-	run("tmux", "set-hook", "-g", "after-resize-window",
-		fmt.Sprintf("run-shell -b '%s'", signalCmd))
-	run("tmux", "set-hook", "-g", "client-resized",
-		fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'",
-			hookBin, hookBin, signalCmd))
-	run("tmux", "set-hook", "-g", "client-active",
-		fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'",
-			hookBin, hookBin, signalCmd))
-	run("tmux", "set-hook", "-g", "client-focus-in",
-		fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'",
-			hookBin, hookBin, signalCmd))
-	run("tmux", "set-hook", "-g", "after-select-window",
-		fmt.Sprintf("run-shell -b '%s; tmux refresh-client -S; %s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '[ -x \"%s\" ] && \"%s\" --dim-only'",
-			signalCmd, hookBin, cyclePaneBin, cyclePaneBin))
+	// Register hooks in parallel
+	var hookWg sync.WaitGroup
+	hooks := [][3]string{
+		{"after-resize-pane", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{hook_pane}\"'", hookBin), ""},
+		{"after-resize-window", fmt.Sprintf("run-shell -b '%s'", signalCmd), ""},
+		{"client-resized", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookBin, hookBin, signalCmd), ""},
+		{"client-active", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookBin, hookBin, signalCmd), ""},
+		{"client-focus-in", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookBin, hookBin, signalCmd), ""},
+		{"after-select-window", fmt.Sprintf("run-shell -b '%s; tmux refresh-client -S; %s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '[ -x \"%s\" ] && \"%s\" --dim-only'", signalCmd, hookBin, cyclePaneBin, cyclePaneBin), ""},
+	}
+	for _, h := range hooks {
+		hookWg.Add(1)
+		go func(name, cmd string) {
+			defer hookWg.Done()
+			run("tmux", "set-hook", "-g", name, cmd)
+		}(h[0], h[1])
+	}
+	hookWg.Wait()
 
 	// Wait for renderers
 	for i := 0; i < 10; i++ {
@@ -322,7 +326,7 @@ func gracefulKillAuxPanes() {
 			}
 		}
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 }
 
 func resetMouseEscapeSequences() {
@@ -341,39 +345,6 @@ func resetMouseEscapeSequences() {
 	}
 }
 
-func restartDaemonIfUnresponsive(pidFile, sockPath, eventsLog string) {
-	if !fileExists(pidFile) || !fileExists(sockPath) {
-		return
-	}
-	data, _ := os.ReadFile(pidFile)
-	pid := strings.TrimSpace(string(data))
-	if pid == "" || exec.Command("kill", "-0", pid).Run() != nil {
-		os.Remove(pidFile)
-		os.Remove(sockPath)
-		return
-	}
-	if !fileExists(eventsLog) {
-		return
-	}
-	info, err := os.Stat(eventsLog)
-	if err != nil {
-		return
-	}
-	lastSize := info.Size()
-	exec.Command("kill", "-USR1", pid).Run()
-	for i := 0; i < 10; i++ {
-		time.Sleep(100 * time.Millisecond)
-		info2, _ := os.Stat(eventsLog)
-		if info2 != nil && info2.Size() > lastSize {
-			return
-		}
-	}
-	// Daemon unresponsive
-	run("tmux", "display-message", "-d", "3000", "Tabby: daemon unresponsive, restarting")
-	exec.Command("kill", pid).Run()
-	os.Remove(pidFile)
-	os.Remove(sockPath)
-}
 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)

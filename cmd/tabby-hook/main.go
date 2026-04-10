@@ -178,8 +178,9 @@ func main() {
 	daemonAction := strings.ReplaceAll(action, "-", "_")
 
 	if err := sendAction(daemonAction, target, value); err != nil {
-		fmt.Fprintf(os.Stderr, "tabby-hook: %v\n", err)
-		os.Exit(1)
+		// Silently exit — daemon may be restarting or not yet ready.
+		// Exiting non-zero causes tmux to display error messages to the user.
+		os.Exit(0)
 	}
 }
 

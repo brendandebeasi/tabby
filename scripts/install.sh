@@ -24,6 +24,7 @@ go build -o bin/tabby-hook ./cmd/tabby-hook
 go build -o bin/tabby-watchdog ./cmd/tabby-watchdog
 go build -o bin/tabby-dev ./cmd/tabby-dev
 go build -o bin/tabby-sidebar-popup ./cmd/tabby-sidebar-popup
+go build -o bin/tabby-pane-picker ./cmd/tabby-pane-picker
 
 chmod +x bin/render-status
 chmod +x bin/render-tab
@@ -37,5 +38,6 @@ chmod +x bin/tabby-hook
 chmod +x bin/tabby-watchdog
 chmod +x bin/tabby-dev
 chmod +x bin/tabby-sidebar-popup
+chmod +x bin/tabby-pane-picker
 
 printf "Installation complete. Reload tmux config with: tmux source ~/.tmux.conf\n"

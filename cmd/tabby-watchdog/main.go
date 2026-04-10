@@ -62,8 +62,9 @@ func main() {
 	daemonPidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
 
 	exe, _ := os.Executable()
-	daemonBin := filepath.Join(filepath.Dir(exe), "tabby-daemon")
-	crashHook := filepath.Join(filepath.Dir(exe), "..", "scripts", "crash-handler.sh")
+	binDir := filepath.Dir(exe)
+	daemonBin := filepath.Join(binDir, "tabby-daemon")
+	crashHook := filepath.Join(binDir, "..", "scripts", "crash-handler.sh")
 
 	// Write our PID
 	os.WriteFile(watchdogPidFile, []byte(strconv.Itoa(os.Getpid())), 0644)
@@ -75,10 +76,28 @@ func main() {
 	for {
 		os.Remove(sentinel)
 
+		// Register hooks before daemon starts so resize/focus events are captured
+		registerHooks(binDir)
+
 		cmd := exec.Command(daemonBin, daemonArgs...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		err := cmd.Run()
+
+		// Start daemon, wait for PID file, then store PID in tmux option
+		cmd.Start()
+		go func() {
+			for i := 0; i < 40; i++ {
+				if pidData, err := os.ReadFile(daemonPidFile); err == nil {
+					pid := strings.TrimSpace(string(pidData))
+					if pid != "" {
+						exec.Command("tmux", "set-option", "-g", "@tabby_daemon_pid", pid).Run()
+						break
+					}
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+		}()
+		err := cmd.Wait()
 
 		exitCode := 0
 		if err != nil {
@@ -158,4 +177,26 @@ func logCrash(path, format string, args ...interface{}) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// registerHooks ensures tmux hooks for resize/focus/select are registered.
+// These hooks signal the daemon on layout-affecting events. Without them,
+// resize and window-switch events are invisible to the daemon.
+func registerHooks(binDir string) {
+	hookBin := filepath.Join(binDir, "tabby-hook")
+	cycleBin := filepath.Join(binDir, "cycle-pane")
+	signalCmd := `kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true`
+
+	type hook struct{ name, cmd string }
+	hooks := []hook{
+		{"after-resize-pane", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{hook_pane}\"'", hookBin)},
+		{"after-resize-window", fmt.Sprintf("run-shell -b '%s'", signalCmd)},
+		{"client-resized", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookBin, hookBin, signalCmd)},
+		{"client-active", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookBin, hookBin, signalCmd)},
+		{"client-focus-in", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookBin, hookBin, signalCmd)},
+		{"after-select-window", fmt.Sprintf("run-shell -b '%s; tmux refresh-client -S; %s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '[ -x \"%s\" ] && \"%s\" --dim-only'", signalCmd, hookBin, cycleBin, cycleBin)},
+	}
+	for _, h := range hooks {
+		exec.Command("tmux", "set-hook", "-g", h.name, h.cmd).Run()
+	}
 }
