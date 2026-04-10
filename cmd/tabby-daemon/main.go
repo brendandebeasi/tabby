@@ -248,6 +248,16 @@ func getPaneHeaderBin() string {
 	return filepath.Join(dir, "pane-header")
 }
 
+// getPopupBin returns the path to the tabby-sidebar-popup binary
+func getPopupBin() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(exe)
+	return filepath.Join(dir, "tabby-sidebar-popup")
+}
+
 // saveLayoutBeforeKill saves the current window layout for a pane's window
 // so that tabby-hook preserve-pane-ratios can restore it after the kill.
 // This MUST be called before user/content-pane kill-pane operations.
@@ -705,7 +715,7 @@ func cleanupOrphanWindowsByTmux(sessionID string) {
 // spawnPaneHeaders spawns header panes above each content pane in all windows.
 // Each content pane gets its own header showing that pane's info and action buttons.
 // Height is 1 line normally, or 2 lines when custom_border is enabled (to render our own border).
-func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool, windows []tmux.Window) {
+func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool, headerHeightRows int, windows []tmux.Window) {
 	// NOTE: No @tabby_spawning check here — the caller (doPaneLayoutOps) already
 	// holds the lock. Checking it here would self-deadlock since the caller sets
 	// @tabby_spawning=1 before calling us.
@@ -825,10 +835,9 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 		if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
 			activeBeforeHeader = strings.TrimSpace(string(out))
 		}
-		logEvent("SPAWN_HEADER pane=%s window=%s active_before=%s width=%d height=%d custom_border=%v", pane.id, pane.windowID, activeBeforeHeader, pane.width, pane.height, customBorder)
+		logEvent("SPAWN_HEADER pane=%s window=%s active_before=%s width=%d height=%d custom_border=%v header_rows=%d", pane.id, pane.windowID, activeBeforeHeader, pane.width, pane.height, customBorder, headerHeightRows)
 		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && exec '%s' -session '%s' -pane '%s' %s", headerBin, sessionID, pane.id, debugFlag)
-		headerHeight := "1"
-		spawnCmd := exec.Command("tmux", "split-window", "-d", "-t", pane.id, "-v", "-b", "-l", headerHeight, cmdStr)
+		spawnCmd := exec.Command("tmux", "split-window", "-d", "-t", pane.id, "-v", "-b", "-l", fmt.Sprintf("%d", headerHeightRows), cmdStr)
 		if out, err := spawnCmd.CombinedOutput(); err != nil {
 			debugLog.Printf("Failed to spawn pane header for %s: %v, output: %s", pane.id, err, string(out))
 			continue
@@ -1959,7 +1968,7 @@ func main() {
 			logEvent("PANE_LAYOUT_START")
 			customBorder := coordinator.GetConfig().PaneHeader.CustomBorder
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
-			spawnPaneHeaders(server, *sessionID, customBorder, coordinator.GetWindows())
+			spawnPaneHeaders(server, *sessionID, customBorder, coordinator.desiredPaneHeaderHeight(), coordinator.GetWindows())
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
 			cleanupOrphanedHeaders(customBorder, coordinator, activeWindowID)
 			// NOTE: updateHeaderBorderStyles is NOT called here to avoid
@@ -2029,6 +2038,7 @@ func main() {
 					// one by one as the user later visits them.
 					logEvent("WIDTH_SYNC_REQUEST trigger=signal_refresh active=%s force=%v", activeWindowID, sizesChanged)
 					coordinator.RunWidthSync(activeWindowID, sizesChanged)
+					coordinator.RunHeaderHeightSync(activeWindowID)
 
 					// Apply pane dimming inline (replaces cycle-pane --dim-only shell call)
 					coordinator.ApplyPaneDimming(activeWindowID)
@@ -2140,6 +2150,7 @@ func main() {
 					activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 					logEvent("WIDTH_SYNC_REQUEST trigger=geometry_tick active=%s force=1", activeWin)
 					coordinator.RunWidthSync(activeWin, true)
+					coordinator.RunHeaderHeightSync(activeWin)
 					server.BroadcastRender()
 				})
 			case <-watchdogTicker.C:

@@ -166,7 +166,8 @@ func main() {
 		debugLog("failed scheduling @tabby_new_window_id auto-clear: %v", err)
 	}
 
-	sendWinchToContentPanes(newWindowID)
+	// SIGWINCH broadcast removed: tmux sends SIGWINCH to all panes automatically
+	// during its own reflow, so an explicit broadcast here causes extra resize churn.
 }
 
 func readTmuxOption(name string) string {

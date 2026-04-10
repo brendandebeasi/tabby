@@ -55,6 +55,7 @@ type RenderPayload struct {
 	PinnedRegions  []ClickableRegion `json:"pinned_regions"`  // Clickable regions in pinned content (Y relative to pinned start)
 	SidebarBg      string            `json:"sidebar_bg,omitempty"`
 	TerminalBg     string            `json:"terminal_bg,omitempty"`
+	ClientProfile  string            `json:"client_profile,omitempty"` // "phone" or "desktop" (empty = desktop)
 }
 
 // InputPayload contains input events from renderer
@@ -89,6 +90,7 @@ type ResizePayload struct {
 	Height       int    `json:"height"`
 	ColorProfile string `json:"color_profile,omitempty"` // "Ascii", "ANSI", "ANSI256", "TrueColor"
 	PaneID       string `json:"pane_id,omitempty"`       // tmux pane ID of the renderer
+	HeaderHeight int    `json:"header_height,omitempty"` // rows allocated to pane-header; 0 means 1 (backward compat)
 }
 
 // ViewportUpdatePayload contains scroll position update

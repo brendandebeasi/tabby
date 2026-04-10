@@ -103,11 +103,13 @@ type rendererModel struct {
 	connected bool
 
 	// Render state from daemon
-	content     string
-	regions     []daemon.ClickableRegion
-	sequenceNum uint64
-	sidebarBg   string
-	terminalBg  string
+	content       string
+	regions       []daemon.ClickableRegion
+	sequenceNum   uint64
+	sidebarBg     string
+	terminalBg    string
+	clientProfile string // "phone" or "desktop"
+	headerHeight  int    // rows allocated to this header (0 or 1 = single row)
 	// The header pane's own tmux pane ID (for menu positioning)
 	headerPaneID string
 
@@ -231,6 +233,8 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sequenceNum = msg.payload.SequenceNum
 		m.sidebarBg = msg.payload.SidebarBg
 		m.terminalBg = msg.payload.TerminalBg
+		m.clientProfile = msg.payload.ClientProfile
+		m.headerHeight = msg.payload.Height
 		return m, nil
 
 	case tickMsg:
@@ -494,6 +498,27 @@ func (m rendererModel) View() string {
 		return ""
 	}
 
+	// 2-row phone layout: daemon sends two newline-separated lines in Content.
+	// Render both rows, padding each to full width.
+	if m.headerHeight >= 2 && m.clientProfile == "phone" {
+		lines := strings.SplitN(m.content, "\n", 2)
+		row0 := lines[0]
+		row1 := ""
+		if len(lines) > 1 {
+			row1 = lines[1]
+		}
+		row0Width := runewidth.StringWidth(stripAnsi(row0))
+		if row0Width < m.width {
+			row0 += strings.Repeat(" ", m.width-row0Width)
+		}
+		row1Width := runewidth.StringWidth(stripAnsi(row1))
+		if row1Width < m.width {
+			row1 += strings.Repeat(" ", m.width-row1Width)
+		}
+		return row0 + "\n" + row1
+	}
+
+	// Single-row default behavior
 	line := m.content
 	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
 		line = line[:idx]

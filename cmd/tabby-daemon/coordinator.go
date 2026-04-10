@@ -249,8 +249,14 @@ type Coordinator struct {
 	// Per-client widths for accurate click detection
 	clientWidths      map[string]int
 	clientHeights     map[string]int
+	clientPrevWidth   map[string]int
+	clientPrevHeight  map[string]int
 	keyboardHoldUntil map[string]time.Time
 	clientWidthsMu    sync.RWMutex
+
+	// Per-client profile classification ("desktop" | "phone")
+	clientProfile   map[string]string
+	clientProfileMu sync.RWMutex
 
 	// Sidebar collapse state
 	sidebarCollapsed     bool
@@ -319,6 +325,28 @@ func (c *Coordinator) UpdateClientSizeSnapshot(clientID string, width int, heigh
 		return
 	}
 	c.clientWidthsMu.Lock()
+	var prevW, prevH int
+	if c.clientPrevWidth != nil {
+		prevW = c.clientPrevWidth[clientID]
+	}
+	if c.clientPrevHeight != nil {
+		prevH = c.clientPrevHeight[clientID]
+	}
+	if width == prevW && height == prevH && prevW > 0 {
+		coordinatorDebugLog.Printf("RESIZE_NOOP client=%s width=%d height=%d", clientID, width, height)
+		c.clientWidthsMu.Unlock()
+		return
+	}
+	if c.clientPrevWidth == nil {
+		c.clientPrevWidth = make(map[string]int)
+	}
+	c.clientPrevWidth[clientID] = width
+	if height > 0 {
+		if c.clientPrevHeight == nil {
+			c.clientPrevHeight = make(map[string]int)
+		}
+		c.clientPrevHeight[clientID] = height
+	}
 	c.clientWidths[clientID] = width
 	if height > 0 {
 		if c.clientHeights == nil {
@@ -328,6 +356,7 @@ func (c *Coordinator) UpdateClientSizeSnapshot(clientID string, width int, heigh
 	}
 	c.updateKeyboardHoldLocked(clientID, height)
 	c.clientWidthsMu.Unlock()
+	c.SetClientProfile(clientID, c.computeProfile(width))
 }
 
 // GetGlobalWidth returns the coordinator's current global sidebar width.
@@ -344,10 +373,7 @@ func (c *Coordinator) GetGlobalWidth() int {
 }
 
 func (c *Coordinator) collapseWindowPanes(windowTarget string, win *tmux.Window) {
-	headerHeight := 1
-	if c.config.PaneHeader.CustomBorder {
-		headerHeight = 2
-	}
+	headerHeight := c.desiredPaneHeaderHeight()
 	for _, pane := range win.Panes {
 		paneID := pane.ID
 		if paneID == "" {
@@ -758,6 +784,8 @@ func NewCoordinator(sessionID string) *Coordinator {
 		collapsedGroups:    make(map[string]bool),
 		clientWidths:       make(map[string]int),
 		clientHeights:      make(map[string]int),
+		clientPrevWidth:    make(map[string]int),
+		clientPrevHeight:   make(map[string]int),
 		keyboardHoldUntil:  make(map[string]time.Time),
 		pendingMenus:       make(map[string][]menuItemDef),
 		lastWindowSelect:   make(map[string]time.Time),
@@ -768,6 +796,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		aiBellUntil:        make(map[int]int64),
 		hookPaneActive:     make(map[string]bool),
 		hookPaneBusyIdleAt: make(map[string]int64),
+		clientProfile:      make(map[string]string),
 		lastWidth:          25, // Default width for pet physics
 		pet: petState{
 			Pos:       pos2D{X: 10, Y: 0},
@@ -4547,6 +4576,55 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	}
 }
 
+// desiredPaneHeaderHeight returns the number of rows a pane-header pane should occupy.
+// Returns 2 when the active client is a phone or when custom_border is enabled; otherwise 1.
+func (c *Coordinator) desiredPaneHeaderHeight() int {
+	if c.ActiveClientProfile() == "phone" || c.config.PaneHeader.CustomBorder {
+		return 2
+	}
+	return 1
+}
+
+// RunHeaderHeightSync iterates pane-header panes on the active window and resizes
+// any whose current height differs from desiredPaneHeaderHeight. Idempotent.
+func (c *Coordinator) RunHeaderHeightSync(activeClientID string) {
+	target := c.desiredPaneHeaderHeight()
+
+	// List all panes in the session, filter to pane-header panes
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F",
+		"#{pane_id}\x1f#{pane_height}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+	if err != nil {
+		return
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\x1f", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		paneID := parts[0]
+		currentHeight, _ := strconv.Atoi(parts[1])
+		curCmd := parts[2]
+		startCmd := parts[3]
+
+		if !strings.Contains(curCmd, "pane-header") && !strings.Contains(startCmd, "pane-header") {
+			continue
+		}
+		if currentHeight == target {
+			continue
+		}
+		logEvent("HEADER_HEIGHT_SYNC pane=%s current=%d target=%d", paneID, currentHeight, target)
+		resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", paneID, "-y", fmt.Sprintf("%d", target)).Run()
+		resizeCancel()
+	}
+}
+
 func (c *Coordinator) persistSidebarWidthProfile(windowID string, width int) {
 	if windowID == "" || width < 10 {
 		return
@@ -5611,14 +5689,40 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		})
 	}
 
-	if c.config.PaneHeader.CustomBorder {
-		return &daemon.RenderPayload{
-			Content:    line,
-			Width:      width,
-			Height:     1,
-			TotalLines: 1,
-			Regions:    regions,
+	// Determine active client profile for this header pane.
+	activeProfile := c.ActiveClientProfile()
+
+	// When height >= 2 and phone profile: inject hamburger glyph into top-left 2 cols
+	// of row 0, add empty row 1 (reserved for Phase 2 carousel), and register a
+	// 2x2 clickable region for "pane_header:hamburger".
+	headerRows := c.desiredPaneHeaderHeight()
+	content := line
+	totalLines := 1
+	if headerRows >= 2 && activeProfile == "phone" {
+		// Hamburger glyph: "≡ " occupies 2 visual cols. Replace first 2 cols of row 0.
+		hamburger := baseStyle.Copy().Render("≡ ")
+		rest := runewidth.TruncateLeft(line, 2, "")
+		row0 := hamburger + rest
+		// Pad row0 to full width
+		row0VisWidth := uniseg.StringWidth(stripAnsi(row0))
+		if row0VisWidth < width {
+			row0 += strings.Repeat(" ", width-row0VisWidth)
 		}
+
+		// Hamburger clickable region: cols 0-2, rows 0-1
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 1,
+			StartCol:  0, EndCol: 2,
+			Action: "pane_header:hamburger", Target: paneID,
+		})
+
+		// Second row: empty, background-filled (reserved for Phase 2 carousel)
+		row1 := lipgloss.NewStyle().Background(lipgloss.Color(headerBg)).Width(width).Render("")
+		if headerBg == "" {
+			row1 = strings.Repeat(" ", width)
+		}
+		content = row0 + "\n" + row1
+		totalLines = 2
 	}
 
 	sidebarBg := ""
@@ -5628,14 +5732,26 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		terminalBg = c.theme.TerminalBg
 	}
 
+	if c.config.PaneHeader.CustomBorder {
+		return &daemon.RenderPayload{
+			Content:       content,
+			Width:         width,
+			Height:        headerRows,
+			TotalLines:    totalLines,
+			Regions:       regions,
+			ClientProfile: activeProfile,
+		}
+	}
+
 	return &daemon.RenderPayload{
-		Content:    line,
-		Width:      width,
-		Height:     1,
-		TotalLines: 1,
-		Regions:    regions,
-		SidebarBg:  sidebarBg,
-		TerminalBg: terminalBg,
+		Content:       content,
+		Width:         width,
+		Height:        headerRows,
+		TotalLines:    totalLines,
+		Regions:       regions,
+		SidebarBg:     sidebarBg,
+		TerminalBg:    terminalBg,
+		ClientProfile: activeProfile,
 	}
 }
 
@@ -8961,7 +9077,63 @@ func (c *Coordinator) RemoveClient(clientID string) {
 		delete(c.clientHeights, clientID)
 	}
 	c.clientWidthsMu.Unlock()
+	c.clientProfileMu.Lock()
+	delete(c.clientProfile, clientID)
+	c.clientProfileMu.Unlock()
 	coordinatorDebugLog.Printf("Removed client: %s (remaining: %d)", clientID, len(c.clientWidths))
+}
+
+// computeProfile classifies a client terminal width as "phone" or "desktop".
+func (c *Coordinator) computeProfile(width int) string {
+	if width < 80 {
+		return "phone"
+	}
+	return "desktop"
+}
+
+// SetClientProfile records the profile classification for a client.
+func (c *Coordinator) SetClientProfile(clientID string, profile string) {
+	c.clientProfileMu.Lock()
+	if c.clientProfile == nil {
+		c.clientProfile = make(map[string]string)
+	}
+	c.clientProfile[clientID] = profile
+	c.clientProfileMu.Unlock()
+}
+
+// ActiveClientProfile returns the profile of the active client.
+// It finds the client whose current width matches activeClientWidth.
+// Falls back to "desktop" if no match is found.
+func (c *Coordinator) ActiveClientProfile() string {
+	c.activeClientWidthMu.RLock()
+	acw := c.activeClientWidth
+	c.activeClientWidthMu.RUnlock()
+
+	c.clientWidthsMu.RLock()
+	var activeClientID string
+	for id, w := range c.clientWidths {
+		if strings.HasPrefix(id, "header:") {
+			continue
+		}
+		if w == acw {
+			activeClientID = id
+			break
+		}
+	}
+	c.clientWidthsMu.RUnlock()
+
+	if activeClientID == "" {
+		return "desktop"
+	}
+
+	c.clientProfileMu.RLock()
+	profile := c.clientProfile[activeClientID]
+	c.clientProfileMu.RUnlock()
+
+	if profile == "" {
+		return "desktop"
+	}
+	return profile
 }
 
 // HandleInput processes input events from renderers
@@ -9632,6 +9804,17 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Click on a pane label in the header -> focus that pane
 		exec.Command("tmux", "select-pane", "-t", input.ResolvedTarget).Run()
 		return true
+
+	case "pane_header:hamburger":
+		// Hamburger icon tapped on phone profile pane-header -> open sidebar popup
+		sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+		sessID := strings.TrimSpace(string(sessIDOut))
+		popupBin := getPopupBin()
+		if popupBin != "" && sessID != "" {
+			go exec.Command("tmux", "display-popup", "-E", "-w", "100%", "-h", "100%",
+				"--", popupBin, "--session", sessID).Run()
+		}
+		return false
 
 	case "header_context":
 		// This is the full-width fallback region on pane headers.
