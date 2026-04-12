@@ -204,29 +204,17 @@ func doOnPaneResize(args []string) {
 	signalDaemon("USR1")
 }
 
-// doSignalClientResize replaces signal_client_resize.sh: resize all windows
-// to client dimensions, then send USR2 to daemon.
+// doSignalClientResize is the handler for tmux's client-resized hook.
+// It used to iterate every window and force-resize each one to the firing
+// client's dimensions. That caused multi-client resize churn: with two
+// attached clients (e.g. desktop + phone), each client's resize event would
+// drag every window to its own size, fighting tmux until things settled.
+// tmux already handles window sizing correctly via `window-size latest` +
+// `aggressive-resize on`, so the explicit resize-window loop was redundant
+// AND harmful. Now we just signal the daemon; the daemon's client geometry
+// tick elects a single active client and runs one width sync per change.
 func doSignalClientResize(args []string) {
-	width := ""
-	height := ""
-	if len(args) >= 1 {
-		width = args[0]
-	}
-	if len(args) >= 2 {
-		height = args[1]
-	}
-
-	if width != "" && height != "" {
-		if isNumeric(width) && isNumeric(height) {
-			out, _ := exec.Command("tmux", "list-windows", "-F", "#{window_id}").Output()
-			for _, wid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-				if wid == "" {
-					continue
-				}
-				exec.Command("tmux", "resize-window", "-x", width, "-y", height, "-t", wid).Run()
-			}
-		}
-	}
+	_ = args
 	signalDaemon("USR2")
 }
 

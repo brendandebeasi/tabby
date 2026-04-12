@@ -1,5 +1,10 @@
 # Hot Path Shell-to-Go Migration
 
+**STATUS: PHASE 1 + PHASE 3 COMPLETE** (commits `f50a0ed`, `ccc68f3`, `3bf1878`)
+
+See `COMPOSITOR_ROADMAP.md` for the continuation (Phases 4-6 redesigned as Phases B-R).
+See `RENDERER_ARCHITECTURE.md` for the complete feature set and renderer engine design.
+
 ## Requirements Summary
 
 Consolidate the ~14 shell scripts that fire on every window switch, pane focus, and pane kill into the Go daemon. The daemon already has the state these scripts query (windows, panes, layouts, client geometry). Eliminating the shell middlemen cuts 10+ tmux round-trips and multiple process spawns per navigation event.

@@ -105,7 +105,7 @@ tmux set-option -g window-size latest
 tmux set-option -g aggressive-resize on
 
 # New panes/windows open in the current content pane's directory.
-# If focus is on a pane-header utility pane, split the underlying content pane.
+# If focus is on a window-header utility pane, split the underlying content pane.
 SPLIT_PANE_CMD="$CURRENT_DIR/bin/tabby-hook split-pane"
 tmux bind-key '"' run-shell "$SPLIT_PANE_CMD v"
 tmux bind-key '%' run-shell "$SPLIT_PANE_CMD h"
@@ -243,23 +243,23 @@ CYCLE_PANE_BIN="$CURRENT_DIR/bin/cycle-pane"
 tmux set-option -ug window-style
 tmux set-option -ug window-active-style
 
-# Pane header format: hide for utility panes (sidebar, pane-header)
+# Pane header format: hide for utility panes (sidebar, window-header)
 
 # Unbind right-click on pane so it passes through to apps with mouse capture
-# (sidebar-renderer / pane-header use BubbleTea mouse mode and handle right-click internally)
+# (sidebar-renderer / window-header use BubbleTea mouse mode and handle right-click internally)
 tmux unbind-key -T root MouseDown3Pane 2>/dev/null || true
 tmux bind-key -T root MouseDown3Pane send-keys -M -t =
 
 # Keep utility-pane drag events forwarded, but force tmux copy-drag in normal panes.
 tmux unbind-key -T root MouseDrag1Pane 2>/dev/null || true
 tmux bind-key -T root MouseDrag1Pane \
-    if-shell -F -t = "#{||:#{m:*sidebar-render*,#{pane_current_command}},#{m:*pane-header*,#{pane_current_command}}}" \
+    if-shell -F -t = "#{||:#{m:*sidebar-render*,#{pane_current_command}},#{||:#{m:*pane-header*,#{pane_current_command}},#{m:*window-header*,#{pane_current_command}}}}" \
         "send-keys -M -t =" \
         "select-pane -t = ; copy-mode -M"
 
-# Handle clicks on pane-header panes specially to allow buttons to work regardless of focus
-# Architecture: Only intercept pane-header clicks. Let sidebar and normal panes use default tmux behavior.
-# Flow: MouseDown1Pane -> if pane-header: store click pos, select pane -> BubbleTea FocusMsg -> daemon handles action
+# Handle clicks on window-header panes specially to allow buttons to work regardless of focus
+# Architecture: Only intercept window-header clicks. Let sidebar and normal panes use default tmux behavior.
+# Flow: MouseDown1Pane -> if window-header: store click pos, select pane -> BubbleTea FocusMsg -> daemon handles action
 
 # Bind MouseDown1Pane:
 # 1. Check target pane command
@@ -268,14 +268,14 @@ tmux bind-key -T root MouseDrag1Pane \
 tmux bind-key -T root MouseDown1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M -t =" \
-        "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
+        "if-shell -F -t = \"#{||:#{m:*pane-header*,#{pane_current_command}},#{m:*window-header*,#{pane_current_command}}}\" \
 		    \"select-pane -t = ; send-keys -M -t =\" \
             \"select-pane -t = ; send-keys -M -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 
 tmux bind-key -T root MouseUp1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M -t =" \
-        "if-shell -F -t = \"#{m:*pane-header*,#{pane_current_command}}\" \
+        "if-shell -F -t = \"#{||:#{m:*pane-header*,#{pane_current_command}},#{m:*window-header*,#{pane_current_command}}}\" \
 		    \"send-keys -M -t =\" \
             \"select-pane -t = ; send-keys -M -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
 

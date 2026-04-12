@@ -400,6 +400,13 @@ func ListWindows() ([]Window, error) {
 				continue
 			}
 		}
+		// Skip sidebar stash windows. Tabby uses break-pane to park sidebar
+		// panes in these holding windows while hidden on mobile; they must
+		// not appear in any listing consumed by the renderer, window carousel,
+		// or status bar.
+		if strings.HasPrefix(stripANSI(parts[2]), "_tabby_stash_") {
+			continue
+		}
 		windows = append(windows, Window{
 			ID:          parts[0],
 			Index:       index,

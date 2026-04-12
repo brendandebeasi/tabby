@@ -108,6 +108,12 @@ type rendererModel struct {
 	height    int
 	connected bool
 
+	// Debounce generation counter for WindowSizeMsg. Incremented on every
+	// size event; resizeFlushMsg only fires a sendResize when its captured
+	// generation still matches, so rapid reflow bursts coalesce into one
+	// outgoing MsgResize after the pane size settles.
+	resizeGen int
+
 	// Render state from daemon
 	content        string
 	pinnedContent  string
@@ -201,6 +207,13 @@ type tickMsg time.Time
 
 type longPressMsg struct {
 	X, Y int
+}
+
+// resizeFlushMsg fires after the debounce window elapses; the generation field
+// is compared against the model's current resizeGen so only the most recent
+// WindowSizeMsg in a burst actually triggers an outgoing MsgResize.
+type resizeFlushMsg struct {
+	gen int
 }
 
 // Init implements tea.Model
@@ -519,9 +532,22 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		if m.connected {
+		if !m.connected {
+			return m, nil
+		}
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("WINDOW_SIZE width=%d height=%d client=%s", m.width, m.height, m.clientID)
+		}
+		m.resizeGen++
+		gen := m.resizeGen
+		return m, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+			return resizeFlushMsg{gen: gen}
+		})
+
+	case resizeFlushMsg:
+		if msg.gen == m.resizeGen && m.connected {
 			if inputLog != nil && isInputLogEnabled() {
-				inputLog.Printf("WINDOW_SIZE width=%d height=%d client=%s", m.width, m.height, m.clientID)
+				inputLog.Printf("WINDOW_SIZE_FLUSH width=%d height=%d client=%s gen=%d", m.width, m.height, m.clientID, msg.gen)
 			}
 			m.sendResize()
 		}

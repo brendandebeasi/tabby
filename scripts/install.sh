@@ -16,7 +16,7 @@ go build -o bin/render-status ./cmd/render-status
 go build -o bin/render-tab ./cmd/render-tab
 go build -o bin/tabby-daemon ./cmd/tabby-daemon
 go build -o bin/sidebar-renderer ./cmd/sidebar-renderer
-go build -o bin/pane-header ./cmd/pane-header
+go build -o bin/window-header ./cmd/window-header
 go build -o bin/cycle-pane ./cmd/cycle-pane
 go build -o bin/new-window ./cmd/new-window
 go build -o bin/tabby-toggle ./cmd/tabby-toggle
@@ -30,7 +30,7 @@ chmod +x bin/render-status
 chmod +x bin/render-tab
 chmod +x bin/tabby-daemon
 chmod +x bin/sidebar-renderer
-chmod +x bin/pane-header
+chmod +x bin/window-header
 chmod +x bin/cycle-pane
 chmod +x bin/new-window
 chmod +x bin/tabby-toggle

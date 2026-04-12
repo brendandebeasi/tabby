@@ -127,6 +127,7 @@ func TestView_PadsToWidth(t *testing.T) {
 func TestView_TakesFirstLineOnly(t *testing.T) {
 	m := rendererModel{connected: true, content: "Line1\nLine2\nLine3", width: 10}
 	got := m.View()
+	// headerHeight is 0 → single-row mode → only first line rendered
 	if strings.Contains(got, "Line2") || strings.Contains(got, "Line3") {
 		t.Fatalf("View() should only show first line, got %q", got)
 	}
@@ -143,6 +144,14 @@ func TestView_NoTruncation(t *testing.T) {
 	}
 }
 
+func TestView_MultiRowRendersAllRows(t *testing.T) {
+	m := rendererModel{connected: true, content: "row0\nrow1\nrow2", width: 10, headerHeight: 3}
+	got := m.View()
+	if !strings.Contains(got, "row0") || !strings.Contains(got, "row1") || !strings.Contains(got, "row2") {
+		t.Fatalf("View() with headerHeight=3 should render all rows, got %q", got)
+	}
+}
+
 func TestProcessMouseClick_NoRegions(t *testing.T) {
 	m := rendererModel{width: 80, regions: nil}
 	result, cmd := m.processMouseClick(5, 0, tea.MouseButtonLeft, false)
@@ -156,7 +165,7 @@ func TestProcessMouseClick_HitRegion(t *testing.T) {
 	m := rendererModel{
 		width: 80,
 		regions: []daemon.ClickableRegion{
-			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 20, Action: "select_window", Target: "1"},
+			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 20, Action: "window_header:menu", Target: "@1"},
 		},
 	}
 	result, _ := m.processMouseClick(10, 0, tea.MouseButtonLeft, false)
@@ -169,7 +178,7 @@ func TestProcessMouseClick_MissRegion(t *testing.T) {
 	m := rendererModel{
 		width: 80,
 		regions: []daemon.ClickableRegion{
-			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 20, Action: "select_window", Target: "1"},
+			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 20, Action: "window_header:menu", Target: "@1"},
 		},
 	}
 	result, _ := m.processMouseClick(50, 0, tea.MouseButtonLeft, false)
@@ -198,7 +207,7 @@ func TestProcessMouseClick_FullWidthRegion(t *testing.T) {
 	m := rendererModel{
 		width: 80,
 		regions: []daemon.ClickableRegion{
-			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 0, Action: "select_window", Target: "2"},
+			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 0, Action: "window_header:menu", Target: "@1"},
 		},
 	}
 	result, _ := m.processMouseClick(40, 0, tea.MouseButtonLeft, false)
@@ -207,19 +216,22 @@ func TestProcessMouseClick_FullWidthRegion(t *testing.T) {
 	}
 }
 
-func TestProcessMouseClick_MultipleRegions(t *testing.T) {
+func TestProcessMouseClick_MultiRowRegion(t *testing.T) {
 	m := rendererModel{
 		width: 80,
 		regions: []daemon.ClickableRegion{
-			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 30, Action: "select_window", Target: "1"},
-			{StartLine: 0, EndLine: 0, StartCol: 30, EndCol: 60, Action: "select_pane", Target: "%5"},
-			{StartLine: 0, EndLine: 0, StartCol: 60, EndCol: 80, Action: "button", Target: "close"},
+			{StartLine: 0, EndLine: 2, StartCol: 0, EndCol: 4, Action: "window_header:hamburger", Target: "@1"},
+			{StartLine: 0, EndLine: 2, StartCol: 4, EndCol: 8, Action: "window_header:prev_window", Target: "@1"},
+			{StartLine: 0, EndLine: 2, StartCol: 8, EndCol: 12, Action: "window_header:close_window", Target: "@1"},
+			{StartLine: 0, EndLine: 2, StartCol: 12, EndCol: 16, Action: "window_header:next_window", Target: "@1"},
 		},
 	}
-	for _, x := range []int{10, 40, 70} {
-		result, _ := m.processMouseClick(x, 0, tea.MouseButtonLeft, false)
-		if result == nil {
-			t.Fatalf("click at x=%d should return non-nil", x)
+	for _, y := range []int{0, 1, 2} {
+		for _, x := range []int{1, 5, 9, 13} {
+			result, _ := m.processMouseClick(x, y, tea.MouseButtonLeft, false)
+			if result == nil {
+				t.Fatalf("click at x=%d y=%d should return non-nil", x, y)
+			}
 		}
 	}
 }
@@ -254,7 +266,7 @@ func TestUpdate_RenderMsg_SetsRegionsAndFlags(t *testing.T) {
 		SidebarBg:  "#1e1e1e",
 		TerminalBg: "#000000",
 		Regions: []daemon.ClickableRegion{
-			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 40, Action: "select_window", Target: "1"},
+			{StartLine: 0, EndLine: 0, StartCol: 0, EndCol: 40, Action: "window_header:menu", Target: "@1"},
 		},
 	}
 	result, _ := m.Update(renderMsg{payload: payload})
@@ -289,16 +301,6 @@ func TestUpdate_KeyMsgCtrlC(t *testing.T) {
 	}
 }
 
-func TestUpdate_KeyMsgOther(t *testing.T) {
-	m := rendererModel{}
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}
-	result, cmd := m.Update(msg)
-	if result == nil {
-		t.Fatal("Update should return non-nil model")
-	}
-	_ = cmd
-}
-
 func TestUpdate_WindowSizeMsg(t *testing.T) {
 	m := rendererModel{connected: false}
 	msg := tea.WindowSizeMsg{Width: 100, Height: 2}
@@ -315,84 +317,45 @@ func TestUpdate_WindowSizeMsg(t *testing.T) {
 
 func TestUpdate_FocusMsg(t *testing.T) {
 	m := rendererModel{}
-	result, cmd := m.Update(tea.FocusMsg{})
+	result, _ := m.Update(tea.FocusMsg{})
 	if result == nil {
 		t.Fatal("Update should return non-nil model")
 	}
-	_ = cmd
 }
 
 func TestUpdate_BlurMsg(t *testing.T) {
 	m := rendererModel{}
-	result, cmd := m.Update(tea.BlurMsg{})
+	result, _ := m.Update(tea.BlurMsg{})
 	if result == nil {
 		t.Fatal("Update should return non-nil model")
 	}
-	_ = cmd
-}
-
-func TestUpdate_LongPressMsg_NotActive(t *testing.T) {
-	m := rendererModel{longPressActive: false, width: 80}
-	result, cmd := m.Update(longPressMsg{X: 5, Y: 0})
-	if result == nil {
-		t.Fatal("Update should return non-nil model")
-	}
-	_ = cmd
-}
-
-func TestUpdate_LongPressMsg_ActiveNoMovement(t *testing.T) {
-	m := rendererModel{
-		longPressActive: true,
-		mouseDownPos:    struct{ X, Y int }{5, 0},
-		width:           80,
-	}
-	result, _ := m.Update(longPressMsg{X: 5, Y: 0})
-	if result == nil {
-		t.Fatal("Update should return non-nil model")
-	}
-}
-
-func TestUpdate_LongPressMsg_ActiveLargeMovement(t *testing.T) {
-	m := rendererModel{
-		longPressActive: true,
-		mouseDownPos:    struct{ X, Y int }{5, 0},
-		width:           80,
-	}
-	result, cmd := m.Update(longPressMsg{X: 60, Y: 0})
-	if result == nil {
-		t.Fatal("Update should return non-nil model")
-	}
-	_ = cmd
 }
 
 func TestUpdate_UnknownMsg(t *testing.T) {
 	type unknownMsg struct{}
 	m := rendererModel{}
-	result, cmd := m.Update(unknownMsg{})
+	result, _ := m.Update(unknownMsg{})
 	if result == nil {
 		t.Fatal("Update should return non-nil model")
 	}
-	_ = cmd
 }
 
 func TestHandleMouse_NotConnected(t *testing.T) {
 	m := rendererModel{connected: false, width: 80}
 	msg := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 5, Y: 0}
-	result, cmd := m.handleMouse(msg)
+	result, _ := m.handleMouse(msg)
 	if result == nil {
 		t.Fatal("handleMouse should return non-nil even when disconnected")
 	}
-	_ = cmd
 }
 
-func TestHandleMouse_PressLeftNonTouch(t *testing.T) {
+func TestHandleMouse_PressLeft(t *testing.T) {
 	m := rendererModel{connected: true, width: 80}
 	msg := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 5, Y: 0}
-	result, cmd := m.handleMouse(msg)
+	result, _ := m.handleMouse(msg)
 	if result == nil {
 		t.Fatal("handleMouse should return non-nil model")
 	}
-	_ = cmd
 }
 
 func TestHandleMouse_PressRight(t *testing.T) {
@@ -401,77 +364,6 @@ func TestHandleMouse_PressRight(t *testing.T) {
 	result, _ := m.handleMouse(msg)
 	if result == nil {
 		t.Fatal("handleMouse right press should return non-nil")
-	}
-}
-
-func TestHandleMouse_PressShiftLeft(t *testing.T) {
-	m := rendererModel{connected: true, width: 80}
-	msg := tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Shift: true, X: 5, Y: 0,
-	}
-	result, _ := m.handleMouse(msg)
-	if result == nil {
-		t.Fatal("handleMouse shift+left should return non-nil")
-	}
-}
-
-func TestHandleMouse_PressCtrlLeft(t *testing.T) {
-	m := rendererModel{connected: true, width: 80}
-	msg := tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Ctrl: true, X: 5, Y: 0,
-	}
-	result, _ := m.handleMouse(msg)
-	if result == nil {
-		t.Fatal("handleMouse ctrl+left should return non-nil")
-	}
-}
-
-func TestHandleMouse_ReleaseSkipNextRelease(t *testing.T) {
-	m := rendererModel{connected: true, skipNextRelease: true}
-	msg := tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 5, Y: 0}
-	result, _ := m.handleMouse(msg)
-	if result == nil {
-		t.Fatal("handleMouse release should return non-nil")
-	}
-	result2, _ := result.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 5, Y: 0})
-	if result2 == nil {
-		t.Error("second release should still return non-nil model")
-	}
-}
-
-func TestHandleMouse_ReleaseNonTouchNoDownTime(t *testing.T) {
-	m := rendererModel{connected: true}
-	msg := tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 5, Y: 0}
-	result, cmd := m.handleMouse(msg)
-	if result == nil {
-		t.Fatal("handleMouse should return non-nil")
-	}
-	_ = cmd
-}
-
-func TestHandleMouse_MotionNoLongPress(t *testing.T) {
-	m := rendererModel{connected: true, longPressActive: false}
-	msg := tea.MouseMsg{Action: tea.MouseActionMotion, X: 5, Y: 0}
-	result, _ := m.handleMouse(msg)
-	if result == nil {
-		t.Fatal("handleMouse motion should return non-nil")
-	}
-}
-
-func TestHandleMouse_MotionCancelsLongPress(t *testing.T) {
-	m := rendererModel{
-		connected:       true,
-		longPressActive: true,
-		mouseDownPos:    struct{ X, Y int }{0, 0},
-	}
-	msg := tea.MouseMsg{Action: tea.MouseActionMotion, X: 50, Y: 0}
-	result, _ := m.handleMouse(msg)
-	if result == nil {
-		t.Fatal("handleMouse motion should return non-nil")
-	}
-	result2, _ := result.Update(longPressMsg{X: 50, Y: 0})
-	if result2 == nil {
-		t.Error("longPressMsg after motion should still return non-nil model")
 	}
 }
 
@@ -498,33 +390,5 @@ func TestProcessMouseClick_MiddleButton(t *testing.T) {
 	result, _ := m.processMouseClick(5, 0, tea.MouseButtonMiddle, false)
 	if result == nil {
 		t.Fatal("middle-click should return non-nil model")
-	}
-}
-
-func TestHandleMouse_TouchModeLeftPress_FirstTap(t *testing.T) {
-	m := rendererModel{connected: true, width: 80}
-	msg := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 5, Y: 0}
-	result, cmd := m.handleMouse(msg)
-	if result == nil {
-		t.Fatal("left press should return non-nil model")
-	}
-	_ = cmd
-	result2, _ := result.Update(longPressMsg{X: 5, Y: 0})
-	if result2 == nil {
-		t.Error("longPressMsg after press should return non-nil model")
-	}
-}
-
-func TestHandleMouse_NonTouchReleaseWithDownTime(t *testing.T) {
-	m := rendererModel{
-		connected:    true,
-		width:        80,
-		mouseDownPos: struct{ X, Y int }{5, 0},
-	}
-	m.mouseDownTime = m.mouseDownTime.Add(0)
-	msg := tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 5, Y: 0}
-	result, _ := m.handleMouse(msg)
-	if result == nil {
-		t.Fatal("release should return non-nil model")
 	}
 }

@@ -39,7 +39,7 @@ import (
 var coordinatorDebugLog *log.Logger
 
 // globalCoordinator is set once in main() so standalone functions can access
-// profile-aware settings like desiredPaneHeaderHeight.
+// profile-aware settings like desiredWindowHeaderHeight.
 var globalCoordinator *Coordinator
 
 // Deadlock detection
@@ -250,6 +250,18 @@ type Coordinator struct {
 	activeClientWidth   int
 	activeClientWidthMu sync.RWMutex
 
+	// Mobile border hide state: tracks whether tmux pane-border-style has been
+	// overridden to the terminal background (invisible) because a narrow client
+	// is active. Set by syncMobileBorders().
+	mobileBorderHidden bool
+	mobileBorderInit   bool
+	mobileBorderMu     sync.Mutex
+
+	// Window-header button press feedback: maps windowID -> (action, timestamp).
+	// Used to render a pressed/highlighted button for ~150ms after a tap.
+	windowHeaderPressMu sync.Mutex
+	windowHeaderPress   map[string]windowHeaderPressEntry
+
 	// Per-client widths for accurate click detection
 	clientWidths      map[string]int
 	clientHeights     map[string]int
@@ -266,9 +278,9 @@ type Coordinator struct {
 	windowZoomOwner   map[string]string // windowID -> "phone" | ""
 	windowZoomOwnerMu sync.RWMutex
 
-	// Sidebar collapse state
-	sidebarCollapsed     bool
-	sidebarPreviousWidth int
+	// Sidebar visibility state (true while the sidebar pane is stashed in a
+	// holding window via break-pane; false when it is live in its parent window).
+	sidebarHidden bool
 
 	// Pet widget layout (for custom click detection)
 	petLayout petWidgetLayout
@@ -291,9 +303,21 @@ type Coordinator struct {
 	hookPaneBusyIdleAt map[string]int64  // pane ID → unix timestamp when hook-busy but process looks idle
 	aiBellUntil        map[int]int64     // window index → unix timestamp when bell expires (window-level)
 
-	// Callback to sync sidebar client widths in the server's client map
-	// Called during expand_sidebar to update server-side Width before BroadcastRender
+	// Callback to sync sidebar client widths in the server's client map.
+	// Called after a width change (e.g. grow/shrink) to update server-side Width
+	// before BroadcastRender.
 	OnSyncSidebarClientWidths func(newWidth int)
+
+	// Callback to re-render a specific client. Used to flash button press
+	// feedback on the window-header: record the press, call OnRefreshClient
+	// so the next render draws the pressed style, then again after the press
+	// TTL so it clears on its own.
+	OnRefreshClient func(clientID string)
+
+	// Callback to trigger a pane-layout refresh (spawn/kill window-headers,
+	// pane-headers, sidebars). Fired on phone<->desktop profile transitions so
+	// the header topology follows the active client's form factor.
+	OnRefreshLayout func()
 
 	// Context menu state (for in-renderer menus)
 	OnSendMenu         func(clientID string, menu *daemon.MenuPayload)
@@ -329,7 +353,7 @@ func (c *Coordinator) GetWindows() []tmux.Window {
 }
 
 func (c *Coordinator) UpdateClientSizeSnapshot(clientID string, width int, height int) {
-	if clientID == "" || strings.HasPrefix(clientID, "header:") || width <= 0 {
+	if clientID == "" || strings.HasPrefix(clientID, "window-header:") || strings.HasPrefix(clientID, "header:") || width <= 0 {
 		return
 	}
 	c.clientWidthsMu.Lock()
@@ -384,7 +408,7 @@ func (c *Coordinator) collapseWindowPanes(windowTarget string, win *tmux.Window)
 	// Use actual window width for header height, not global profile
 	winWidthOut, _ := exec.Command("tmux", "display-message", "-p", "-t", windowTarget, "#{window_width}").Output()
 	winWidth, _ := strconv.Atoi(strings.TrimSpace(string(winWidthOut)))
-	headerHeight := c.desiredPaneHeaderHeightForWidth(winWidth)
+	headerHeight := c.desiredWindowHeaderHeightForWidth(winWidth)
 	for _, pane := range win.Panes {
 		paneID := pane.ID
 		if paneID == "" {
@@ -750,6 +774,12 @@ func NewCoordinator(sessionID string) *Coordinator {
 	// Enable TrueColor for accurate theme rendering
 	lipgloss.SetColorProfile(termenv.TrueColor)
 
+	// Tell tmux that xterm-like clients support RGB truecolor so hex border/style
+	// colors render exactly rather than being quantized to the 256-palette. Without
+	// this, pane-border-style=#faf4ed doesn't match true-RGB pane backgrounds,
+	// leaving visible border lines even when we "hide" them by color-matching.
+	exec.Command("tmux", "set-option", "-sa", "terminal-features", ",xterm*:RGB").Run()
+
 	cfg, err := config.LoadConfig(config.DefaultConfigPath())
 	if err != nil {
 		cfg = &config.Config{}
@@ -896,19 +926,9 @@ func NewCoordinator(sessionID string) *Coordinator {
 		}
 	}
 
-	// Read collapse state from tmux option
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_collapsed").Output(); err == nil {
-		collapsed := strings.TrimSpace(string(out))
-		if collapsed == "1" {
-			c.sidebarCollapsed = true
-			// Also read the previous width for restoring
-			if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_previous_width").Output(); err == nil {
-				if w, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && w >= 15 {
-					c.sidebarPreviousWidth = w
-				}
-			}
-		}
-	}
+	// Clear any stale legacy tmux globals from the old 1-col "collapse" feature.
+	exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_collapsed").Run()
+	exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_previous_width").Run()
 
 	// Apply global theme styles to tmux (borders, messages, etc.)
 	c.applyThemeToTmux()
@@ -1238,10 +1258,12 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "@tabby_pane_dim").Run()
 			}
 		}
-		// Reset border style to match active border
-		if out, err := exec.Command("tmux", "show-options", "-gqv", "pane-active-border-style").Output(); err == nil {
-			if s := strings.TrimSpace(string(out)); s != "" {
-				exec.Command("tmux", "set-option", "-g", "pane-border-style", s).Run()
+		// Reset border style to match active border (skip when mobile hide is active)
+		if !c.borderStylingBlocked() {
+			if out, err := exec.Command("tmux", "show-options", "-gqv", "pane-active-border-style").Output(); err == nil {
+				if s := strings.TrimSpace(string(out)); s != "" {
+					exec.Command("tmux", "set-option", "-g", "pane-border-style", s).Run()
+				}
 			}
 		}
 		return
@@ -1309,6 +1331,9 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 // applyBorderDim reads the global pane-active-border-style fg color and sets
 // pane-border-style to a desaturated version so inactive borders look dimmed.
 func (c *Coordinator) applyBorderDim(opacity float64) {
+	if c.borderStylingBlocked() {
+		return
+	}
 	out, err := exec.Command("tmux", "show-options", "-gqv", "pane-active-border-style").Output()
 	if err != nil {
 		return
@@ -1462,7 +1487,7 @@ func (c *Coordinator) HandleWindowSelect(activeWindowID string) {
 	}
 	c.stateMu.RUnlock()
 
-	if tabBg != "" {
+	if tabBg != "" && !c.borderStylingBlocked() {
 		exec.Command("tmux", "set-option", "-g", "pane-active-border-style", "fg="+tabBg).Run()
 	}
 }
@@ -1971,6 +1996,22 @@ func (c *Coordinator) RefreshWindows() {
 	windows, err := tmux.ListWindowsWithPanes()
 	if err != nil {
 		return
+	}
+
+	// Drop sidebar stash windows from tabby's view entirely. They are holding
+	// windows for break-pane'd sidebars while hidden on mobile — they must not
+	// appear in the window carousel, be selectable via prev/next, or show up
+	// in any rendered list. They're still live in tmux; join-pane brings them
+	// back when the user reveals the sidebar.
+	if len(windows) > 0 {
+		filtered := windows[:0]
+		for _, w := range windows {
+			if strings.HasPrefix(w.Name, sidebarStashWindowPrefix) {
+				continue
+			}
+			filtered = append(filtered, w)
+		}
+		windows = filtered
 	}
 
 	c.applyCWDColorIconMappings(windows)
@@ -2695,32 +2736,34 @@ func (c *Coordinator) applyThemeToTmux() {
 		activeBg = borderBg // fallback to inactive bg
 	}
 
-	// Apply inactive border style
-	if inactiveStyle := buildBorderStyle(borderFg, borderBg); inactiveStyle != "" {
-		exec.Command("tmux", "set-option", "-g", "pane-border-style", inactiveStyle).Run()
-	}
-
-	// Apply active border style
-	if activeStyle := buildBorderStyle(activeFg, activeBg); activeStyle != "" {
-		exec.Command("tmux", "set-option", "-g", "pane-active-border-style", activeStyle).Run()
-	}
-
-	// With overlay pane headers enabled, tmux border lines add an extra visual row
-	// between header and content that looks like a duplicate/non-functional header.
-	// Prefer runtime tmux option as source of truth, with config as fallback.
-	paneHeadersEnabled := c.config.Sidebar.PaneHeaders
-	if out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output(); err == nil {
-		paneHeadersEnabled = strings.TrimSpace(string(out)) == "on"
-	}
-	if paneHeadersEnabled && !c.config.PaneHeader.CustomBorder {
-		exec.Command("tmux", "set-option", "-g", "pane-border-lines", "simple").Run()
-		if c.config.PaneHeader.TerminalBg != "" {
-			style := fmt.Sprintf("fg=%s,bg=%s", c.config.PaneHeader.TerminalBg, c.config.PaneHeader.TerminalBg)
-			exec.Command("tmux", "set-option", "-g", "pane-border-style", style).Run()
-			exec.Command("tmux", "set-option", "-g", "pane-active-border-style", style).Run()
+	if !c.borderStylingBlocked() {
+		// Apply inactive border style
+		if inactiveStyle := buildBorderStyle(borderFg, borderBg); inactiveStyle != "" {
+			exec.Command("tmux", "set-option", "-g", "pane-border-style", inactiveStyle).Run()
 		}
-	} else if c.config.PaneHeader.BorderLines != "" {
-		exec.Command("tmux", "set-option", "-g", "pane-border-lines", c.config.PaneHeader.BorderLines).Run()
+
+		// Apply active border style
+		if activeStyle := buildBorderStyle(activeFg, activeBg); activeStyle != "" {
+			exec.Command("tmux", "set-option", "-g", "pane-active-border-style", activeStyle).Run()
+		}
+
+		// With overlay pane headers enabled, tmux border lines add an extra visual row
+		// between header and content that looks like a duplicate/non-functional header.
+		// Prefer runtime tmux option as source of truth, with config as fallback.
+		paneHeadersEnabled := c.config.Sidebar.PaneHeaders
+		if out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output(); err == nil {
+			paneHeadersEnabled = strings.TrimSpace(string(out)) == "on"
+		}
+		if paneHeadersEnabled && !c.config.PaneHeader.CustomBorder {
+			exec.Command("tmux", "set-option", "-g", "pane-border-lines", "simple").Run()
+			if c.config.PaneHeader.TerminalBg != "" {
+				style := fmt.Sprintf("fg=%s,bg=%s", c.config.PaneHeader.TerminalBg, c.config.PaneHeader.TerminalBg)
+				exec.Command("tmux", "set-option", "-g", "pane-border-style", style).Run()
+				exec.Command("tmux", "set-option", "-g", "pane-active-border-style", style).Run()
+			}
+		} else if c.config.PaneHeader.BorderLines != "" {
+			exec.Command("tmux", "set-option", "-g", "pane-border-lines", c.config.PaneHeader.BorderLines).Run()
+		}
 	}
 
 	// Apply message/mode styles (command prompt)
@@ -4218,10 +4261,10 @@ func (c *Coordinator) renderAdventurePlayArea(safePlayWidth int, petSprite strin
 
 // handleWidthSync checks if the current width matches global state and syncs if needed
 func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
-	if strings.HasPrefix(clientID, "header:") {
+	if strings.HasPrefix(clientID, "window-header:") || strings.HasPrefix(clientID, "header:") {
 		return
 	}
-	if c.sidebarCollapsed {
+	if c.sidebarHidden {
 		return
 	}
 
@@ -4381,10 +4424,384 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 // SetActiveClientWidth records the currently-focused physical tmux client's
 // terminal width (in cols). RunWidthSync caps sidebar targets against this so
 // that we never ask tmux for more cols than the active client can honor.
+//
+// When the width transitions across the phone/desktop boundary, we also
+// auto-expand the sidebar if it was hidden (so desktop users don't land in a
+// collapsed-to-1-col strip after switching back from their phone).
 func (c *Coordinator) SetActiveClientWidth(w int) {
 	c.activeClientWidthMu.Lock()
+	prev := c.activeClientWidth
 	c.activeClientWidth = w
 	c.activeClientWidthMu.Unlock()
+
+	prevProfile := c.computeProfile(prev)
+	newProfile := c.computeProfile(w)
+	if prev > 0 && prevProfile != newProfile {
+		// Profile transition: kick the layout refresh so window-header panes
+		// get killed (desktop) or spawned (phone) to match the new form factor.
+		if c.OnRefreshLayout != nil {
+			go c.OnRefreshLayout()
+		}
+		if newProfile == "desktop" && sidebarIsStashed() {
+			c.sidebarHidden = false
+			go func() {
+				c.restoreSidebarPanes()
+				coordinatorDebugLog.Printf("profile transition phone->desktop: auto-restored stashed sidebars")
+			}()
+		}
+		if newProfile == "phone" && !sidebarIsStashed() {
+			// On phone there is no room for a sidebar — stash it so only the
+			// window-header + content pane remain. The renderer process stays
+			// alive in the holding window and is join-pane'd back on the next
+			// transition to desktop.
+			c.sidebarHidden = true
+			go func() {
+				hideSidebarPanes()
+				coordinatorDebugLog.Printf("profile transition desktop->phone: auto-stashed sidebars")
+			}()
+		}
+	}
+}
+
+// sidebarStashWindowPrefix is the tmux window-name prefix used to park sidebar
+// panes off-screen while keeping the sidebar-renderer process alive. On hide we
+// call tmux break-pane to move each sidebar pane to its own stash window named
+// "{prefix}{window_id_without_@}". On show we list stash windows, match them
+// back to the original window, and join-pane them in at the left edge.
+const sidebarStashWindowPrefix = "_tabby_stash_"
+
+func stashNameForWindow(windowID string) string {
+	return sidebarStashWindowPrefix + strings.TrimPrefix(windowID, "@")
+}
+
+func originalWindowIDFromStash(stashName string) string {
+	suffix := strings.TrimPrefix(stashName, sidebarStashWindowPrefix)
+	if suffix == "" || suffix == stashName {
+		return ""
+	}
+	return "@" + suffix
+}
+
+// hideSidebarPanes moves every live sidebar pane to a dedicated stash window
+// (one per original window). The sidebar-renderer process continues running;
+// restoreSidebarPanes reattaches it later via join-pane. The sidebar's current
+// width is saved on the stash window via @tabby_stashed_width so restore can
+// bring it back at the same size the user had before hiding.
+func hideSidebarPanes() {
+	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
+		"#{pane_id}|#{window_id}|#{pane_current_command}|#{pane_start_command}|#{pane_width}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "|", 5)
+		if len(parts) < 5 {
+			continue
+		}
+		paneID := parts[0]
+		winID := parts[1]
+		cur := parts[2]
+		start := parts[3]
+		paneW := parts[4]
+		if !strings.HasPrefix(cur, "sidebar") && !strings.HasPrefix(start, "sidebar") {
+			continue
+		}
+		stashName := stashNameForWindow(winID)
+		// break-pane -d: don't switch the current client to the new window.
+		if err := exec.Command("tmux", "break-pane", "-d", "-s", paneID, "-n", stashName).Run(); err != nil {
+			coordinatorDebugLog.Printf("hideSidebarPanes: break-pane failed for %s: %v", paneID, err)
+			continue
+		}
+		// Persist the pre-stash width on the new stash window so restoreSidebarPanes
+		// can join the pane back at its original size.
+		if paneW != "" {
+			if w, convErr := strconv.Atoi(strings.TrimSpace(paneW)); convErr == nil && w > 0 {
+				exec.Command("tmux", "set-option", "-w", "-t", stashName,
+					"@tabby_stashed_width", strconv.Itoa(w)).Run()
+			}
+		}
+		coordinatorDebugLog.Printf("hideSidebarPanes: %s (window %s) -> %s width=%s", paneID, winID, stashName, paneW)
+	}
+}
+
+// restoreSidebarPanes reverses hideSidebarPanes: for each stash window, join
+// its lone pane back into the original window on the left edge.
+func (c *Coordinator) restoreSidebarPanes() {
+	out, err := exec.Command("tmux", "list-windows", "-a", "-F",
+		"#{window_id}|#{window_name}").Output()
+	if err != nil {
+		return
+	}
+	defaultWidth := c.globalWidth
+	if defaultWidth < 15 {
+		defaultWidth = 25
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		stashWinID := parts[0]
+		stashName := parts[1]
+		if !strings.HasPrefix(stashName, sidebarStashWindowPrefix) {
+			continue
+		}
+		origWinID := originalWindowIDFromStash(stashName)
+		if origWinID == "" {
+			continue
+		}
+		// Prefer the width the sidebar had right before it was stashed so the
+		// user gets their exact layout back. Falls back to globalWidth if the
+		// option is missing (e.g. legacy stash created before this code landed).
+		width := defaultWidth
+		if widthOut, wErr := exec.Command("tmux", "show-options", "-w", "-qv", "-t", stashWinID,
+			"@tabby_stashed_width").Output(); wErr == nil {
+			if w, convErr := strconv.Atoi(strings.TrimSpace(string(widthOut))); convErr == nil && w > 0 {
+				width = w
+			}
+		}
+		// Get the sidebar pane inside the stash window.
+		pout, err := exec.Command("tmux", "list-panes", "-t", stashWinID, "-F", "#{pane_id}").Output()
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(strings.TrimSpace(string(pout)), "\n")
+		if len(lines) == 0 || lines[0] == "" {
+			continue
+		}
+		stashPane := lines[0]
+		// Find a content pane in the original window to use as the join target.
+		tout, err := exec.Command("tmux", "list-panes", "-t", origWinID, "-F",
+			"#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output()
+		if err != nil {
+			// Original window is gone — drop the stash.
+			exec.Command("tmux", "kill-window", "-t", stashWinID).Run()
+			continue
+		}
+		targetPane := ""
+		for _, pline := range strings.Split(strings.TrimSpace(string(tout)), "\n") {
+			pparts := strings.SplitN(pline, "|", 3)
+			if len(pparts) < 3 {
+				continue
+			}
+			if isAuxiliaryPaneCommand(pparts[1]) || isAuxiliaryPaneCommand(pparts[2]) {
+				continue
+			}
+			targetPane = pparts[0]
+			break
+		}
+		if targetPane == "" {
+			exec.Command("tmux", "kill-window", "-t", stashWinID).Run()
+			continue
+		}
+		// -h -b -l <width>: horizontal split, before target, sized in cols.
+		if err := exec.Command("tmux", "join-pane", "-h", "-b", "-l", fmt.Sprintf("%d", width),
+			"-s", stashPane, "-t", targetPane).Run(); err != nil {
+			coordinatorDebugLog.Printf("restoreSidebarPanes: join-pane failed for %s: %v", stashPane, err)
+			continue
+		}
+		coordinatorDebugLog.Printf("restoreSidebarPanes: %s -> %s (width=%d)", stashPane, targetPane, width)
+	}
+}
+
+// selectNeighborWindow cycles to the prev/next non-stash window relative to
+// the currently active window. delta=-1 selects previous, delta=+1 selects
+// next. Uses the coordinator's filtered window list (RefreshWindows already
+// drops _tabby_stash_ windows) so we never land on a sidebar holding window.
+// Wraps around at the ends.
+func (c *Coordinator) selectNeighborWindow(delta int) {
+	c.stateMu.RLock()
+	wins := make([]string, 0, len(c.windows))
+	for _, w := range c.windows {
+		if strings.HasPrefix(w.Name, sidebarStashWindowPrefix) {
+			continue
+		}
+		wins = append(wins, w.ID)
+	}
+	c.stateMu.RUnlock()
+
+	if len(wins) == 0 {
+		return
+	}
+	if len(wins) == 1 {
+		// Nothing to cycle to.
+		return
+	}
+
+	activeOut, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+	active := strings.TrimSpace(string(activeOut))
+
+	idx := -1
+	for i, id := range wins {
+		if id == active {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		// Active window not in filtered list (e.g. tmux placed us on a stash
+		// window). Jump to the first real window instead.
+		idx = 0
+	} else {
+		idx = (idx + delta + len(wins)) % len(wins)
+	}
+	target := wins[idx]
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
+	defer cancel()
+	exec.CommandContext(ctx, "tmux", "select-window", "-t", target).Run()
+}
+
+// sidebarIsStashed reports whether any stash window exists.
+func sidebarIsStashed() bool {
+	out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_name}").Output()
+	if err != nil {
+		return false
+	}
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(name, sidebarStashWindowPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// borderStylingBlocked is a legacy hook from the mobile border-hide experiment.
+// That experiment was reverted (color-matching couldn't reclaim the space tmux
+// reserves for pane borders), so this always returns false and normal themed
+// border styling runs as usual. Kept as a no-op so existing guards compile.
+func (c *Coordinator) borderStylingBlocked() bool {
+	return false
+}
+
+// windowHeaderPressEntry records the last tapped button on a window-header
+// pane so renders can briefly highlight it as visual tap feedback.
+type windowHeaderPressEntry struct {
+	action string
+	at     time.Time
+}
+
+// windowHeaderPressDuration controls how long a button stays visually
+// "pressed" after a tap.
+const windowHeaderPressDuration = 180 * time.Millisecond
+
+// recordWindowHeaderPress stores which window-header button was just tapped
+// so the next render can highlight it. Schedules a follow-up render so the
+// pressed state clears automatically.
+func (c *Coordinator) recordWindowHeaderPress(windowID, action string) {
+	if windowID == "" || action == "" {
+		return
+	}
+	c.windowHeaderPressMu.Lock()
+	if c.windowHeaderPress == nil {
+		c.windowHeaderPress = make(map[string]windowHeaderPressEntry)
+	}
+	c.windowHeaderPress[windowID] = windowHeaderPressEntry{action: action, at: time.Now()}
+	c.windowHeaderPressMu.Unlock()
+
+	// Trigger an immediate re-render so the pressed state is drawn, and a
+	// second one after the press window expires so it clears on its own.
+	if c.OnRefreshClient != nil {
+		clientID := "window-header:" + windowID
+		c.OnRefreshClient(clientID)
+		go func() {
+			time.Sleep(windowHeaderPressDuration + 20*time.Millisecond)
+			if c.OnRefreshClient != nil {
+				c.OnRefreshClient(clientID)
+			}
+		}()
+	}
+}
+
+// activeWindowHeaderPress returns the currently pressed action for a window
+// if one was tapped within the press duration, else "".
+func (c *Coordinator) activeWindowHeaderPress(windowID string) string {
+	c.windowHeaderPressMu.Lock()
+	defer c.windowHeaderPressMu.Unlock()
+	if c.windowHeaderPress == nil {
+		return ""
+	}
+	entry, ok := c.windowHeaderPress[windowID]
+	if !ok {
+		return ""
+	}
+	if time.Since(entry.at) > windowHeaderPressDuration {
+		delete(c.windowHeaderPress, windowID)
+		return ""
+	}
+	return entry.action
+}
+
+// syncMobileBorders toggles tmux pane border visibility based on the active
+// client's width. On narrow clients (<100 cols) the pane-border color is set
+// to match the terminal background so borders disappear visually; on desktop
+// the override is removed. Tracks last-applied state to avoid spamming tmux.
+func (c *Coordinator) syncMobileBorders() {
+	c.activeClientWidthMu.RLock()
+	acw := c.activeClientWidth
+	c.activeClientWidthMu.RUnlock()
+
+	wantHidden := acw > 0 && acw < 100
+
+	c.mobileBorderMu.Lock()
+	defer c.mobileBorderMu.Unlock()
+	if c.mobileBorderHidden == wantHidden && c.mobileBorderInit {
+		return
+	}
+	c.mobileBorderHidden = wantHidden
+	c.mobileBorderInit = true
+
+	if wantHidden {
+		bg := "default"
+		if c.theme != nil && c.theme.TerminalBg != "" {
+			bg = c.theme.TerminalBg
+		}
+		style := fmt.Sprintf("fg=%s,bg=%s", bg, bg)
+		exec.Command("tmux", "set-option", "-g", "pane-border-style", style).Run()
+		exec.Command("tmux", "set-option", "-g", "pane-active-border-style", style).Run()
+		exec.Command("tmux", "set-option", "-g", "pane-border-status", "off").Run()
+		// Per-window options override globals. Force-apply the hidden style
+		// to every window and every pane so buildPaneHeaderColorArgs leftovers
+		// (e.g. fg=#98babe) can't keep drawing visible borders.
+		if out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}").Output(); err == nil {
+			for _, wid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if wid == "" {
+					continue
+				}
+				exec.Command("tmux", "set-window-option", "-t", wid, "pane-border-style", style).Run()
+				exec.Command("tmux", "set-window-option", "-t", wid, "pane-active-border-style", style).Run()
+			}
+		}
+		if out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}").Output(); err == nil {
+			for _, pid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if pid == "" {
+					continue
+				}
+				exec.Command("tmux", "set-option", "-p", "-t", pid, "pane-border-style", style).Run()
+			}
+		}
+		logEvent("MOBILE_BORDERS hidden acw=%d style=%s", acw, style)
+	} else {
+		exec.Command("tmux", "set-option", "-gu", "pane-border-style").Run()
+		exec.Command("tmux", "set-option", "-gu", "pane-active-border-style").Run()
+		if out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}").Output(); err == nil {
+			for _, wid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if wid == "" {
+					continue
+				}
+				exec.Command("tmux", "set-window-option", "-t", wid, "-u", "pane-border-style").Run()
+				exec.Command("tmux", "set-window-option", "-t", wid, "-u", "pane-active-border-style").Run()
+			}
+		}
+		if out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}").Output(); err == nil {
+			for _, pid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if pid == "" {
+					continue
+				}
+				exec.Command("tmux", "set-option", "-p", "-t", pid, "-u", "pane-border-style").Run()
+			}
+		}
+		logEvent("MOBILE_BORDERS restored acw=%d", acw)
+	}
 }
 
 // capTargetToActiveClient clamps a desired sidebar width so that the active
@@ -4414,7 +4831,7 @@ func (c *Coordinator) capTargetToActiveClient(target int) int {
 // When force=true, skips the 500ms debounce (used for immediate restoration after layout changes).
 func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	start := time.Now()
-	if c.sidebarCollapsed {
+	if c.sidebarHidden {
 		logEvent("WIDTH_SYNC_SKIP reason=sidebar_collapsed active=%s force=%v", activeWindowID, force)
 		return
 	}
@@ -4485,9 +4902,13 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	}
 	var ops []resizeOp
 
-	// Read actual tmux pane widths to detect stale client data
+	// Read actual tmux pane widths to detect stale client data.
+	// Wrapped in a bounded context so a stalled tmux server cannot hold
+	// widthSyncMu indefinitely — previously this was the blocking point behind
+	// the DEADLOCK WARNING + LOOP_SKIP task=client_geometry_tick stalls.
 	actualPaneWidths := make(map[string]int)
-	if paneOut, err := exec.Command("tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{window_id}|#{pane_width}").Output(); err == nil {
+	paneCtx, paneCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	if paneOut, err := exec.CommandContext(paneCtx, "tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{window_id}|#{pane_width}").Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
 			parts := strings.SplitN(line, "|", 3)
 			if len(parts) == 3 && strings.HasPrefix(parts[0], "sidebar") {
@@ -4496,12 +4917,15 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 				}
 			}
 		}
+	} else if paneCtx.Err() == context.DeadlineExceeded {
+		logEvent("WIDTH_SYNC_PANE_LIST_TIMEOUT ms=1500")
 	}
+	paneCancel()
 
 	for clientID, currentWidth := range clientSnapshot {
 		currentHeight := clientHeightSnapshot[clientID]
 		// Skip header clients
-		if strings.HasPrefix(clientID, "header:") {
+		if strings.HasPrefix(clientID, "window-header:") || strings.HasPrefix(clientID, "header:") {
 			continue
 		}
 
@@ -4535,11 +4959,12 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 		// comes back as a new MsgResize -> without this cap, we'd fight tmux in
 		// a loop.
 		targetWidth := c.boundedSidebarWidthForWindow(clientID, c.globalWidth, currentHeight)
-		// Phone profile: collapse sidebar to 1 column to maximize content area.
-		// The header provides navigation via hamburger menu + carousel instead.
-		if c.ActiveClientProfile() == "phone" {
-			targetWidth = 1
-		}
+		// NOTE: the old "phone profile -> targetWidth = 1" branch has been
+		// removed. Phone hides the sidebar by break-pane'ing it to a holding
+		// window (see SetActiveClientWidth + hideSidebarPanes); any live
+		// sidebar that reaches this loop should keep its normal bounded width.
+		// Forcing 1 here caused a one-frame visible collapse during the race
+		// between profile transition and the async stash goroutine.
 		if applyKeyboardClamp && targetWidth > keyboardWidth {
 			targetWidth = keyboardWidth
 		}
@@ -4625,10 +5050,25 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	}
 }
 
-// desiredPaneHeaderHeight returns the number of rows a pane-header pane should occupy.
-// Based on the active client width: narrow (< 80) = phone (6 rows), wide = desktop (1 row).
+// desiredPaneHeaderHeight returns the number of rows a per-content-pane header pane should occupy.
+// Pane-headers are always 1 row (or 2 with CustomBorder). They never grow to 3 on phone —
+// the phone button bar lives on the window-header instead.
 func (c *Coordinator) desiredPaneHeaderHeight() int {
-	if c.ActiveClientProfile() == "phone" {
+	if c.config.PaneHeader.CustomBorder {
+		return 2
+	}
+	return 1
+}
+
+// desiredWindowHeaderHeight returns the number of rows a window-header pane should
+// occupy, based on the active client width. Matches the per-width version's
+// touch-client threshold (< 100 cols = 3-row fat-touch button bar) so that spawning
+// and height-sync agree; otherwise the spawn-time default of 1 would flicker up to 3.
+func (c *Coordinator) desiredWindowHeaderHeight() int {
+	c.activeClientWidthMu.RLock()
+	acw := c.activeClientWidth
+	c.activeClientWidthMu.RUnlock()
+	if acw > 0 && acw < 100 {
 		return 3
 	}
 	if c.config.PaneHeader.CustomBorder {
@@ -4637,11 +5077,14 @@ func (c *Coordinator) desiredPaneHeaderHeight() int {
 	return 1
 }
 
-// desiredPaneHeaderHeightForWidth returns the header height based on a specific
+// desiredWindowHeaderHeightForWidth returns the header height based on a specific
 // window width, rather than the global active client profile. This prevents
 // phone-profile oscillation from affecting desktop window headers.
-func (c *Coordinator) desiredPaneHeaderHeightForWidth(windowWidth int) int {
-	if windowWidth > 0 && windowWidth < 80 {
+func (c *Coordinator) desiredWindowHeaderHeightForWidth(windowWidth int) int {
+	// Touch-client threshold is 100 cols; below that we render a 3-row fat-touch header
+	// with the hamburger/prev/close/next button bar. Above 100, desktop 1-row title only.
+	// Distinct from the sidebar phone threshold (60) which governs sidebar width locking.
+	if windowWidth > 0 && windowWidth < 100 {
 		return 3
 	}
 	if c.config.PaneHeader.CustomBorder {
@@ -4694,11 +5137,19 @@ func (c *Coordinator) RunHeaderHeightSync(activeClientID string) {
 		startCmd := parts[3]
 		windowWidth, _ := strconv.Atoi(parts[4])
 
-		if !strings.Contains(curCmd, "pane-header") && !strings.Contains(startCmd, "pane-header") {
+		isWindowHeader := strings.Contains(curCmd, "window-header") || strings.Contains(startCmd, "window-header")
+		isPaneHeader := strings.Contains(curCmd, "pane-header") || strings.Contains(startCmd, "pane-header")
+		if !isWindowHeader && !isPaneHeader {
 			continue
 		}
 
-		target := c.desiredPaneHeaderHeightForWidth(windowWidth)
+		var target int
+		if isWindowHeader {
+			target = c.desiredWindowHeaderHeightForWidth(windowWidth)
+		} else {
+			// Pane-headers are always 1 row (or 2 with CustomBorder); never 3 on phone.
+			target = c.desiredPaneHeaderHeight()
+		}
 		if currentHeight == target {
 			continue
 		}
@@ -4811,7 +5262,7 @@ func (c *Coordinator) getMobileKeyboardSettings() (int, int) {
 }
 
 func (c *Coordinator) updateKeyboardHoldLocked(clientID string, reportedHeight int) {
-	if clientID == "" || strings.HasPrefix(clientID, "header:") {
+	if clientID == "" || strings.HasPrefix(clientID, "window-header:") || strings.HasPrefix(clientID, "header:") {
 		return
 	}
 	_, keyboardThreshold := c.getMobileKeyboardSettings()
@@ -4986,11 +5437,7 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 // RenderForClient generates content for a specific client's dimensions
 func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemon.RenderPayload {
 	// Guard dimensions
-	if c.sidebarCollapsed {
-		if width < 1 {
-			width = 1
-		}
-	} else if width < 3 {
+	if width < 3 {
 		width = 3
 	}
 	if height < 5 {
@@ -4999,45 +5446,8 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 
 	// NOTE: Width sync has been moved off the render path to prevent deadlocks.
 	// It now runs from the main event loop via RunWidthSync().
-
-	// If sidebar is collapsed (explicit or phone-profile width=1), render minimal expand button
-	if c.sidebarCollapsed || width <= 2 {
-		var s strings.Builder
-		expandStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(c.getTextColorWithFallback(""))).
-			Bold(true)
-		dimStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(c.getInactiveTextColorWithFallback("")))
-
-		// 3-row tall expand button near the top for easy touch access
-		// Render as a single column when collapsed.
-		buttonStart := 1             // Start at row 1 for visibility
-		buttonEnd := buttonStart + 2 // 3 rows total
-
-		for i := 0; i < height; i++ {
-			if i >= buttonStart && i <= buttonEnd {
-				// Button rows - bright and clickable
-				s.WriteString(expandStyle.Render(">") + "\n")
-			} else {
-				// Non-button rows - dim background
-				s.WriteString(dimStyle.Render(" ") + "\n")
-			}
-		}
-
-		content := s.String()
-		return &daemon.RenderPayload{
-			Content:    content,
-			Width:      width,
-			Height:     height,
-			TotalLines: height,
-			Regions: []daemon.ClickableRegion{
-				// Main button area (3 rows) - primary click target
-				{StartLine: buttonStart, EndLine: buttonEnd, Action: "expand_sidebar", Target: ""},
-				// Entire sidebar is also clickable as fallback
-				{StartLine: 0, EndLine: height - 1, Action: "expand_sidebar", Target: ""},
-			},
-		}
-	}
+	// The "collapsed 1-col strip" render path has been removed: hide/show is
+	// done by break-pane/join-pane so the renderer never renders while hidden.
 
 	// Normal render - guard minimum width
 	if width < 10 {
@@ -5121,50 +5531,6 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	allRegions := append(headerRegions, topWRegions...)
 	allRegions = append(allRegions, mainRegions...)
 	allRegions = append(allRegions, bottomWRegions...)
-
-	// Overlay floating collapse button in top-right corner of header
-	// This makes the collapse button easy to tap on mobile
-	// Button is 2 columns wide, spans header height rows
-	btnRows := c.config.Sidebar.Header.Height
-	if btnRows < 1 {
-		btnRows = 3
-	}
-	if width >= 6 { // Only show if sidebar is wide enough
-		collapseBtn := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(c.getTextColorWithFallback(""))).
-			Bold(true)
-
-		btnWidth := 2
-
-		lines := strings.Split(fullContent, "\n")
-		for row := 0; row < btnRows && row < len(lines); row++ {
-			// Strip any trailing whitespace/newline from line
-			line := strings.TrimRight(lines[row], " \t")
-
-			// Calculate visual width by stripping ANSI codes
-			plainLine := stripAnsi(line)
-			visualWidth := uniseg.StringWidth(plainLine)
-
-			// Build new line: original content + padding + button
-			targetCol := width - btnWidth
-			if visualWidth < targetCol {
-				// Need to pad
-				line = line + strings.Repeat(" ", targetCol-visualWidth)
-			}
-			// Note: if visualWidth >= targetCol, button may overlap content
-			// That's acceptable for the floating overlay effect
-
-			lines[row] = line + collapseBtn.Render("< ")
-		}
-		fullContent = strings.Join(lines, "\n")
-
-		// Add collapse button click region in top-right
-		allRegions = append([]daemon.ClickableRegion{{
-			StartLine: 0, EndLine: btnRows - 1,
-			StartCol: width - btnWidth, EndCol: width,
-			Action: "collapse_sidebar", Target: "",
-		}}, allRegions...) // Prepend so it has priority
-	}
 
 	// Count total lines
 	totalLines := strings.Count(fullContent, "\n")
@@ -5298,34 +5664,47 @@ func abbreviatePath(path string, maxWidth int) string {
 	return result + strings.Join(components, "/")
 }
 
-// RenderHeaderForClient renders a 1-line pane header for a specific content pane.
-// Each content pane has its own header showing that pane's label and action buttons.
-// clientID format: "header:%123" where %123 is the pane ID the header sits above.
+// RenderHeaderForClient renders a 1-line window header for a specific window.
+// Each window has one window-header that shows the active pane's label.
+// clientID format: "window-header:@123" where @123 is the window ID.
 func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) *daemon.RenderPayload {
 	if width < 5 {
 		width = 5
 	}
 
-	// Parse pane ID from clientID
-	paneID := strings.TrimPrefix(clientID, "header:")
-	if paneID == "" {
+	// Parse window ID from clientID
+	windowID := strings.TrimPrefix(clientID, "window-header:")
+	if windowID == "" {
 		return nil
 	}
 
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 
-	// Find the window this header belongs to
+	// Find the window
 	var foundWindow *tmux.Window
 	for i := range c.windows {
-		for j := range c.windows[i].Panes {
-			if c.windows[i].Panes[j].ID == paneID {
-				foundWindow = &c.windows[i]
+		if c.windows[i].ID == windowID {
+			foundWindow = &c.windows[i]
+			break
+		}
+	}
+
+	// Determine which content pane to show (prefer active, fall back to first non-system)
+	paneID := ""
+	if foundWindow != nil {
+		for i := range foundWindow.Panes {
+			p := foundWindow.Panes[i]
+			if isAuxiliaryPane(p) {
+				continue
+			}
+			if p.Active {
+				paneID = p.ID
 				break
 			}
-		}
-		if foundWindow != nil {
-			break
+			if paneID == "" {
+				paneID = p.ID
+			}
 		}
 	}
 
@@ -5788,139 +6167,168 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	// Rows 0-1: hamburger + title (2 rows tall)
 	// Rows 2-3: carousel prev/next (2 rows tall buttons)
 	// Rows 4-5: action buttons (2 rows tall)
-	headerRows := c.desiredPaneHeaderHeightForWidth(width)
+	headerRows := c.desiredWindowHeaderHeightForWidth(width)
 	content := line
 	totalLines := 1
-	if width < 80 {
-		// High-contrast styles for phone header legibility
-		titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))   // cream white
-		carouselStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")) // bright white
-		btnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))      // cream white
+	_ = foundWindow // used by phone layout below
+	if width < 100 {
+		// Touch layout: 3 rows, 5 fat-tappable buttons spread across the full width.
+		// No title text — the pane-header strips below already show pane titles.
+		// Each button occupies width/5 cols with the glyph centered. Rows 0/1/2
+		// all map to the same click regions for fat touch targets.
+		// Buttons (left→right): prev window, hamburger, new window, close, next window.
+		regions = regions[:0]
+
+		const buttonCount = 5
+
+		// Function-coded colors. Nav buttons are neutral blue, hamburger is gray
+		// (neutral/menu), new window is green (constructive), close is red (destructive).
+		fgColor := lipgloss.Color("230") // off-white
+		pressFg := lipgloss.Color("16")
+		pressBg := lipgloss.Color("255")
+		navBg := lipgloss.Color("24")      // blue
+		menuBg := lipgloss.Color("240")    // gray
+		newBg := lipgloss.Color("28")      // green
+		closeBg := lipgloss.Color("124")   // red
+
+		prevStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(navBg)
+		hamStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(menuBg)
+		newStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(newBg)
+		closeStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(closeBg)
+		nextStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(navBg)
+		btnPressStyle := lipgloss.NewStyle().Bold(true).Foreground(pressFg).Background(pressBg)
+		fillStyle := lipgloss.NewStyle()
 		if headerBg != "" {
-			titleStyle = titleStyle.Background(lipgloss.Color(headerBg))
-			carouselStyle = carouselStyle.Background(lipgloss.Color("237")) // slightly different bg for carousel
-			btnStyle = btnStyle.Background(lipgloss.Color("240"))           // button bg distinct from header
+			fillStyle = fillStyle.Background(lipgloss.Color(headerBg))
 		}
 
-		padRowWith := func(bare string, style lipgloss.Style) string {
-			vw := uniseg.StringWidth(bare)
-			if vw < width {
-				bare += strings.Repeat(" ", width-vw)
-			}
-			return style.Render(bare)
+		hamburger := "\u2261"  // ≡
+		prevGlyph := "\u25b2"  // ▲ (up — prev window in the stack)
+		newGlyph := "+"        // new window
+		closeGlyph := "\u2715" // ✕
+		nextGlyph := "\u25bc"  // ▼ (down — next window in the stack)
+
+		gapW := 1
+		cellW := (width - gapW*(buttonCount-1)) / buttonCount
+		if cellW < 3 {
+			cellW = 3
 		}
-
-		// 3 physical rows, 1 logical row. All controls on middle row (row 1).
-		// Rows 0 and 2 are padding for fat touch targets (3 rows tall).
-		// Layout: [hamburger] [<< N/M cmd >>] [title...]
-		// Or if single pane: [hamburger] [title...]
-
-		titleText := stripAnsi(line)
-
-		// Build the middle row content
-		hamburger := "\u2261 " // ≡
-		hambW := uniseg.StringWidth(hamburger)
-
-		// Get carousel info
-		var carLabel string
-		var prevBtn, nextBtn string
-		var prevW, nextW int
-		hasCar := false
-
-		carCtx, carCancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
-		carOut, carErr := exec.CommandContext(carCtx, "tmux", "display-message", "-p",
-			"#{pane_index}\x1f#{window_panes}\x1f#{pane_current_command}").Output()
-		carCancel()
-
-		if carErr == nil {
-			carParts := strings.SplitN(strings.TrimSpace(string(carOut)), "\x1f", 3)
-			if len(carParts) == 3 {
-				paneIdx, _ := strconv.Atoi(carParts[0])
-				paneTotal, _ := strconv.Atoi(carParts[1])
-				displayIdx := paneIdx + 1
-
-				if paneTotal > 1 {
-					hasCar = true
-					prevBtn = "<"
-					nextBtn = ">"
-					prevW = uniseg.StringWidth(prevBtn)
-					nextW = uniseg.StringWidth(nextBtn)
-					carLabel = fmt.Sprintf(" %d/%d ", displayIdx, paneTotal)
-				}
+		used := cellW*buttonCount + gapW*(buttonCount-1)
+		if used > width {
+			// Not enough room for gaps — drop them entirely.
+			gapW = 0
+			cellW = width / buttonCount
+			if cellW < 1 {
+				cellW = 1
+			}
+			used = cellW * buttonCount
+			if used > width {
+				used = width
 			}
 		}
-
-		// Compose middle row: [hamburger][<<][N/M][>>] [title...]
-		var middleBare string
-		carEndCol := hambW // track where carousel region ends
-		if hasCar {
-			carLabelW := uniseg.StringWidth(carLabel)
-			carEndCol = hambW + prevW + carLabelW + nextW
-			remaining := width - carEndCol
-			if remaining < 1 {
-				remaining = 1
-			}
-			if uniseg.StringWidth(titleText) > remaining-1 {
-				titleText = runewidth.Truncate(titleText, remaining-1, "..")
-			}
-			middleBare = hamburger + prevBtn + carLabel + nextBtn + " " + titleText
-		} else {
-			remaining := width - hambW
-			if remaining < 1 {
-				remaining = 1
-			}
-			if uniseg.StringWidth(titleText) > remaining {
-				titleText = runewidth.Truncate(titleText, remaining, "..")
-			}
-			middleBare = hamburger + titleText
+		leftover := width - used
+		if leftover < 0 {
+			leftover = 0
 		}
 
-		row1 := padRowWith(middleBare, titleStyle)
-		emptyRow := padRowWith("", titleStyle)
+		pressedAction := c.activeWindowHeaderPress(windowID)
+		isPrevPressed := pressedAction == "window_header:prev_window"
+		isHamPressed := pressedAction == "window_header:hamburger"
+		isNewPressed := pressedAction == "window_header:new_window"
+		isClosePressed := pressedAction == "window_header:close_window"
+		isNextPressed := pressedAction == "window_header:next_window"
 
-		// Click regions span all 3 rows for fat touch targets
-		// Hamburger: cols 0..hambW
+		styleFor := func(base lipgloss.Style, pressed bool) lipgloss.Style {
+			if pressed {
+				return btnPressStyle
+			}
+			return base
+		}
+
+		renderCell := func(glyph string, base lipgloss.Style, pressed bool) string {
+			style := styleFor(base, pressed)
+			gw := uniseg.StringWidth(glyph)
+			if gw > cellW {
+				return style.Render(runewidth.Truncate(glyph, cellW, ""))
+			}
+			padTotal := cellW - gw
+			leftPad := padTotal / 2
+			rightPad := padTotal - leftPad
+			return style.Render(strings.Repeat(" ", leftPad) + glyph + strings.Repeat(" ", rightPad))
+		}
+
+		renderEmpty := func(base lipgloss.Style, pressed bool) string {
+			return styleFor(base, pressed).Render(strings.Repeat(" ", cellW))
+		}
+
+		gapStr := fillStyle.Render(strings.Repeat(" ", gapW))
+
+		middleBare := renderCell(prevGlyph, prevStyle, isPrevPressed) + gapStr +
+			renderCell(hamburger, hamStyle, isHamPressed) + gapStr +
+			renderCell(newGlyph, newStyle, isNewPressed) + gapStr +
+			renderCell(closeGlyph, closeStyle, isClosePressed) + gapStr +
+			renderCell(nextGlyph, nextStyle, isNextPressed)
+		if leftover > 0 {
+			middleBare += fillStyle.Render(strings.Repeat(" ", leftover))
+		}
+
+		// Empty cells use the same pressed/unpressed style so the full 3-row block
+		// highlights as one button while pressed.
+		blankRow := renderEmpty(prevStyle, isPrevPressed) + gapStr +
+			renderEmpty(hamStyle, isHamPressed) + gapStr +
+			renderEmpty(newStyle, isNewPressed) + gapStr +
+			renderEmpty(closeStyle, isClosePressed) + gapStr +
+			renderEmpty(nextStyle, isNextPressed)
+		if leftover > 0 {
+			blankRow += fillStyle.Render(strings.Repeat(" ", leftover))
+		}
+		emptyRow := blankRow
+
+		// Click regions: gap cols between buttons are intentionally non-clickable.
+		p0 := 0
+		p1 := cellW
+		h0 := p1 + gapW
+		h1 := h0 + cellW
+		nw0 := h1 + gapW
+		nw1 := nw0 + cellW
+		cl0 := nw1 + gapW
+		cl1 := cl0 + cellW
+		n0 := cl1 + gapW
+		n1 := n0 + cellW
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 2,
-			StartCol: 0, EndCol: hambW,
-			Action: "pane_header:hamburger", Target: paneID,
+			StartCol: p0, EndCol: p1,
+			Action: "window_header:prev_window", Target: windowID,
 		})
-
-		if hasCar {
-			// Prev: cols hambW..hambW+prevW
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 2,
+			StartCol: h0, EndCol: h1,
+			Action: "window_header:hamburger", Target: windowID,
+		})
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 2,
+			StartCol: nw0, EndCol: nw1,
+			Action: "window_header:new_window", Target: windowID,
+		})
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 2,
+			StartCol: cl0, EndCol: cl1,
+			Action: "window_header:close_window", Target: windowID,
+		})
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 2,
+			StartCol: n0, EndCol: n1,
+			Action: "window_header:next_window", Target: windowID,
+		})
+		if leftover > 0 {
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 2,
-				StartCol: hambW, EndCol: hambW + prevW,
-				Action: "pane_header:prev_pane", Target: paneID,
-			})
-			// Carousel label (pane picker)
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 2,
-				StartCol: hambW + prevW, EndCol: carEndCol - nextW,
-				Action: "pane_header:pane_picker", Target: paneID,
-			})
-			// Next
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 2,
-				StartCol: carEndCol - nextW, EndCol: carEndCol,
-				Action: "pane_header:next_pane", Target: paneID,
-			})
-			// Title area: rest of row
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 2,
-				StartCol: carEndCol, EndCol: width,
-				Action: "header_context", Target: paneID,
-			})
-		} else {
-			// Title area: everything after hamburger
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 2,
-				StartCol: hambW, EndCol: width,
-				Action: "header_context", Target: paneID,
+				StartCol: n1, EndCol: width,
+				Action: "window_header:menu", Target: windowID,
 			})
 		}
 
-		content = emptyRow + "\n" + row1 + "\n" + emptyRow
+		content = emptyRow + "\n" + middleBare + "\n" + emptyRow
 		totalLines = 3
 	}
 
@@ -5954,6 +6362,479 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 }
 
+// RenderPaneHeaderForClient renders a 1-row title strip for a specific content pane.
+// Each content pane has its own header showing that pane's label and action buttons.
+// clientID format: "header:%123" where %123 is the pane ID the header sits above.
+// On phone profile, this still renders as a single row — buttons are on window-header.
+func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height int) *daemon.RenderPayload {
+	if width < 5 {
+		width = 5
+	}
+
+	// Parse pane ID from clientID
+	paneID := strings.TrimPrefix(clientID, "header:")
+	if paneID == "" {
+		return nil
+	}
+
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+
+	// Find the window this header belongs to
+	var foundWindow *tmux.Window
+	for i := range c.windows {
+		for j := range c.windows[i].Panes {
+			if c.windows[i].Panes[j].ID == paneID {
+				foundWindow = &c.windows[i]
+				break
+			}
+		}
+		if foundWindow != nil {
+			break
+		}
+	}
+
+	blankLine := strings.Repeat(" ", width)
+	if foundWindow == nil {
+		return &daemon.RenderPayload{Content: blankLine, Width: width, Height: 1, TotalLines: 1}
+	}
+
+	var foundPane *tmux.Pane
+	for i := range foundWindow.Panes {
+		if foundWindow.Panes[i].ID == paneID {
+			foundPane = &foundWindow.Panes[i]
+			break
+		}
+	}
+	if foundPane == nil {
+		return &daemon.RenderPayload{Content: blankLine, Width: width, Height: 1, TotalLines: 1}
+	}
+
+	canResizeH := false
+	canResizeV := false
+	hasBorderBelow := false
+	hasBorderRight := false
+	for _, op := range foundWindow.Panes {
+		if isAuxiliaryPane(op) || op.ID == foundPane.ID {
+			continue
+		}
+		if max(foundPane.Top, op.Top) < min(foundPane.Top+foundPane.Height, op.Top+op.Height) {
+			canResizeH = true
+			if op.Left >= foundPane.Left+foundPane.Width {
+				hasBorderRight = true
+			}
+		}
+		if max(foundPane.Left, op.Left) < min(foundPane.Left+foundPane.Width, op.Left+op.Width) {
+			canResizeV = true
+			if op.Top >= foundPane.Top+foundPane.Height {
+				hasBorderBelow = true
+			}
+		}
+	}
+
+	headerColors := c.GetHeaderColorsForPane(paneID)
+	headerBg := headerColors.Bg
+	headerFg := headerColors.Fg
+
+	if c.config.PaneHeader.DimInactive {
+		paneIsDimmed := false
+		for _, p := range foundWindow.Panes {
+			if p.ID == paneID && !p.Active {
+				paneIsDimmed = true
+				break
+			}
+		}
+		if paneIsDimmed {
+			opacity := c.config.PaneHeader.DimOpacity
+			if opacity <= 0 || opacity > 1 {
+				opacity = 0.6
+			}
+			tBg := c.config.PaneHeader.TerminalBg
+			headerBg = desaturateHex(headerBg, opacity, tBg)
+			headerFg = desaturateHex(headerFg, opacity, tBg)
+		}
+	}
+	groupColor := headerBg
+	isWindowActive := foundWindow.Active
+
+	baseStyle := lipgloss.NewStyle()
+	if headerBg != "" {
+		baseStyle = baseStyle.Background(lipgloss.Color(headerBg))
+	}
+
+	collapseBtn := ""
+	isCollapsed := false
+	contentPaneCount := 0
+	for _, p := range foundWindow.Panes {
+		if !isAuxiliaryPane(p) {
+			contentPaneCount++
+		}
+	}
+	if contentPaneCount > 1 {
+		if out, err := exec.Command("tmux", "show-options", "-pqv", "-t", paneID, "@tabby_pane_collapsed").Output(); err == nil {
+			if strings.TrimSpace(string(out)) == "1" {
+				isCollapsed = true
+			}
+		}
+		if isCollapsed {
+			collapseBtn = c.config.PaneHeader.CollapseCollapsedIcon
+		} else {
+			collapseBtn = c.config.PaneHeader.CollapseExpandedIcon
+		}
+	}
+	splitVBtn := "|"
+	splitHBtn := "-"
+	if contentPaneCount > 1 && collapseBtn == "" {
+		collapseBtn = "▾"
+		if isCollapsed {
+			collapseBtn = "▸"
+		}
+	}
+	vGrowBtn := c.config.PaneHeader.ResizeVerticalGrowIcon
+	if vGrowBtn == "" {
+		vGrowBtn = c.config.PaneHeader.ResizeGrowIcon
+	}
+	if vGrowBtn == "" {
+		vGrowBtn = "↓"
+	}
+	vShrinkBtn := c.config.PaneHeader.ResizeVerticalShrinkIcon
+	if vShrinkBtn == "" {
+		vShrinkBtn = c.config.PaneHeader.ResizeShrinkIcon
+	}
+	if vShrinkBtn == "" {
+		vShrinkBtn = "↑"
+	}
+	hGrowBtn := c.config.PaneHeader.ResizeHorizontalGrowIcon
+	if hGrowBtn == "" {
+		hGrowBtn = c.config.PaneHeader.ResizeGrowIcon
+	}
+	if hGrowBtn == "" {
+		hGrowBtn = "→"
+	}
+	hShrinkBtn := c.config.PaneHeader.ResizeHorizontalShrinkIcon
+	if hShrinkBtn == "" {
+		hShrinkBtn = c.config.PaneHeader.ResizeShrinkIcon
+	}
+	if hShrinkBtn == "" {
+		hShrinkBtn = "←"
+	}
+	closeBtn := "×"
+	compactSplitVBtn := "|"
+	compactSplitHBtn := "-"
+	compactCloseBtn := "x"
+	menuBtn := "≡"
+	compactMode := width <= 40
+	if compactMode {
+		if contentPaneCount > 1 && collapseBtn != "" {
+			menuBtn = collapseBtn + " " + compactSplitVBtn + " " + compactSplitHBtn + " " + compactCloseBtn
+		} else {
+			menuBtn = compactSplitVBtn + " " + compactSplitHBtn + " " + compactCloseBtn
+		}
+	}
+	// On narrow/touch clients, pane-headers are plain title strips — all action
+	// buttons live on the window-header control bar above. Threshold is wider
+	// than the sidebar phone threshold (60) because fiddly pane-header buttons
+	// are unusable on any touch client, not just sub-60 SSH sessions.
+	// Use window content width (not pane width, which may be a split on desktop).
+	winContentWidth := 0
+	for _, p := range foundWindow.Panes {
+		if isAuxiliaryPane(p) {
+			continue
+		}
+		if right := p.Left + p.Width; right > winContentWidth {
+			winContentWidth = right
+		}
+	}
+	isPhone := winContentWidth > 0 && winContentWidth < 100
+	showMenuButton := compactMode && !isPhone
+	showInlineControls := !compactMode && !isPhone
+
+	showInlineCollapse := collapseBtn != "" && showInlineControls
+	showInlineSplits := showInlineControls
+	showVerticalResize := contentPaneCount > 1 && showInlineControls && canResizeV
+	showHorizontalResize := contentPaneCount > 1 && showInlineControls && canResizeH
+	showInlineClose := showInlineControls
+	buttonsStr := "  "
+	if isPhone {
+		buttonsStr = ""
+	}
+	if showMenuButton {
+		buttonsStr += menuBtn + "   "
+	}
+	if showInlineCollapse {
+		buttonsStr += collapseBtn + "  "
+	}
+	if showInlineSplits {
+		buttonsStr += splitVBtn + " " + splitHBtn + "  "
+	}
+	if showVerticalResize || showHorizontalResize {
+		if showVerticalResize {
+			buttonsStr += vGrowBtn + " " + vShrinkBtn + " "
+		}
+		if showHorizontalResize {
+			buttonsStr += hGrowBtn + " " + hShrinkBtn + " "
+		}
+		buttonsStr += " "
+	}
+	if showInlineClose {
+		buttonsStr += closeBtn + "  "
+	}
+	buttonsWidth := uniseg.StringWidth(buttonsStr)
+
+	label := foundPane.Command
+	if foundPane.LockedTitle != "" {
+		label = foundPane.LockedTitle
+	} else if foundPane.Title != "" && foundPane.Title != foundPane.Command && foundPane.Title != foundWindow.Name {
+		label = foundPane.Title
+	}
+	winVisualNum := c.windowVisualPos[foundWindow.ID]
+	labelText := fmt.Sprintf("%d.%d %s", winVisualNum, foundPane.Index, label)
+
+	groupIcon := ""
+	for _, group := range c.grouped {
+		for _, groupWindow := range group.Windows {
+			if groupWindow.ID == foundWindow.ID {
+				groupIcon = strings.TrimSpace(group.Theme.Icon)
+				break
+			}
+		}
+		if groupIcon != "" {
+			break
+		}
+	}
+	windowIcon := strings.TrimSpace(foundWindow.Icon)
+	if groupIcon != "" {
+		labelText = groupIcon + " " + labelText
+	}
+	if windowIcon != "" {
+		labelText = windowIcon + " " + labelText
+	}
+
+	groupAccent := ""
+	if groupColor != "" {
+		groupAccent = lipgloss.NewStyle().SetString("▇").Foreground(lipgloss.Color(groupColor)).String()
+	}
+	groupAccentWidth := uniseg.StringWidth(stripAnsi(groupAccent))
+
+	if foundPane.CurrentPath != "" {
+		availWidth := width - groupAccentWidth - 1 - buttonsWidth
+		if availWidth < 4 {
+			availWidth = 4
+		}
+		baseWidth := uniseg.StringWidth(labelText)
+		pathMaxWidth := availWidth - baseWidth - 1
+		if pathMaxWidth > 8 {
+			abbrevPath := abbreviatePath(foundPane.CurrentPath, pathMaxWidth)
+			if abbrevPath != "" {
+				labelText = fmt.Sprintf("%s %s", labelText, abbrevPath)
+			}
+		}
+	}
+
+	availWidth := width - groupAccentWidth - 1 - buttonsWidth
+	if availWidth < 4 {
+		availWidth = 4
+	}
+	if uniseg.StringWidth(labelText) > availWidth {
+		labelText = runewidth.Truncate(labelText, availWidth, "~")
+	}
+
+	isActive := foundPane.Active && isWindowActive
+	segStyle := baseStyle.Copy()
+	btnStyle2 := baseStyle.Copy()
+	if headerFg != "" {
+		segStyle = segStyle.Foreground(lipgloss.Color(headerFg))
+		btnStyle2 = btnStyle2.Foreground(lipgloss.Color(headerFg))
+	}
+	if isActive {
+		segStyle = segStyle.Bold(true)
+	}
+
+	var regions []daemon.ClickableRegion
+
+	labelWidth := uniseg.StringWidth(labelText)
+	renderedLabel := segStyle.Render(labelText)
+	currentCol := groupAccentWidth + 1 + labelWidth
+	btnAreaStart := width - buttonsWidth
+	if btnAreaStart < currentCol {
+		btnAreaStart = currentCol
+	}
+	spacerWidth := btnAreaStart - currentCol
+	fullLineStyle := baseStyle.Copy().Width(width)
+
+	line := groupAccent + " " +
+		renderedLabel +
+		strings.Repeat(" ", spacerWidth) +
+		btnStyle2.Render(buttonsStr)
+
+	if headerBg != "" {
+		line = c.applyBackgroundFill(line, headerBg, width)
+	} else {
+		line = fullLineStyle.Render(line)
+	}
+
+	cursor := btnAreaStart + 2
+	if showMenuButton {
+		if compactMode {
+			if contentPaneCount > 1 && collapseBtn != "" {
+				collapseEnd := cursor + uniseg.StringWidth(collapseBtn) + 1
+				regions = append(regions, daemon.ClickableRegion{
+					StartLine: 0, EndLine: 0,
+					StartCol: cursor, EndCol: collapseEnd,
+					Action: "toggle_pane_collapse", Target: paneID,
+				})
+				cursor = collapseEnd
+			}
+			splitVEnd := cursor + uniseg.StringWidth(compactSplitVBtn) + 1
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: splitVEnd,
+				Action: "header_split_h", Target: paneID,
+			})
+			splitHEnd := splitVEnd + uniseg.StringWidth(compactSplitHBtn) + 1
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: splitVEnd, EndCol: splitHEnd,
+				Action: "header_split_v", Target: paneID,
+			})
+			closeEnd := splitHEnd + uniseg.StringWidth(compactCloseBtn)
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: splitHEnd, EndCol: closeEnd,
+				Action: "header_close", Target: paneID,
+			})
+			cursor = closeEnd + 3
+		} else {
+			menuEnd := cursor + uniseg.StringWidth(menuBtn)
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: menuEnd,
+				Action: "pane_menu", Target: paneID,
+			})
+			cursor = menuEnd + 3
+		}
+	}
+	if showInlineCollapse {
+		collapseEnd := cursor + 2
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 0,
+			StartCol: cursor, EndCol: collapseEnd,
+			Action: "toggle_pane_collapse", Target: paneID,
+		})
+		cursor = collapseEnd + 1
+	}
+	if showInlineSplits {
+		splitVEnd := cursor + 2
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 0,
+			StartCol: cursor, EndCol: splitVEnd,
+			Action: "header_split_h", Target: paneID,
+		})
+		cursor = splitVEnd
+		splitHEnd := cursor + 2
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 0,
+			StartCol: cursor, EndCol: splitHEnd,
+			Action: "header_split_v", Target: paneID,
+		})
+		cursor = splitHEnd + 1
+	}
+	if showVerticalResize || showHorizontalResize {
+		if showVerticalResize {
+			vGrowEnd := cursor + 2
+			vShrinkEnd := vGrowEnd + 2
+			vDownAction := "pane_grow_v"
+			vUpAction := "pane_shrink_v"
+			if !hasBorderBelow {
+				vDownAction = "pane_shrink_v"
+				vUpAction = "pane_grow_v"
+			}
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: vGrowEnd,
+				Action: vDownAction, Target: paneID,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: vGrowEnd, EndCol: vShrinkEnd,
+				Action: vUpAction, Target: paneID,
+			})
+			cursor = vShrinkEnd
+		}
+		if showHorizontalResize {
+			hGrowEnd := cursor + 2
+			hShrinkEnd := hGrowEnd + 2
+			hRightAction := "pane_grow_h"
+			hLeftAction := "pane_shrink_h"
+			if !hasBorderRight {
+				hRightAction = "pane_shrink_h"
+				hLeftAction = "pane_grow_h"
+			}
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: cursor, EndCol: hGrowEnd,
+				Action: hRightAction, Target: paneID,
+			})
+			regions = append(regions, daemon.ClickableRegion{
+				StartLine: 0, EndLine: 0,
+				StartCol: hGrowEnd, EndCol: hShrinkEnd,
+				Action: hLeftAction, Target: paneID,
+			})
+			cursor = hShrinkEnd
+		}
+		cursor += 1
+	}
+	if showInlineClose {
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 0,
+			StartCol: cursor, EndCol: width,
+			Action: "header_close", Target: paneID,
+		})
+	}
+	if !compactMode && !isPhone {
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 0,
+			Action: "header_context", Target: paneID,
+		})
+	}
+
+	// Pane-headers always render as a single 1-row title strip.
+	// Phone buttons live on window-header; no multi-row layout here.
+	headerRows := c.desiredPaneHeaderHeight()
+	activeProfile := "desktop"
+	if isPhone {
+		activeProfile = "phone"
+	}
+
+	sidebarBg := ""
+	terminalBg := ""
+	if c.theme != nil {
+		sidebarBg = c.theme.SidebarBg
+		terminalBg = c.theme.TerminalBg
+	}
+
+	if c.config.PaneHeader.CustomBorder {
+		return &daemon.RenderPayload{
+			Content:       line,
+			Width:         width,
+			Height:        headerRows,
+			TotalLines:    1,
+			Regions:       regions,
+			ClientProfile: activeProfile,
+		}
+	}
+	return &daemon.RenderPayload{
+		Content:       line,
+		Width:         width,
+		Height:        headerRows,
+		TotalLines:    1,
+		Regions:       regions,
+		SidebarBg:     sidebarBg,
+		TerminalBg:    terminalBg,
+		ClientProfile: activeProfile,
+	}
+}
+
 // hashContent returns a simple hash of content for comparison
 func hashContent(s string) uint32 {
 	var h uint32
@@ -5973,7 +6854,7 @@ func syncAllSidebarWidths(newWidth int) {
 // correct bounded width. Called on client-resized so all windows settle
 // at once rather than lazily as the user visits each one.
 func (c *Coordinator) ResizeAllWindowsNow() {
-	if c.sidebarCollapsed {
+	if c.sidebarHidden {
 		return
 	}
 
@@ -7628,12 +8509,17 @@ func (c *Coordinator) collectWidgetEntries(width int, skipPet bool) []widgetEntr
 		})
 	}
 
-	entries = append(entries, widgetEntry{
-		name:     "nav_buttons",
-		zone:     "bottom",
-		priority: 9998,
-		content:  c.renderNavButtons(width),
-	})
+	// On phone, the window-header button bar already provides prev/next navigation
+	// (with matching up/down arrows), so the sidebar's dedicated nav buttons would
+	// be redundant.
+	if c.ActiveClientProfile() != "phone" {
+		entries = append(entries, widgetEntry{
+			name:     "nav_buttons",
+			zone:     "bottom",
+			priority: 9998,
+			content:  c.renderNavButtons(width),
+		})
+	}
 
 	// Action buttons (new tab, new group, close, touch mode toggle)
 	actionZone := c.config.Sidebar.ActionZone
@@ -7736,13 +8622,17 @@ func (c *Coordinator) generateWidgetZones(width int, skipPet bool) (string, []da
 	// Render top zone
 	topContent, topRegions := c.renderWidgetZone(topEntries, width)
 
-	// Add resize buttons to bottom (always last)
-	bottomEntries = append(bottomEntries, widgetEntry{
-		name:     "resize_buttons",
-		zone:     "bottom",
-		priority: 9999,
-		content:  c.renderSidebarResizeButtons(width),
-	})
+	// Add resize buttons to bottom (always last). Hidden on phone where the
+	// sidebar has no room to shrink/grow and the < / > glyphs would look like
+	// navigation arrows that duplicate the window-header button bar.
+	if c.ActiveClientProfile() != "phone" {
+		bottomEntries = append(bottomEntries, widgetEntry{
+			name:     "resize_buttons",
+			zone:     "bottom",
+			priority: 9999,
+			content:  c.renderSidebarResizeButtons(width),
+		})
+	}
 
 	// Render bottom zone
 	bottomContent, bottomRegions := c.renderWidgetZone(bottomEntries, width)
@@ -9283,8 +10173,11 @@ func (c *Coordinator) RemoveClient(clientID string) {
 }
 
 // computeProfile classifies a client terminal width as "phone" or "desktop".
+// The threshold (100) matches the phone render gate in RenderHeaderForClient
+// so that clients that render with the touch layout also route through the
+// phone-profile code paths (window-header spawning, auto-unhide, etc.).
 func (c *Coordinator) computeProfile(width int) string {
-	if width < 80 {
+	if width < 100 {
 		return "phone"
 	}
 	return "desktop"
@@ -9315,6 +10208,12 @@ func (c *Coordinator) ActiveClientProfile() string {
 // HandleInput processes input events from renderers
 // Returns true if window list refresh is needed (expensive tmux calls)
 func (c *Coordinator) HandleInput(clientID string, input *daemon.InputPayload) bool {
+	// Interacting with the window-header should never leave focus on that pane.
+	// Clicking a tmux pane gives it focus before our renderer forwards the event,
+	// so restore focus to a content pane once the action has been handled.
+	if strings.HasPrefix(clientID, "window-header:") || strings.HasPrefix(clientID, "header:") {
+		defer focusContentPaneInActiveWindow()
+	}
 	switch input.Type {
 	case "action":
 		return c.handleSemanticAction(clientID, input)
@@ -9751,11 +10650,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "prev_window":
-		exec.Command("tmux", "previous-window").Run()
+		c.selectNeighborWindow(-1)
+		focusContentPaneInActiveWindow()
 		return true
 
 	case "next_window":
-		exec.Command("tmux", "next-window").Run()
+		c.selectNeighborWindow(+1)
+		focusContentPaneInActiveWindow()
 		return true
 
 	case "drop_food":
@@ -9892,52 +10793,21 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		coordinatorDebugLog.Printf("Sidebar grow: %d -> %d (syncing all)", currentWidth, newWidth)
 		return false
 
-	case "toggle_collapse_sidebar":
-		if c.sidebarCollapsed {
-			input.ResolvedAction = "expand_sidebar"
+	case "toggle_collapse_sidebar", "collapse_sidebar", "expand_sidebar":
+		// Legacy action names from the old 1-col collapse feature. They now
+		// toggle sidebar visibility via break-pane stash / join-pane restore,
+		// matching the window-header hamburger path.
+		if sidebarIsStashed() {
+			c.sidebarHidden = false
+			c.restoreSidebarPanes()
+			coordinatorDebugLog.Printf("toggle_collapse_sidebar: restored stashed sidebars")
 		} else {
-			input.ResolvedAction = "collapse_sidebar"
+			c.sidebarHidden = true
+			hideSidebarPanes()
+			coordinatorDebugLog.Printf("toggle_collapse_sidebar: stashed sidebars")
 		}
-		return c.handleSemanticAction(clientID, input)
-
-	case "collapse_sidebar":
-		currentWidth := c.getClientWidth(clientID)
-		c.sidebarPreviousWidth = currentWidth
-		c.sidebarCollapsed = true
-		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_collapsed", "1").Run()
-		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_previous_width", fmt.Sprintf("%d", currentWidth)).Run()
-		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", "1").Run()
-		syncAllSidebarWidths(1)
-		coordinatorDebugLog.Printf("Sidebar collapsed: saved width=%d, synced all to 1", currentWidth)
-		return true
-
-	case "expand_sidebar":
-		// On phone profile, open sidebar as popup instead of expanding
-		if c.ActiveClientProfile() == "phone" {
-			sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
-			sessID := strings.TrimSpace(string(sessIDOut))
-			popupBin := getPopupBin()
-			if popupBin != "" && sessID != "" {
-				go exec.Command("tmux", "display-popup", "-E", "-w", "100%", "-h", "100%",
-					"--", popupBin, "--session", sessID).Run()
-			}
-			return false
-		}
-		c.sidebarCollapsed = false
-		newWidth := c.sidebarPreviousWidth
-		if newWidth < 15 {
-			newWidth = 25
-		}
-		newWidth = c.boundedSidebarWidthForWindow(clientID, newWidth, 0)
-		exec.Command("tmux", "set-option", "-gqu", "@tabby_sidebar_collapsed").Run()
-		go exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
-		syncAllSidebarWidths(newWidth)
-		c.UpdateClientSizeSnapshot(clientID, newWidth, 0)
-		if c.OnSyncSidebarClientWidths != nil {
-			c.OnSyncSidebarClientWidths(newWidth)
-		}
-		coordinatorDebugLog.Printf("Sidebar expanded: restoring width=%d, synced all", newWidth)
-		return true
+		focusContentPaneInActiveWindow()
+		return false
 
 	case "sidebar_settings":
 		// Show sidebar settings context menu
@@ -9992,37 +10862,65 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		exec.Command("tmux", "select-pane", "-t", input.ResolvedTarget).Run()
 		return true
 
-	case "pane_header:hamburger":
-		// Hamburger icon tapped on phone profile pane-header -> open sidebar popup
-		sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
-		sessID := strings.TrimSpace(string(sessIDOut))
-		popupBin := getPopupBin()
-		if popupBin != "" && sessID != "" {
-			go exec.Command("tmux", "display-popup", "-E", "-w", "100%", "-h", "100%",
-				"--", popupBin, "--session", sessID).Run()
+	case "window_header:hamburger":
+		// Hamburger tapped on window header -> hide/show the inline sidebar by
+		// break-pane'ing it out to a stash window (keeping the renderer process
+		// alive), and join-pane'ing it back on the next tap.
+		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:hamburger")
+		if sidebarIsStashed() {
+			c.sidebarHidden = false
+			c.restoreSidebarPanes()
+			coordinatorDebugLog.Printf("hamburger show: restored stashed sidebars")
+		} else {
+			c.sidebarHidden = true
+			hideSidebarPanes()
+			coordinatorDebugLog.Printf("hamburger hide: stashed sidebars")
 		}
+		focusContentPaneInActiveWindow()
 		return false
 
-	case "pane_header:prev_pane":
-		exec.Command("tmux", "select-pane", "-t", ":.-").Run()
+	case "window_header:prev_window":
+		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:prev_window")
+		c.selectNeighborWindow(-1)
+		focusContentPaneInActiveWindow()
 		return true
 
-	case "pane_header:next_pane":
-		exec.Command("tmux", "select-pane", "-t", ":.+").Run()
+	case "window_header:next_window":
+		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:next_window")
+		c.selectNeighborWindow(+1)
+		focusContentPaneInActiveWindow()
 		return true
 
-	case "pane_header:pane_picker":
-		// Center text of carousel row tapped -> open full-screen pane picker popup
-		paneID := input.ResolvedTarget
-		winIDOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{window_id}").Output()
-		winID := strings.TrimSpace(string(winIDOut))
-		exe, err := os.Executable()
-		if err == nil && winID != "" {
-			pickerBin := filepath.Join(filepath.Dir(exe), "tabby-pane-picker")
-			go exec.Command("tmux", "display-popup", "-E", "-w", "100%", "-h", "100%",
-				"--", pickerBin, "--window", winID).Run()
+	case "window_header:new_window":
+		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:new_window")
+		ctxNew, cancelNew := context.WithTimeout(context.Background(), tmuxCmdTimeout)
+		defer cancelNew()
+		exec.CommandContext(ctxNew, "tmux", "new-window").Run()
+		focusContentPaneInActiveWindow()
+		return true
+
+	case "window_header:close_window":
+		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:close_window")
+		// Kill the target window (no confirmation, per plan).
+		// ResolvedTarget is the window ID.
+		target := input.ResolvedTarget
+		if target == "" {
+			// Fall back to active window
+			if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+				target = strings.TrimSpace(string(out))
+			}
 		}
-		return false
+		if target != "" {
+			ctxKill, cancelKill := context.WithTimeout(context.Background(), tmuxCmdTimeout)
+			defer cancelKill()
+			exec.CommandContext(ctxKill, "tmux", "kill-window", "-t", target).Run()
+		}
+		return true
+
+	case "window_header:menu":
+		// Title area tap -> route to existing header_context handler (no-op for left click)
+		input.ResolvedAction = "header_context"
+		return c.handleSemanticAction(clientID, input)
 
 	case "pane_header:groups":
 		// Groups button on phone header -> show group context menu as popup
@@ -10425,7 +11323,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	case "pane_menu":
 		// Debounce header-triggered menu opens to avoid press/release reopen flashes.
-		if strings.HasPrefix(clientID, "header:") {
+		if strings.HasPrefix(clientID, "window-header:") {
 			key := clientID + "|" + input.ResolvedTarget
 			now := time.Now()
 			c.lastPaneMenuOpenMu.Lock()
@@ -10442,7 +11340,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// that should dismiss the menu. Target the content pane instead so
 		// tmux properly handles click-outside and Esc dismissal.
 		pos := menuPosition{PaneID: input.PaneID, X: input.MouseX, Y: input.MouseY}
-		if strings.HasPrefix(clientID, "header:") {
+		if strings.HasPrefix(clientID, "window-header:") {
 			pos = menuPosition{PaneID: input.ResolvedTarget}
 		}
 		c.showPaneContextMenu(clientID, input.ResolvedTarget, pos)
@@ -11128,7 +12026,7 @@ parseItems:
 // since the 1-line pane is too small for overlay menus.
 func (c *Coordinator) executeOrSendMenu(clientID string, args []string, pos menuPosition) {
 	// Pane-header clients can't show overlay menus - use tmux display-menu
-	isHeaderClient := strings.HasPrefix(clientID, "header:")
+	isHeaderClient := strings.HasPrefix(clientID, "window-header:") || strings.HasPrefix(clientID, "header:")
 
 	if c.OnSendMenu != nil && !isHeaderClient {
 		title, items := parseTmuxMenuArgs(args)
@@ -11328,7 +12226,7 @@ func (c *Coordinator) handleRightClick(clientID string, input *daemon.InputPaylo
 	}
 	// For header clients, use SourcePaneID (the header pane itself) for positioning
 	// so the menu appears at the click location. The content pane comes from ResolvedTarget.
-	if strings.HasPrefix(clientID, "header:") {
+	if strings.HasPrefix(clientID, "window-header:") {
 		if input.SourcePaneID != "" {
 			pos.PaneID = input.SourcePaneID
 			coordinatorDebugLog.Printf("handleRightClick: header client, using SourcePaneID=%s", input.SourcePaneID)
@@ -11441,7 +12339,7 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	args = append(args, "  Reset to Default", "d", resetColorCmd)
 
 	// Set Marker — opens the searchable emoji/icon picker (same as group menu)
-	if !strings.HasPrefix(clientID, "header:") {
+	if !strings.HasPrefix(clientID, "window-header:") {
 		target := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(win.Index)))
 		searchCmd := fmt.Sprintf("tabby-marker-picker:window:%s", target)
 		args = append(args, "Set Marker", "m", searchCmd)
@@ -11632,7 +12530,7 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	// For header clients, -t targets the header pane (for positioning), so #{pane_current_path}
 	// would resolve to the header pane's path. Pre-resolve from the content pane instead.
 	panePath := "#{pane_current_path}"
-	if strings.HasPrefix(clientID, "header:") {
+	if strings.HasPrefix(clientID, "window-header:") {
 		if out, err := exec.Command("tmux", "display-message", "-t", pane.ID, "-p", "#{pane_current_path}").Output(); err == nil {
 			resolved := strings.TrimSpace(string(out))
 			if resolved != "" {
@@ -11854,7 +12752,7 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	)
 	args = append(args, "  Custom (Hex)...", "#", customColorCmd)
 
-	canShowMarkerPicker := c.OnSendMenu != nil && !strings.HasPrefix(clientID, "header:")
+	canShowMarkerPicker := c.OnSendMenu != nil && !strings.HasPrefix(clientID, "window-header:")
 	if canShowMarkerPicker {
 		groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
 		searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
@@ -12423,7 +13321,7 @@ func fixHeaderHeightsInWindow(paneID string) {
 	if windowID == "" {
 		return
 	}
-	target := globalCoordinator.desiredPaneHeaderHeightForWidth(windowWidth)
+	target := globalCoordinator.desiredWindowHeaderHeightForWidth(windowWidth)
 	targetStr := fmt.Sprintf("%d", target)
 	listOut, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}:#{pane_current_command}").Output()
 	for _, line := range strings.Split(string(listOut), "\n") {
@@ -12446,6 +13344,9 @@ func isAuxiliaryPaneCommand(cmd string) bool {
 		return true
 	}
 	if strings.Contains(lower, "pane-header") || strings.Contains(lower, "pane header") || strings.Contains(lower, "pane_header") {
+		return true
+	}
+	if strings.Contains(lower, "window-header") || strings.Contains(lower, "window_header") {
 		return true
 	}
 	return false
@@ -12488,7 +13389,7 @@ func findContentPane(windowID, fallback string) string {
 		pID, cmd, startCmd, active := parts[0], parts[1], parts[2], parts[3]
 		combined := cmd + "|" + startCmd
 		if strings.Contains(combined, "sidebar") || strings.Contains(combined, "renderer") ||
-			strings.Contains(combined, "pane-header") || strings.Contains(combined, "tabby-daemon") {
+			strings.Contains(combined, "pane-header") || strings.Contains(combined, "window-header") || strings.Contains(combined, "tabby-daemon") {
 			continue
 		}
 		if active == "1" {
@@ -12543,6 +13444,22 @@ func selectContentPaneInActiveWindow() {
 		return
 	}
 
+	windowIDOut, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+	if err != nil {
+		return
+	}
+	windowID := strings.TrimSpace(string(windowIDOut))
+	if windowID == "" {
+		return
+	}
+	selectContentPaneInWindow(windowID)
+}
+
+// focusContentPaneInActiveWindow ensures focus is in a content pane in the
+// currently active window. Not feature-gated — used to keep keyboard focus
+// out of auxiliary panes (sidebar/pane-header/window-header) after window
+// switches or taps on the window-header.
+func focusContentPaneInActiveWindow() {
 	windowIDOut, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
 	if err != nil {
 		return

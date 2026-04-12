@@ -11,7 +11,7 @@ RENDER_STATUS=bin/render-status
 RENDER_TAB=bin/render-tab
 TABBY_DAEMON=bin/tabby-daemon
 SIDEBAR_RENDERER=bin/sidebar-renderer
-PANE_HEADER=bin/pane-header
+WINDOW_HEADER=bin/window-header
 MANAGE_GROUP=bin/manage-group
 
 # Directories
@@ -24,7 +24,7 @@ SCREENSHOT_DIR=$(TEST_DIR)/screenshots
 all: build
 
 # Build all binaries
-build: $(RENDER_STATUS) $(RENDER_TAB) $(TABBY_DAEMON) $(SIDEBAR_RENDERER) $(PANE_HEADER) $(MANAGE_GROUP)
+build: $(RENDER_STATUS) $(RENDER_TAB) $(TABBY_DAEMON) $(SIDEBAR_RENDERER) $(WINDOW_HEADER) $(MANAGE_GROUP)
 
 $(RENDER_STATUS): cmd/render-status/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
@@ -42,9 +42,9 @@ $(SIDEBAR_RENDERER): cmd/sidebar-renderer/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -o $@ ./cmd/sidebar-renderer
 
-$(PANE_HEADER): cmd/pane-header/main.go pkg/**/*.go
+$(WINDOW_HEADER): cmd/window-header/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $@ ./cmd/pane-header
+	$(GOBUILD) -o $@ ./cmd/window-header
 
 $(MANAGE_GROUP): cmd/manage-group/main.go pkg/**/*.go
 	@mkdir -p $(BIN_DIR)
@@ -107,7 +107,7 @@ install: build
 	@cp $(RENDER_TAB) $(PLUGIN_DIR)/bin/
 	@cp $(TABBY_DAEMON) $(PLUGIN_DIR)/bin/
 	@cp $(SIDEBAR_RENDERER) $(PLUGIN_DIR)/bin/
-	@cp $(PANE_HEADER) $(PLUGIN_DIR)/bin/
+	@cp $(WINDOW_HEADER) $(PLUGIN_DIR)/bin/
 	@cp $(MANAGE_GROUP) $(PLUGIN_DIR)/bin/
 	@cp scripts/*.sh $(PLUGIN_DIR)/scripts/
 	@cp tabby.tmux $(PLUGIN_DIR)/
@@ -123,7 +123,7 @@ sync: build
 	@cp $(RENDER_TAB) $(PLUGIN_DIR)/bin/
 	@cp $(TABBY_DAEMON) $(PLUGIN_DIR)/bin/
 	@cp $(SIDEBAR_RENDERER) $(PLUGIN_DIR)/bin/
-	@cp $(PANE_HEADER) $(PLUGIN_DIR)/bin/
+	@cp $(WINDOW_HEADER) $(PLUGIN_DIR)/bin/
 	@cp $(MANAGE_GROUP) $(PLUGIN_DIR)/bin/
 	@cp scripts/*.sh $(PLUGIN_DIR)/scripts/
 	@cp tabby.tmux $(PLUGIN_DIR)/

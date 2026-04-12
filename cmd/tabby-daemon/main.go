@@ -540,6 +540,12 @@ func cleanupOrphanedSidebars(windows []tmux.Window) {
 		if windowID == "" {
 			continue
 		}
+		// Sidebar stash windows hold break-pane'd sidebars while hidden on
+		// mobile. They legitimately contain only a sidebar pane — killing
+		// them would kill the stashed renderer and trigger a respawn.
+		if strings.HasPrefix(win.Name, "_tabby_stash_") {
+			continue
+		}
 
 		paneOut, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
 			"#{pane_id}\x1f#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
@@ -617,16 +623,26 @@ func cleanupOrphanWindowsByTmux(sessionID string) {
 		}
 	}
 
-	out, err := exec.Command("tmux", "list-windows", "-t", sessionID, "-F", "#{window_id}").Output()
+	out, err := exec.Command("tmux", "list-windows", "-t", sessionID, "-F", "#{window_id}\x1f#{window_name}").Output()
 	if err != nil {
 		return
 	}
 	now := time.Now()
 	seen := make(map[string]bool)
 
-	for _, rawWid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		windowID := strings.TrimSpace(rawWid)
+	for _, rawLine := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		winParts := strings.SplitN(strings.TrimSpace(rawLine), "\x1f", 2)
+		if len(winParts) < 1 {
+			continue
+		}
+		windowID := winParts[0]
 		if windowID == "" {
+			continue
+		}
+		// Skip sidebar stash windows: they hold break-pane'd sidebars while
+		// hidden on mobile and legitimately contain only a sidebar pane.
+		if len(winParts) == 2 && strings.HasPrefix(winParts[1], sidebarStashWindowPrefix) {
+			delete(orphanWindowFirstSeen, windowID)
 			continue
 		}
 		seen[windowID] = true

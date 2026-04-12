@@ -23,24 +23,6 @@ func newRenderCoordinator(t *testing.T) *Coordinator {
 	return c
 }
 
-func TestRenderForClient_CollapsedSidebar(t *testing.T) {
-	c := newRenderCoordinator(t)
-	c.sidebarCollapsed = true
-	payload := c.RenderForClient("test-client", 1, 24)
-	assert.NotNil(t, payload)
-	assert.Equal(t, 1, payload.Width)
-	assert.Equal(t, 24, payload.Height)
-	assert.NotEmpty(t, payload.Regions)
-}
-
-func TestRenderForClient_CollapsedSidebarZeroWidth(t *testing.T) {
-	c := newRenderCoordinator(t)
-	c.sidebarCollapsed = true
-	payload := c.RenderForClient("test-client", 0, 10)
-	assert.NotNil(t, payload)
-	assert.GreaterOrEqual(t, payload.Width, 1)
-}
-
 func TestRenderForClient_EmptyWindowsAndGroups(t *testing.T) {
 	c := newRenderCoordinator(t)
 	payload := c.RenderForClient("test-client", 30, 24)

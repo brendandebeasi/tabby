@@ -51,10 +51,20 @@ func main() {
 	}
 	defer os.Remove(toggleLock)
 
-	// Global timeout
+	// Global watchdog: if we haven't finished in 30s something is genuinely
+	// wedged. Signal via channel so a successful exit cancels the timer and
+	// defers (lock cleanup) always run.
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		time.Sleep(15 * time.Second)
-		os.Exit(1)
+		select {
+		case <-done:
+			return
+		case <-time.After(30 * time.Second):
+			os.Remove(toggleLock)
+			fmt.Fprintln(os.Stderr, "Error: tabby-toggle timed out after 30s")
+			os.Exit(1)
+		}
 	}()
 
 	// Get current state
