@@ -238,6 +238,16 @@ func getRendererBin() string {
 	return filepath.Join(dir, "sidebar-renderer")
 }
 
+// getWindowHeaderBin returns the path to the window-header binary
+func getWindowHeaderBin() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(exe)
+	return filepath.Join(dir, "window-header")
+}
+
 // getPaneHeaderBin returns the path to the pane-header binary
 func getPaneHeaderBin() string {
 	exe, err := os.Executable()
@@ -353,6 +363,18 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		logEvent("SPAWN_SKIP script_lock_active")
 		return false
 	}
+	// Collect windows whose sidebar is currently stashed (break-pane'd out).
+	// Those sidebars are alive in holding windows — don't re-spawn.
+	stashedWindows := make(map[string]bool)
+	if stashOut, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_name}").Output(); err == nil {
+		for _, name := range strings.Split(strings.TrimSpace(string(stashOut)), "\n") {
+			if !strings.HasPrefix(name, "_tabby_stash_") {
+				continue
+			}
+			orig := "@" + strings.TrimPrefix(name, "_tabby_stash_")
+			stashedWindows[orig] = true
+		}
+	}
 	rendererBin := getRendererBin()
 	if rendererBin == "" {
 		return false
@@ -387,6 +409,13 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		// Skip if already has a renderer
 		if connectedClients[windowID] {
 			logEvent("SPAWN_CHECK window=%s result=skip_has_client", windowID)
+			continue
+		}
+		// Skip if the sidebar for this window is currently stashed off-screen
+		// (user hid it via the hamburger). The stashed sidebar-renderer is
+		// still alive and will be join-pane'd back when the user shows it.
+		if stashedWindows[windowID] {
+			logEvent("SPAWN_CHECK window=%s result=skip_stashed", windowID)
 			continue
 		}
 
@@ -477,17 +506,11 @@ func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Windo
 
 	// Check each connected client - if their window no longer exists, disconnect them
 	for _, clientID := range server.GetAllClientIDs() {
-		// Clients are usually window IDs (e.g. "@1") or "header:@1"
+		// Clients are usually window IDs (e.g. "@1") or "window-header:@1" or "header:%1"
 		targetID := clientID
-		if strings.HasPrefix(clientID, "header:") {
-			// For headers, we need to map back to the window.
-			// But currently headers are tracked by pane ID in clientID?
-			// Actually, clientID for renderers IS the window ID.
-			// ClientID for headers is "header:<paneID>".
-			// We can't easily check if a pane exists from just window list efficiently
-			// without iterating all panes.
-			// But since we have all panes in 'windows', we can check.
-			continue // Skip headers for now, let them die naturally when pane dies
+		if strings.HasPrefix(clientID, "window-header:") || strings.HasPrefix(clientID, "header:") {
+			// Window/pane headers die naturally when their window/pane closes.
+			continue
 		}
 
 		if !currentWindows[targetID] {
@@ -567,9 +590,9 @@ func cleanupOrphanedSidebars(windows []tmux.Window) {
 
 func paneIsSystemPane(cmd string, startCmd string) bool {
 	return strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") ||
-		strings.Contains(cmd, "tabby") || strings.Contains(cmd, "pane-header") ||
+		strings.Contains(cmd, "tabby") || strings.Contains(cmd, "window-header") || strings.Contains(cmd, "pane-header") ||
 		strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") ||
-		strings.Contains(startCmd, "tabby") || strings.Contains(startCmd, "pane-header")
+		strings.Contains(startCmd, "tabby") || strings.Contains(startCmd, "window-header") || strings.Contains(startCmd, "pane-header")
 }
 
 var orphanWindowFirstSeen = map[string]time.Time{}
@@ -712,13 +735,187 @@ func cleanupOrphanWindowsByTmux(sessionID string) {
 	}
 }
 
-// spawnPaneHeaders spawns header panes above each content pane in all windows.
-// Each content pane gets its own header showing that pane's info and action buttons.
-// Height is 1 line normally, or 2 lines when custom_border is enabled (to render our own border).
-func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool, headerHeightRows int, windows []tmux.Window) {
+// spawnWindowHeaders spawns exactly ONE window-header pane per window, positioned
+// at the top and spanning the window's full content width. The header tracks the
+// window's active pane internally and renders a single 1-row (desktop) or 3-row
+// (phone) strip shared across all content panes.
+func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bool, headerHeightRows int, windows []tmux.Window, coordinator *Coordinator) {
 	// NOTE: No @tabby_spawning check here — the caller (doPaneLayoutOps) already
 	// holds the lock. Checking it here would self-deadlock since the caller sets
 	// @tabby_spawning=1 before calling us.
+	headerBin := getWindowHeaderBin()
+	if headerBin == "" {
+		return
+	}
+
+	// Check if window headers are enabled (tmux option name unchanged for compat)
+	out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "on" {
+		return
+	}
+
+	// Window-headers are a phone-only affordance: they host the hamburger + carousel
+	// buttons that replace the sidebar interaction on narrow clients. On desktop,
+	// kill any that are around and skip spawning new ones.
+	if coordinator != nil && coordinator.ActiveClientProfile() != "phone" {
+		if headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
+			"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
+				if line == "" {
+					continue
+				}
+				parts := strings.SplitN(line, "\x1f", 3)
+				if len(parts) < 3 {
+					continue
+				}
+				if strings.Contains(parts[1], "window-header") || strings.Contains(parts[2], "window-header") {
+					markSkipPreserveForWindow(parts[0])
+					exec.Command("tmux", "kill-pane", "-t", parts[0]).Run()
+					logEvent("WINDOW_HEADER_KILL_DESKTOP pane=%s", parts[0])
+				}
+			}
+		}
+		return
+	}
+
+	// Discover existing window-header panes keyed by window_id
+	windowsWithHeader := make(map[string]bool)
+	if headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
+		"#{window_id}\x1f#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
+		byWindow := make(map[string][]string)
+		for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "\x1f", 4)
+			if len(parts) < 4 {
+				continue
+			}
+			winID := parts[0]
+			paneID := parts[1]
+			curCmd := parts[2]
+			startCmd := parts[3]
+			if !strings.Contains(curCmd, "window-header") && !strings.Contains(startCmd, "window-header") {
+				continue
+			}
+			windowsWithHeader[winID] = true
+			byWindow[winID] = append(byWindow[winID], paneID)
+		}
+		// Deduplicate: kill any extra window-header panes in the same window
+		for winID, panes := range byWindow {
+			if len(panes) <= 1 {
+				continue
+			}
+			sort.Strings(panes)
+			for _, extraPane := range panes[1:] {
+				logEvent("WINDOW_HEADER_DEDUP window=%s kill=%s", winID, extraPane)
+				markSkipPreserveForWindow(extraPane)
+				exec.Command("tmux", "kill-pane", "-t", extraPane).Run()
+			}
+		}
+	}
+
+	// For each window without a header, spawn one above the topmost content pane
+	spawned := false
+	spawnedInWindow := make(map[string]bool)
+	for _, win := range windows {
+		if win.ID == "" {
+			continue
+		}
+		if windowsWithHeader[win.ID] {
+			continue
+		}
+		// Find the topmost content pane (smallest pane_top, non-system)
+		var topPane *tmux.Pane
+		for i := range win.Panes {
+			p := win.Panes[i]
+			if paneIsSystemPane(p.Command, p.StartCommand) {
+				continue
+			}
+			if topPane == nil || p.Top < topPane.Top {
+				tp := p
+				topPane = &tp
+			}
+		}
+		if topPane == nil {
+			continue
+		}
+		// Pane must be tall enough to split off a header row
+		if topPane.Height < headerHeightRows+2 {
+			continue
+		}
+
+		debugFlag := ""
+		if *debugMode {
+			debugFlag = "-debug"
+		}
+		activeBeforeHeader := ""
+		if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
+			activeBeforeHeader = strings.TrimSpace(string(out))
+		}
+		logEvent("SPAWN_WINDOW_HEADER window=%s target_pane=%s active_before=%s custom_border=%v header_rows=%d",
+			win.ID, topPane.ID, activeBeforeHeader, customBorder, headerHeightRows)
+		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && exec '%s' -session '%s' -window '%s' %s",
+			headerBin, sessionID, win.ID, debugFlag)
+		// -v -f (without -b) = full-width split at bottom of window (footer).
+		spawnCmd := exec.Command("tmux", "split-window", "-d", "-t", topPane.ID, "-v", "-f",
+			"-l", fmt.Sprintf("%d", headerHeightRows), cmdStr)
+		if out, err := spawnCmd.CombinedOutput(); err != nil {
+			debugLog.Printf("Failed to spawn window-header for %s: %v, output: %s", win.ID, err, string(out))
+			continue
+		}
+		spawned = true
+		spawnedInWindow[win.ID] = true
+	}
+
+	// Disable pane borders on all newly spawned header panes
+	if spawned {
+		for winID := range spawnedInWindow {
+			headerPaneOut, err := exec.Command("tmux", "list-panes", "-t", winID, "-F",
+				"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+			if err == nil {
+				for _, hLine := range strings.Split(string(headerPaneOut), "\n") {
+					hLine = strings.TrimSpace(hLine)
+					if strings.Contains(hLine, "window-header") {
+						hParts := strings.SplitN(hLine, "\x1f", 3)
+						if len(hParts) >= 1 {
+							hTarget := "1"
+							if globalCoordinator != nil {
+								hTarget = fmt.Sprintf("%d", globalCoordinator.desiredWindowHeaderHeight())
+							}
+							exec.Command("tmux", "resize-pane", "-t", hParts[0], "-y", hTarget).Run()
+							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
+							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// paneTargetRegex extracts the -pane argument from a pane-header start command
+var paneTargetRegex = regexp.MustCompile(`-pane\s+(?:'([^']+)'|"([^"]+)"|([^\s]+))`)
+
+func paneTargetFromStartCmd(startCmd string) string {
+	matches := paneTargetRegex.FindStringSubmatch(startCmd)
+	if len(matches) < 2 {
+		return ""
+	}
+	for i := 1; i < len(matches); i++ {
+		if matches[i] != "" {
+			return matches[i]
+		}
+	}
+	return ""
+}
+
+// spawnPaneHeaders spawns a header pane above each content pane in all windows.
+// Each content pane gets its own 1-row title strip. The phone button bar lives
+// on window-header; pane-headers are always 1 row on both desktop and phone.
+func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool, headerHeightRows int, windows []tmux.Window) {
+	// NOTE: No @tabby_spawning check here — the caller (doPaneLayoutOps) already
+	// holds the lock.
 	headerBin := getPaneHeaderBin()
 	if headerBin == "" {
 		return
@@ -756,7 +953,6 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			panesWithHeader[target] = true
 			headersByTarget[target] = append(headersByTarget[target], paneID)
 		}
-
 		for target, headerPanes := range headersByTarget {
 			if len(headerPanes) <= 1 {
 				continue
@@ -769,7 +965,6 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 		}
 	}
 
-	// First pass: identify system panes vs content panes
 	type paneEntry struct {
 		id       string
 		windowID string
@@ -778,30 +973,23 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 	}
 	var contentPanes []paneEntry
 
-	// Flatten all panes from all windows
 	for _, win := range windows {
 		for _, p := range win.Panes {
-			curCmd := p.Command
-			startCmd := p.StartCommand
-
-			// Check if this is a system pane (sidebar/renderer/header/daemon)
-			// by checking BOTH current command and start command
-			isSystem := strings.Contains(curCmd, "sidebar") || strings.Contains(curCmd, "renderer") ||
-				strings.Contains(curCmd, "pane-header") || strings.Contains(curCmd, "tabby") ||
-				strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") ||
-				strings.Contains(startCmd, "pane-header") || strings.Contains(startCmd, "tabby")
-
+			isSystem := strings.Contains(p.Command, "sidebar") || strings.Contains(p.Command, "renderer") ||
+				strings.Contains(p.Command, "pane-header") || strings.Contains(p.Command, "window-header") ||
+				strings.Contains(p.Command, "tabby") ||
+				strings.Contains(p.StartCommand, "sidebar") || strings.Contains(p.StartCommand, "renderer") ||
+				strings.Contains(p.StartCommand, "pane-header") || strings.Contains(p.StartCommand, "window-header") ||
+				strings.Contains(p.StartCommand, "tabby")
 			if isSystem {
-				// Track which content panes already have a header process running
-				if strings.Contains(curCmd, "pane-header") || strings.Contains(startCmd, "pane-header") {
-					target := paneTargetFromStartCmd(startCmd)
+				if strings.Contains(p.Command, "pane-header") || strings.Contains(p.StartCommand, "pane-header") {
+					target := paneTargetFromStartCmd(p.StartCommand)
 					if target != "" {
 						panesWithHeader[target] = true
 					}
 				}
 				continue
 			}
-
 			contentPanes = append(contentPanes, paneEntry{
 				id:       p.ID,
 				windowID: win.ID,
@@ -811,33 +999,29 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 		}
 	}
 
-	// Second pass: spawn a header for each content pane that doesn't have one
 	spawned := false
-	spawnedInWindow := make(map[string]bool) // track windows we spawned in for cleanup
+	spawnedInWindow := make(map[string]bool)
 	for _, pane := range contentPanes {
-		// Skip if this pane already has a header
 		if panesWithHeader[pane.id] {
 			continue
 		}
-
-		// Pane must be tall enough to split off a 1-line header
 		if pane.height < 3 {
 			continue
 		}
-
-		// Spawn header pane above this content pane
 		debugFlag := ""
 		if *debugMode {
 			debugFlag = "-debug"
 		}
-		// Log active pane before spawn for debugging focus issues
 		activeBeforeHeader := ""
 		if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
 			activeBeforeHeader = strings.TrimSpace(string(out))
 		}
-		logEvent("SPAWN_HEADER pane=%s window=%s active_before=%s width=%d height=%d custom_border=%v header_rows=%d", pane.id, pane.windowID, activeBeforeHeader, pane.width, pane.height, customBorder, headerHeightRows)
-		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && exec '%s' -session '%s' -pane '%s' %s", headerBin, sessionID, pane.id, debugFlag)
-		spawnCmd := exec.Command("tmux", "split-window", "-d", "-t", pane.id, "-v", "-b", "-l", fmt.Sprintf("%d", headerHeightRows), cmdStr)
+		logEvent("SPAWN_HEADER pane=%s window=%s active_before=%s width=%d height=%d custom_border=%v header_rows=%d",
+			pane.id, pane.windowID, activeBeforeHeader, pane.width, pane.height, customBorder, headerHeightRows)
+		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && exec '%s' -session '%s' -pane '%s' %s",
+			headerBin, sessionID, pane.id, debugFlag)
+		spawnCmd := exec.Command("tmux", "split-window", "-d", "-t", pane.id, "-v", "-b", "-l",
+			fmt.Sprintf("%d", headerHeightRows), cmdStr)
 		if out, err := spawnCmd.CombinedOutput(); err != nil {
 			debugLog.Printf("Failed to spawn pane header for %s: %v, output: %s", pane.id, err, string(out))
 			continue
@@ -846,7 +1030,6 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 		spawnedInWindow[pane.windowID] = true
 	}
 
-	// Disable pane borders on all newly spawned header panes
 	if spawned {
 		for winID := range spawnedInWindow {
 			headerPaneOut, err := exec.Command("tmux", "list-panes", "-t", winID, "-F",
@@ -872,11 +1055,11 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 	}
 }
 
-// paneTargetRegex extracts the -pane argument from a pane-header start command
-var paneTargetRegex = regexp.MustCompile(`-pane\s+(?:'([^']+)'|"([^"]+)"|([^\s]+))`)
+// windowTargetRegex extracts the -window argument from a window-header start command
+var windowTargetRegex = regexp.MustCompile(`-window\s+(?:'([^']+)'|"([^"]+)"|([^\s]+))`)
 
-func paneTargetFromStartCmd(startCmd string) string {
-	matches := paneTargetRegex.FindStringSubmatch(startCmd)
+func windowTargetFromStartCmd(startCmd string) string {
+	matches := windowTargetRegex.FindStringSubmatch(startCmd)
 	if len(matches) < 2 {
 		return ""
 	}
@@ -888,8 +1071,8 @@ func paneTargetFromStartCmd(startCmd string) string {
 	return ""
 }
 
-// cleanupOrphanedHeaders removes header panes that are disabled or orphaned
-// (target pane no longer exists).
+// cleanupOrphanedHeaders removes header panes (window-header and pane-header)
+// that are disabled or orphaned (target window/pane no longer exists).
 func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeWindowID string) {
 	// Get all panes with geometry, start command, and window ID.
 	// Scoped to our session with -t to avoid cross-session interference.
@@ -904,57 +1087,52 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		return
 	}
 
-	// Check if pane headers are disabled
 	enabledOut, _ := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output()
 	headersEnabled := strings.TrimSpace(string(enabledOut)) == "on"
 
-	// Build a set of content pane IDs and track their dimensions
-	// Check both current and start commands to handle race condition after split-window
+	// Track which windows and content panes currently exist
+	windowExists := make(map[string]bool)
 	contentPaneExists := make(map[string]bool)
-	contentPaneDimensions := make(map[string]struct{ width, height, top, left int })
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\x1f", 8)
-		if len(parts) < 8 {
-			continue
-		}
-		paneID := parts[0]
-		curCmd := parts[1]
-		widthStr := parts[2]
-		startCmd := parts[3]
-		heightStr := parts[4]
-		topStr := parts[5]
-		leftStr := parts[6]
-		isSystem := strings.Contains(curCmd, "pane-header") || strings.Contains(curCmd, "sidebar") ||
-			strings.Contains(curCmd, "renderer") || strings.Contains(curCmd, "tabby") ||
-			strings.Contains(startCmd, "pane-header") || strings.Contains(startCmd, "sidebar") ||
-			strings.Contains(startCmd, "renderer") || strings.Contains(startCmd, "tabby")
-		if !isSystem {
-			contentPaneExists[paneID] = true
-			width, _ := strconv.Atoi(widthStr)
-			height, _ := strconv.Atoi(heightStr)
-			top, _ := strconv.Atoi(topStr)
-			left, _ := strconv.Atoi(leftStr)
-			contentPaneDimensions[paneID] = struct{ width, height, top, left int }{width, height, top, left}
-		}
-	}
 
-	// Collect header panes with their dimensions
 	type headerInfo struct {
-		paneID   string
-		windowID string
-		target   string
-		width    int
-		height   int
-		top      int
-		left     int
+		paneID        string
+		windowID      string
+		target        string
+		height        int
+		isWindowHeader bool
 	}
-	var headers []headerInfo
+	var windowHeaders []headerInfo
+	var paneHeaders []headerInfo
 
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+	// First pass: collect content panes and windows
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\x1f", 8)
+		if len(parts) < 8 {
+			continue
+		}
+		winID := parts[7]
+		if winID != "" {
+			windowExists[winID] = true
+		}
+		curCmd := parts[1]
+		startCmd := parts[3]
+		isSystem := strings.Contains(curCmd, "window-header") || strings.Contains(curCmd, "pane-header") ||
+			strings.Contains(curCmd, "sidebar") || strings.Contains(curCmd, "renderer") || strings.Contains(curCmd, "tabby") ||
+			strings.Contains(startCmd, "window-header") || strings.Contains(startCmd, "pane-header") ||
+			strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") || strings.Contains(startCmd, "tabby")
+		if !isSystem {
+			contentPaneExists[parts[0]] = true
+		}
+	}
+
+	// Second pass: collect header panes
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -964,106 +1142,112 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 			continue
 		}
 		curCmd := parts[1]
-		widthStr := parts[2]
 		startCmd := parts[3]
-		if !strings.Contains(curCmd, "pane-header") && !strings.Contains(startCmd, "pane-header") {
-			continue
-		}
-		w, _ := strconv.Atoi(widthStr)
 		h, _ := strconv.Atoi(parts[4])
-		top, _ := strconv.Atoi(parts[5])
-		left, _ := strconv.Atoi(parts[6])
 		winID := parts[7]
-		target := paneTargetFromStartCmd(startCmd)
-		headers = append(headers, headerInfo{
-			paneID: parts[0], windowID: winID,
-			target: target, width: w, height: h, top: top, left: left,
-		})
+
+		if strings.Contains(curCmd, "window-header") || strings.Contains(startCmd, "window-header") {
+			target := windowTargetFromStartCmd(startCmd)
+			if target == "" {
+				target = winID
+			}
+			windowHeaders = append(windowHeaders, headerInfo{
+				paneID: parts[0], windowID: winID, target: target, height: h, isWindowHeader: true,
+			})
+		} else if strings.Contains(curCmd, "pane-header") || strings.Contains(startCmd, "pane-header") {
+			target := paneTargetFromStartCmd(startCmd)
+			paneHeaders = append(paneHeaders, headerInfo{
+				paneID: parts[0], windowID: winID, target: target, height: h, isWindowHeader: false,
+			})
+		}
 	}
 
-	keepHeader := make(map[string]bool)
-	byTarget := make(map[string][]string)
-	for _, hdr := range headers {
-		if hdr.target == "" {
+	killed := false
+
+	// --- Window-header cleanup: one per window ---
+	keepWindowHeader := make(map[string]bool)
+	byWindow := make(map[string][]string)
+	for _, hdr := range windowHeaders {
+		byWindow[hdr.windowID] = append(byWindow[hdr.windowID], hdr.paneID)
+	}
+	for _, paneIDs := range byWindow {
+		sort.Strings(paneIDs)
+		if len(paneIDs) > 0 {
+			keepWindowHeader[paneIDs[0]] = true
+		}
+	}
+	for _, hdr := range windowHeaders {
+		if !headersEnabled {
+			logEvent("CLEANUP_WINDOW_HEADER pane=%s reason=disabled", hdr.paneID)
+			markSkipPreserveForWindow(hdr.paneID)
+			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			killed = true
 			continue
 		}
-		byTarget[hdr.target] = append(byTarget[hdr.target], hdr.paneID)
+		if !keepWindowHeader[hdr.paneID] {
+			logEvent("CLEANUP_WINDOW_HEADER pane=%s window=%s reason=duplicate", hdr.paneID, hdr.windowID)
+			markSkipPreserveForWindow(hdr.paneID)
+			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			killed = true
+			continue
+		}
+		expectedHeight := coordinator.desiredWindowHeaderHeight()
+		if hdr.height > expectedHeight {
+			logEvent("WINDOW_HEADER_HEIGHT_ADJUST trigger=cleanup pane=%s height=%d expected=%d", hdr.paneID, hdr.height, expectedHeight)
+			exec.Command("tmux", "resize-pane", "-t", hdr.paneID, "-y", fmt.Sprintf("%d", expectedHeight)).Run()
+		}
+		if hdr.target != "" && hdr.target != hdr.windowID && !windowExists[hdr.target] {
+			logEvent("CLEANUP_WINDOW_HEADER pane=%s target=%s reason=target_window_gone", hdr.paneID, hdr.target)
+			markSkipPreserveForWindow(hdr.paneID)
+			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			killed = true
+		}
+	}
+
+	// --- Pane-header cleanup: one per content pane ---
+	keepPaneHeader := make(map[string]bool)
+	byTarget := make(map[string][]string)
+	for _, hdr := range paneHeaders {
+		if hdr.target != "" {
+			byTarget[hdr.target] = append(byTarget[hdr.target], hdr.paneID)
+		}
 	}
 	for _, paneIDs := range byTarget {
 		sort.Strings(paneIDs)
 		if len(paneIDs) > 0 {
-			keepHeader[paneIDs[0]] = true
+			keepPaneHeader[paneIDs[0]] = true
 		}
 	}
-
-	// Process headers: kill disabled, orphaned, or mismatched dimensions
-	killed := false
-	for _, hdr := range headers {
-		// Kill if headers disabled globally
+	for _, hdr := range paneHeaders {
 		if !headersEnabled {
-			logEvent("CLEANUP_HEADER pane=%s reason=disabled", hdr.paneID)
+			logEvent("CLEANUP_PANE_HEADER pane=%s reason=disabled", hdr.paneID)
 			markSkipPreserveForWindow(hdr.paneID)
 			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
 		}
-
-		if hdr.target != "" && !keepHeader[hdr.paneID] {
-			logEvent("CLEANUP_HEADER pane=%s target=%s reason=duplicate_target", hdr.paneID, hdr.target)
+		if hdr.target == "" || !keepPaneHeader[hdr.paneID] {
+			logEvent("CLEANUP_PANE_HEADER pane=%s target=%s reason=duplicate_or_no_target", hdr.paneID, hdr.target)
 			markSkipPreserveForWindow(hdr.paneID)
 			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
 		}
-
-		// Force header height to expected size if it's grown beyond it
+		// Kill if target content pane no longer exists
+		if hdr.target != "" && !contentPaneExists[hdr.target] {
+			logEvent("CLEANUP_PANE_HEADER pane=%s target=%s reason=target_pane_gone", hdr.paneID, hdr.target)
+			markSkipPreserveForWindow(hdr.paneID)
+			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			killed = true
+			continue
+		}
 		expectedHeight := coordinator.desiredPaneHeaderHeight()
 		if hdr.height > expectedHeight {
-			debugLog.Printf("Header %s height=%d, forcing to %d", hdr.paneID, hdr.height, expectedHeight)
-			logEvent("HEADER_HEIGHT_ADJUST trigger=cleanup pane=%s height=%d expected=%d", hdr.paneID, hdr.height, expectedHeight)
+			logEvent("PANE_HEADER_HEIGHT_ADJUST trigger=cleanup pane=%s height=%d expected=%d", hdr.paneID, hdr.height, expectedHeight)
 			exec.Command("tmux", "resize-pane", "-t", hdr.paneID, "-y", fmt.Sprintf("%d", expectedHeight)).Run()
-		}
-
-		// Kill if target pane no longer exists
-		if hdr.target == "" {
-			continue
-		}
-		if !contentPaneExists[hdr.target] {
-			logEvent("CLEANUP_HEADER pane=%s target=%s reason=target_gone", hdr.paneID, hdr.target)
-			markSkipPreserveForWindow(hdr.paneID)
-			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
-			killed = true
-			continue
-		}
-
-		// Kill if header geometry doesn't match its target pane.
-		// Valid header must match target width/left and sit above target top.
-		if targetDims, ok := contentPaneDimensions[hdr.target]; ok {
-			if hdr.width != targetDims.width {
-				logEvent("CLEANUP_HEADER pane=%s target=%s reason=width_mismatch header_w=%d target_w=%d", hdr.paneID, hdr.target, hdr.width, targetDims.width)
-				markSkipPreserveForWindow(hdr.paneID)
-				exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
-				killed = true
-				continue
-			}
-			if hdr.left != targetDims.left {
-				logEvent("CLEANUP_HEADER pane=%s target=%s reason=left_mismatch header_left=%d target_left=%d", hdr.paneID, hdr.target, hdr.left, targetDims.left)
-				markSkipPreserveForWindow(hdr.paneID)
-				exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
-				killed = true
-				continue
-			}
-			if hdr.top >= targetDims.top {
-				logEvent("CLEANUP_HEADER pane=%s target=%s reason=not_above_target header_top=%d target_top=%d", hdr.paneID, hdr.target, hdr.top, targetDims.top)
-				markSkipPreserveForWindow(hdr.paneID)
-				exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
-				killed = true
-				continue
-			}
 		}
 	}
 
-	// Restore sidebar widths if we killed any headers (layout may have shifted)
 	if killed {
 		logEvent("WIDTH_SYNC_REQUEST trigger=cleanup_orphan_headers active=%s force=1", activeWindowID)
 		coordinator.RunWidthSync(activeWindowID, true)
@@ -1120,7 +1304,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 
 		// Only check sidebar/renderer panes
 		isSidebar := strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer")
-		isHeader := strings.Contains(cmd, "pane-header")
+		isHeader := strings.Contains(cmd, "window-header") || strings.Contains(cmd, "pane-header")
 		if !isSidebar && !isHeader {
 			continue
 		}
@@ -1192,7 +1376,7 @@ func updateHeaderBorderStyles(coordinator *Coordinator) {
 	}
 
 	// Removed: select-pane -P calls were stealing focus
-	// Sidebar and pane-header content is rendered with proper ANSI colors via lipgloss
+	// Sidebar and window-header content is rendered with proper ANSI colors via lipgloss
 	// Terminal panes use native colors from the terminal emulator
 	_ = coordinator // suppress unused warning
 	_ = out
@@ -1265,6 +1449,7 @@ func shouldRestoreFocus() bool {
 	}
 	return strings.Contains(cmd, "sidebar") ||
 		strings.Contains(cmd, "renderer") ||
+		strings.Contains(cmd, "window-header") ||
 		strings.Contains(cmd, "pane-header")
 }
 
@@ -1312,12 +1497,19 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 			continue
 		}
 
+		if strings.Contains(cmd, "window-header") || strings.Contains(startCmd, "window-header") {
+			// For window-header panes, the clientID is "window-header:<windowID>"
+			headerSizes["window-header:"+windowID] = paneSize{width: width, height: height, paneID: paneID}
+			continue
+		}
+
 		if strings.Contains(cmd, "pane-header") || strings.Contains(startCmd, "pane-header") {
+			// For pane-header panes, extract the target content pane ID from start command.
+			// clientID is "header:<paneID>".
 			targetPane := paneTargetFromStartCmd(startCmd)
-			if targetPane == "" {
-				targetPane = paneID
+			if targetPane != "" {
+				headerSizes["header:"+targetPane] = paneSize{width: width, height: height, paneID: paneID}
 			}
-			headerSizes["header:"+targetPane] = paneSize{width: width, height: height, paneID: paneID}
 		}
 	}
 
@@ -1364,10 +1556,19 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 				logEvent("HEADER_SIZE_SYNC trigger=%s client=%s prev=none new=%dx%d", trigger, clientID, size.width, size.height)
 			}
 		}
-		desiredH := coordinator.desiredPaneHeaderHeight()
-		if size.height > desiredH {
-			logEvent("HEADER_HEIGHT_ANOMALY trigger=%s client=%s height=%d desired=%d", trigger, clientID, size.height, desiredH)
-			exec.Command("tmux", "resize-pane", "-t", size.paneID, "-y", fmt.Sprintf("%d", desiredH)).Run()
+		// Enforce correct height per header type
+		if strings.HasPrefix(clientID, "window-header:") {
+			desiredH := coordinator.desiredWindowHeaderHeight()
+			if size.height > desiredH {
+				logEvent("HEADER_HEIGHT_ANOMALY trigger=%s client=%s height=%d desired=%d", trigger, clientID, size.height, desiredH)
+				exec.Command("tmux", "resize-pane", "-t", size.paneID, "-y", fmt.Sprintf("%d", desiredH)).Run()
+			}
+		} else if strings.HasPrefix(clientID, "header:") {
+			desiredH := coordinator.desiredPaneHeaderHeight()
+			if size.height > desiredH {
+				logEvent("HEADER_HEIGHT_ANOMALY trigger=%s client=%s height=%d desired=%d", trigger, clientID, size.height, desiredH)
+				exec.Command("tmux", "resize-pane", "-t", size.paneID, "-y", fmt.Sprintf("%d", desiredH)).Run()
+			}
 		}
 		server.UpdateClientSize(clientID, size.width, size.height)
 	}
@@ -1465,6 +1666,25 @@ func activeClientGeometry() (width int, height int, tty string, activity int64, 
 		}
 	}
 
+	// Desktop-preference override: if the activity-winner is a narrow client
+	// (phone range) but another active attached client is clearly a desktop,
+	// promote the desktop for the purposes of width/profile selection. This
+	// prevents a brief phone tap from collapsing every sidebar to 1 column
+	// across every concurrently-attached desktop client.
+	if attachedClients[bestIdx].width < 60 {
+		for i, cand := range attachedClients {
+			if i == bestIdx || cand.width < 80 {
+				continue
+			}
+			if now-cand.activity <= idleWindow {
+				logEvent("CLIENT_GEOM_DESKTOP_OVERRIDE narrow_tty=%s narrow_w=%d desktop_tty=%s desktop_w=%d",
+					attachedClients[bestIdx].tty, attachedClients[bestIdx].width, cand.tty, cand.width)
+				bestIdx = i
+				break
+			}
+		}
+	}
+
 	best := attachedClients[bestIdx]
 	reason := "activity"
 	if now-best.activity > idleWindow {
@@ -1478,21 +1698,30 @@ func activeClientGeometry() (width int, height int, tty string, activity int64, 
 }
 
 
-func resizeAllWindowsToClient(width, height int) {
+// resizeAllWindowsToClient authoritatively locks every tmux window to the
+// elected active client's dimensions, overriding tmux's `window-size latest`
+// auto-reflow. This is the single source of truth for window geometry —
+// inactive clients (e.g. an idle phone) must not be able to shrink windows.
+func resizeAllWindowsToClient(width, height int, reason string) {
 	if width <= 0 || height <= 0 {
 		return
 	}
-	out, err := exec.Command("tmux", "list-windows", "-F", "#{window_id}").Output()
+	out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}").Output()
 	if err != nil {
+		logEvent("RESIZE_ALL_WINDOWS_ERR reason=%s err=%v", reason, err)
 		return
 	}
+	count := 0
 	for _, wid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		wid = strings.TrimSpace(wid)
 		if wid == "" {
 			continue
 		}
-		exec.Command("tmux", "resize-window", "-x", fmt.Sprintf("%d", width), "-y", fmt.Sprintf("%d", height), "-t", wid).Run()
+		if err := exec.Command("tmux", "resize-window", "-x", fmt.Sprintf("%d", width), "-y", fmt.Sprintf("%d", height), "-t", wid).Run(); err == nil {
+			count++
+		}
 	}
+	logEvent("RESIZE_ALL_WINDOWS reason=%s size=%dx%d count=%d", reason, width, height, count)
 }
 
 // resetTerminalModes sends escape sequences to disable mouse tracking modes
@@ -1587,9 +1816,13 @@ func main() {
 				result = nil
 			}
 		}()
-		// Route header clients to pane header renderer
-		if strings.HasPrefix(clientID, "header:") {
+		// Route window-header clients (window-header:@<id>) to the window header renderer
+		if strings.HasPrefix(clientID, "window-header:") {
 			return coordinator.RenderHeaderForClient(clientID, width, height)
+		}
+		// Route pane-header clients (header:%<paneID>) to the per-pane title strip renderer
+		if strings.HasPrefix(clientID, "header:") {
+			return coordinator.RenderPaneHeaderForClient(clientID, width, height)
 		}
 		renderClientID := clientID
 		if idx := strings.Index(clientID, "#web-"); idx > 0 {
@@ -1684,9 +1917,21 @@ func main() {
 	}
 	coordinator.OnSyncSidebarClientWidths = func(newWidth int) {
 		for _, id := range server.GetAllClientIDs() {
-			if !strings.HasPrefix(id, "header:") {
+			if !strings.HasPrefix(id, "window-header:") {
 				server.UpdateClientWidth(id, newWidth)
 			}
+		}
+	}
+	coordinator.OnRefreshClient = func(clientID string) {
+		server.SendRenderToClient(clientID)
+	}
+	coordinator.OnRefreshLayout = func() {
+		// Non-blocking poke: the main loop will pick this up and run
+		// doPaneLayoutOps next tick. Used on profile transitions so the
+		// window-header topology follows the active client's form factor.
+		select {
+		case refreshCh <- struct{}{}:
+		default:
 		}
 	}
 
@@ -1724,6 +1969,14 @@ func main() {
 		for range clientResizedCh {
 			logEvent("SIGNAL_USR2_CLIENT_RESIZED session=%s", *sessionID)
 			go func() {
+				// Elect the single active client and lock every window to its
+				// dims. Inactive clients (e.g. a backgrounded phone) must not
+				// shrink windows via tmux's `window-size latest` auto-reflow.
+				if w, h, tty, _, ok := activeClientGeometry(); ok {
+					coordinator.SetActiveClientWidth(w)
+					resizeAllWindowsToClient(w, h, "sigusr2")
+					logEvent("SIGUSR2_ACTIVE_CLIENT tty=%s size=%dx%d", tty, w, h)
+				}
 				syncClientSizesFromTmux(server, coordinator, "sigusr2")
 				activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 				logEvent("WIDTH_SYNC_REQUEST trigger=sigusr2 active=%s force=1", activeWin)
@@ -1899,6 +2152,7 @@ func main() {
 		lastWindowsHash := ""
 		lastGitState := ""
 		lastClientGeometry := ""
+		lastResizeKey := "" // tty+WxH only: drives resizeAllWindowsToClient dedupe
 		activeWindowID := "" // Track active window for optimized rendering
 
 		lastWindowCount := 0 // Track window count for close detection
@@ -1934,7 +2188,7 @@ func main() {
 		paneLayoutCooldown := 150 * time.Millisecond
 
 		// Restore saved layouts once at startup, before the main event loop.
-		// Must not run inside doPaneLayoutOps: spawnPaneHeaders sets @tabby_spawning=1
+		// Must not run inside doPaneLayoutOps: spawnWindowHeaders sets @tabby_spawning=1
 		// which blocks layout updates to @tabby_layout_<windowID>,
 		// so any stale layout written after the split would persist and be applied
 		// by tabby-hook preserve-pane-ratios, corrupting the live pane geometry.
@@ -1961,7 +2215,9 @@ func main() {
 			logEvent("PANE_LAYOUT_START")
 			customBorder := coordinator.GetConfig().PaneHeader.CustomBorder
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
-			spawnPaneHeaders(server, *sessionID, customBorder, coordinator.desiredPaneHeaderHeight(), coordinator.GetWindows())
+			windows := coordinator.GetWindows()
+			spawnWindowHeaders(server, *sessionID, customBorder, coordinator.desiredWindowHeaderHeight(), windows, coordinator)
+			spawnPaneHeaders(server, *sessionID, customBorder, coordinator.desiredPaneHeaderHeight(), windows)
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
 			cleanupOrphanedHeaders(customBorder, coordinator, activeWindowID)
 			// NOTE: updateHeaderBorderStyles is NOT called here to avoid
@@ -2075,6 +2331,13 @@ func main() {
 						// Second broadcast only if structure changed (new/removed renderers)
 						structureChanged := spawnedRenderer || currentHash != lastWindowsHash
 						if structureChanged {
+							// New window just appeared — immediately lock every
+							// window to the elected active client's dims so
+							// tmux's `window-size latest` can't momentarily
+							// reflow the new window to an inactive client size.
+							if w, h, _, _, ok := activeClientGeometry(); ok {
+								resizeAllWindowsToClient(w, h, "structure_refresh")
+							}
 							syncClientSizesFromTmux(server, coordinator, "structure_refresh")
 							server.BroadcastRender()
 						}
@@ -2140,6 +2403,15 @@ func main() {
 					lastClientGeometry = geomKey
 					logEvent("CLIENT_GEOMETRY_CHANGE tty=%s size=%dx%d activity=%d", tty, w, h, activity)
 					coordinator.SetActiveClientWidth(w)
+					// Authoritatively lock all windows to the elected active
+					// client's dims BEFORE syncing pane sizes, otherwise tmux
+					// may return stale mid-reflow pane dims. Dedupe on tty+dims
+					// so activity-only bumps don't cause a resize storm.
+					resizeKey := fmt.Sprintf("%s:%dx%d", tty, w, h)
+					if resizeKey != lastResizeKey {
+						lastResizeKey = resizeKey
+						resizeAllWindowsToClient(w, h, "geometry_tick")
+					}
 					syncClientSizesFromTmux(server, coordinator, "geometry_tick")
 					activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 					logEvent("WIDTH_SYNC_REQUEST trigger=geometry_tick active=%s force=1", activeWin)

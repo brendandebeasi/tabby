@@ -92,7 +92,15 @@ func main() {
 			if w := readTmuxOptionInt("@tabby_sidebar_width"); w > 0 {
 				globalWidth = w
 			}
+			// Match RunWidthSync / boundedSidebarWidthForWindow semantics:
+			// the tier width is a cap, the global is the "requested" width.
+			// Without this cap, the sidebar spawns at tier (e.g. 25) and is
+			// then immediately resized to globalWidth (e.g. 15), producing a
+			// visible one-frame jump on window creation.
 			width := tmuxpkg.ResponsiveSidebarWidth(newWindowID, globalWidth)
+			if globalWidth > 0 && globalWidth < width {
+				width = globalWidth
+			}
 
 			position := readTmuxOption("@tabby_sidebar_position")
 			if position == "" {
