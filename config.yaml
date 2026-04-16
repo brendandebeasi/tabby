@@ -49,8 +49,8 @@ bindings:
   next_tab: "prefix + n"
   prev_tab: "prefix + p"
 
-  next_window_global: "cmd+shift+]"
-  prev_window_global: "cmd+shift+["
+  next_window_global: "cmd+]"
+  prev_window_global: "cmd+["
 
   new_window_global: "cmd+shift+n"
   kill_window_global: "cmd+shift+w"

@@ -211,8 +211,13 @@ To use `Cmd+Shift+\` as the trigger, your terminal must send the CSI u sequence 
 
 **Ghostty** — add to `~/.config/ghostty/config`:
 ```
-super+shift+backslash=text:\x1b[92;6u
+keybind = super+shift+backslash=text:\x1b[92;6u
+keybind = cmd+left_bracket=text:\x1b{
+keybind = cmd+right_bracket=text:\x1b}
+keybind = cmd+grave_accent=text:\x1b`
 ```
+
+The `cmd+[` / `cmd+]` bindings enable window navigation (`prev_window` / `next_window`). `cmd+shift+[/]` is left free for Ghostty's native tab switching. The `cmd+`` ` `` binding enables pane cycling (`swap_pane`); it overrides macOS's "cycle same-app windows" shortcut within Ghostty.
 
 On macOS, `Cmd+Shift+\` is bound to "Show All Tabs" by default. Disable it:
 ```bash
