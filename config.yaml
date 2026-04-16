@@ -77,7 +77,7 @@ sidebar:
   close_button: false
   sort_by: "group"  # "group" or "index"
   hide_predefined_colors: false  # Hide predefined color palette in context menus (keep Custom + Reset)
-  debug: true  # Enable debug logging to /tmp/tabby-debug.log
+  debug: false  # Enable debug logging to /tmp/tabby-debug.log
   line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
   mobile_max_percent: 15
   mobile_min_content_cols: 40
@@ -89,21 +89,21 @@ sidebar:
   # Theme presets: rose-pine-dawn, rose-pine, rose-pine-moon, catppuccin-mocha,
   #   catppuccin-latte, dracula, nord, solarized-dark, solarized-light,
   #   gruvbox-dark, gruvbox-light, tokyo-night, one-dark, dark
-  theme: rose-pine-dawn  # Light theme matching Ghostty
+  # Light terminal (e.g. Ghostty with light background): rose-pine-dawn
+  # Dark terminal: dark, rose-pine, catppuccin-mocha, tokyo-night, etc.
+  theme: rose-pine-dawn
   colors:
-    inactive_fg: "#f0f0f0"          # Inactive window text (very close to white)
-    pane_fg: "#f5f5f5"              # Pane text (almost white)
+    # Colors below are only needed to override the theme preset.
+    # Most theme colors are derived automatically — only set values here
+    # when you want to deviate from the chosen theme.
     disclosure_expanded: "⊟"        # Expanded state icon (boxed minus)
     disclosure_collapsed: "⊞"       # Collapsed state icon (boxed plus)
     active_indicator_frames: ["▶", "▶", "▶", "▶", "▶", " "]
-    active_indicator_fg: "#000000"
-    active_indicator_bg: "transparent"
     tree_branch: "├─"               # Branch connector
     tree_branch_last: "└─"          # Last branch connector
-     tree_connector: "─"             # Horizontal connector
-     tree_connector_panes: "┬"       # Connector when has panes
-     tree_continue: "│"              # Vertical continuation
-     # Colors auto-derived from terminal theme detection
+    tree_connector: "─"             # Horizontal connector
+    tree_connector_panes: "┬"       # Connector when has panes
+    tree_continue: "│"              # Vertical continuation
 
 pane_header:
   active_fg: "#ffffff"
@@ -203,7 +203,7 @@ widgets:
     show_cpu: true
     show_memory: true
     show_battery: true
-    style: "nerd"          # nerd, emoji, ascii, minimal
+    style: "emoji"         # nerd, emoji, ascii, minimal
     bar_style: "block"     # block, braille, dots, ascii
     bar_width: 5
     cpu_fg: "#aaaaaa"

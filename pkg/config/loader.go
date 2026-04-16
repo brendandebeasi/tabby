@@ -114,6 +114,14 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// DefaultConfig returns a fully-defaulted Config for use when no config file exists.
+// All fields have sensible values applied via applyDefaults.
+func DefaultConfig() *Config {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	return cfg
+}
+
 // SaveConfig writes the config to the specified path
 func SaveConfig(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
@@ -214,6 +222,49 @@ func DefaultGroupWithIndex(name string, groupIndex int) Group {
 }
 
 func applyDefaults(cfg *Config) {
+	// Top-level layout defaults
+	if cfg.Position == "" {
+		cfg.Position = "top"
+	}
+	if cfg.Height == 0 {
+		cfg.Height = 2
+	}
+
+	// Overflow defaults
+	if cfg.Overflow.Mode == "" {
+		cfg.Overflow.Mode = "scroll"
+	}
+	if cfg.Overflow.Indicator == "" {
+		cfg.Overflow.Indicator = "›"
+	}
+
+	// Sidebar theme and layout defaults
+	if cfg.Sidebar.Theme == "" {
+		cfg.Sidebar.Theme = "dark"
+	}
+	if cfg.Sidebar.SortBy == "" {
+		cfg.Sidebar.SortBy = "group"
+	}
+
+	// Pane header defaults
+	if cfg.PaneHeader.BorderLines == "" {
+		cfg.PaneHeader.BorderLines = "heavy"
+	}
+	if cfg.PaneHeader.DimOpacity == 0 {
+		cfg.PaneHeader.DimOpacity = 0.7
+	}
+
+	// Busy detection defaults
+	if cfg.BusyDetection.IdleTimeout == 0 {
+		cfg.BusyDetection.IdleTimeout = 10
+	}
+
+	// Default group: ensure at least one catch-all group exists
+	if len(cfg.Groups) == 0 {
+		cfg.Groups = []Group{DefaultGroupWithIndex("Default", 0)}
+		cfg.Groups[0].Pattern = ".*"
+	}
+
 	// Apply icon style preset if set (before individual icon defaults)
 	applyIconStyleDefaults(cfg)
 

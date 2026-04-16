@@ -994,7 +994,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 
 	cfg, err := config.LoadConfig(config.DefaultConfigPath())
 	if err != nil {
-		cfg = &config.Config{}
+		cfg = config.DefaultConfig()
 	}
 
 	// Set up debug logging from config if enabled
