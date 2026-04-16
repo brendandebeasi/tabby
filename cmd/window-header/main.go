@@ -221,6 +221,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clientID = msg.clientID
 		m.connected = true
 		debugLog.Printf("Connected as %s", m.clientID)
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("CONNECTED client=%s window=%s pane=%s", m.clientID, *windowID, m.headerPaneID)
+		}
 
 		// Start receiver goroutine
 		go m.receiveLoop()
@@ -232,6 +235,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case disconnectedMsg:
 		m.connected = false
 		debugLog.Printf("Disconnected from daemon")
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("DISCONNECTED client=%s window=%s pane=%s", m.clientID, *windowID, m.headerPaneID)
+		}
 		// Try to reconnect after a delay
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
 			return connectCmd()()
@@ -450,6 +456,9 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSim
 			debugLog.Printf("  RESOLVED: (no match)")
 		}
 	}
+	if inputLog != nil && isInputLogEnabled() {
+		inputLog.Printf("CLICK_RESOLVE client=%s seq=%d button=%v x=%d y=%d action=%s target=%s window=%s pane=%s", m.clientID, m.sequenceNum, button, x, y, resolvedAction, resolvedTarget, *windowID, m.headerPaneID)
+	}
 
 	// For window-header, target reference is the window ID.
 	paneIDStr := *windowID
@@ -563,6 +572,9 @@ func (m *rendererModel) receiveLoop() {
 // Send methods
 func (m *rendererModel) sendMessage(msg daemon.Message) {
 	if m.conn == nil {
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("SEND_DROP reason=nil_conn type=%s client=%s", msg.Type, m.clientID)
+		}
 		return
 	}
 	m.sendMu.Lock()
@@ -570,10 +582,36 @@ func (m *rendererModel) sendMessage(msg daemon.Message) {
 
 	data, err := json.Marshal(msg)
 	if err != nil {
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("SEND_DROP reason=marshal type=%s client=%s err=%v", msg.Type, m.clientID, err)
+		}
 		return
 	}
-	m.conn.SetWriteDeadline(time.Now().Add(time.Second))
-	m.conn.Write(append(data, '\n'))
+	deadline := time.Now().Add(time.Second)
+	if err := m.conn.SetWriteDeadline(deadline); err != nil {
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("SEND_WARN reason=deadline type=%s client=%s err=%v", msg.Type, m.clientID, err)
+		}
+	}
+	if inputLog != nil && isInputLogEnabled() {
+		inputLog.Printf("SEND_MSG type=%s client=%s bytes=%d", msg.Type, m.clientID, len(data)+1)
+	}
+	if _, err := m.conn.Write(append(data, '\n')); err != nil {
+		if inputLog != nil && isInputLogEnabled() {
+			inputLog.Printf("SEND_ERR type=%s client=%s err=%v", msg.Type, m.clientID, err)
+		}
+		if *debugMode {
+			debugLog.Printf("sendMessage write failed type=%s client=%s err=%v", msg.Type, m.clientID, err)
+		}
+		return
+	}
+	if inputLog != nil && isInputLogEnabled() {
+		if msg.Type == daemon.MsgInput {
+			if payload, ok := msg.Payload.(*daemon.InputPayload); ok && payload != nil {
+				inputLog.Printf("SEND_INPUT_OK client=%s action=%s resolved=%s target=%s x=%d y=%d pane=%s sourcePane=%s", m.clientID, payload.Action, payload.ResolvedAction, payload.ResolvedTarget, payload.MouseX, payload.MouseY, payload.PaneID, payload.SourcePaneID)
+			}
+		}
+	}
 }
 
 func (m *rendererModel) sendSubscribe() {

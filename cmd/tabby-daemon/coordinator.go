@@ -103,6 +103,125 @@ func tmuxOutputTrimmed(args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func clientTTYForWindow(windowID string) string {
+	windowID = strings.TrimSpace(windowID)
+	if windowID == "" {
+		return ""
+	}
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}\x1f#{window_id}\x1f#{client_activity}").Output()
+	if err != nil {
+		return ""
+	}
+	bestTTY := ""
+	bestActivity := int64(-1)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\x1f")
+		if len(parts) < 2 {
+			continue
+		}
+		tty := strings.TrimSpace(parts[0])
+		win := strings.TrimSpace(parts[1])
+		if tty == "" || win != windowID {
+			continue
+		}
+		activity := int64(0)
+		if len(parts) >= 3 {
+			if v, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64); err == nil {
+				activity = v
+			}
+		}
+		if activity > bestActivity {
+			bestActivity = activity
+			bestTTY = tty
+		}
+	}
+	return bestTTY
+}
+
+func tmuxClientWindowSnapshot() string {
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}=#{window_id}(#{client_flags})").Output()
+	if err != nil {
+		return ""
+	}
+	lines := make([]string, 0)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, ",")
+}
+
+func fallbackWindowHeaderAction(windowID string, mouseX int) string {
+	windowID = strings.TrimSpace(windowID)
+	if windowID == "" {
+		return ""
+	}
+	width := 0
+	if out, err := exec.Command("tmux", "display-message", "-p", "-t", windowID, "#{window_width}").Output(); err == nil {
+		width, _ = strconv.Atoi(strings.TrimSpace(string(out)))
+	}
+	if width <= 0 {
+		return ""
+	}
+	if mouseX < 0 {
+		mouseX = 0
+	}
+	if mouseX >= width {
+		mouseX = width - 1
+	}
+
+	const buttonCount = 5
+	gapW := 1
+	cellW := (width - gapW*(buttonCount-1)) / buttonCount
+	if cellW < 3 {
+		cellW = 3
+	}
+	used := cellW*buttonCount + gapW*(buttonCount-1)
+	if used > width {
+		gapW = 0
+		cellW = width / buttonCount
+		if cellW < 1 {
+			cellW = 1
+		}
+		used = cellW * buttonCount
+		if used > width {
+			used = width
+		}
+	}
+
+	p1 := cellW
+	h0 := p1 + gapW
+	h1 := h0 + cellW
+	nw0 := h1 + gapW
+	nw1 := nw0 + cellW
+	cl0 := nw1 + gapW
+	cl1 := cl0 + cellW
+	n0 := cl1 + gapW
+	n1 := n0 + cellW
+
+	switch {
+	case mouseX >= 0 && mouseX < p1:
+		return "window_header:prev_window"
+	case mouseX >= h0 && mouseX < h1:
+		return "window_header:hamburger"
+	case mouseX >= nw0 && mouseX < nw1:
+		return "window_header:new_window"
+	case mouseX >= cl0 && mouseX < cl1:
+		return "window_header:close_window"
+	case mouseX >= n0 && mouseX < n1:
+		return "window_header:next_window"
+	default:
+		return ""
+	}
+}
+
 func windowFocusRestoreTarget(activeWindowID, pendingNewWindowID string) string {
 	if pendingNewWindowID == "" || pendingNewWindowID == activeWindowID {
 		return ""
@@ -110,13 +229,56 @@ func windowFocusRestoreTarget(activeWindowID, pendingNewWindowID string) string 
 	return pendingNewWindowID
 }
 
-func preferredWindowFocusTarget(activeWindowID string) string {
-	return windowFocusRestoreTarget(activeWindowID, tmuxOutputTrimmed("show-option", "-gqv", "@tabby_new_window_id"))
+func preferredWindowFocusTarget(c *Coordinator, activeWindowID string) string {
+	if c == nil {
+		return ""
+	}
+	status := c.NewWindowStatus()
+	if status.State != "ready" {
+		if status.WindowID != "" {
+			logEvent("FOCUS_TARGET_SKIP pending=%s active=%s state=%s reason=not_ready", status.WindowID, activeWindowID, status.State)
+		}
+		return ""
+	}
+	target := windowFocusRestoreTarget(activeWindowID, status.WindowID)
+	reason := "pending_differs"
+	if status.WindowID == "" {
+		reason = "pending_empty"
+	} else if status.WindowID == activeWindowID {
+		reason = "pending_equals_active"
+	}
+	if status.WindowID != "" {
+		logEvent("FOCUS_TARGET_CHECK pending=%s active=%s result=%s state=%s reason=%s age_ms=%d", status.WindowID, activeWindowID, target, status.State, reason, time.Since(status.Created).Milliseconds())
+	}
+	return target
+}
+
+type NewWindowStatus struct {
+	State      string
+	WindowID   string
+	SessionID  string
+	Group      string
+	WorkingDir string
+	Created    time.Time
+}
+
+type WindowTransition struct {
+	TargetWindowID string
+	Reason         string
+	Source         string
+	StartedAt      time.Time
 }
 
 func restoreWindowFocus(windowID string) {
 	if windowID == "" {
 		return
+	}
+	if globalCoordinator != nil {
+		if err := globalCoordinator.SelectWindow(windowID, "restore_window_focus", "refresh_windows"); err == nil {
+			return
+		} else {
+			logEvent("RESTORE_WINDOW_FOCUS_ERR target=%s err=%v", windowID, err)
+		}
 	}
 	_ = tmuxRun("select-window", "-t", windowID)
 }
@@ -280,7 +442,10 @@ type Coordinator struct {
 
 	// Sidebar visibility state (true while the sidebar pane is stashed in a
 	// holding window via break-pane; false when it is live in its parent window).
-	sidebarHidden bool
+	sidebarHidden    bool
+	newWindowMu      sync.RWMutex
+	newWindowStatus  NewWindowStatus
+	windowTransition WindowTransition
 
 	// Pet widget layout (for custom click detection)
 	petLayout petWidgetLayout
@@ -350,6 +515,53 @@ func (c *Coordinator) GetWindows() []tmux.Window {
 	result := make([]tmux.Window, len(c.windows))
 	copy(result, c.windows)
 	return result
+}
+
+func (c *Coordinator) NewWindowStatus() NewWindowStatus {
+	c.newWindowMu.RLock()
+	defer c.newWindowMu.RUnlock()
+	status := c.newWindowStatus
+	if status.State == "" {
+		status.State = "none"
+	}
+	return status
+}
+
+func (c *Coordinator) SetNewWindowInFlight(group, workingDir string) {
+	c.newWindowMu.Lock()
+	c.newWindowStatus = NewWindowStatus{
+		State:      "inFlight",
+		SessionID:  c.sessionID,
+		Group:      strings.TrimSpace(group),
+		WorkingDir: strings.TrimSpace(workingDir),
+		Created:    time.Now(),
+	}
+	c.newWindowMu.Unlock()
+	logEvent("NEW_WINDOW_INFLIGHT session=%s group=%s path=%s", c.sessionID, strings.TrimSpace(group), strings.TrimSpace(workingDir))
+}
+
+func (c *Coordinator) SetNewWindowReady(windowID string) {
+	windowID = strings.TrimSpace(windowID)
+	c.newWindowMu.Lock()
+	prev := c.newWindowStatus
+	c.newWindowStatus = NewWindowStatus{
+		State:      "ready",
+		WindowID:   windowID,
+		SessionID:  c.sessionID,
+		Group:      prev.Group,
+		WorkingDir: prev.WorkingDir,
+		Created:    time.Now(),
+	}
+	c.newWindowMu.Unlock()
+	logEvent("NEW_WINDOW_READY windowID=%s group=%s", windowID, prev.Group)
+}
+
+func (c *Coordinator) ClearNewWindowStatus() {
+	c.newWindowMu.Lock()
+	prev := c.newWindowStatus
+	c.newWindowStatus = NewWindowStatus{State: "none"}
+	c.newWindowMu.Unlock()
+	logEvent("NEW_WINDOW_CLEAR prev_state=%s windowID=%s", prev.State, prev.WindowID)
 }
 
 func (c *Coordinator) UpdateClientSizeSnapshot(clientID string, width int, height int) {
@@ -1371,24 +1583,17 @@ func (c *Coordinator) PreserveWindowNames() {
 	}
 }
 
-// ApplyNewWindowGroup reads @tabby_new_window_group and @tabby_new_window_id,
-// applies the saved group to the new window, then clears the option.
-// Replaces scripts/apply_new_window_group.sh.
+// ApplyNewWindowGroup applies in-memory new-window group metadata to the
+// in-flight/ready window. Replaces scripts/apply_new_window_group.sh.
 func (c *Coordinator) ApplyNewWindowGroup() {
-	savedGroup := ""
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_group").Output(); err == nil {
-		savedGroup = strings.TrimSpace(string(out))
+	status := c.NewWindowStatus()
+	if status.State != "ready" || status.WindowID == "" {
+		return
 	}
-	newWindowID := ""
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output(); err == nil {
-		newWindowID = strings.TrimSpace(string(out))
+	if status.Group == "" || status.Group == "Default" {
+		return
 	}
-
-	if savedGroup != "" && newWindowID != "" {
-		exec.Command("tmux", "set-window-option", "-t", newWindowID, "@tabby_group", savedGroup).Run()
-	}
-	// Always clear the pending group option
-	exec.Command("tmux", "set-option", "-gu", "@tabby_new_window_group").Run()
+	exec.Command("tmux", "set-window-option", "-t", status.WindowID, "@tabby_group", status.Group).Run()
 }
 
 // EnforceStatusExclusivity ensures the tmux status bar is off when the sidebar
@@ -1492,6 +1697,77 @@ func (c *Coordinator) HandleWindowSelect(activeWindowID string) {
 	}
 }
 
+func (c *Coordinator) BeginTransition(targetWindowID, reason, source string) error {
+	targetWindowID = strings.TrimSpace(targetWindowID)
+	reason = strings.TrimSpace(reason)
+	source = strings.TrimSpace(source)
+	if targetWindowID == "" {
+		return fmt.Errorf("begin transition: target window ID is required")
+	}
+	if reason == "" {
+		reason = "unspecified"
+	}
+	if source == "" {
+		source = "unknown"
+	}
+
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.windowTransition.TargetWindowID != "" {
+		return fmt.Errorf("begin transition: transition already in progress target=%s reason=%s source=%s", c.windowTransition.TargetWindowID, c.windowTransition.Reason, c.windowTransition.Source)
+	}
+	c.windowTransition = WindowTransition{
+		TargetWindowID: targetWindowID,
+		Reason:         reason,
+		Source:         source,
+		StartedAt:      time.Now(),
+	}
+	return nil
+}
+
+func (c *Coordinator) CompleteTransition() {
+	c.stateMu.Lock()
+	c.windowTransition = WindowTransition{}
+	c.stateMu.Unlock()
+}
+
+func (c *Coordinator) IsTransitionInProgress() bool {
+	c.stateMu.RLock()
+	inProgress := c.windowTransition.TargetWindowID != ""
+	c.stateMu.RUnlock()
+	return inProgress
+}
+
+func (c *Coordinator) SelectWindow(targetWindowID, reason, source string) error {
+	targetWindowID = strings.TrimSpace(targetWindowID)
+	reason = strings.TrimSpace(reason)
+	source = strings.TrimSpace(source)
+
+	if targetWindowID == "" {
+		return fmt.Errorf("select window: target window ID is required")
+	}
+
+	if err := c.BeginTransition(targetWindowID, reason, source); err != nil {
+		return fmt.Errorf("select window: %w", err)
+	}
+	defer c.CompleteTransition()
+
+	if err := tmuxRun("select-window", "-t", targetWindowID); err != nil {
+		if reason == "" {
+			reason = "unspecified"
+		}
+		if source == "" {
+			source = "unknown"
+		}
+		return fmt.Errorf("select window target=%s reason=%s source=%s: %w", targetWindowID, reason, source, err)
+	}
+
+	c.SetActiveWindowOptimistic(targetWindowID)
+	c.TrackWindowHistory(targetWindowID)
+	c.HandleWindowSelect(targetWindowID)
+	return nil
+}
+
 // SaveWindowLayouts saves the current layout string for each window to tmux
 // options (@tabby_layout_<WID>). Called on every signal_refresh after
 // RefreshWindows so that tabby-hook preserve-pane-ratios has fresh data.
@@ -1563,7 +1839,9 @@ func (c *Coordinator) SelectPreviousWindow() {
 	// Find first surviving window in history
 	for _, id := range history {
 		if existing[id] {
-			exec.Command("tmux", "select-window", "-t", id).Run()
+			if err := c.SelectWindow(id, "select_previous_window", "window_close"); err != nil {
+				logEvent("SELECT_PREVIOUS_WINDOW_ERR target=%s err=%v", id, err)
+			}
 			break
 		}
 	}
@@ -2106,7 +2384,7 @@ func (c *Coordinator) RefreshWindows() {
 	// (queued before a Cmd+[/] key press) triggers RefreshWindows, the
 	// activeWindowID captured inside will be the OLD window, and select-window
 	// jumps back to it. See: Tabby issue "meta+[/] sometimes skips back".
-	if focusTarget := preferredWindowFocusTarget(activeWindowID); focusTarget != "" {
+	if focusTarget := preferredWindowFocusTarget(c, activeWindowID); focusTarget != "" {
 		restoreWindowFocus(focusTarget)
 		logEvent("RESTORE_WINDOW_FOCUS target=%s active=%s", focusTarget, activeWindowID)
 	}
@@ -4421,13 +4699,25 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	}
 }
 
+// Profile transition debounce: during client resize animations (especially
+// phone connect), the active client width can change rapidly through many
+// intermediate values. We delay profile transitions by profileTransitionDelay
+// and cancel if the profile changes back, preventing stash/restore thrash.
+var (
+	profileTransitionMu    sync.Mutex
+	profileTransitionTimer *time.Timer
+	pendingProfile         string
+)
+
+const profileTransitionDelay = 750 * time.Millisecond
+
 // SetActiveClientWidth records the currently-focused physical tmux client's
 // terminal width (in cols). RunWidthSync caps sidebar targets against this so
 // that we never ask tmux for more cols than the active client can honor.
 //
-// When the width transitions across the phone/desktop boundary, we also
-// auto-expand the sidebar if it was hidden (so desktop users don't land in a
-// collapsed-to-1-col strip after switching back from their phone).
+// When the width transitions across the phone/desktop boundary, we schedule
+// a debounced profile transition to avoid reacting to intermediate sizes
+// during client resize animations.
 func (c *Coordinator) SetActiveClientWidth(w int) {
 	c.activeClientWidthMu.Lock()
 	prev := c.activeClientWidth
@@ -4436,31 +4726,86 @@ func (c *Coordinator) SetActiveClientWidth(w int) {
 
 	prevProfile := c.computeProfile(prev)
 	newProfile := c.computeProfile(w)
-	if prev > 0 && prevProfile != newProfile {
-		// Profile transition: kick the layout refresh so window-header panes
-		// get killed (desktop) or spawned (phone) to match the new form factor.
-		if c.OnRefreshLayout != nil {
-			go c.OnRefreshLayout()
+	// On initial boot (prev == 0), always fire the profile action so
+	// phone clients get their sidebar auto-stashed even though computeProfile(0)
+	// and computeProfile(<100) are both "phone".
+	if prevProfile != newProfile || prev == 0 {
+		status := c.NewWindowStatus()
+		if status.State != "none" {
+			logEvent("PROFILE_TRANSITION_SUPPRESSED prev=%s new=%s target=%s state=%s",
+				prevProfile, newProfile, status.WindowID, status.State)
+			return
 		}
-		if newProfile == "desktop" && sidebarIsStashed() {
+
+		profileTransitionMu.Lock()
+		if profileTransitionTimer != nil {
+			profileTransitionTimer.Stop()
+		}
+		pendingProfile = newProfile
+		logEvent("PROFILE_TRANSITION_SCHEDULED prev=%s new=%s delay=%dms",
+			prevProfile, newProfile, profileTransitionDelay.Milliseconds())
+		profileTransitionTimer = time.AfterFunc(profileTransitionDelay, func() {
+			profileTransitionMu.Lock()
+			target := pendingProfile
+			pendingProfile = ""
+			profileTransitionTimer = nil
+			profileTransitionMu.Unlock()
+
+			currentProfile := c.ActiveClientProfile()
+			if target != currentProfile {
+				logEvent("PROFILE_TRANSITION_STALE scheduled=%s current=%s action=skip", target, currentProfile)
+				return
+			}
+
+			logEvent("PROFILE_TRANSITION_FIRE target=%s", target)
+			c.executeProfileTransition(target)
+		})
+		profileTransitionMu.Unlock()
+	}
+}
+
+func (c *Coordinator) executeProfileTransition(newProfile string) {
+	if c.OnRefreshLayout != nil {
+		go c.OnRefreshLayout()
+	}
+
+	if newProfile == "desktop" && sidebarIsStashed() {
+		narrow := hasNarrowClient()
+		logEvent("PROFILE_TRANSITION_DESKTOP_STASHED new=%s hasNarrow=%v sidebarHidden=%v",
+			newProfile, narrow, c.sidebarHidden)
+		if narrow {
+			logEvent("PROFILE_TRANSITION_SKIP_RESTORE reason=phone_client_still_attached")
+		} else {
 			c.sidebarHidden = false
 			go func() {
 				c.restoreSidebarPanes()
 				coordinatorDebugLog.Printf("profile transition phone->desktop: auto-restored stashed sidebars")
 			}()
 		}
-		if newProfile == "phone" && !sidebarIsStashed() {
-			// On phone there is no room for a sidebar — stash it so only the
-			// window-header + content pane remain. The renderer process stays
-			// alive in the holding window and is join-pane'd back on the next
-			// transition to desktop.
-			c.sidebarHidden = true
-			go func() {
-				hideSidebarPanes()
-				coordinatorDebugLog.Printf("profile transition desktop->phone: auto-stashed sidebars")
-			}()
-		}
 	}
+	if newProfile == "phone" && !sidebarIsStashed() {
+		c.sidebarHidden = true
+		go func() {
+			hideSidebarPanes()
+			coordinatorDebugLog.Printf("profile transition desktop->phone: auto-stashed sidebars")
+		}()
+	}
+}
+
+// hasNarrowClient checks if the ACTIVE tmux client has a phone-sized width.
+// Uses activeClientGeometry() to determine the true active client, not just
+// any attached client. This prevents spurious sidebar restoration bugs when
+// both phone and desktop clients are attached.
+func hasNarrowClient() bool {
+	width, _, tty, _, ok := activeClientGeometry()
+	if !ok {
+		logEvent("HASNARROW_CLIENT_NO_ACTIVE_CLIENT")
+		return false
+	}
+
+	isNarrow := width > 0 && width < 100
+	logEvent("HASNARROW_CLIENT_ACTIVE tty=%s width=%d narrow=%v", tty, width, isNarrow)
+	return isNarrow
 }
 
 // sidebarStashWindowPrefix is the tmux window-name prefix used to park sidebar
@@ -4610,26 +4955,54 @@ func (c *Coordinator) restoreSidebarPanes() {
 // drops _tabby_stash_ windows) so we never land on a sidebar holding window.
 // Wraps around at the ends.
 func (c *Coordinator) selectNeighborWindow(delta int) {
+	c.selectNeighborWindowFrom("", delta)
+}
+
+func (c *Coordinator) selectNeighborWindowFrom(currentWindowID string, delta int) {
 	c.stateMu.RLock()
 	wins := make([]string, 0, len(c.windows))
+	active := ""
 	for _, w := range c.windows {
 		if strings.HasPrefix(w.Name, sidebarStashWindowPrefix) {
 			continue
 		}
 		wins = append(wins, w.ID)
+		if w.Active {
+			active = w.ID
+		}
 	}
 	c.stateMu.RUnlock()
 
 	if len(wins) == 0 {
+		logEvent("WINDOW_NAV_SKIP reason=no_windows delta=%d", delta)
 		return
 	}
 	if len(wins) == 1 {
 		// Nothing to cycle to.
+		logEvent("WINDOW_NAV_SKIP reason=single_window delta=%d only=%s", delta, wins[0])
 		return
 	}
 
-	activeOut, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
-	active := strings.TrimSpace(string(activeOut))
+	activeTTY := strings.TrimSpace(clientTTYForWindow(currentWindowID))
+	if activeTTY == "" {
+		if _, _, tty, _, ok := activeClientGeometry(); ok {
+			activeTTY = strings.TrimSpace(tty)
+		}
+	}
+
+	if strings.TrimSpace(currentWindowID) != "" {
+		active = strings.TrimSpace(currentWindowID)
+	}
+
+	if active == "" {
+		args := []string{"display-message"}
+		if activeTTY != "" {
+			args = append(args, "-c", activeTTY)
+		}
+		args = append(args, "-p", "#{window_id}")
+		activeOut, _ := exec.Command("tmux", args...).Output()
+		active = strings.TrimSpace(string(activeOut))
+	}
 
 	idx := -1
 	for i, id := range wins {
@@ -4641,14 +5014,23 @@ func (c *Coordinator) selectNeighborWindow(delta int) {
 	if idx == -1 {
 		// Active window not in filtered list (e.g. tmux placed us on a stash
 		// window). Jump to the first real window instead.
+		logEvent("WINDOW_NAV_FALLBACK reason=active_not_in_filtered active=%s delta=%d candidates=%v", active, delta, wins)
 		idx = 0
 	} else {
 		idx = (idx + delta + len(wins)) % len(wins)
 	}
 	target := wins[idx]
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
-	defer cancel()
-	exec.CommandContext(ctx, "tmux", "select-window", "-t", target).Run()
+	logEvent("WINDOW_NAV_SELECT trigger=window_header delta=%d active=%s source=%s target=%s candidates=%v", delta, active, strings.TrimSpace(currentWindowID), target, wins)
+	before := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+	if err := c.SelectWindow(target, "window_neighbor_nav", "window_header"); err != nil {
+		logEvent("WINDOW_NAV_SELECT_ERR target=%s err=%v", target, err)
+		return
+	}
+	after := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+	logEvent("WINDOW_NAV_RESULT source=%s target=%s before=%s after=%s clients=%s", strings.TrimSpace(currentWindowID), target, before, after, tmuxClientWindowSnapshot())
+	if after != target {
+		logEvent("WINDOW_NAV_NOOP source=%s target=%s before=%s after=%s", strings.TrimSpace(currentWindowID), target, before, after)
+	}
 }
 
 // sidebarIsStashed reports whether any stash window exists.
@@ -4691,6 +5073,7 @@ func (c *Coordinator) recordWindowHeaderPress(windowID, action string) {
 	if windowID == "" || action == "" {
 		return
 	}
+	logEvent("WINDOW_HEADER_PRESS window=%s action=%s", windowID, action)
 	c.windowHeaderPressMu.Lock()
 	if c.windowHeaderPress == nil {
 		c.windowHeaderPress = make(map[string]windowHeaderPressEntry)
@@ -6186,10 +6569,10 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		fgColor := lipgloss.Color("230") // off-white
 		pressFg := lipgloss.Color("16")
 		pressBg := lipgloss.Color("255")
-		navBg := lipgloss.Color("24")      // blue
-		menuBg := lipgloss.Color("240")    // gray
-		newBg := lipgloss.Color("28")      // green
-		closeBg := lipgloss.Color("124")   // red
+		navBg := lipgloss.Color("24")    // blue
+		menuBg := lipgloss.Color("240")  // gray
+		newBg := lipgloss.Color("28")    // green
+		closeBg := lipgloss.Color("124") // red
 
 		prevStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(navBg)
 		hamStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(menuBg)
@@ -6949,7 +7332,16 @@ func (c *Coordinator) getAnimatedActiveIndicator(fallback string) string {
 }
 
 func (c *Coordinator) HasActiveIndicatorAnimation() bool {
-	return len(c.config.Sidebar.Colors.ActiveIndicatorFrames) > 1
+	frames := c.config.Sidebar.Colors.ActiveIndicatorFrames
+	if len(frames) < 2 {
+		return false
+	}
+	for i := 1; i < len(frames); i++ {
+		if frames[i] != frames[0] {
+			return true
+		}
+	}
+	return false
 }
 
 // getIndicatorIcon returns the icon for an indicator
@@ -10296,21 +10688,22 @@ func (c *Coordinator) openColorPicker(clientID, scope, target, title, currentCol
 // handleSemanticAction processes pre-resolved semantic actions from renderers
 // Returns true if window list refresh is needed
 func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputPayload) bool {
-	coordinatorDebugLog.Printf("=== SEMANTIC ACTION ===")
-	coordinatorDebugLog.Printf("  Client: %s", clientID)
-	coordinatorDebugLog.Printf("  Action: %s", input.ResolvedAction)
-	coordinatorDebugLog.Printf("  Target: %s", input.ResolvedTarget)
-	coordinatorDebugLog.Printf("  Button: %s", input.Button)
-	coordinatorDebugLog.Printf("  Mouse: X=%d Y=%d ViewportOffset=%d", input.MouseX, input.MouseY, input.ViewportOffset)
-	coordinatorDebugLog.Printf("  SequenceNum: %d", input.SequenceNum)
+	// Debug logging for semantic actions
+	coordinatorDebugLog.Printf("handleSemanticAction: clientID=%s resolvedAction=%s target=%s", clientID, input.ResolvedAction, input.ResolvedTarget)
 
-	// Handle right-click for context menus
-	// Show context menu for all right-clicks (regular, simulated, or touch mode)
-	if input.Button == "right" && input.ResolvedAction != "" {
-		coordinatorDebugLog.Printf("  -> Right-click: simulated=%v -> showing context menu",
-			input.IsSimulatedRightClick)
-		c.handleRightClick(clientID, input)
-		return true
+	if input.ResolvedAction == "" && strings.HasPrefix(clientID, "window-header:") && strings.EqualFold(strings.TrimSpace(input.Action), "press") {
+		windowID := strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+		if fallback := fallbackWindowHeaderAction(windowID, input.MouseX); fallback != "" {
+			input.ResolvedAction = fallback
+			input.ResolvedTarget = windowID
+			logEvent("WINDOW_HEADER_FALLBACK_RESOLVE client=%s x=%d y=%d action=%s", clientID, input.MouseX, input.MouseY, fallback)
+		}
+	}
+
+	if input.ResolvedAction == "" {
+		// No action resolved - stay in sidebar (don't steal focus)
+		coordinatorDebugLog.Printf("  -> No action resolved, staying in sidebar")
+		return false
 	}
 
 	// Custom pet widget click detection (bypasses BubbleZone)
@@ -10327,6 +10720,37 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// No action resolved - stay in sidebar (don't steal focus)
 		coordinatorDebugLog.Printf("  -> No action resolved, staying in sidebar")
 		return false
+	}
+
+	actionClass := "general"
+	if idx := strings.Index(input.ResolvedAction, ":"); idx > 0 {
+		actionClass = input.ResolvedAction[:idx]
+	}
+	logEvent("SEMANTIC_ACTION_CLASS class=%s action=%s client=%s target=%s", actionClass, input.ResolvedAction, clientID, input.ResolvedTarget)
+
+	if strings.HasPrefix(input.ResolvedAction, "window_header:") {
+		sourceWindow := strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+		activeWindow := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+		status := c.NewWindowStatus()
+		logEvent("WINDOW_HEADER_TRACE phase=entry action=%s client=%s source=%s active=%s state=%s ready=%s age_ms=%d", input.ResolvedAction, clientID, sourceWindow, activeWindow, status.State, status.WindowID, time.Since(status.Created).Milliseconds())
+		if status.State == "ready" && time.Since(status.Created) > 3*time.Second {
+			logEvent("WINDOW_HEADER_READY_TIMEOUT action=%s source=%s ready=%s age_ms=%d", input.ResolvedAction, sourceWindow, status.WindowID, time.Since(status.Created).Milliseconds())
+			c.ClearNewWindowStatus()
+			status = c.NewWindowStatus()
+		}
+		if status.State == "ready" && status.WindowID != "" {
+			activeWindow = status.WindowID
+		}
+		if sourceWindow != "" && activeWindow != "" && sourceWindow != activeWindow {
+			logEvent("WINDOW_HEADER_ACTION_REMAP action=%s source=%s active=%s state=%s ready=%s", input.ResolvedAction, sourceWindow, activeWindow, status.State, status.WindowID)
+			if status.State == "ready" {
+				logEvent("WINDOW_HEADER_REMAP_CLEAR_READY source=%s active=%s", sourceWindow, activeWindow)
+				c.ClearNewWindowStatus()
+			}
+			clientID = "window-header:" + activeWindow
+			input.ResolvedTarget = activeWindow
+			logEvent("WINDOW_HEADER_TRACE phase=remap action=%s remapped_client=%s remapped_target=%s", input.ResolvedAction, clientID, input.ResolvedTarget)
+		}
 	}
 
 	switch input.ResolvedAction {
@@ -10355,12 +10779,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.lastWindowSelectMu.Unlock()
 		logEvent("SELECT_WINDOW client=%s raw=%s target=%s", clientID, rawTarget, targetWindow)
 
-		selectCtx, selectCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		exec.CommandContext(selectCtx, "tmux", "select-window", "-t", targetWindow).Run()
-		selectCancel()
-		// Optimistic: immediately flip active window so the next BroadcastRender
-		// (triggered by refreshCh) renders the TABBY header with the correct color.
-		c.SetActiveWindowOptimistic(targetWindow)
+		if err := c.SelectWindow(targetWindow, "semantic_select_window", clientID); err != nil {
+			logEvent("SELECT_WINDOW_ERR client=%s raw=%s target=%s err=%v", clientID, rawTarget, targetWindow, err)
+			return false
+		}
 
 		activeCtx, activeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		activeOut, activeErr := exec.CommandContext(activeCtx, "tmux", "display-message", "-p", "-t", targetWindow,
@@ -10574,7 +10996,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			windowID := strings.TrimSpace(string(out))
 			if windowID != "" {
 				// Select the window first, then the pane
-				exec.Command("tmux", "select-window", "-t", windowID).Run()
+				if err := c.SelectWindow(windowID, "semantic_select_pane_window", clientID); err != nil {
+					logEvent("SELECT_PANE_WINDOW_ERR pane=%s window=%s client=%s err=%v", paneID, windowID, clientID, err)
+					return false
+				}
 			}
 		}
 		exec.Command("tmux", "select-pane", "-t", paneID).Run()
@@ -10650,12 +11075,20 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "prev_window":
-		c.selectNeighborWindow(-1)
+		sourceWindowID := ""
+		if strings.HasPrefix(strings.TrimSpace(input.ResolvedTarget), "@") {
+			sourceWindowID = strings.TrimSpace(input.ResolvedTarget)
+		}
+		c.selectNeighborWindowFrom(sourceWindowID, -1)
 		focusContentPaneInActiveWindow()
 		return true
 
 	case "next_window":
-		c.selectNeighborWindow(+1)
+		sourceWindowID := ""
+		if strings.HasPrefix(strings.TrimSpace(input.ResolvedTarget), "@") {
+			sourceWindowID = strings.TrimSpace(input.ResolvedTarget)
+		}
+		c.selectNeighborWindowFrom(sourceWindowID, +1)
 		focusContentPaneInActiveWindow()
 		return true
 
@@ -10866,6 +11299,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Hamburger tapped on window header -> hide/show the inline sidebar by
 		// break-pane'ing it out to a stash window (keeping the renderer process
 		// alive), and join-pane'ing it back on the next tap.
+		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, strings.TrimPrefix(clientID, "window-header:"))
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:hamburger")
 		if sidebarIsStashed() {
 			c.sidebarHidden = false
@@ -10880,26 +11314,27 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return false
 
 	case "window_header:prev_window":
+		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, strings.TrimPrefix(clientID, "window-header:"))
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:prev_window")
-		c.selectNeighborWindow(-1)
+		c.selectNeighborWindowFrom(strings.TrimPrefix(clientID, "window-header:"), -1)
 		focusContentPaneInActiveWindow()
 		return true
 
 	case "window_header:next_window":
+		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, strings.TrimPrefix(clientID, "window-header:"))
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:next_window")
-		c.selectNeighborWindow(+1)
+		c.selectNeighborWindowFrom(strings.TrimPrefix(clientID, "window-header:"), +1)
 		focusContentPaneInActiveWindow()
 		return true
 
 	case "window_header:new_window":
+		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, strings.TrimPrefix(clientID, "window-header:"))
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:new_window")
-		ctxNew, cancelNew := context.WithTimeout(context.Background(), tmuxCmdTimeout)
-		defer cancelNew()
-		exec.CommandContext(ctxNew, "tmux", "new-window").Run()
-		focusContentPaneInActiveWindow()
+		c.createNewWindowInCurrentGroup(clientID)
 		return true
 
 	case "window_header:close_window":
+		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, input.ResolvedTarget)
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:close_window")
 		// Kill the target window (no confirmation, per plan).
 		// ResolvedTarget is the window ID.
@@ -11017,7 +11452,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		activeOut, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
 		activeID := strings.TrimSpace(string(activeOut))
 		if activeID == targetID && aboveID != "" {
-			exec.Command("tmux", "select-window", "-t", aboveID).Run()
+			if err := c.SelectWindow(aboveID, "kill_window_neighbor_preselect", "kill_window"); err != nil {
+				logEvent("KILL_WINDOW_PRESELECT_ERR target=%s neighbor=%s err=%v", targetID, aboveID, err)
+				return false
+			}
 		}
 		exec.Command("tmux", "set-option", "-g", "@tabby_close_select_window", "1").Run()
 		exec.Command("tmux", "set-option", "-g", "@tabby_close_select_index", windowIndex).Run()
@@ -11160,8 +11598,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		if !hasMain {
 			exec.Command("tmux", "kill-session", "-t", sessID).Run()
+			return true
 		}
-		return true
+		return false
 
 	case "delete_group":
 		name := input.ResolvedTarget
@@ -12134,6 +12573,18 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 		return
 	}
 
+	if strings.HasPrefix(item.Command, "tabby-new-window:") {
+		parts := strings.SplitN(item.Command, ":", 3)
+		if len(parts) == 3 {
+			groupBytes, gErr := base64.StdEncoding.DecodeString(parts[1])
+			pathBytes, pErr := base64.StdEncoding.DecodeString(parts[2])
+			if gErr == nil && pErr == nil {
+				c.createNewWindowWithOverrides(clientID, string(groupBytes), string(pathBytes))
+			}
+		}
+		return
+	}
+
 	// Execute the tmux command via temp file (handles complex quoting correctly)
 	executeTmuxCommand(item.Command)
 }
@@ -12687,15 +13138,12 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	}
 	coordinatorDebugLog.Printf("showGroupContextMenu: final path=%s", newWindowPath)
 
-	exe2, _ := os.Executable()
-	newWindowBin := filepath.Join(filepath.Dir(exe2), "new-window")
-	groupEsc := strings.ReplaceAll(group.Name, "'", "'\"'\"'")
-	pathEsc := strings.ReplaceAll(newWindowPath, "'", "'\"'\"'")
+	encodedGroup := base64.StdEncoding.EncodeToString([]byte(group.Name))
+	encodedPath := base64.StdEncoding.EncodeToString([]byte(newWindowPath))
+	newWindowCmd := fmt.Sprintf("tabby-new-window:%s:%s", encodedGroup, encodedPath)
 	if group.Name != "Default" {
-		newWindowCmd := fmt.Sprintf("set-option -g @tabby_new_window_group '%s' ; set-option -g @tabby_new_window_path '%s' ; run-shell '%s'", groupEsc, pathEsc, newWindowBin)
 		args = append(args, fmt.Sprintf("New %s Window", group.Name), "n", newWindowCmd)
 	} else {
-		newWindowCmd := fmt.Sprintf("set-option -g @tabby_new_window_group 'Default' ; set-option -g @tabby_new_window_path '%s' ; run-shell '%s'", pathEsc, newWindowBin)
 		args = append(args, "New Window", "n", newWindowCmd)
 	}
 
@@ -12857,14 +13305,13 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 		}
 	}
 
-	// Set override options that the new-window binary reads.
-	// These are cleared by the binary after use.
-	if currentGroup != "" && currentGroup != "Default" {
-		exec.Command("tmux", "set-option", "-g", "@tabby_new_window_group", currentGroup).Run()
-	}
-	if workingDir != "" {
-		exec.Command("tmux", "set-option", "-g", "@tabby_new_window_path", workingDir).Run()
-	}
+	c.createNewWindowWithOverrides(clientID, currentGroup, workingDir)
+}
+
+func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, workingDir string) {
+	logEvent("NEW_WINDOW_CREATE client=%s group=%s path=%s", clientID, currentGroup, workingDir)
+
+	c.SetNewWindowInFlight(currentGroup, workingDir)
 
 	// Find the new-window binary (sibling of this daemon binary)
 	newWindowBin := ""
@@ -12874,16 +13321,40 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 
 	if newWindowBin != "" {
 		if _, err := os.Stat(newWindowBin); err == nil {
-			// Atomic path: binary spawns sidebar before switching, no hook storm.
 			args := []string{"-session", c.sessionID}
+			sourceWindowID := ""
+			if strings.HasPrefix(clientID, "window-header:") {
+				sourceWindowID = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+			}
+			if sourceTTY := strings.TrimSpace(clientTTYForWindow(sourceWindowID)); sourceTTY != "" {
+				args = append(args, "-client-tty", sourceTTY)
+			}
+			if currentGroup != "" {
+				args = append(args, "-group", currentGroup)
+			}
+			if workingDir != "" {
+				args = append(args, "-path", workingDir)
+			}
+			if c.sidebarHidden {
+				args = append(args, "-no-sidebar")
+			}
 			logEvent("NEW_WINDOW_BINARY bin=%s session=%s group=%s", newWindowBin, c.sessionID, currentGroup)
-			if err := exec.Command(newWindowBin, args...).Run(); err != nil {
+			out, err := exec.Command(newWindowBin, args...).CombinedOutput()
+			if err != nil {
 				logEvent("NEW_WINDOW_BINARY_ERR err=%v (falling back to legacy)", err)
+				c.ClearNewWindowStatus()
 				// Fall through to legacy path below
 				newWindowBin = ""
 			} else {
-				lastNewWindowCreation = time.Now()
-				return
+				newID := strings.TrimSpace(string(out))
+				if newID == "" {
+					logEvent("NEW_WINDOW_BINARY_ERR err=empty_window_id (falling back to legacy)")
+					c.ClearNewWindowStatus()
+					newWindowBin = ""
+				} else {
+					c.SetNewWindowReady(newID)
+					return
+				}
 			}
 		}
 	}
@@ -12905,20 +13376,15 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 	}
 
 	if newWindowIDLegacy != "" {
-		exec.Command("tmux", "set-option", "-g", "@tabby_new_window_id", newWindowIDLegacy).Run()
-		exec.Command("tmux", "select-window", "-t", newWindowIDLegacy).Run()
-
-		go func(id string) {
-			time.Sleep(2 * time.Second)
-			if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output(); err == nil {
-				if strings.TrimSpace(string(out)) == id {
-					exec.Command("tmux", "set-option", "-gu", "@tabby_new_window_id").Run()
-				}
-			}
-		}(newWindowIDLegacy)
+		if err := c.SelectWindow(newWindowIDLegacy, "new_window_legacy", "create_new_window"); err != nil {
+			logEvent("NEW_WINDOW_LEGACY_SELECT_ERR id=%s err=%v", newWindowIDLegacy, err)
+			c.ClearNewWindowStatus()
+			return
+		}
+		c.SetNewWindowReady(newWindowIDLegacy)
+		return
 	}
-
-	lastNewWindowCreation = time.Now()
+	c.ClearNewWindowStatus()
 }
 
 // showIndicatorContextMenu displays the context menu for window indicators (busy, bell, etc.)
@@ -13125,7 +13591,7 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			for _, op := range moves {
 				tmuxRun("move-window", "-s", op.src, "-t", op.dst)
 			}
-			if focusTarget := preferredWindowFocusTarget(activeWindowID); focusTarget != "" {
+			if focusTarget := preferredWindowFocusTarget(c, activeWindowID); focusTarget != "" {
 				restoreWindowFocus(focusTarget)
 			}
 		}
@@ -13460,6 +13926,16 @@ func selectContentPaneInActiveWindow() {
 // out of auxiliary panes (sidebar/pane-header/window-header) after window
 // switches or taps on the window-header.
 func focusContentPaneInActiveWindow() {
+	if globalCoordinator != nil {
+		status := globalCoordinator.NewWindowStatus()
+		if status.State == "inFlight" || status.State == "ready" {
+			logEvent("FOCUS_CONTENT_PANE_SKIP reason=new_window_status state=%s target=%s", status.State, status.WindowID)
+			return
+		}
+	}
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
+		return
+	}
 	windowIDOut, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
 	if err != nil {
 		return

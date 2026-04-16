@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/grouping"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
@@ -254,4 +255,68 @@ func TestGetConfig_ReturnsConfig(t *testing.T) {
 	cfg := c.GetConfig()
 	assert.Same(t, c.config, cfg)
 	assert.Equal(t, 2, len(cfg.Groups))
+}
+
+func TestNewWindowStatusLifecycle(t *testing.T) {
+	c := newTestCoordinator(t)
+
+	initial := c.NewWindowStatus()
+	assert.Equal(t, "none", initial.State)
+	assert.Empty(t, initial.WindowID)
+
+	c.SetNewWindowInFlight("Dev", "/tmp/project")
+	inFlight := c.NewWindowStatus()
+	assert.Equal(t, "inFlight", inFlight.State)
+	assert.Equal(t, "Dev", inFlight.Group)
+	assert.Equal(t, "/tmp/project", inFlight.WorkingDir)
+	assert.NotZero(t, inFlight.Created)
+
+	c.SetNewWindowReady("@123")
+	ready := c.NewWindowStatus()
+	assert.Equal(t, "ready", ready.State)
+	assert.Equal(t, "@123", ready.WindowID)
+	assert.Equal(t, "Dev", ready.Group)
+	assert.Equal(t, "/tmp/project", ready.WorkingDir)
+
+	c.ClearNewWindowStatus()
+	cleared := c.NewWindowStatus()
+	assert.Equal(t, "none", cleared.State)
+	assert.Empty(t, cleared.WindowID)
+	assert.Empty(t, cleared.Group)
+	assert.Empty(t, cleared.WorkingDir)
+}
+
+func TestWindowTransitionLifecycle(t *testing.T) {
+	c := newTestCoordinator(t)
+
+	assert.False(t, c.IsTransitionInProgress())
+
+	err := c.BeginTransition("@2", "switch_window", "test")
+	assert.NoError(t, err)
+	assert.True(t, c.IsTransitionInProgress())
+
+	c.stateMu.RLock()
+	transition := c.windowTransition
+	c.stateMu.RUnlock()
+
+	assert.Equal(t, "@2", transition.TargetWindowID)
+	assert.Equal(t, "switch_window", transition.Reason)
+	assert.Equal(t, "test", transition.Source)
+	assert.False(t, transition.StartedAt.IsZero())
+	assert.WithinDuration(t, time.Now(), transition.StartedAt, 2*time.Second)
+
+	c.CompleteTransition()
+	assert.False(t, c.IsTransitionInProgress())
+}
+
+func TestWindowTransitionRejectsBeginWhileInProgress(t *testing.T) {
+	c := newTestCoordinator(t)
+
+	err := c.BeginTransition("@2", "switch_window", "test")
+	assert.NoError(t, err)
+
+	err = c.BeginTransition("@3", "switch_window", "test")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "transition already in progress")
+	assert.Contains(t, err.Error(), "target=@2")
 }

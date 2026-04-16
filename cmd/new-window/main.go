@@ -9,21 +9,23 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	tmuxpkg "github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 var (
 	flagSession   = flag.String("session", "", "target tmux session ID")
+	flagGroup     = flag.String("group", "", "group name for the new window")
+	flagPath      = flag.String("path", "", "working directory for the new window")
 	flagClientTTY = flag.String("client-tty", "", "client TTY for multi-client focus")
+	flagNoSidebar = flag.Bool("no-sidebar", false, "skip sidebar creation (mobile/collapsed)")
 	flagDebug     = flag.Bool("debug", false, "enable debug logging")
 )
 
 func main() {
 	flag.Parse()
 
-	sidebarEnabled := readTmuxOption("@tabby_sidebar") == "enabled"
+	sidebarEnabled := readTmuxOption("@tabby_sidebar") == "enabled" && !*flagNoSidebar
 
 	sessionID := strings.TrimSpace(*flagSession)
 	if sessionID == "" {
@@ -34,7 +36,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	group := readTmuxOption("@tabby_new_window_group")
+	group := strings.TrimSpace(*flagGroup)
 	if group == "" && strings.TrimSpace(*flagClientTTY) != "" {
 		group = readTmuxDisplayForClient(strings.TrimSpace(*flagClientTTY), "#{@tabby_group}")
 	}
@@ -42,7 +44,7 @@ func main() {
 		group = runTmuxTrimmedOrEmpty("show-window-option", "-v", "@tabby_group")
 	}
 
-	windowPath := readTmuxOption("@tabby_new_window_path")
+	windowPath := strings.TrimSpace(*flagPath)
 	if windowPath == "" && strings.TrimSpace(*flagClientTTY) != "" {
 		windowPath = readTmuxDisplayForClient(strings.TrimSpace(*flagClientTTY), "#{pane_current_path}")
 	}
@@ -78,10 +80,6 @@ func main() {
 		if _, err := runTmuxOutput("set-window-option", "-t", newWindowID, "@tabby_group", group); err != nil {
 			debugLog("failed setting @tabby_group on %s: %v", newWindowID, err)
 		}
-	}
-
-	if _, err := runTmuxOutput("set-option", "-g", "@tabby_new_window_id", newWindowID); err != nil {
-		debugLog("failed setting @tabby_new_window_id=%s: %v", newWindowID, err)
 	}
 
 	firstPane := ""
@@ -142,12 +140,6 @@ func main() {
 		}
 	}
 
-	clientTTY := strings.TrimSpace(*flagClientTTY)
-	if _, err := runTmuxOutput("select-window", "-t", newWindowID); err != nil {
-		debugLog("select-window failed for %s: %v", newWindowID, err)
-	}
-	debugLog("select-window completed")
-
 	if firstPane != "" {
 		if _, err := runTmuxOutput("select-pane", "-t", firstPane); err != nil {
 			debugLog("select-pane failed for first pane %s: %v", firstPane, err)
@@ -157,22 +149,8 @@ func main() {
 		focusFirstContentPane(newWindowID)
 		debugLog("focusFirstContentPane completed")
 	}
-	scheduleFocusRecovery(newWindowID, clientTTY)
 
-	if _, err := runTmuxOutput("set-option", "-gu", "@tabby_new_window_group"); err != nil {
-		debugLog("failed clearing @tabby_new_window_group: %v", err)
-	}
-	if _, err := runTmuxOutput("set-option", "-gu", "@tabby_new_window_path"); err != nil {
-		debugLog("failed clearing @tabby_new_window_path: %v", err)
-	}
-
-	signalDaemonUSR1(sessionID)
-
-	quotedID := shSingleQuote(newWindowID)
-	clearCmd := fmt.Sprintf("sleep 2 && tmux show-option -gqv @tabby_new_window_id | grep -qx %s && tmux set-option -gu @tabby_new_window_id || true", quotedID)
-	if err := exec.Command("sh", "-c", clearCmd).Start(); err != nil {
-		debugLog("failed scheduling @tabby_new_window_id auto-clear: %v", err)
-	}
+	fmt.Println(newWindowID)
 
 	// SIGWINCH broadcast removed: tmux sends SIGWINCH to all panes automatically
 	// during its own reflow, so an explicit broadcast here causes extra resize churn.
@@ -294,28 +272,6 @@ func focusFirstContentPane(windowID string) {
 	}
 }
 
-func signalDaemonUSR1(sessionID string) {
-	pidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		debugLog("daemon pid file not found: %s (%v)", pidFile, err)
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		debugLog("invalid daemon pid in %s: %v", pidFile, err)
-		return
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		debugLog("find process failed for pid %d: %v", pid, err)
-		return
-	}
-	if err := proc.Signal(syscall.SIGUSR1); err != nil {
-		debugLog("failed sending SIGUSR1 to pid %d: %v", pid, err)
-	}
-}
-
 func sendWinchToContentPanes(windowID string) {
 	out, err := runTmuxOutput("list-panes", "-t", windowID, "-F", "#{pane_id}\t#{pane_pid}\t#{pane_start_command}\t#{pane_current_command}")
 	if err != nil || out == "" {
@@ -346,45 +302,11 @@ func sendWinchToContentPanes(windowID string) {
 	}
 }
 
-func scheduleFocusRecovery(windowID, clientTTY string) {
-	if windowID == "" {
-		return
+func shSingleQuote(s string) string {
+	if s == "" {
+		return "''"
 	}
-
-	go func() {
-		// Check if this window is still the pending new window
-		pending, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output()
-		if strings.TrimSpace(string(pending)) != windowID {
-			return
-		}
-
-		exec.Command("tmux", "select-window", "-t", windowID).Run()
-		contentPane := pickContentPane(windowID)
-		if contentPane != "" {
-			exec.Command("tmux", "select-pane", "-t", contentPane).Run()
-		}
-
-		time.Sleep(150 * time.Millisecond)
-
-		// Re-verify and set last-window/last-pane tracking
-		pending2, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output()
-		curWin, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
-		if strings.TrimSpace(string(pending2)) == windowID && strings.TrimSpace(string(curWin)) == windowID {
-			exec.Command("tmux", "select-window", "-t", windowID).Run()
-			contentPane = pickContentPane(windowID)
-			if contentPane != "" {
-				exec.Command("tmux", "select-pane", "-t", contentPane).Run()
-				exec.Command("tmux", "set-option", "-g", "@tabby_last_pane", contentPane).Run()
-			}
-			exec.Command("tmux", "set-option", "-g", "@tabby_last_window", windowID).Run()
-		}
-
-		// Clear pending flag
-		pending3, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output()
-		if strings.TrimSpace(string(pending3)) == windowID {
-			exec.Command("tmux", "set-option", "-gu", "@tabby_new_window_id").Run()
-		}
-	}()
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func pickContentPane(windowID string) string {
@@ -410,13 +332,6 @@ func pickContentPane(windowID string) string {
 		}
 	}
 	return first
-}
-
-func shSingleQuote(s string) string {
-	if s == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func firstMatchingToken(output, prefix string) string {
