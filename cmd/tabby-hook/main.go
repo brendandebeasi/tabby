@@ -176,6 +176,9 @@ func main() {
 	}
 
 	daemonAction := strings.ReplaceAll(action, "-", "_")
+	if daemonAction == "exit_if_no_main" {
+		daemonAction = "exit_if_no_main_windows"
+	}
 
 	if err := sendAction(daemonAction, target, value); err != nil {
 		// Silently exit — daemon may be restarting or not yet ready.
@@ -527,7 +530,8 @@ func sendAction(action, target, value string) error {
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	msg := message{
-		Type: "input",
+		Type:     "input",
+		ClientID: "hook:tabby-hook",
 		Payload: inputPayload{
 			Type:           "action",
 			ResolvedAction: action,

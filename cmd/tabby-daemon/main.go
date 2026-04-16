@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -32,11 +33,6 @@ var crashLog *log.Logger
 var eventLog *log.Logger
 var inputLog *log.Logger
 var daemonStartTime time.Time
-
-// lastNewWindowCreation tracks when the coordinator last created a new window.
-// The refresh loop uses this to skip selectContentPaneInActiveWindow() calls
-// that would race with the new-window handler's own focus management.
-var lastNewWindowCreation time.Time
 
 // rotateLogFile rotates a log file if it exceeds maxBytes.
 // Keeps one .prev backup. Returns nil on success or if file is small enough.
@@ -359,6 +355,10 @@ func responsiveSidebarWidth(windowID string, globalWidth int) int {
 // The coordinator is used to compute the bounded sidebar width, ensuring the spawn
 // uses the same width calculation as RunWidthSync (prevents resize churn on startup).
 func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window, coordinator *Coordinator) bool {
+	if coordinator.sidebarHidden {
+		logEvent("SPAWN_SKIP reason=sidebar_hidden")
+		return false
+	}
 	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
 		logEvent("SPAWN_SKIP script_lock_active")
 		return false
@@ -521,7 +521,7 @@ func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Windo
 }
 
 // cleanupOrphanedSidebars closes sidebar panes in windows where all other panes were closed
-func cleanupOrphanedSidebars(windows []tmux.Window) {
+func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 	// Skip cleanup during new window creation to prevent killing windows
 	// whose content pane hasn't been detected yet (race condition).
 	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
@@ -529,8 +529,9 @@ func cleanupOrphanedSidebars(windows []tmux.Window) {
 			return
 		}
 	}
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output(); err == nil {
-		if strings.TrimSpace(string(out)) != "" {
+	if coordinator != nil {
+		status := coordinator.NewWindowStatus()
+		if status.State == "inFlight" || status.State == "ready" {
 			return
 		}
 	}
@@ -603,7 +604,7 @@ func paneIsSystemPane(cmd string, startCmd string) bool {
 
 var orphanWindowFirstSeen = map[string]time.Time{}
 
-func cleanupOrphanWindowsByTmux(sessionID string) {
+func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 	if sessionID == "" {
 		return
 	}
@@ -617,8 +618,9 @@ func cleanupOrphanWindowsByTmux(sessionID string) {
 			return
 		}
 	}
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output(); err == nil {
-		if strings.TrimSpace(string(out)) != "" {
+	if coordinator != nil {
+		status := coordinator.NewWindowStatus()
+		if status.State == "inFlight" || status.State == "ready" {
 			return
 		}
 	}
@@ -1111,10 +1113,10 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 	contentPaneExists := make(map[string]bool)
 
 	type headerInfo struct {
-		paneID        string
-		windowID      string
-		target        string
-		height        int
+		paneID         string
+		windowID       string
+		target         string
+		height         int
 		isWindowHeader bool
 	}
 	var windowHeaders []headerInfo
@@ -1422,9 +1424,14 @@ func saveFocusState(sessionID string) {
 }
 
 // restoreFocusState restores the previously saved window and pane focus
-func restoreFocusState() {
-	newWindowOut, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_new_window_id").Output()
-	if strings.TrimSpace(string(newWindowOut)) != "" {
+func restoreFocusState(coordinator *Coordinator) {
+	if coordinator != nil {
+		status := coordinator.NewWindowStatus()
+		if status.State == "inFlight" || status.State == "ready" {
+			return
+		}
+	}
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
 		return
 	}
 
@@ -1539,17 +1546,15 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 			logEvent("GEOM_SYNC_SKIP trigger=%s client=%s width=%d height=%d reason=too_small", trigger, windowID, size.width, size.height)
 			continue
 		}
-		if info := server.GetClientInfo(windowID); info != nil {
-			if info.Width != size.width || info.Height != size.height {
-				sizesChanged = true
-				changeCount++
-				logEvent("GEOM_SYNC_SIDEBAR trigger=%s client=%s prev=%dx%d new=%dx%d delta_w=%d delta_h=%d",
-					trigger, windowID, info.Width, info.Height, size.width, size.height, size.width-info.Width, size.height-info.Height)
-			}
-		} else {
+		info := server.GetClientInfo(windowID)
+		if info == nil {
+			continue
+		}
+		if info.Width != size.width || info.Height != size.height {
 			sizesChanged = true
 			changeCount++
-			logEvent("GEOM_SYNC_SIDEBAR trigger=%s client=%s prev=none new=%dx%d", trigger, windowID, size.width, size.height)
+			logEvent("GEOM_SYNC_SIDEBAR trigger=%s client=%s prev=%dx%d new=%dx%d delta_w=%d delta_h=%d",
+				trigger, windowID, info.Width, info.Height, size.width, size.height, size.width-info.Width, size.height-info.Height)
 		}
 		server.UpdateClientSize(windowID, size.width, size.height)
 		if coordinator != nil {
@@ -1594,6 +1599,93 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 	}
 
 	return sizesChanged
+}
+
+// Sticky election state: once a client is elected, hold it for at least
+// this long before switching to prevent flip-flop during hook storms.
+// Protected by stickyClientMu — accessed from main loop and SIGUSR2 goroutine.
+var (
+	stickyClientMu   sync.Mutex
+	stickyClientTTY  string
+	stickyClientTime time.Time
+
+	preferredClientMu     sync.Mutex
+	preferredClientTTY    string
+	preferredClientTime   time.Time
+	preferredClientReason string
+)
+
+const (
+	stickyClientMinHold   = 3 * time.Second
+	preferredClientMaxAge = 8 * time.Second
+)
+
+func setPreferredClientTTY(tty, reason string) {
+	tty = strings.TrimSpace(tty)
+	if tty == "" {
+		return
+	}
+	preferredClientMu.Lock()
+	preferredClientTTY = tty
+	preferredClientTime = time.Now()
+	preferredClientReason = reason
+	preferredClientMu.Unlock()
+	logEvent("CLIENT_FOCUS_PIN tty=%s reason=%s", tty, reason)
+}
+
+func latestAttachedClientTTY() string {
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}\x1f#{client_flags}\x1f#{client_activity}").Output()
+	if err != nil {
+		return ""
+	}
+	bestTTY := ""
+	bestActivity := int64(-1)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\x1f")
+		if len(parts) < 3 {
+			continue
+		}
+		if !strings.Contains(parts[1], "attached") {
+			continue
+		}
+		activity, _ := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+		if activity > bestActivity {
+			bestActivity = activity
+			bestTTY = strings.TrimSpace(parts[0])
+		}
+	}
+	return bestTTY
+}
+
+func sourceWindowIDFromClientID(clientID string) string {
+	clientID = strings.TrimSpace(clientID)
+	if strings.HasPrefix(clientID, "window-header:") {
+		return strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+	}
+	if strings.HasPrefix(clientID, "@") {
+		return clientID
+	}
+	return ""
+}
+
+func clientTTYForPane(paneID string) string {
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" {
+		return ""
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{client_tty}").Output()
+	if err != nil {
+		return ""
+	}
+	tty := strings.TrimSpace(string(out))
+	if strings.HasPrefix(tty, "#{") {
+		return ""
+	}
+	return tty
 }
 
 func activeClientGeometry() (width int, height int, tty string, activity int64, ok bool) {
@@ -1682,26 +1774,33 @@ func activeClientGeometry() (width int, height int, tty string, activity int64, 
 		}
 	}
 
-	// Desktop-preference override: if the activity-winner is a narrow client
-	// (phone range) but another active attached client is clearly a desktop,
-	// promote the desktop for the purposes of width/profile selection. This
-	// prevents a brief phone tap from collapsing every sidebar to 1 column
-	// across every concurrently-attached desktop client.
-	if attachedClients[bestIdx].width < 60 {
-		for i, cand := range attachedClients {
-			if i == bestIdx || cand.width < 80 {
-				continue
-			}
-			if now-cand.activity <= idleWindow {
-				logEvent("CLIENT_GEOM_DESKTOP_OVERRIDE narrow_tty=%s narrow_w=%d desktop_tty=%s desktop_w=%d",
-					attachedClients[bestIdx].tty, attachedClients[bestIdx].width, cand.tty, cand.width)
-				bestIdx = i
-				break
+	best := attachedClients[bestIdx]
+
+	preferredClientMu.Lock()
+	if preferredClientTTY != "" {
+		if time.Since(preferredClientTime) > preferredClientMaxAge {
+			logEvent("CLIENT_FOCUS_PIN_EXPIRED tty=%s age_ms=%d reason=%s", preferredClientTTY, time.Since(preferredClientTime).Milliseconds(), preferredClientReason)
+			preferredClientTTY = ""
+			preferredClientReason = ""
+		} else {
+			for i, c := range attachedClients {
+				if c.tty == preferredClientTTY {
+					bestIdx = i
+					best = attachedClients[bestIdx]
+					break
+				}
 			}
 		}
 	}
+	preferredClientMu.Unlock()
 
-	best := attachedClients[bestIdx]
+	stickyClientMu.Lock()
+	if best.tty != stickyClientTTY {
+		stickyClientTTY = best.tty
+		stickyClientTime = time.Now()
+	}
+	stickyClientMu.Unlock()
+
 	reason := "activity"
 	if now-best.activity > idleWindow {
 		reason = "stale_activity"
@@ -1712,7 +1811,6 @@ func activeClientGeometry() (width int, height int, tty string, activity int64, 
 	logEvent("CLIENT_GEOM_SELECT tty=%s size=%dx%d reason=%s activity=%d attached=%d focused=%d", best.tty, best.width, best.height, reason, best.activity, len(attachedClients), focusedCount)
 	return best.width, best.height, best.tty, best.activity, true
 }
-
 
 // resizeAllWindowsToClient authoritatively locks every tmux window to the
 // elected active client's dimensions, overriding tmux's `window-size latest`
@@ -1848,6 +1946,12 @@ func main() {
 	}
 
 	refreshCh := make(chan struct{}, 10)
+	var emptyClientDropCount uint64
+	var emptyClientDropLastLog int64
+	var lastExplicitNavAt time.Time
+	var lastExplicitNavWindow string
+	var navSettleUntil time.Time
+	var navSettledWindow string
 
 	// Ignore SIGPIPE — daemon runs backgrounded and stdout/stderr may become broken pipes
 	signal.Ignore(syscall.SIGPIPE)
@@ -1859,13 +1963,59 @@ func main() {
 
 	// Set up input callback with panic recovery
 	server.OnInput = func(clientID string, input *daemon.InputPayload) {
-		logEvent("INPUT_START client=%s type=%s btn=%s action=%s resolved=%s x=%d y=%d", clientID, input.Type, input.Button, input.Action, input.ResolvedAction, input.MouseX, input.MouseY)
+		logEvent("INPUT_START client=%s type=%s btn=%s action=%s resolved=%s x=%d y=%d target=%s pane=%s sourcePane=%s", clientID, input.Type, input.Button, input.Action, input.ResolvedAction, input.MouseX, input.MouseY, input.ResolvedTarget, input.PaneID, input.SourcePaneID)
+		if strings.TrimSpace(clientID) == "" {
+			resolved := strings.TrimSpace(input.ResolvedAction)
+			if resolved == "" || resolved == "exit_if_no_main" || resolved == "exit_if_no_main_windows" {
+				n := atomic.AddUint64(&emptyClientDropCount, 1)
+				now := time.Now().UnixNano()
+				last := atomic.LoadInt64(&emptyClientDropLastLog)
+				logNow := now-last >= int64(750*time.Millisecond) && atomic.CompareAndSwapInt64(&emptyClientDropLastLog, last, now)
+				if logNow {
+					logEvent("INPUT_DROP_EMPTY_CLIENT action=%s resolved=%s target=%s pane=%s sourcePane=%s count=%d", input.Action, input.ResolvedAction, input.ResolvedTarget, input.PaneID, input.SourcePaneID, n)
+				}
+				return
+			}
+			logEvent("INPUT_EMPTY_CLIENT_ALLOW action=%s resolved=%s target=%s", input.Action, input.ResolvedAction, input.ResolvedTarget)
+		}
+		resolvedAction := strings.TrimSpace(input.ResolvedAction)
+		pinFocus := true
+		if strings.HasPrefix(clientID, "hook:") && (resolvedAction == "" || resolvedAction == "exit_if_no_main" || resolvedAction == "exit_if_no_main_windows") {
+			pinFocus = false
+		}
+		if pinFocus {
+			sourceWin := sourceWindowIDFromClientID(clientID)
+			sourceTTY := ""
+			if input.PaneID != "" {
+				sourceTTY = clientTTYForPane(input.PaneID)
+			}
+			if sourceTTY == "" && sourceWin != "" {
+				sourceTTY = clientTTYForWindow(sourceWin)
+			}
+			if sourceTTY == "" {
+				sourceTTY = latestAttachedClientTTY()
+			}
+			if sourceTTY != "" {
+				setPreferredClientTTY(sourceTTY, fmt.Sprintf("input:%s:%s", clientID, input.ResolvedAction))
+			}
+		} else {
+			logEvent("CLIENT_FOCUS_PIN_SKIP client=%s resolved=%s", clientID, input.ResolvedAction)
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				debugLog.Printf("PANIC in OnInput handler (client=%s): %v", clientID, r)
 				logEvent("PANIC_INPUT client=%s err=%v", clientID, r)
 			}
 		}()
+		if strings.HasPrefix(clientID, "window-header:") {
+			if resolvedAction == "window_header:prev_window" || resolvedAction == "window_header:next_window" || resolvedAction == "window_header:new_window" {
+				lastExplicitNavAt = time.Now()
+				lastExplicitNavWindow = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+				navSettledWindow = lastExplicitNavWindow
+				navSettleUntil = time.Now().Add(1200 * time.Millisecond)
+				logEvent("EXPLICIT_NAV_MARK action=%s window=%s settle_until_ms=%d", resolvedAction, lastExplicitNavWindow, time.Until(navSettleUntil).Milliseconds())
+			}
+		}
 		needsRefresh := coordinator.HandleInput(clientID, input)
 		logEvent("INPUT_HANDLED client=%s needsRefresh=%v", clientID, needsRefresh)
 		if needsRefresh {
@@ -1898,6 +2048,9 @@ func main() {
 	// Set up connect/disconnect callbacks
 	server.OnConnect = func(clientID string, paneID string) {
 		logEvent("CLIENT_CONNECT client=%s pane=%s", clientID, paneID)
+		if tty := latestAttachedClientTTY(); tty != "" {
+			setPreferredClientTTY(tty, fmt.Sprintf("connect:%s", clientID))
+		}
 		if paneID != "" {
 			coordinator.ApplyThemeToPane(paneID)
 		}
@@ -1985,9 +2138,6 @@ func main() {
 		for range clientResizedCh {
 			logEvent("SIGNAL_USR2_CLIENT_RESIZED session=%s", *sessionID)
 			go func() {
-				// Elect the single active client and lock every window to its
-				// dims. Inactive clients (e.g. a backgrounded phone) must not
-				// shrink windows via tmux's `window-size latest` auto-reflow.
 				if w, h, tty, _, ok := activeClientGeometry(); ok {
 					coordinator.SetActiveClientWidth(w)
 					resizeAllWindowsToClient(w, h, "sigusr2")
@@ -2072,7 +2222,7 @@ func main() {
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		if shouldRestoreFocus() {
-			restoreFocusState()
+			restoreFocusState(coordinator)
 		}
 	}()
 
@@ -2168,23 +2318,99 @@ func main() {
 		lastWindowsHash := ""
 		lastGitState := ""
 		lastClientGeometry := ""
-		lastResizeKey := "" // tty+WxH only: drives resizeAllWindowsToClient dedupe
-		activeWindowID := "" // Track active window for optimized rendering
+		lastResizeKey := ""          // tty+WxH only: drives resizeAllWindowsToClient dedupe
+		lastWindowCheckSyncKey := "" // active window + active client geometry at last window_check width sync
+		activeWindowID := ""         // Track active window for optimized rendering
 
 		lastWindowCount := 0 // Track window count for close detection
 
-		// Helper to get current active window ID (cached, updated on events)
+		newWindowReadyHold := 900 * time.Millisecond
+		newWindowReadyTimeout := 3 * time.Second
+		postReadyStabilize := 2500 * time.Millisecond
+		lastReadyWindowID := ""
+		var lastReadyClearedAt time.Time
+
+		coordinatorActiveWindowID := func() string {
+			for _, w := range coordinator.GetWindows() {
+				if w.Active {
+					return w.ID
+				}
+			}
+			return ""
+		}
+
 		updateActiveWindow := func() {
+			status := coordinator.NewWindowStatus()
+			coordActive := coordinatorActiveWindowID()
+			logEvent("READY_STATE_TRACE phase=update_active_start state=%s ready=%s age_ms=%d daemon_active=%s coordinator_active=%s", status.State, status.WindowID, time.Since(status.Created).Milliseconds(), activeWindowID, coordActive)
+			if status.State == "inFlight" {
+				logEvent("UPDATE_ACTIVE_WINDOW_WAIT reason=new_window_inflight daemon_active=%s coordinator_active=%s", activeWindowID, coordActive)
+				return
+			}
+			if status.State == "ready" {
+				if status.WindowID != "" {
+					lastReadyWindowID = status.WindowID
+				}
+				ageMs := time.Since(status.Created).Milliseconds()
+				if time.Since(status.Created) > newWindowReadyTimeout {
+					logEvent("NEW_WINDOW_READY_TIMEOUT_CLEAR window=%s age_ms=%d", status.WindowID, ageMs)
+					coordinator.ClearNewWindowStatus()
+					if status.WindowID != "" {
+						lastReadyWindowID = status.WindowID
+					}
+					lastReadyClearedAt = time.Now()
+				} else {
+					hasWindow := false
+					for _, w := range coordinator.GetWindows() {
+						if w.ID == status.WindowID {
+							hasWindow = true
+							break
+						}
+					}
+					if hasWindow && status.WindowID != "" && activeWindowID != status.WindowID {
+						logEvent("WINDOW_STATE_DRIFT source=new_window_ready tmux_active=unknown daemon_active=%s coordinator_active=%s ready_window=%s", activeWindowID, coordActive, status.WindowID)
+					}
+					logEvent("READY_STATE_TRACE phase=update_active_ready_observe state=%s ready=%s age_ms=%d daemon_active=%s coordinator_active=%s hasWindow=%v", status.State, status.WindowID, ageMs, activeWindowID, coordActive, hasWindow)
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			if out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+			args := []string{"display-message"}
+			if _, _, tty, _, ok := activeClientGeometry(); ok && strings.TrimSpace(tty) != "" {
+				args = append(args, "-c", strings.TrimSpace(tty))
+			}
+			args = append(args, "-p", "#{window_id}")
+			if out, err := exec.CommandContext(ctx, "tmux", args...).Output(); err == nil {
 				newID := strings.TrimSpace(string(out))
-				if newID != activeWindowID && newID != "" {
-					// Window changed — track in history and handle select
-					coordinator.TrackWindowHistory(newID)
-					coordinator.HandleWindowSelect(newID)
+				if newID != "" {
+					logEvent("UPDATE_ACTIVE_WINDOW_TMUX_QUERY daemon_old=%s tmux_new=%s coordinator_active=%s", activeWindowID, newID, coordActive)
 				}
-				activeWindowID = newID
+				logEvent("READY_STATE_TRACE phase=update_active_tmux_query state=%s ready=%s daemon_active=%s tmux_active=%s coordinator_active=%s", status.State, status.WindowID, activeWindowID, newID, coordActive)
+				if newID != "" {
+					if newID != activeWindowID || newID != coordActive {
+						logEvent("WINDOW_STATE_DRIFT source=tmux_query tmux_active=%s daemon_active=%s coordinator_active=%s", newID, activeWindowID, coordActive)
+					}
+					if newID != activeWindowID {
+						if !lastReadyClearedAt.IsZero() && lastReadyWindowID != "" {
+							sinceClear := time.Since(lastReadyClearedAt)
+							if sinceClear <= postReadyStabilize && activeWindowID == lastReadyWindowID && newID != lastReadyWindowID {
+								logEvent("UPDATE_ACTIVE_WINDOW_TMUX_SUPPRESS old=%s new=%s last_ready=%s since_clear_ms=%d", activeWindowID, newID, lastReadyWindowID, sinceClear.Milliseconds())
+								return
+							}
+						}
+						if !navSettleUntil.IsZero() && time.Now().Before(navSettleUntil) && navSettledWindow != "" {
+							if newID != navSettledWindow {
+								logEvent("UPDATE_ACTIVE_WINDOW_TMUX_SUPPRESS_NAV old=%s new=%s settled=%s remaining_ms=%d marked_window=%s", activeWindowID, newID, navSettledWindow, time.Until(navSettleUntil).Milliseconds(), lastExplicitNavWindow)
+								return
+							}
+							logEvent("UPDATE_ACTIVE_WINDOW_TMUX_NAV_CONFIRMED old=%s new=%s settled=%s age_ms=%d", activeWindowID, newID, navSettledWindow, time.Since(lastExplicitNavAt).Milliseconds())
+						}
+						logEvent("UPDATE_ACTIVE_WINDOW_TMUX_OBSERVE old=%s new=%s coordinator_active=%s", activeWindowID, newID, coordActive)
+					}
+					activeWindowID = newID
+				}
+			} else {
+				logEvent("UPDATE_ACTIVE_WINDOW_TMUX_ERR err=%v", err)
 			}
 		}
 		updateActiveWindow() // Initial fetch
@@ -2223,12 +2449,31 @@ func main() {
 
 		doPaneLayoutOps := func() {
 			now := time.Now()
+			status := coordinator.NewWindowStatus()
+			logEvent("READY_STATE_TRACE phase=pane_layout_start state=%s ready=%s age_ms=%d active=%s", status.State, status.WindowID, time.Since(status.Created).Milliseconds(), activeWindowID)
+			if status.State == "inFlight" {
+				logEvent("PANE_LAYOUT_SKIP reason=new_window_inflight")
+				return
+			}
+			if status.State == "ready" {
+				age := time.Since(status.Created)
+				if age > newWindowReadyTimeout {
+					logEvent("PANE_LAYOUT_READY_TIMEOUT_CLEAR window=%s age_ms=%d", status.WindowID, age.Milliseconds())
+					coordinator.ClearNewWindowStatus()
+					status = coordinator.NewWindowStatus()
+				} else if age > newWindowReadyHold {
+					logEvent("PANE_LAYOUT_SKIP reason=new_window_ready window=%s age_ms=%d", status.WindowID, age.Milliseconds())
+					return
+				}
+			}
 			if now.Sub(lastPaneLayoutOps) < paneLayoutCooldown {
 				logEvent("PANE_LAYOUT_SKIP cooldown_remaining=%dms", (paneLayoutCooldown - now.Sub(lastPaneLayoutOps)).Milliseconds())
 				return
 			}
 			lastPaneLayoutOps = now
-			logEvent("PANE_LAYOUT_START")
+			logEvent("PANE_LAYOUT_START activeProfile=%s sidebarHidden=%v newWindowState=%s",
+				coordinator.ActiveClientProfile(), coordinator.sidebarHidden,
+				status.State)
 			customBorder := coordinator.GetConfig().PaneHeader.CustomBorder
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
 			windows := coordinator.GetWindows()
@@ -2282,12 +2527,23 @@ func main() {
 					coordinator.RefreshWindows()
 					t1 := time.Now()
 
-					// Detect window close: if window count decreased, select
-					// the most recently visited surviving window from history.
-					currentWindowCount := len(coordinator.GetWindows())
+					windowsAfterRefresh := coordinator.GetWindows()
+					currentWindowCount := len(windowsAfterRefresh)
 					if currentWindowCount < lastWindowCount && lastWindowCount > 0 {
-						coordinator.SelectPreviousWindow()
-						updateActiveWindow() // Re-fetch after selecting
+						activeStillExists := false
+						for _, w := range windowsAfterRefresh {
+							if w.ID == activeWindowID {
+								activeStillExists = true
+								break
+							}
+						}
+						if !activeStillExists {
+							logEvent("WINDOW_CLOSE_RESTORE_TRIGGER active=%s prev_count=%d count=%d", activeWindowID, lastWindowCount, currentWindowCount)
+							coordinator.SelectPreviousWindow()
+							updateActiveWindow() // Re-fetch after selecting
+						} else {
+							logEvent("WINDOW_CLOSE_RESTORE_SKIP reason=active_exists active=%s prev_count=%d count=%d", activeWindowID, lastWindowCount, currentWindowCount)
+						}
 					}
 					lastWindowCount = currentWindowCount
 
@@ -2322,8 +2578,8 @@ func main() {
 						spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows, coordinator)
 						t2 := time.Now()
 
-						cleanupOrphanedSidebars(windows)
-						cleanupOrphanWindowsByTmux(*sessionID)
+						cleanupOrphanedSidebars(windows, coordinator)
+						cleanupOrphanWindowsByTmux(*sessionID, coordinator)
 						t3 := time.Now()
 
 						cleanupSidebarsForClosedWindows(server, windows)
@@ -2347,10 +2603,6 @@ func main() {
 						// Second broadcast only if structure changed (new/removed renderers)
 						structureChanged := spawnedRenderer || currentHash != lastWindowsHash
 						if structureChanged {
-							// New window just appeared — immediately lock every
-							// window to the elected active client's dims so
-							// tmux's `window-size latest` can't momentarily
-							// reflow the new window to an inactive client size.
 							if w, h, _, _, ok := activeClientGeometry(); ok {
 								resizeAllWindowsToClient(w, h, "structure_refresh")
 							}
@@ -2393,18 +2645,32 @@ func main() {
 					// Calling RefreshWindows() here added a redundant ListWindowsWithPanes()
 					// tmux round-trip that caused lock contention and task stalls under load.
 					windows := coordinator.GetWindows()
+					windowIDs := make([]string, len(windows))
+					for i, w := range windows {
+						windowIDs[i] = w.ID
+					}
+					logEvent("WINDOW_CHECK_LIST count=%d ids=%v", len(windows), windowIDs)
 
-					spawnedFallback := spawnRenderersForNewWindows(server, *sessionID, windows, coordinator)
-					cleanupOrphanedSidebars(windows)
-					cleanupOrphanWindowsByTmux(*sessionID)
-					cleanupSidebarsForClosedWindows(server, windows)
-					doPaneLayoutOps()
-					_ = spawnedFallback
+					spawnRenderersForNewWindows(server, *sessionID, windows, coordinator)
+					cleanupOrphanedSidebars(windows, coordinator)
+					cleanupOrphanWindowsByTmux(*sessionID, coordinator)
 					// Persist current layouts to disk for restart recovery
 					saveLayoutsToDisk(windows)
-					// Width sync as fallback for missed events
-					logEvent("WIDTH_SYNC_REQUEST trigger=window_check active=%s force=0", activeWindowID)
-					coordinator.RunWidthSync(activeWindowID, false)
+					// Width sync as fallback for missed events, only when active context changed
+					activeTTY := ""
+					activeW := 0
+					if w, _, tty, _, ok := activeClientGeometry(); ok {
+						activeTTY = strings.TrimSpace(tty)
+						activeW = w
+					}
+					syncKey := fmt.Sprintf("%s|%s|%d", activeWindowID, activeTTY, activeW)
+					if syncKey != lastWindowCheckSyncKey {
+						logEvent("WIDTH_SYNC_REQUEST trigger=window_check active=%s force=0 key=%s", activeWindowID, syncKey)
+						coordinator.RunWidthSync(activeWindowID, false)
+						lastWindowCheckSyncKey = syncKey
+					} else {
+						logEvent("WIDTH_SYNC_SKIP trigger=window_check reason=stable_context key=%s", syncKey)
+					}
 				})
 			case <-clientGeometryTicker.C:
 				runLoopTaskNonFatal("client_geometry_tick", 2*time.Second, func() {
@@ -2412,17 +2678,13 @@ func main() {
 					if !ok {
 						return
 					}
-					geomKey := fmt.Sprintf("%s:%dx%d:%d", tty, w, h, activity)
+					geomKey := fmt.Sprintf("%s:%dx%d:%d", tty, w, h, activity/5)
 					if geomKey == lastClientGeometry {
 						return
 					}
 					lastClientGeometry = geomKey
 					logEvent("CLIENT_GEOMETRY_CHANGE tty=%s size=%dx%d activity=%d", tty, w, h, activity)
 					coordinator.SetActiveClientWidth(w)
-					// Authoritatively lock all windows to the elected active
-					// client's dims BEFORE syncing pane sizes, otherwise tmux
-					// may return stale mid-reflow pane dims. Dedupe on tty+dims
-					// so activity-only bumps don't cause a resize storm.
 					resizeKey := fmt.Sprintf("%s:%dx%d", tty, w, h)
 					if resizeKey != lastResizeKey {
 						lastResizeKey = resizeKey

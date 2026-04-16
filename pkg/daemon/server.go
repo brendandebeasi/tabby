@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,6 +28,11 @@ type ClientInfo struct {
 }
 
 // Server is the daemon server that manages connected renderers
+type InputAnonStats struct {
+	lastDropLogNano int64
+	dropCount       uint64
+}
+
 type Server struct {
 	socketPath string
 	pidPath    string
@@ -34,6 +40,8 @@ type Server struct {
 	clients    map[string]*ClientInfo
 	clientsMu  sync.RWMutex
 	done       chan struct{}
+
+	anonInputStats sync.Map
 
 	// Render state
 	sequenceNum uint64
@@ -179,6 +187,24 @@ func (s *Server) GetSocketPath() string {
 	return s.socketPath
 }
 
+func (s *Server) recordAnonymousInput(sourceKey string) (uint64, bool) {
+	if sourceKey == "" {
+		sourceKey = "unknown"
+	}
+	value, _ := s.anonInputStats.LoadOrStore(sourceKey, &InputAnonStats{})
+	stats := value.(*InputAnonStats)
+	count := atomic.AddUint64(&stats.dropCount, 1)
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&stats.lastDropLogNano)
+	if now-last < int64(750*time.Millisecond) {
+		return count, false
+	}
+	if atomic.CompareAndSwapInt64(&stats.lastDropLogNano, last, now) {
+		return count, true
+	}
+	return count, false
+}
+
 // acceptLoop handles incoming connections
 func (s *Server) acceptLoop() {
 	for {
@@ -206,20 +232,31 @@ func (s *Server) acceptLoop() {
 func (s *Server) handleClient(conn net.Conn) {
 	defer conn.Close()
 
+	remoteAddr := ""
+	if conn != nil && conn.RemoteAddr() != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
 	scanner := bufio.NewScanner(conn)
 	// Increase scanner buffer for large render payloads
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	var clientID string
 
 	for scanner.Scan() {
+		raw := scanner.Bytes()
 		var msg Message
-		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			if s.DebugLog != nil {
+				s.DebugLog("SOCKET_PARSE_ERR client=%s remote=%s bytes=%d err=%v", clientID, remoteAddr, len(raw), err)
+			}
 			continue
 		}
 
 		switch msg.Type {
 		case MsgSubscribe:
 			clientID = msg.ClientID
+			if s.DebugLog != nil {
+				s.DebugLog("SOCKET_SUBSCRIBE client=%s remote=%s", clientID, remoteAddr)
+			}
 			// Parse resize payload if included
 			width, height := 80, 24 // defaults
 			colorProfile := "ANSI256"
@@ -310,25 +347,52 @@ func (s *Server) handleClient(conn net.Conn) {
 			}
 
 		case MsgInput:
-			if msg.Payload != nil {
-				payloadBytes, _ := json.Marshal(msg.Payload)
-				var input InputPayload
-				if json.Unmarshal(payloadBytes, &input) == nil {
-					if s.DebugLog != nil {
-						s.DebugLog("SOCKET_INPUT client=%s type=%s btn=%s action=%s resolved=%s", clientID, input.Type, input.Button, input.Action, input.ResolvedAction)
-					}
-					if s.OnInput != nil {
-						// Recover from panics in input handler to avoid killing client goroutine
-						func() {
-							defer func() {
-								if r := recover(); r != nil {
-									fmt.Fprintf(os.Stderr, "PANIC in OnInput (client=%s): %v\n", clientID, r)
-								}
-							}()
-							s.OnInput(clientID, &input)
-						}()
+			effectiveClientID := clientID
+			if strings.TrimSpace(effectiveClientID) == "" && strings.TrimSpace(msg.ClientID) != "" {
+				effectiveClientID = strings.TrimSpace(msg.ClientID)
+				clientID = effectiveClientID
+				if s.DebugLog != nil {
+					s.DebugLog("SOCKET_INPUT_CLIENT_FALLBACK remote=%s client=%s", remoteAddr, effectiveClientID)
+				}
+			}
+			if msg.Payload == nil {
+				if s.DebugLog != nil {
+					s.DebugLog("SOCKET_INPUT_DROP reason=nil_payload client=%s remote=%s", effectiveClientID, remoteAddr)
+				}
+				continue
+			}
+			payloadBytes, err := json.Marshal(msg.Payload)
+			if err != nil {
+				if s.DebugLog != nil {
+					s.DebugLog("SOCKET_INPUT_DROP reason=payload_marshal client=%s remote=%s err=%v", effectiveClientID, remoteAddr, err)
+				}
+				continue
+			}
+			var input InputPayload
+			if err := json.Unmarshal(payloadBytes, &input); err != nil {
+				if s.DebugLog != nil {
+					s.DebugLog("SOCKET_INPUT_DROP reason=payload_unmarshal client=%s remote=%s bytes=%d err=%v", effectiveClientID, remoteAddr, len(payloadBytes), err)
+				}
+				continue
+			}
+			if s.DebugLog != nil {
+				s.DebugLog("SOCKET_INPUT client=%s type=%s btn=%s action=%s resolved=%s x=%d y=%d target=%s pane=%s sourcePane=%s remote=%s", effectiveClientID, input.Type, input.Button, input.Action, input.ResolvedAction, input.MouseX, input.MouseY, input.ResolvedTarget, input.PaneID, input.SourcePaneID, remoteAddr)
+				if strings.TrimSpace(effectiveClientID) == "" {
+					count, shouldLog := s.recordAnonymousInput(remoteAddr)
+					if shouldLog {
+						s.DebugLog("SOCKET_INPUT_ANON source=%s count=%d resolved=%s action=%s", remoteAddr, count, input.ResolvedAction, input.Action)
 					}
 				}
+			}
+			if s.OnInput != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Fprintf(os.Stderr, "PANIC in OnInput (client=%s): %v\n", effectiveClientID, r)
+						}
+					}()
+					s.OnInput(effectiveClientID, &input)
+				}()
 			}
 
 		case MsgPing:
