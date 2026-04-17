@@ -24,6 +24,16 @@ build:
 	done
 	@chmod +x $(BIN_DIR)/*
 
+# Build Linux amd64 binaries for bastion deployment (separate dir, does not overwrite local bin/)
+build-linux:
+	@mkdir -p bin-linux
+	@for d in cmd/*/; do \
+		name=$$(basename $$d); \
+		GOOS=linux GOARCH=amd64 $(GOBUILD) -o bin-linux/$$name ./$$d || exit 1; \
+	done
+	@echo "Linux binaries in bin-linux/"
+
+
 # Download dependencies
 deps:
 	$(GOMOD) download
