@@ -259,6 +259,23 @@ func applyDefaults(cfg *Config) {
 		cfg.BusyDetection.IdleTimeout = 10
 	}
 
+	// AutoTheme defaults
+	if cfg.AutoTheme.Mode == "" {
+		cfg.AutoTheme.Mode = "system"
+	}
+	if cfg.AutoTheme.Light == "" {
+		cfg.AutoTheme.Light = "rose-pine-dawn"
+	}
+	if cfg.AutoTheme.Dark == "" {
+		cfg.AutoTheme.Dark = "rose-pine"
+	}
+	if cfg.AutoTheme.TimeLight == "" {
+		cfg.AutoTheme.TimeLight = "08:00"
+	}
+	if cfg.AutoTheme.TimeDark == "" {
+		cfg.AutoTheme.TimeDark = "20:00"
+	}
+
 	// Default group: ensure at least one catch-all group exists
 	if len(cfg.Groups) == 0 {
 		cfg.Groups = []Group{DefaultGroupWithIndex("Default", 0)}

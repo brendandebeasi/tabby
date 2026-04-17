@@ -18,6 +18,17 @@ type Config struct {
 	Widgets       Widgets       `yaml:"widgets"`
 	BusyDetection BusyDetection `yaml:"busy_detection"`
 	TerminalTitle TerminalTitle `yaml:"terminal_title"`
+	AutoTheme     AutoTheme     `yaml:"auto_theme"`
+}
+
+// AutoTheme configures automatic theme switching based on time of day or system dark/light mode.
+type AutoTheme struct {
+	Enabled   bool   `yaml:"enabled"`
+	Mode      string `yaml:"mode"`       // "system" (follow OS) or "time" (schedule)
+	Light     string `yaml:"light"`      // Theme name for light mode
+	Dark      string `yaml:"dark"`       // Theme name for dark mode
+	TimeLight string `yaml:"time_light"` // "HH:MM" — start of light period (mode: time only)
+	TimeDark  string `yaml:"time_dark"`  // "HH:MM" — start of dark period (mode: time only)
 }
 
 // BusyDetection configures which pane commands trigger the busy indicator.

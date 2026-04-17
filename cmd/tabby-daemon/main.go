@@ -2308,15 +2308,23 @@ func main() {
 		animationTicker := time.NewTicker(100 * time.Millisecond)      // Combined spinner + pet animation (was two separate tickers)
 		gitTicker := time.NewTicker(5 * time.Second)                   // Git status
 		watchdogTicker := time.NewTicker(5 * time.Second)              // Watchdog: check renderer health
+		autoThemeTicker := time.NewTicker(60 * time.Second)            // Auto-theme: check system dark/light mode or time schedule
 		defer refreshTicker.Stop()
 		defer windowCheckTicker.Stop()
 		defer clientGeometryTicker.Stop()
 		defer animationTicker.Stop()
 		defer gitTicker.Stop()
 		defer watchdogTicker.Stop()
+		defer autoThemeTicker.Stop()
+
+		// Apply auto-theme immediately on startup (don't wait for first tick).
+		if want := coordinator.ResolveAutoTheme(); want != "" && want != coordinator.ActiveThemeName() {
+			coordinator.SetTheme(want)
+		}
 
 		lastWindowsHash := ""
 		lastGitState := ""
+		lastAutoTheme := coordinator.ActiveThemeName()
 		lastClientGeometry := ""
 		lastResizeKey := ""          // tty+WxH only: drives resizeAllWindowsToClient dedupe
 		lastWindowCheckSyncKey := "" // active window + active client geometry at last window_check width sync
@@ -2749,6 +2757,16 @@ func main() {
 				if !ok {
 					return
 				}
+			case <-autoThemeTicker.C:
+				runLoopTaskNonFatal("auto_theme_tick", 5*time.Second, func() {
+					want := coordinator.ResolveAutoTheme()
+					if want != "" && want != lastAutoTheme {
+						logEvent("AUTO_THEME_SWITCH from=%s to=%s", lastAutoTheme, want)
+						coordinator.SetTheme(want)
+						server.BroadcastRender()
+						lastAutoTheme = want
+					}
+				})
 			}
 		}
 	}()

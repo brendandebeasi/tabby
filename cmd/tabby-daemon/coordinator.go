@@ -1145,6 +1145,12 @@ func NewCoordinator(sessionID string) *Coordinator {
 	// Apply global theme styles to tmux (borders, messages, etc.)
 	c.applyThemeToTmux()
 
+	// Initialize sidebarHidden from physical tmux state so spawnRenderersForNewWindows
+	// doesn't try to spawn sidebars for windows created without one while the phone
+	// profile transition timer hasn't fired yet (750ms window after restart).
+	c.sidebarHidden = sidebarIsStashed()
+	logEvent("COORDINATOR_INIT sidebarHidden=%v (from stash windows)", c.sidebarHidden)
+
 	return c
 }
 
@@ -2900,6 +2906,22 @@ func (c *Coordinator) syncWindowNames() []tmuxWindowRename {
 		c.windows[i].Name = desiredName
 	}
 	return pending
+}
+
+// isRawWindowID returns true if s looks like a raw tmux window ID (@N).
+// tmux uses @N as the window ID format; if this appears as a window name
+// it means automatic-rename hasn't fired yet or allow-rename picked up a
+// spurious OSC sequence that echoed back the window ID.
+func isRawWindowID(s string) bool {
+	if len(s) < 2 || s[0] != '@' {
+		return false
+	}
+	for _, c := range s[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // shortenPath converts a full path to a short display name.
@@ -4785,12 +4807,21 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 			}()
 		}
 	}
-	if newProfile == "phone" && !sidebarIsStashed() {
+	if newProfile == "phone" {
+		// Always mark sidebarHidden=true when entering phone profile, even if
+		// sidebars are already physically stashed (e.g. daemon restart with
+		// existing stash windows). Without this, sidebarHidden stays false and
+		// spawnRenderersForNewWindows incorrectly spawns sidebars for windows
+		// created with -no-sidebar, causing visible layout thrash.
 		c.sidebarHidden = true
-		go func() {
-			hideSidebarPanes()
-			coordinatorDebugLog.Printf("profile transition desktop->phone: auto-stashed sidebars")
-		}()
+		if !sidebarIsStashed() {
+			go func() {
+				hideSidebarPanes()
+				coordinatorDebugLog.Printf("profile transition desktop->phone: auto-stashed sidebars")
+			}()
+		} else {
+			logEvent("PROFILE_TRANSITION_PHONE_ALREADY_STASHED sidebarHidden=true (no-op hide)")
+		}
 	}
 }
 
@@ -8029,6 +8060,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			// numbering that matches sidebar order regardless of tmux renumbering)
 			// Display is 0-indexed to match tmux window indices
 			displayName := win.Name
+			if isRawWindowID(displayName) {
+				displayName = "~" // automatic-rename hasn't fired yet
+			}
 			if win.Icon != "" {
 				displayName = win.Icon + " " + displayName
 			}
@@ -8580,6 +8614,9 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		// Build tab content with group prefix
 		// Display is 0-indexed to match tmux window indices
 		displayName := win.Name
+		if isRawWindowID(displayName) {
+			displayName = "~" // automatic-rename hasn't fired yet
+		}
 		if win.Icon != "" {
 			displayName = win.Icon + " " + displayName
 		}
