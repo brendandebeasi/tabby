@@ -6,14 +6,6 @@ GOBUILD=$(GOCMD) build
 GOTEST=$(GOCMD) test
 GOMOD=$(GOCMD) mod
 
-# Binary names
-RENDER_STATUS=bin/render-status
-RENDER_TAB=bin/render-tab
-TABBY_DAEMON=bin/tabby-daemon
-SIDEBAR_RENDERER=bin/sidebar-renderer
-WINDOW_HEADER=bin/window-header
-MANAGE_GROUP=bin/manage-group
-
 # Directories
 BIN_DIR=bin
 TEST_DIR=tests
@@ -23,32 +15,14 @@ SCREENSHOT_DIR=$(TEST_DIR)/screenshots
 # Default target
 all: build
 
-# Build all binaries
-build: $(RENDER_STATUS) $(RENDER_TAB) $(TABBY_DAEMON) $(SIDEBAR_RENDERER) $(WINDOW_HEADER) $(MANAGE_GROUP)
-
-$(RENDER_STATUS): cmd/render-status/main.go pkg/**/*.go
+# Build all binaries from cmd/
+build:
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $@ ./cmd/render-status
-
-$(RENDER_TAB): cmd/render-tab/main.go
-	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $@ ./cmd/render-tab
-
-$(TABBY_DAEMON): cmd/tabby-daemon/*.go pkg/**/*.go
-	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $@ ./cmd/tabby-daemon
-
-$(SIDEBAR_RENDERER): cmd/sidebar-renderer/main.go pkg/**/*.go
-	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $@ ./cmd/sidebar-renderer
-
-$(WINDOW_HEADER): cmd/window-header/main.go pkg/**/*.go
-	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $@ ./cmd/window-header
-
-$(MANAGE_GROUP): cmd/manage-group/main.go pkg/**/*.go
-	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $@ ./cmd/manage-group
+	@for d in cmd/*/; do \
+		name=$$(basename $$d); \
+		$(GOBUILD) -o $(BIN_DIR)/$$name ./$$d || exit 1; \
+	done
+	@chmod +x $(BIN_DIR)/*
 
 # Download dependencies
 deps:
@@ -103,12 +77,7 @@ install: build
 	@mkdir -p $(PLUGIN_DIR)/bin
 	@mkdir -p $(PLUGIN_DIR)/scripts
 	@mkdir -p ~/.config/tabby
-	@cp $(RENDER_STATUS) $(PLUGIN_DIR)/bin/
-	@cp $(RENDER_TAB) $(PLUGIN_DIR)/bin/
-	@cp $(TABBY_DAEMON) $(PLUGIN_DIR)/bin/
-	@cp $(SIDEBAR_RENDERER) $(PLUGIN_DIR)/bin/
-	@cp $(WINDOW_HEADER) $(PLUGIN_DIR)/bin/
-	@cp $(MANAGE_GROUP) $(PLUGIN_DIR)/bin/
+	@cp $(BIN_DIR)/* $(PLUGIN_DIR)/bin/
 	@cp scripts/*.sh $(PLUGIN_DIR)/scripts/
 	@cp tabby.tmux $(PLUGIN_DIR)/
 	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml
@@ -119,12 +88,7 @@ install: build
 
 # Sync development to install location
 sync: build
-	@cp $(RENDER_STATUS) $(PLUGIN_DIR)/bin/
-	@cp $(RENDER_TAB) $(PLUGIN_DIR)/bin/
-	@cp $(TABBY_DAEMON) $(PLUGIN_DIR)/bin/
-	@cp $(SIDEBAR_RENDERER) $(PLUGIN_DIR)/bin/
-	@cp $(WINDOW_HEADER) $(PLUGIN_DIR)/bin/
-	@cp $(MANAGE_GROUP) $(PLUGIN_DIR)/bin/
+	@cp $(BIN_DIR)/* $(PLUGIN_DIR)/bin/
 	@cp scripts/*.sh $(PLUGIN_DIR)/scripts/
 	@cp tabby.tmux $(PLUGIN_DIR)/
 	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml
