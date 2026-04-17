@@ -2273,8 +2273,10 @@ func (c *Coordinator) RefreshWindows() {
 
 	windows, err := tmux.ListWindowsWithPanes()
 	if err != nil {
+		logEvent("REFRESH_WINDOWS_ERROR err=%v", err)
 		return
 	}
+	logEvent("REFRESH_WINDOWS_OK count=%d", len(windows))
 
 	// Drop sidebar stash windows from tabby's view entirely. They are holding
 	// windows for break-pane'd sidebars while hidden on mobile — they must not
