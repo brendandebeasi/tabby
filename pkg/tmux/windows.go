@@ -19,6 +19,12 @@ import (
 // This prevents one stuck tmux call from blocking the entire daemon event loop.
 const tmuxCmdTimeout = 5 * time.Second
 
+// tmuxFieldSep is the field separator used in tmux -F format strings.
+// Must be a printable ASCII sequence unlikely to appear in window names, paths, or layout
+// strings. Non-printable bytes like \x1f work on macOS tmux but Linux tmux escapes them
+// to literal octal sequences (e.g. \037), breaking field parsing.
+const tmuxFieldSep = "|||"
+
 // tmuxOutput runs a tmux command with a timeout and returns its stdout.
 // Returns an error if the command fails or the timeout expires.
 func tmuxOutput(args ...string) ([]byte, error) {
@@ -291,7 +297,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		"#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{window_activity_flag}\x1f#{window_bell_flag}\x1f#{window_silence_flag}\x1f#{window_last_flag}\x1f#{@tabby_color}\x1f#{@tabby_group}\x1f#{@tabby_busy}\x1f#{@tabby_bell}\x1f#{@tabby_activity}\x1f#{@tabby_silence}\x1f#{@tabby_collapsed}\x1f#{@tabby_input}\x1f#{@tabby_name_locked}\x1f#{@tabby_sync_width}\x1f#{session_id}\x1f#{@tabby_pinned}\x1f#{@tabby_icon}\x1f#{window_layout}")
+		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}"}, tmuxFieldSep))
 	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -303,7 +309,7 @@ func ListWindows() ([]Window, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, "\x1f")
+		parts := strings.Split(line, tmuxFieldSep)
 		if len(parts) < 8 {
 			continue
 		}
@@ -442,7 +448,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		windowTarget = fmt.Sprintf("%s:%d", sessionTarget, windowIndex)
 	}
 	out, err := DefaultRunner.Run("list-panes", "-t", windowTarget, "-F",
-		"#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_left}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_dead}")
+		strings.Join([]string{"#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_current_command}", "#{pane_title}", "#{pane_pid}", "#{pane_last_activity}", "#{@tabby_pane_title}", "#{pane_top}", "#{pane_left}", "#{pane_current_path}", "#{@tabby_pane_collapsed}", "#{@tabby_pane_prev_height}", "#{pane_start_command}", "#{pane_dead}"}, tmuxFieldSep))
 	if err != nil {
 		return nil, err
 	}
@@ -459,7 +465,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, "\x1f")
+		parts := strings.Split(line, tmuxFieldSep)
 		if len(parts) < 5 {
 			continue
 		}
@@ -569,7 +575,7 @@ func ListAllPanes() (map[int][]Pane, error) {
 		args = append(args, "-a")
 	}
 	args = append(args, "-F",
-		"#{window_index}\x1f#{pane_id}\x1f#{pane_index}\x1f#{pane_active}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_pid}\x1f#{pane_last_activity}\x1f#{@tabby_pane_title}\x1f#{pane_top}\x1f#{pane_left}\x1f#{pane_current_path}\x1f#{@tabby_pane_collapsed}\x1f#{@tabby_pane_prev_height}\x1f#{pane_start_command}\x1f#{pane_width}\x1f#{pane_height}")
+		strings.Join([]string{"#{window_index}", "#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_current_command}", "#{pane_title}", "#{pane_pid}", "#{pane_last_activity}", "#{@tabby_pane_title}", "#{pane_top}", "#{pane_left}", "#{pane_current_path}", "#{@tabby_pane_collapsed}", "#{@tabby_pane_prev_height}", "#{pane_start_command}", "#{pane_width}", "#{pane_height}"}, tmuxFieldSep))
 	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, err
@@ -584,7 +590,7 @@ func ListAllPanes() (map[int][]Pane, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, "\x1f")
+		parts := strings.Split(line, tmuxFieldSep)
 		if len(parts) < 6 {
 			continue
 		}
