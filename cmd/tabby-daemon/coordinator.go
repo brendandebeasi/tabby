@@ -4883,6 +4883,7 @@ func (c *Coordinator) restoreSidebarPanes() {
 	if defaultWidth < 15 {
 		defaultWidth = 25
 	}
+	var restoredWindows []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.SplitN(line, "|", 2)
 		if len(parts) < 2 {
@@ -4948,6 +4949,51 @@ func (c *Coordinator) restoreSidebarPanes() {
 			continue
 		}
 		coordinatorDebugLog.Printf("restoreSidebarPanes: %s -> %s (width=%d)", stashPane, targetPane, width)
+
+		// After sidebar is restored, kill any pane-headers that span the full window width.
+		// During phone mode the pane-header expands to full width; after join-pane the sidebar
+		// is beside the terminal but the header still spans the whole row. Kill and let respawn.
+		restoredWindows = append(restoredWindows, origWinID)
+	}
+
+	// Kill full-width pane-headers in restored windows so they can be respawned correctly.
+	for _, winID := range restoredWindows {
+		// Get window width first.
+		winWidthOut, err := exec.Command("tmux", "display-message", "-t", winID, "-p", "#{window_width}").Output()
+		if err != nil {
+			continue
+		}
+		winWidth, _ := strconv.Atoi(strings.TrimSpace(string(winWidthOut)))
+		if winWidth <= 0 {
+			continue
+		}
+
+		pout, err := exec.Command("tmux", "list-panes", "-t", winID, "-F",
+			"#{pane_id}|#{pane_width}|#{pane_left}|#{pane_current_command}|#{pane_start_command}").Output()
+		if err != nil {
+			continue
+		}
+		for _, pl := range strings.Split(strings.TrimSpace(string(pout)), "\n") {
+			parts := strings.SplitN(pl, "|", 5)
+			if len(parts) < 5 {
+				continue
+			}
+			pID := parts[0]
+			pWidth, _ := strconv.Atoi(parts[1])
+			pLeft, _ := strconv.Atoi(parts[2])
+			curCmd := parts[3]
+			startCmd := parts[4]
+			isHeader := strings.Contains(curCmd, "pane-header") || strings.Contains(startCmd, "pane-header")
+			if !isHeader {
+				continue
+			}
+			// Full-width means header starts at col 0 AND spans the full window width.
+			if pLeft == 0 && pWidth >= winWidth-1 {
+				logEvent("RESTORE_KILL_FULLWIDTH_HEADER pane=%s window=%s width=%d winWidth=%d", pID, winID, pWidth, winWidth)
+				markSkipPreserveForWindow(pID)
+				exec.Command("tmux", "kill-pane", "-t", pID).Run()
+			}
+		}
 	}
 }
 
