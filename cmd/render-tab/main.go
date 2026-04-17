@@ -7,6 +7,20 @@ import (
 	"strings"
 )
 
+// isRawWindowID returns true if s is a raw tmux window ID (@N) — seen briefly
+// after window creation before automatic-rename fires.
+func isRawWindowID(s string) bool {
+	if len(s) < 2 || s[0] != '@' {
+		return false
+	}
+	for _, c := range s[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // ansiEscapeRegex matches ANSI escape sequences
 var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(?:\x07|\x1b\\)`)
 
@@ -23,6 +37,9 @@ func main() {
 	mode := os.Args[1]
 	index := os.Args[2]
 	name := stripANSI(os.Args[3])
+	if isRawWindowID(name) {
+		name = "~"
+	}
 	flags := ""
 	if len(os.Args) > 4 {
 		flags = os.Args[4]
