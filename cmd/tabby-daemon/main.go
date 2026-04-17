@@ -268,11 +268,11 @@ func getPopupBin() string {
 // so that tabby-hook preserve-pane-ratios can restore it after the kill.
 // This MUST be called before user/content-pane kill-pane operations.
 func saveLayoutBeforeKill(paneID string) {
-	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}\x1f#{window_layout}").Output()
+	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}|||#{window_layout}").Output()
 	if err != nil {
 		return
 	}
-	parts := strings.SplitN(strings.TrimSpace(string(out)), "\x1f", 2)
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "|||", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return
 	}
@@ -425,12 +425,12 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		// Dead system panes (from a crashed daemon) are killed here so focus can escape them.
 		hasRenderer := false
 		if rawOut, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
-			"#{pane_id}\x1f#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
+			"#{pane_id}|||#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
 			for _, rawLine := range strings.Split(strings.TrimSpace(string(rawOut)), "\n") {
 				if rawLine == "" {
 					continue
 				}
-				rawParts := strings.SplitN(rawLine, "\x1f", 4)
+				rawParts := strings.SplitN(rawLine, "|||", 4)
 				if len(rawParts) < 4 {
 					continue
 				}
@@ -549,7 +549,7 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 		}
 
 		paneOut, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
-			"#{pane_id}\x1f#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+			"#{pane_id}|||#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output()
 		if err != nil {
 			continue
 		}
@@ -560,7 +560,7 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 			if line == "" {
 				continue
 			}
-			parts := strings.SplitN(line, "\x1f", 4)
+			parts := strings.SplitN(line, "|||", 4)
 			if len(parts) < 4 {
 				continue
 			}
@@ -625,7 +625,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 		}
 	}
 
-	out, err := exec.Command("tmux", "list-windows", "-t", sessionID, "-F", "#{window_id}\x1f#{window_name}").Output()
+	out, err := exec.Command("tmux", "list-windows", "-t", sessionID, "-F", "#{window_id}|||#{window_name}").Output()
 	if err != nil {
 		return
 	}
@@ -633,7 +633,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 	seen := make(map[string]bool)
 
 	for _, rawLine := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		winParts := strings.SplitN(strings.TrimSpace(rawLine), "\x1f", 2)
+		winParts := strings.SplitN(strings.TrimSpace(rawLine), "|||", 2)
 		if len(winParts) < 1 {
 			continue
 		}
@@ -650,7 +650,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 		seen[windowID] = true
 
 		paneOut, paneErr := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
-			"#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+			"#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output()
 		if paneErr != nil {
 			delete(orphanWindowFirstSeen, windowID)
 			continue
@@ -668,7 +668,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 			if line == "" {
 				continue
 			}
-			parts := strings.SplitN(line, "\x1f", 3)
+			parts := strings.SplitN(line, "|||", 3)
 			if len(parts) < 3 {
 				continue
 			}
@@ -701,7 +701,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 		}
 
 		confirmOut, confirmErr := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
-			"#{pane_dead}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+			"#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output()
 		if confirmErr != nil {
 			delete(orphanWindowFirstSeen, windowID)
 			continue
@@ -712,7 +712,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 			if line == "" {
 				continue
 			}
-			parts := strings.SplitN(line, "\x1f", 3)
+			parts := strings.SplitN(line, "|||", 3)
 			if len(parts) < 3 {
 				continue
 			}
@@ -777,12 +777,12 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 	// kill any that are around and skip spawning new ones.
 	if coordinator != nil && coordinator.ActiveClientProfile() != "phone" {
 		if headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
-			"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
+			"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
 			for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
 				if line == "" {
 					continue
 				}
-				parts := strings.SplitN(line, "\x1f", 3)
+				parts := strings.SplitN(line, "|||", 3)
 				if len(parts) < 3 {
 					continue
 				}
@@ -799,13 +799,13 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 	// Discover existing window-header panes keyed by window_id
 	windowsWithHeader := make(map[string]bool)
 	if headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{window_id}\x1f#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
+		"#{window_id}|||#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
 		byWindow := make(map[string][]string)
 		for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
 			if line == "" {
 				continue
 			}
-			parts := strings.SplitN(line, "\x1f", 4)
+			parts := strings.SplitN(line, "|||", 4)
 			if len(parts) < 4 {
 				continue
 			}
@@ -890,12 +890,12 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 	if spawned {
 		for winID := range spawnedInWindow {
 			headerPaneOut, err := exec.Command("tmux", "list-panes", "-t", winID, "-F",
-				"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+				"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 			if err == nil {
 				for _, hLine := range strings.Split(string(headerPaneOut), "\n") {
 					hLine = strings.TrimSpace(hLine)
 					if strings.Contains(hLine, "window-header") {
-						hParts := strings.SplitN(hLine, "\x1f", 3)
+						hParts := strings.SplitN(hLine, "|||", 3)
 						if len(hParts) >= 1 {
 							hTarget := "1"
 							if globalCoordinator != nil {
@@ -948,13 +948,13 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 	panesWithHeader := make(map[string]bool) // content paneID -> has header
 
 	if headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output(); err == nil {
+		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
 		headersByTarget := make(map[string][]string)
 		for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
 			if line == "" {
 				continue
 			}
-			parts := strings.SplitN(line, "\x1f", 3)
+			parts := strings.SplitN(line, "|||", 3)
 			if len(parts) < 3 {
 				continue
 			}
@@ -1051,12 +1051,12 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 	if spawned {
 		for winID := range spawnedInWindow {
 			headerPaneOut, err := exec.Command("tmux", "list-panes", "-t", winID, "-F",
-				"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+				"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 			if err == nil {
 				for _, hLine := range strings.Split(string(headerPaneOut), "\n") {
 					hLine = strings.TrimSpace(hLine)
 					if strings.Contains(hLine, "pane-header") {
-						hParts := strings.SplitN(hLine, "\x1f", 3)
+						hParts := strings.SplitN(hLine, "|||", 3)
 						if len(hParts) >= 1 {
 							hTarget := "1"
 							if globalCoordinator != nil {
@@ -1099,7 +1099,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		listArgs = append(listArgs, "-t", *sessionID)
 	}
 	listArgs = append(listArgs, "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_width}\x1f#{pane_start_command}\x1f#{pane_height}\x1f#{pane_top}\x1f#{pane_left}\x1f#{window_id}")
+		"#{pane_id}|||#{pane_current_command}|||#{pane_width}|||#{pane_start_command}|||#{pane_height}|||#{pane_top}|||#{pane_left}|||#{window_id}")
 	out, err := exec.Command("tmux", listArgs...).Output()
 	if err != nil {
 		return
@@ -1130,7 +1130,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x1f", 8)
+		parts := strings.SplitN(line, "|||", 8)
 		if len(parts) < 8 {
 			continue
 		}
@@ -1155,7 +1155,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x1f", 8)
+		parts := strings.SplitN(line, "|||", 8)
 		if len(parts) < 8 {
 			continue
 		}
@@ -1299,7 +1299,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 		watchdogArgs = append(watchdogArgs, "-t", sessionID)
 	}
 	watchdogArgs = append(watchdogArgs, "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_pid}\x1f#{window_id}\x1f#{pane_dead}")
+		"#{pane_id}|||#{pane_current_command}|||#{pane_pid}|||#{window_id}|||#{pane_dead}")
 	out, err := exec.Command("tmux", watchdogArgs...).Output()
 	if err != nil {
 		return
@@ -1310,7 +1310,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x1f", 5)
+		parts := strings.SplitN(line, "|||", 5)
 		if len(parts) < 5 {
 			continue
 		}
@@ -1388,7 +1388,7 @@ func restoreSidebarWidths() {
 func updateHeaderBorderStyles(coordinator *Coordinator) {
 	// Get all panes with start command info
 	out, err := exec.Command("tmux", "list-panes", "-s", "-F",
-		"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 	if err != nil {
 		return
 	}
@@ -1483,7 +1483,7 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 
 	// Get all panes with their sizes and commands
 	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
-		"#{window_id}\x1f#{pane_id}\x1f#{pane_width}\x1f#{pane_height}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+		"#{window_id}|||#{pane_id}|||#{pane_width}|||#{pane_height}|||#{pane_current_command}|||#{pane_start_command}").Output()
 	if err != nil {
 		logEvent("GEOM_SYNC_ERROR trigger=%s err=%v", trigger, err)
 		return false
@@ -1503,7 +1503,7 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x1f", 6)
+		parts := strings.SplitN(line, "|||", 6)
 		if len(parts) < 6 {
 			continue
 		}
@@ -1634,7 +1634,7 @@ func setPreferredClientTTY(tty, reason string) {
 }
 
 func latestAttachedClientTTY() string {
-	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}\x1f#{client_flags}\x1f#{client_activity}").Output()
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|||#{client_flags}|||#{client_activity}").Output()
 	if err != nil {
 		return ""
 	}
@@ -1645,7 +1645,7 @@ func latestAttachedClientTTY() string {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, "\x1f")
+		parts := strings.Split(line, "|||")
 		if len(parts) < 3 {
 			continue
 		}
@@ -1691,7 +1691,7 @@ func clientTTYForPane(paneID string) string {
 func activeClientGeometry() (width int, height int, tty string, activity int64, ok bool) {
 	const idleWindow = int64(1500)
 	now := time.Now().Unix()
-	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}\x1f#{client_width}\x1f#{client_height}\x1f#{client_flags}\x1f#{client_activity}").Output()
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|||#{client_width}|||#{client_height}|||#{client_flags}|||#{client_activity}").Output()
 	if err != nil {
 		return 0, 0, "", 0, false
 	}
@@ -1712,7 +1712,7 @@ func activeClientGeometry() (width int, height int, tty string, activity int64, 
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, "\x1f")
+		parts := strings.Split(line, "|||")
 		if len(parts) < 5 {
 			continue
 		}

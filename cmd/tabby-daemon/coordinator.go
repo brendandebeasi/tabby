@@ -108,7 +108,7 @@ func clientTTYForWindow(windowID string) string {
 	if windowID == "" {
 		return ""
 	}
-	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}\x1f#{window_id}\x1f#{client_activity}").Output()
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|||#{window_id}|||#{client_activity}").Output()
 	if err != nil {
 		return ""
 	}
@@ -119,7 +119,7 @@ func clientTTYForWindow(windowID string) string {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, "\x1f")
+		parts := strings.Split(line, "|||")
 		if len(parts) < 2 {
 			continue
 		}
@@ -5503,7 +5503,7 @@ func (c *Coordinator) RunHeaderHeightSync(activeClientID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F",
-		"#{pane_id}\x1f#{pane_height}\x1f#{pane_current_command}\x1f#{pane_start_command}\x1f#{window_width}").Output()
+		"#{pane_id}|||#{pane_height}|||#{pane_current_command}|||#{pane_start_command}|||#{window_width}").Output()
 	if err != nil {
 		return
 	}
@@ -5512,7 +5512,7 @@ func (c *Coordinator) RunHeaderHeightSync(activeClientID string) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x1f", 5)
+		parts := strings.SplitN(line, "|||", 5)
 		if len(parts) < 5 {
 			continue
 		}
@@ -10788,10 +10788,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 		activeCtx, activeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		activeOut, activeErr := exec.CommandContext(activeCtx, "tmux", "display-message", "-p", "-t", targetWindow,
-			"#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+			"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 		activeCancel()
 		if activeErr == nil {
-			parts := strings.SplitN(strings.TrimSpace(string(activeOut)), "\x1f", 3)
+			parts := strings.SplitN(strings.TrimSpace(string(activeOut)), "|||", 3)
 			if len(parts) == 3 && !isAuxiliaryPaneCommand(parts[1]) && !isAuxiliaryPaneCommand(parts[2]) {
 				return true
 			}
@@ -10799,11 +10799,11 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", targetWindow,
-			"-F", "#{pane_id}\x1f#{pane_current_command}\x1f#{pane_start_command}").Output()
+			"-F", "#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 		listCancel()
 		if err == nil {
 			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-				parts := strings.SplitN(line, "\x1f", 3)
+				parts := strings.SplitN(line, "|||", 3)
 				if len(parts) != 3 {
 					continue
 				}
@@ -13779,8 +13779,8 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 
 func fixHeaderHeightsInWindow(paneID string) {
 	// Get window ID and width so we use per-window width, not global profile
-	infoOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{window_id}\x1f#{window_width}").Output()
-	infoParts := strings.SplitN(strings.TrimSpace(string(infoOut)), "\x1f", 2)
+	infoOut, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{window_id}|||#{window_width}").Output()
+	infoParts := strings.SplitN(strings.TrimSpace(string(infoOut)), "|||", 2)
 	if len(infoParts) < 2 {
 		return
 	}
@@ -13952,12 +13952,12 @@ func focusContentPaneInActiveWindow() {
 // selectContentPaneInWindow selects the first non-auxiliary pane in the given window.
 func selectContentPaneInWindow(windowID string) {
 	out, err := exec.Command("tmux", "list-panes", "-t", windowID,
-		"-F", "#{pane_id}\x1f#{pane_current_command}").Output()
+		"-F", "#{pane_id}|||#{pane_current_command}").Output()
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "\x1f", 2)
+		parts := strings.SplitN(line, "|||", 2)
 		if len(parts) == 2 {
 			if !isAuxiliaryPaneCommand(parts[1]) {
 				exec.Command("tmux", "select-pane", "-t", parts[0]).Run()

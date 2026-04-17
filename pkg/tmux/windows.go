@@ -19,11 +19,14 @@ import (
 // This prevents one stuck tmux call from blocking the entire daemon event loop.
 const tmuxCmdTimeout = 5 * time.Second
 
-// tmuxFieldSep is the field separator used in tmux -F format strings.
+// FieldSep is the field separator used in tmux -F format strings.
 // Must be a printable ASCII sequence unlikely to appear in window names, paths, or layout
 // strings. Non-printable bytes like \x1f work on macOS tmux but Linux tmux escapes them
 // to literal octal sequences (e.g. \037), breaking field parsing.
-const tmuxFieldSep = "|||"
+const FieldSep = "|||"
+
+// tmuxFieldSep is the package-internal alias.
+const tmuxFieldSep = FieldSep
 
 // tmuxOutput runs a tmux command with a timeout and returns its stdout.
 // Returns an error if the command fails or the timeout expires.
