@@ -1282,8 +1282,11 @@ func isWatchdogEnabled() bool {
 	return val != "off" && val != "0" && val != "false"
 }
 
-// watchdogCheckRenderers verifies sidebar renderer processes are alive and respawns dead ones
-func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
+// watchdogCheckRenderers verifies sidebar renderer processes are alive and respawns dead ones.
+// It also detects layout corruption where a left sidebar has been flipped to a full-width
+// top/bottom bar (e.g. after tmux source ~/.tmux.conf) and corrects it by killing and
+// respawning the renderer in the correct horizontal split position.
+func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator *Coordinator) {
 	if !isWatchdogEnabled() {
 		return
 	}
@@ -1293,25 +1296,28 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 		return
 	}
 
-	// Get all panes with PID info, scoped to our session
+	// Get all panes with PID and geometry info, scoped to our session.
 	watchdogArgs := []string{"list-panes", "-s"}
 	if sessionID != "" {
 		watchdogArgs = append(watchdogArgs, "-t", sessionID)
 	}
 	watchdogArgs = append(watchdogArgs, "-F",
-		"#{pane_id}|||#{pane_current_command}|||#{pane_pid}|||#{window_id}|||#{pane_dead}")
+		"#{pane_id}|||#{pane_current_command}|||#{pane_pid}|||#{window_id}|||#{pane_dead}|||#{pane_width}|||#{window_width}")
 	out, err := exec.Command("tmux", watchdogArgs...).Output()
 	if err != nil {
 		return
 	}
+
+	sidebarHidden := coordinator.sidebarHidden
+	globalWidth := coordinator.GetGlobalWidth()
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|||", 5)
-		if len(parts) < 5 {
+		parts := strings.SplitN(line, "|||", 7)
+		if len(parts) < 7 {
 			continue
 		}
 		paneID := parts[0]
@@ -1319,6 +1325,8 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 		pidStr := parts[2]
 		windowID := parts[3]
 		paneDead := parts[4]
+		paneWidth, _ := strconv.Atoi(parts[5])
+		windowWidth, _ := strconv.Atoi(parts[6])
 
 		// Only check sidebar/renderer panes
 		isSidebar := strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer")
@@ -1334,14 +1342,14 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 
 			// Respawn sidebar renderer if it was a sidebar
-			if isSidebar {
+			if isSidebar && !sidebarHidden {
 				logEvent("RESPAWN_SIDEBAR window=%s after dead pane cleanup", windowID)
 				debugFlag := ""
 				if *debugMode {
 					debugFlag = "-debug"
 				}
 				cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
-				exec.Command("tmux", "split-window", "-d", "-t", windowID, "-h", "-b", "-l", "25", cmdStr).Run()
+				exec.Command("tmux", "split-window", "-d", "-t", windowID, "-h", "-b", "-l", fmt.Sprintf("%d", globalWidth), cmdStr).Run()
 			}
 			continue
 		}
@@ -1362,15 +1370,33 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string) {
 			markSkipPreserveForWindow(paneID)
 			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 
-			if isSidebar {
+			if isSidebar && !sidebarHidden {
 				logEvent("RESPAWN_SIDEBAR window=%s after zombie pane cleanup", windowID)
 				debugFlag := ""
 				if *debugMode {
 					debugFlag = "-debug"
 				}
 				cmdStr := fmt.Sprintf("exec '%s' -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
-				exec.Command("tmux", "split-window", "-d", "-t", windowID, "-h", "-b", "-l", "25", cmdStr).Run()
+				exec.Command("tmux", "split-window", "-d", "-t", windowID, "-h", "-b", "-l", fmt.Sprintf("%d", globalWidth), cmdStr).Run()
 			}
+			continue
+		}
+
+		// Layout corruption check: a sidebar-renderer should never be full-width.
+		// If pane_width >= window_width-2 the split direction has been flipped (e.g.
+		// by tmux source ~/.tmux.conf recalculating layouts). Kill and respawn so the
+		// next watchdog / spawnRenderersForNewWindows cycle restores the left sidebar.
+		if isSidebar && !sidebarHidden && windowWidth > 0 && paneWidth >= windowWidth-2 {
+			logEvent("LAYOUT_CORRUPT_SIDEBAR pane=%s window=%s pane_w=%d win_w=%d -- killing flipped sidebar",
+				paneID, windowID, paneWidth, windowWidth)
+			markSkipPreserveForWindow(paneID)
+			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+			debugFlag := ""
+			if *debugMode {
+				debugFlag = "-debug"
+			}
+			cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && exec '%s' -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
+			exec.Command("tmux", "split-window", "-d", "-t", windowID, "-h", "-b", "-f", "-l", fmt.Sprintf("%d", globalWidth), cmdStr).Run()
 		}
 	}
 }
@@ -2709,7 +2735,7 @@ func main() {
 			case <-watchdogTicker.C:
 				ok := runLoopTask("watchdog", 6*time.Second, func() {
 					logInput("HEALTH clients=%d", server.ClientCount())
-					watchdogCheckRenderers(server, *sessionID)
+					watchdogCheckRenderers(server, *sessionID, coordinator)
 				})
 				if !ok {
 					return
