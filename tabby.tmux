@@ -270,14 +270,14 @@ tmux bind-key -T root MouseDown1Pane \
         "send-keys -M -t =" \
         "if-shell -F -t = \"#{||:#{m:*pane-header*,#{pane_current_command}},#{m:*window-header*,#{pane_current_command}}}\" \
 		    \"select-pane -t = ; send-keys -M -t =\" \
-            \"select-pane -t = ; send-keys -M -t = ; run-shell -b '$CYCLE_PANE_BIN --dim-only ; kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
+            \"select-pane -t = ; send-keys -M -t = ; run-shell -b '$CYCLE_PANE_BIN --dim-only ; $CURRENT_DIR/scripts/signal-daemon.sh'\""
 
 tmux bind-key -T root MouseUp1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M -t =" \
         "if-shell -F -t = \"#{||:#{m:*pane-header*,#{pane_current_command}},#{m:*window-header*,#{pane_current_command}}}\" \
 		    \"send-keys -M -t =\" \
-            \"select-pane -t = ; send-keys -M -t = ; run-shell -b 'kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true'\""
+            \"select-pane -t = ; send-keys -M -t = ; run-shell -b '$CURRENT_DIR/scripts/signal-daemon.sh'\""
 
 tmux unbind-key -T root MouseUp3Pane 2>/dev/null || true
 tmux bind-key -T root MouseUp3Pane send-keys -M -t =
@@ -430,7 +430,7 @@ EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby-hook exit-if-no-main"
 # Most hooks now signal the daemon (USR1) which handles all state internally:
 # pane dimming, window history, layout save, border color, status exclusivity,
 # sidebar spawning, and renderer management.
-SIGNAL_CMD="kill -USR1 \$(cat /tmp/tabby-daemon-#{session_id}.pid 2>/dev/null) 2>/dev/null || true"
+SIGNAL_CMD="$CURRENT_DIR/scripts/signal-daemon.sh"
 
 tmux set-hook -g window-linked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S'"
 tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
