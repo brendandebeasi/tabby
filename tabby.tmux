@@ -318,7 +318,8 @@ tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M 
 # Terminal title configuration
 # Read from config.yaml or use defaults
 TITLE_ENABLED=$(grep -A2 "^terminal_title:" "$CONFIG_FILE" 2>/dev/null | grep "enabled:" | awk '{print $2}' || echo "true")
-TITLE_FORMAT=$(grep -A2 "^terminal_title:" "$CONFIG_FILE" 2>/dev/null | grep "format:" | sed 's/.*format: *"\([^"]*\)".*/\1/' || echo "tmux #{window_index}.#{pane_index} #{window_name} #{pane_current_command}")
+TITLE_FORMAT=$(grep -A3 "^terminal_title:" "$CONFIG_FILE" 2>/dev/null | grep "format:" | sed "s/.*format: *//; s/^['\"]//; s/['\"] *$//")
+TITLE_FORMAT=${TITLE_FORMAT:-"tmux #{window_index}.#{pane_index} #{window_name} #{pane_current_command}"}
 
 if [[ "$TITLE_ENABLED" != "false" ]]; then
     tmux set-option -g set-titles on
