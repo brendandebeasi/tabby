@@ -16,16 +16,23 @@ import (
 )
 
 // skipCommands are never dimmed and never cycled (sidebar, pane-header).
-var skipCommands = []string{"sidebar-render"}
+// We match against BOTH pane_current_command and pane_start_command: after
+// the binary consolidation, pane_current_command reports "tabby" for every
+// subcommand process (tmux reads it from the executable name, not argv[0],
+// so `exec -a sidebar-renderer` doesn't help). pane_start_command still
+// contains the original `render sidebar` / `render pane-header` invocation.
+var skipCommands = []string{"sidebar-render", "render sidebar", "sidebar-renderer"}
 
 // headerCommand identifies pane-header processes (dimmed with their content pane).
-const headerCommand = "pane-header"
+// Same rationale: match via either command field.
+var headerCommands = []string{"pane-header", "render pane-header"}
 
 type paneInfo struct {
-	id      string
-	active  bool
-	command string
-	left    int // pane_left: used to match headers with content panes
+	id           string
+	active       bool
+	command      string // pane_current_command — post-consolidation often "tabby"
+	startCommand string // pane_start_command — retains the original invocation
+	left         int    // pane_left: used to match headers with content panes
 }
 
 func Run(args []string) int {
@@ -45,30 +52,34 @@ func Run(args []string) int {
 
 func listPanes() []paneInfo {
 	out, err := exec.Command("tmux", "list-panes", "-F",
-		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}").Output()
+		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}\t#{pane_start_command}").Output()
 	if err != nil {
 		return nil
 	}
 	var panes []paneInfo
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "\t", 4)
+		parts := strings.SplitN(line, "\t", 5)
 		if len(parts) < 4 {
 			continue
 		}
 		left, _ := strconv.Atoi(parts[3])
-		panes = append(panes, paneInfo{
+		info := paneInfo{
 			id:      parts[0],
 			active:  parts[1] == "1",
 			command: parts[2],
 			left:    left,
-		})
+		}
+		if len(parts) >= 5 {
+			info.startCommand = parts[4]
+		}
+		panes = append(panes, info)
 	}
 	return panes
 }
 
-func isSkip(cmd string) bool {
-	lower := strings.ToLower(cmd)
-	for _, s := range skipCommands {
+func matchesAny(haystack string, needles []string) bool {
+	lower := strings.ToLower(haystack)
+	for _, s := range needles {
 		if strings.Contains(lower, s) {
 			return true
 		}
@@ -76,18 +87,27 @@ func isSkip(cmd string) bool {
 	return false
 }
 
-func isHeader(cmd string) bool {
-	return strings.Contains(strings.ToLower(cmd), headerCommand)
+// isSkip returns true for panes that should never be cycled or dimmed
+// (sidebar, pane-header). Matches against both current and start command.
+func isSkip(p paneInfo) bool {
+	return matchesAny(p.command, skipCommands) ||
+		matchesAny(p.startCommand, skipCommands)
 }
 
-func isUtility(cmd string) bool {
-	return isSkip(cmd) || isHeader(cmd)
+// isHeader returns true for pane-header panes (current or start command match).
+func isHeader(p paneInfo) bool {
+	return matchesAny(p.command, headerCommands) ||
+		matchesAny(p.startCommand, headerCommands)
+}
+
+func isUtility(p paneInfo) bool {
+	return isSkip(p) || isHeader(p)
 }
 
 func filterContent(panes []paneInfo) []paneInfo {
 	var out []paneInfo
 	for _, p := range panes {
-		if !isUtility(p.command) {
+		if !isUtility(p) {
 			out = append(out, p)
 		}
 	}
@@ -132,10 +152,10 @@ func applyDim() {
 
 	if !cfg.PaneHeader.DimInactive {
 		for _, p := range panes {
-			if !isSkip(p.command) {
+			if !isSkip(p) {
 				unsetPaneStyle(p.id)
 			}
-			if !isUtility(p.command) {
+			if !isUtility(p) {
 				clearPaneDimFlag(p.id)
 			}
 		}
@@ -150,7 +170,7 @@ func applyDim() {
 	colActive := map[int]bool{}
 	hasActiveContent := false
 	for _, p := range panes {
-		if !isUtility(p.command) {
+		if !isUtility(p) {
 			colActive[p.left] = p.active
 			if p.active {
 				hasActiveContent = true
@@ -165,16 +185,16 @@ func applyDim() {
 	dimBG := computeDimBG(cfg.PaneHeader.TerminalBg, cfg.PaneHeader.DimOpacity)
 
 	for _, p := range panes {
-		if isSkip(p.command) {
+		if isSkip(p) {
 			continue
 		}
 
 		active := p.active
-		if isHeader(p.command) {
+		if isHeader(p) {
 			active = colActive[p.left]
 		}
 
-		if isHeader(p.command) {
+		if isHeader(p) {
 			// Headers are rendered by the daemon — don't set window-style.
 			continue
 		}

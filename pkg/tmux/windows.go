@@ -239,7 +239,11 @@ var sidebarCommands = map[string]bool{
 }
 
 // isSidebarCommand checks if a command should be filtered from pane lists
-// Handles both exact matches and path-qualified commands (e.g., /path/to/sidebar-renderer)
+// Handles both exact matches and path-qualified commands (e.g., /path/to/sidebar-renderer).
+// After the binary consolidation (Phase B), pane_current_command for spawned
+// renderers reports as "tabby" (tmux reads it from the executable name, not
+// argv[0]), so this function is typically called with the pane_start_command
+// which retains the "render sidebar" / "render pane-header" invocation.
 func isSidebarCommand(cmd string) bool {
 	// Check exact match first
 	if sidebarCommands[cmd] {
@@ -251,8 +255,17 @@ func isSidebarCommand(cmd string) bool {
 			return true
 		}
 	}
-	// Also check if command contains known utility substrings anywhere
+	// Legacy substring checks (pre-consolidation binary names).
 	if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "tabby-daemon") || strings.Contains(cmd, "pane-header") {
+		return true
+	}
+	// Post-consolidation invocation patterns: `tabby render sidebar`, `tabby
+	// render pane-header`, `tabby render window-header`, `tabby daemon`.
+	// Match on the subcommand phrase so we don't false-positive on bare "tabby".
+	if strings.Contains(cmd, "render sidebar") ||
+		strings.Contains(cmd, "render pane-header") ||
+		strings.Contains(cmd, "render window-header") ||
+		strings.Contains(cmd, "tabby daemon") {
 		return true
 	}
 	return false

@@ -5,7 +5,7 @@ echo "=== Integration Test: Marker Picker Visual QA ==="
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1 && pwd -P)"
 
-if (cd "$PROJECT_ROOT" && go test ./cmd/tabby -run 'TestRenderPickerModalShowsEmptyStateAndMeta|TestViewOverlaysPickerModal' -count=1 >/dev/null); then
+if (cd "$PROJECT_ROOT" && go test ./cmd/tabby/internal/sidebar -run 'TestRenderPickerModalShowsEmptyStateAndMeta|TestViewOverlaysPickerModal' -count=1 >/dev/null); then
   echo "✓ Picker modal visual snapshot tests pass"
 else
   echo "✗ Picker modal visual snapshot tests failed"

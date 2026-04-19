@@ -61,7 +61,7 @@ fi
 if ! grep -q "Set Marker" "$OUT_FILE" || ! grep -q "Results: 1870" "$OUT_FILE"; then
   # Fallback: generate deterministic modal fixture and capture that in tmux.
   FIXTURE_FILE="/tmp/tabby-marker-picker-fixture.txt"
-  FIXTURE_RAW=$(cd "$PROJECT_ROOT" && TABBY_PRINT_PICKER_FIXTURE=1 go test ./cmd/tabby -run TestRenderPickerModalFixtureOutput -count=1 -v 2>/dev/null || true)
+  FIXTURE_RAW=$(cd "$PROJECT_ROOT" && TABBY_PRINT_PICKER_FIXTURE=1 go test ./cmd/tabby/internal/sidebar -run TestRenderPickerModalFixtureOutput -count=1 -v 2>/dev/null || true)
   printf "%s\n" "$FIXTURE_RAW" | awk '/TABBY_PICKER_FIXTURE_BEGIN/{f=1; next} /TABBY_PICKER_FIXTURE_END/{f=0} f {print}' > "$FIXTURE_FILE"
   if [ ! -s "$FIXTURE_FILE" ]; then
     echo "Missing modal title in screenshot capture and fixture generation failed"
