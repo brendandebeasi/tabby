@@ -67,7 +67,7 @@ test_sidebar_status_sync() {
     
     create_test_windows 4 "$test_name"
     
-    tmux run-shell -t "$test_name" "$PROJECT_ROOT/bin/tabby-toggle"
+    tmux run-shell -t "$test_name" "$PROJECT_ROOT/bin/tabby toggle"
     sleep 1
     
     local tmux_windows=$(tmux list-windows -t "$test_name" -F "#{window_index}:#{window_name}" | sort)
@@ -104,7 +104,7 @@ test_kill_window_updates() {
     tmux new-window -t "$test_name:1" -n "to-be-killed"
     tmux new-window -t "$test_name:2" -n "survivor"
     
-    tmux run-shell -t "$test_name" "$PROJECT_ROOT/bin/tabby-toggle"
+    tmux run-shell -t "$test_name" "$PROJECT_ROOT/bin/tabby toggle"
     sleep 1
     
     tmux kill-window -t "$test_name:to-be-killed"

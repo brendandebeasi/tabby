@@ -15,21 +15,25 @@ SCREENSHOT_DIR=$(TEST_DIR)/screenshots
 # Default target
 all: build
 
+# Binaries that survived the Phase B consolidation. Everything daemon-side
+# lives in cmd/tabby/ as subcommands; the render-tab*/render-status* format
+# binaries stay separate because tmux invokes them per-frame from format
+# strings, where subcommand dispatch would add measurable latency.
+TABBY_BINS := tabby render-tab render-tab-v2 render-tab-dark-text render-status render-status-window input-logger mousetest
+
 # Build all binaries from cmd/
 build:
 	@mkdir -p $(BIN_DIR)
-	@for d in cmd/*/; do \
-		name=$$(basename $$d); \
-		$(GOBUILD) -o $(BIN_DIR)/$$name ./$$d || exit 1; \
+	@for name in $(TABBY_BINS); do \
+		$(GOBUILD) -o $(BIN_DIR)/$$name ./cmd/$$name || exit 1; \
 	done
 	@chmod +x $(BIN_DIR)/*
 
 # Build Linux amd64 binaries for bastion deployment (separate dir, does not overwrite local bin/)
 build-linux:
 	@mkdir -p bin-linux
-	@for d in cmd/*/; do \
-		name=$$(basename $$d); \
-		GOOS=linux GOARCH=amd64 $(GOBUILD) -o bin-linux/$$name ./$$d || exit 1; \
+	@for name in $(TABBY_BINS); do \
+		GOOS=linux GOARCH=amd64 $(GOBUILD) -o bin-linux/$$name ./cmd/$$name || exit 1; \
 	done
 	@echo "Linux binaries in bin-linux/"
 

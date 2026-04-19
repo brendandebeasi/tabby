@@ -71,11 +71,12 @@ func TestMessageTypeConstants(t *testing.T) {
 }
 
 func TestMessageTypeJSONFieldName(t *testing.T) {
-	msg := Message{Type: MsgRender, ClientID: "c1"}
+	msg := Message{Type: MsgRender, Target: RenderTarget{Kind: TargetSidebar, WindowID: "@1"}}
 	data, err := json.Marshal(msg)
 	assert.NoError(t, err)
 	assert.Contains(t, string(data), `"type":"render"`)
-	assert.Contains(t, string(data), `"client_id":"c1"`)
+	assert.Contains(t, string(data), `"kind":"sidebar"`)
+	assert.Contains(t, string(data), `"window":"@1"`)
 
 	msg2 := Message{Type: MsgSubscribe}
 	data2, err := json.Marshal(msg2)
@@ -378,9 +379,9 @@ func TestJSONRoundTrip(t *testing.T) {
 		}
 
 		original := Message{
-			Type:     MsgRender,
-			ClientID: "client-1",
-			Payload:  payload,
+			Type:    MsgRender,
+			Target:  RenderTarget{Kind: TargetSidebar, WindowID: "@1"},
+			Payload: payload,
 		}
 
 		data, err := json.Marshal(original)
@@ -395,7 +396,7 @@ func TestJSONRoundTrip(t *testing.T) {
 		}
 
 		assert.Equal(t, original.Type, restored.Type)
-		assert.Equal(t, original.ClientID, restored.ClientID)
+		assert.Equal(t, original.Target, restored.Target)
 		assert.NotNil(t, restored.Payload)
 	})
 }

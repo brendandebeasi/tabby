@@ -204,7 +204,7 @@ cmd_start() {
     TABBY_CONFIG_DIR="$DEMO_CONFIG_DIR" \
     TABBY_RUNTIME_PREFIX="$DEMO_RUNTIME_PREFIX" \
     TABBY_USE_RENDERER="1" \
-        "$REPO_DIR/bin/tabby-daemon" -session "$DEMO_SESSION_ID" >/dev/null 2>&1 &
+        "$REPO_DIR/bin/tabby daemon" -session "$DEMO_SESSION_ID" >/dev/null 2>&1 &
 
     # Wait for daemon socket (prefixed path)
     DEMO_SOCK="/tmp/${DEMO_RUNTIME_PREFIX}tabby-daemon-\$0.sock"

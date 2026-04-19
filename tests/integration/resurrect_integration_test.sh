@@ -8,8 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TABBY_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SAVE_HOOK="$TABBY_ROOT/bin/tabby-hook resurrect-save"
-RESTORE_HOOK_BIN="$TABBY_ROOT/bin/tabby-hook"
+SAVE_HOOK="$TABBY_ROOT/bin/tabby hook resurrect-save"
+RESTORE_HOOK_BIN="$TABBY_ROOT/bin/tabby"
 FAILED=0
 
 pass() { echo "✓ $1"; }

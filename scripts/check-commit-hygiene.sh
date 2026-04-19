@@ -48,10 +48,17 @@ if printf '%s\n' "$diff_text" | grep -E '^\+[^+].*(BEGIN (RSA|EC|OPENSSH|DSA) PR
 fi
 
 credential_regex="^\\+[^+].*(api[_-]?key|auth[_-]?pass|secret|token|password)[[:space:]]*[:=][[:space:]]*['\"][^'\"]{6,}['\"]"
-if printf '%s\n' "$diff_text" | grep -Ei "$credential_regex" >/dev/null; then
+# Allow-list obvious placeholders that match the credential shape but are
+# sentinel values rather than secrets. "ollama" is literally the string the
+# Ollama local LLM provider requires as a non-empty API key placeholder.
+credential_allowlist='(apiKey = "ollama")'
+credential_hits=$(printf '%s\n' "$diff_text" | grep -Ei "$credential_regex" | grep -Ev "$credential_allowlist" || true)
+if [ -n "$credential_hits" ]; then
   echo ""
   echo "Commit blocked: likely hardcoded credential detected in staged changes." >&2
   echo "Use environment variables or config references instead." >&2
+  echo "First offending line:" >&2
+  printf '%s\n' "$credential_hits" | head -1 >&2
   exit 1
 fi
 

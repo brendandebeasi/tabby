@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Integration Test: AI Indicator State Transitions ==="
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1 && pwd -P)"
-SET_IND="$PROJECT_ROOT/bin/tabby-hook set-indicator"
+SET_IND="$PROJECT_ROOT/bin/tabby hook set-indicator"
 
 WIN_IDX="$(tmux display-message -p '#{window_index}')"
 PANE_ID="$(tmux display-message -p '#{pane_id}')"

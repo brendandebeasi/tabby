@@ -67,10 +67,10 @@ get_pane_path() {
 echo ""
 echo "--- Test 1: Binary exists and is executable ---"
 
-if [ -x "$PROJECT_ROOT/bin/new-window" ]; then
-  pass "bin/new-window exists and is executable"
+if [ -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  pass "bin/tabby new-window exists and is executable"
 else
-  fail "bin/new-window not found or not executable"
+  fail "bin/tabby new-window not found or not executable"
 fi
 
 # ─── Test 2: Atomic creation — new window gets sidebar pane immediately ───
@@ -78,14 +78,14 @@ fi
 echo ""
 echo "--- Test 2: Atomic creation with sidebar pane ---"
 
-if [ ! -x "$PROJECT_ROOT/bin/new-window" ]; then
-  skip "bin/new-window not built yet"
+if [ ! -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  skip "bin/tabby new-window not built yet"
 else
   tmux set-option -g @tabby_sidebar enabled 2>/dev/null || true
   BEFORE=$(count_windows)
   
   # Run the binary with explicit session ID
-  "$PROJECT_ROOT/bin/new-window" -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby new-window" -session "$SESSION_ID" 2>/dev/null || true
   sleep 0.3
   
   AFTER=$(count_windows)
@@ -116,11 +116,11 @@ fi
 echo ""
 echo "--- Test 3: Focus on content pane (not sidebar-renderer) ---"
 
-if [ ! -x "$PROJECT_ROOT/bin/new-window" ]; then
-  skip "bin/new-window not built yet"
+if [ ! -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  skip "bin/tabby new-window not built yet"
 else
   BEFORE=$(count_windows)
-  "$PROJECT_ROOT/bin/new-window" -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby new-window" -session "$SESSION_ID" 2>/dev/null || true
   sleep 0.3
   AFTER=$(count_windows)
   
@@ -144,10 +144,10 @@ else
 echo ""
 echo "--- Test 4: @tabby_spawning cleared after binary exits ---"
 
-if [ ! -x "$PROJECT_ROOT/bin/new-window" ]; then
-  skip "bin/new-window not built yet"
+if [ ! -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  skip "bin/tabby new-window not built yet"
 else
-  "$PROJECT_ROOT/bin/new-window" -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby new-window" -session "$SESSION_ID" 2>/dev/null || true
   sleep 0.3
   
   SPAWNING=$(tmux show-option -gqv @tabby_spawning 2>/dev/null || echo "")
@@ -163,11 +163,11 @@ fi
 echo ""
 echo "--- Test 5: @tabby_new_window_id lifecycle ---"
 
-if [ ! -x "$PROJECT_ROOT/bin/new-window" ]; then
-  skip "bin/new-window not built yet"
+if [ ! -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  skip "bin/tabby new-window not built yet"
 else
   tmux set-option -g @tabby_sidebar enabled 2>/dev/null || true
-  "$PROJECT_ROOT/bin/new-window" -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby new-window" -session "$SESSION_ID" 2>/dev/null || true
   sleep 0.1
   
   NEW_WIN_ID=$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo "")
@@ -192,12 +192,12 @@ fi
 echo ""
 echo "--- Test 6: Group inheritance from @tabby_new_window_group ---"
 
-if [ ! -x "$PROJECT_ROOT/bin/new-window" ]; then
-  skip "bin/new-window not built yet"
+if [ ! -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  skip "bin/tabby new-window not built yet"
 else
   tmux set-option -g @tabby_new_window_group "AtomicTestGroup" 2>/dev/null || true
   BEFORE=$(count_windows)
-  "$PROJECT_ROOT/bin/new-window" -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby new-window" -session "$SESSION_ID" 2>/dev/null || true
   sleep 0.3
   AFTER=$(count_windows)
   
@@ -226,12 +226,12 @@ fi
 echo ""
 echo "--- Test 7: Disabled mode (no sidebar pane) ---"
 
-if [ ! -x "$PROJECT_ROOT/bin/new-window" ]; then
-  skip "bin/new-window not built yet"
+if [ ! -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  skip "bin/tabby new-window not built yet"
 else
   tmux set-option -g @tabby_sidebar disabled 2>/dev/null || true
   BEFORE=$(count_windows)
-  "$PROJECT_ROOT/bin/new-window" -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby new-window" -session "$SESSION_ID" 2>/dev/null || true
   sleep 0.3
   AFTER=$(count_windows)
   
@@ -257,15 +257,15 @@ fi
 echo ""
 echo "--- Test 8: No spurious window switching ---"
 
-if [ ! -x "$PROJECT_ROOT/bin/new-window" ]; then
-  skip "bin/new-window not built yet"
+if [ ! -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  skip "bin/tabby new-window not built yet"
 else
   tmux set-option -g @tabby_sidebar enabled 2>/dev/null || true
   
   # Record current window before running binary
   BEFORE_WIN=$(tmux display-message -p -t "$TEST_SESSION" '#{window_id}')
   
-  "$PROJECT_ROOT/bin/new-window" -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby new-window" -session "$SESSION_ID" 2>/dev/null || true
   sleep 0.3
   
   AFTER_WIN=$(tmux display-message -p -t "$TEST_SESSION" '#{window_id}')
@@ -289,11 +289,11 @@ fi
 echo ""
 echo "--- Test 9: Working directory respected ---"
 
-if [ ! -x "$PROJECT_ROOT/bin/new-window" ]; then
-  skip "bin/new-window not built yet"
+if [ ! -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  skip "bin/tabby new-window not built yet"
 else
   tmux set-option -g @tabby_new_window_path "/tmp" 2>/dev/null || true
-  "$PROJECT_ROOT/bin/new-window" -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby new-window" -session "$SESSION_ID" 2>/dev/null || true
   sleep 0.3
   
   NEWEST_WIN=$(tmux list-windows -t "$TEST_SESSION" -F '#{window_id}' | tail -1)
@@ -327,13 +327,13 @@ fi
 echo ""
 echo "--- Test 10: Both overrides cleared after use ---"
 
-if [ ! -x "$PROJECT_ROOT/bin/new-window" ]; then
-  skip "bin/new-window not built yet"
+if [ ! -x "$PROJECT_ROOT/bin/tabby new-window" ]; then
+  skip "bin/tabby new-window not built yet"
 else
   tmux set-option -g @tabby_new_window_group "ClearTestGroup" 2>/dev/null || true
   tmux set-option -g @tabby_new_window_path "/var" 2>/dev/null || true
   
-  "$PROJECT_ROOT/bin/new-window" -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby new-window" -session "$SESSION_ID" 2>/dev/null || true
   sleep 0.3
   
   GROUP_AFTER=$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")

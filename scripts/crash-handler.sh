@@ -23,7 +23,7 @@ MAX_RESTARTS="${4:-5}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck disable=SC1007
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-INDICATOR="$TABBY_DIR/bin/tabby-hook set-indicator"
+INDICATOR="$TABBY_DIR/bin/tabby hook set-indicator"
 LOG="/tmp/tabby-crash-handler.log"
 CRASH_LOG="/tmp/tabby-daemon-${SESSION_ID}-crash.log"
 EVENTS_LOG="/tmp/tabby-daemon-${SESSION_ID}.events.log"
@@ -267,9 +267,9 @@ Please:
 4. If you're confident in the fix, create a PR
 
 Key source files to check:
-- cmd/tabby-daemon/main.go (daemon main loop, panic recovery)
-- cmd/tabby-daemon/coordinator.go (render coordination, locking)
-- cmd/sidebar-renderer/main.go (renderer client)
+- cmd/tabby/internal/daemon/main.go (daemon main loop, panic recovery)
+- cmd/tabby/internal/daemon/coordinator.go (render coordination, locking)
+- cmd/tabby/internal/sidebar/sidebar.go (renderer client)
 
 Focus on PANIC, CRASH, LOOP_STALL, and DEADLOCK entries in the crash log."
 

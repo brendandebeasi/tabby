@@ -80,7 +80,7 @@ capture_sidebar_open() {
     log_info "Capturing: Sidebar Open"
     
     # Toggle sidebar open
-    tmux run-shell -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle" 2>/dev/null || true
+    tmux run-shell -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby toggle" 2>/dev/null || true
     sleep 1
     
     # Find sidebar pane
@@ -180,7 +180,7 @@ main() {
     # Build first
     log_info "Building binaries..."
     (cd "$PROJECT_ROOT" && go build -o bin/render-status cmd/render-status/main.go) || exit 1
-    (cd "$PROJECT_ROOT" && go build -o bin/sidebar-renderer cmd/sidebar-renderer/main.go) || exit 1
+    (cd "$PROJECT_ROOT" && go build -o bin/tabby ./cmd/tabby) || exit 1
     
     setup_visual_session
     

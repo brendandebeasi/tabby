@@ -10,7 +10,7 @@ SESSION_ID_ARG="${5:-}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck disable=SC1007
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-INDICATOR="$TABBY_DIR/bin/tabby-hook set-indicator"
+INDICATOR="$TABBY_DIR/bin/tabby hook set-indicator"
 LOG_FILE="/tmp/tabby-opencode-hook.log"
 
 # Use tmux from PATH — never hardcode a specific installation path
@@ -276,7 +276,7 @@ send_notification() {
     local focus_cmd=""
     local open_url=""
     if [ -n "$TMUX_TARGET" ]; then
-        focus_cmd="$TABBY_DIR/bin/tabby-hook focus-pane $TMUX_TARGET"
+        focus_cmd="$TABBY_DIR/bin/tabby hook focus-pane $TMUX_TARGET"
     elif [ -n "$session_dir" ]; then
         open_url="opencode://open-project?directory=${session_dir}"
     fi

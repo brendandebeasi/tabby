@@ -75,7 +75,7 @@ cleanup_test_session() {
     tmux kill-server 2>/dev/null || true
     
     # Clean up any orphaned sidebar processes
-    pkill -f "tabby/bin/sidebar-renderer" 2>/dev/null || true
+    pkill -f "tabby/bin/tabby render sidebar" 2>/dev/null || true
     
     # Clean up PID files
     rm -f /tmp/tabby-sidebar-*.pid 2>/dev/null || true
@@ -188,7 +188,7 @@ test_sidebar_toggle_open() {
     fi
     
     # Toggle sidebar (run in test session context)
-    tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle" 2>/dev/null || true
+    tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby toggle" 2>/dev/null || true
     sleep 1
     
     if sidebar_exists; then
@@ -206,12 +206,12 @@ test_sidebar_toggle_close() {
     
     # Ensure sidebar exists first
     if ! sidebar_exists; then
-        tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle" 2>/dev/null || true
+        tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby toggle" 2>/dev/null || true
         sleep 1
     fi
     
     # Toggle again to close
-    tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby-toggle" 2>/dev/null || true
+    tmux run-shell -b -t "$TEST_SESSION" "$PROJECT_ROOT/bin/tabby toggle" 2>/dev/null || true
     sleep 1
     
     if ! sidebar_exists; then
@@ -371,7 +371,7 @@ run_all_tests() {
         log_fail "Failed to build render-status"
         exit 1
     }
-    (cd "$PROJECT_ROOT" && go build -o bin/sidebar-renderer cmd/sidebar-renderer/main.go 2>/dev/null) || {
+    (cd "$PROJECT_ROOT" && go build -o bin/tabby ./cmd/tabby 2>/dev/null) || {
         log_fail "Failed to build sidebar-renderer"
         exit 1
     }

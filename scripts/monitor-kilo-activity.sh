@@ -5,7 +5,7 @@
 set -u
 
 TABBY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INDICATOR="$TABBY_DIR/bin/tabby-hook set-indicator"
+INDICATOR="$TABBY_DIR/bin/tabby hook set-indicator"
 LOG_FILE="/tmp/kilo-activity-monitor.log"
 
 log() {

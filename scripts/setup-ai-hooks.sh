@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)"
 # shellcheck disable=SC1007
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-INDICATOR="$TABBY_DIR/bin/tabby-hook set-indicator"
+INDICATOR="$TABBY_DIR/bin/tabby hook set-indicator"
 
 DRY_RUN=false
 TOOL_FILTER=""
@@ -462,11 +462,11 @@ setup_kilo() {
 // Kilo plugin to add Tabby status indicator hooks
 const { execSync } = require('child_process');
 
-const INDICATOR_BIN = '__TABBY_DIR__/bin/tabby-hook';
+const INDICATOR_BIN = '__TABBY_DIR__/bin/tabby';
 
 function setIndicator(type, value) {
   try {
-    require('child_process').execFileSync(INDICATOR_BIN, ['set-indicator', type, String(value)], { stdio: 'ignore' });
+    require('child_process').execFileSync(INDICATOR_BIN, ['hook', 'set-indicator', type, String(value)], { stdio: 'ignore' });
   } catch (error) {
     // Silently fail if Tabby not available
   }

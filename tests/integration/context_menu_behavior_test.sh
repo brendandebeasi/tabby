@@ -4,7 +4,7 @@ set -e
 echo "=== Integration Test: Context Menu Behavior Guards ==="
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1 && pwd -P)"
-SIDEBAR_RENDERER="$PROJECT_ROOT/cmd/sidebar-renderer/main.go"
+SIDEBAR_RENDERER="$PROJECT_ROO./cmd/tabby/main.go"
 
 if grep -q 'case tea.BlurMsg:' "$SIDEBAR_RENDERER" && grep -q 'm.menuDismiss()' "$SIDEBAR_RENDERER"; then
     echo "✓ Sidebar menu is dismissed on blur"

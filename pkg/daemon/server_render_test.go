@@ -309,7 +309,7 @@ func TestSendMessage_ValidConn(t *testing.T) {
 		received <- string(buf[:n])
 	}()
 
-	err := s.sendMessage(serverConn, Message{Type: MsgPong, ClientID: "test"})
+	err := s.sendMessage(serverConn, Message{Type: MsgPong, Target: RenderTarget{Kind: TargetSidebar, WindowID: "@test"}})
 	assert.NoError(t, err)
 
 	data := <-received

@@ -48,13 +48,16 @@ if [ "${TABBY_DEFERRED:-}" != "1" ]; then
             fi
             if [ "$_WD_ALIVE" = "false" ]; then
                 rm -f "$_SOCK" "$_PIDF"
-                "$CURRENT_DIR/bin/tabby-watchdog" -session "$_SESSION" &
+                "$CURRENT_DIR/bin/tabby" watchdog -session "$_SESSION" &
             fi
         fi
 
         # Instant sidebar pane — single list-panes call for both check and pane ID
-        _SIDEBAR_BIN="$CURRENT_DIR/bin/sidebar-renderer"
-        if [ -x "$_SIDEBAR_BIN" ]; then
+        # Renderers are now subcommands of tabby; exec -a preserves the legacy
+        # argv[0] so pane_current_command still reports "sidebar-renderer" for
+        # detection logic in cycle-pane and the daemon.
+        _TABBY_BIN="$CURRENT_DIR/bin/tabby"
+        if [ -x "$_TABBY_BIN" ]; then
             _PANES=$(tmux list-panes -F "#{pane_id}|#{pane_current_command}|#{pane_start_command}" 2>/dev/null)
             _HAS_SIDEBAR=$(echo "$_PANES" | grep -qE "sidebar" && echo "y" || echo "")
             if [ -z "$_HAS_SIDEBAR" ]; then
@@ -62,7 +65,7 @@ if [ "${TABBY_DEFERRED:-}" != "1" ]; then
                 if [ -n "$_FIRST_PANE" ] && [ -n "$_WINDOW" ]; then
                     _DBG=""; [ "${TABBY_DEBUG:-}" = "1" ] && _DBG="-debug"
                     tmux split-window -d -t "$_FIRST_PANE" -h -b -f -l 25 \
-                        "printf '\\033[?25l\\033[2J\\033[H' && exec '$_SIDEBAR_BIN' -session '$_SESSION' -window '$_WINDOW' $_DBG"
+                        "printf '\\033[?25l\\033[2J\\033[H' && exec -a sidebar-renderer '$_TABBY_BIN' render sidebar -session '$_SESSION' -window '$_WINDOW' $_DBG"
                 fi
             fi
         fi
@@ -106,14 +109,14 @@ tmux set-option -g aggressive-resize on
 
 # New panes/windows open in the current content pane's directory.
 # If focus is on a window-header utility pane, split the underlying content pane.
-SPLIT_PANE_CMD="$CURRENT_DIR/bin/tabby-hook split-pane"
+SPLIT_PANE_CMD="$CURRENT_DIR/bin/tabby hook split-pane"
 tmux bind-key '"' run-shell "$SPLIT_PANE_CMD v"
 tmux bind-key '%' run-shell "$SPLIT_PANE_CMD h"
 tmux bind-key '|' run-shell "$SPLIT_PANE_CMD h"
 tmux bind-key '-' run-shell "$SPLIT_PANE_CMD v"
 
 # Override 'c' to capture group and create new window (Go binary)
-NEW_WINDOW_BIN="$CURRENT_DIR/bin/new-window"
+NEW_WINDOW_BIN="$CURRENT_DIR/bin/tabby new-window"
 tmux bind-key 'c' run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 
 # Enable automatic window renaming by default (shows running command/SSH host)
@@ -234,7 +237,8 @@ fi
 
 # Inactive pane dimming: now handled by tabby-daemon (ApplyPaneDimming on signal_refresh).
 # The cycle-pane binary is still used for pane cycling keybinding only.
-CYCLE_PANE_BIN="$CURRENT_DIR/bin/cycle-pane"
+TABBY_CYCLE_BIN="$CURRENT_DIR/bin/tabby"
+CYCLE_PANE_BIN="$CURRENT_DIR/bin/tabby cycle-pane"
 # Reset global window styles so the daemon's applyThemeToTmux() takes effect.
 # NOTE: We use -ug (unset global) rather than setting to "default" because
 # the string "default" resolves to bg=8 (terminal-native), which may not
@@ -297,7 +301,7 @@ tmux bind-key -T root WheelDownPane \
 tmux set-option -g focus-events on
 
 # Kill-pane: daemon handles save-layout + kill, or kills window if last content pane
-KILL_PANE_SCRIPT="$CURRENT_DIR/bin/tabby-hook kill-pane"
+KILL_PANE_SCRIPT="$CURRENT_DIR/bin/tabby hook kill-pane"
 
 # Pane border mouse: left-click+drag resizes panes, right-click shows context menu
 # IMPORTANT: MouseDown1Border must stay bound for MouseDrag1Border (resize) to work
@@ -401,7 +405,7 @@ if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
     # Mouse bindings for tabs
     tmux set-option -g mouse on
     tmux bind-key -T root MouseDown1Status select-window -t =
-    tmux bind-key -T root MouseDown2Status run-shell "$CURRENT_DIR/bin/tabby-hook kill-window #{window_index}"
+    tmux bind-key -T root MouseDown2Status run-shell "$CURRENT_DIR/bin/tabby hook kill-window #{window_index}"
     tmux bind-key -T root MouseDown3Status command-prompt -I "#W" "rename-window '%%' ; set-window-option @tabby_name_locked 1"
     tmux bind-key -T root MouseDown1StatusRight new-window
 fi
@@ -413,7 +417,7 @@ SIGNAL_SIDEBAR_SCRIPT="$SIGNAL_CMD"
 REFRESH_STATUS_SCRIPT="tmux refresh-client -S"
 
 # All lifecycle scripts now handled by Go binaries via tabby-hook
-HOOK_BIN="$CURRENT_DIR/bin/tabby-hook"
+HOOK_BIN="$CURRENT_DIR/bin/tabby hook"
 ENSURE_SIDEBAR_CMD="$HOOK_BIN ensure-sidebar"
 RESTORE_SIDEBAR_CMD="$HOOK_BIN ensure-sidebar"
 STABILIZE_CLIENT_RESIZE_CMD="$HOOK_BIN stabilize-client-resize"
@@ -423,8 +427,8 @@ FOCUS_RECOVERY_CMD="$HOOK_BIN restore-input-focus"
 # Apply group to new window: now handled by daemon (createNewWindowInCurrentGroup)
 
 # Window kill and exit-if-no-main: now handled by tabby-hook -> daemon
-KILL_WINDOW_SCRIPT="$CURRENT_DIR/bin/tabby-hook kill-window"
-EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby-hook exit-if-no-main"
+KILL_WINDOW_SCRIPT="$CURRENT_DIR/bin/tabby hook kill-window"
+EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby hook exit-if-no-main"
 
 # --- Hook registrations ---
 # Most hooks now signal the daemon (USR1) which handles all state internally:
@@ -490,7 +494,7 @@ TOGGLE_KEY=$(grep "toggle_sidebar:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{pr
 KEY=${TOGGLE_KEY##*+ }
 if [ -z "$KEY" ]; then KEY="Tab"; fi
 
-tmux bind-key "$KEY" run-shell -b "$CURRENT_DIR/bin/tabby-toggle"
+tmux bind-key "$KEY" run-shell -b "$CURRENT_DIR/bin/tabby toggle"
 
 # Double-click on pane or border: pass through mouse events normally
 tmux bind-key -T root DoubleClick1Pane \
@@ -553,12 +557,12 @@ bind_from_config "$KILL_WINDOW_BINDING" "run-shell '$KILL_WINDOW_SCRIPT #{window
 # Swap/cycle active pane within current window (skips utility panes, signals daemon)
 # Uses Go binary: bin/cycle-pane (also handles dimming)
 SWAP_PANE_BINDING=$(grep "swap_pane:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
-if [ -n "$SWAP_PANE_BINDING" ] && [ -x "$CYCLE_PANE_BIN" ]; then
+if [ -n "$SWAP_PANE_BINDING" ] && [ -x "$TABBY_CYCLE_BIN" ]; then
     SWAP_KEY=$(normalize_global_key "$SWAP_PANE_BINDING")
     [ -n "$SWAP_KEY" ] && tmux bind-key -n "$SWAP_KEY" run-shell "$CYCLE_PANE_BIN"
 fi
 # Also override prefix+o to use the smart cycle binary
-if [ -x "$CYCLE_PANE_BIN" ]; then
+if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key o run-shell "$CYCLE_PANE_BIN"
 fi
 
@@ -566,7 +570,7 @@ fi
 # tmux bind-key -n M-Tab run-shell "$CURRENT_DIR/bin/tabby-toggle"
 
 # New Group shortcut (prefix + G)
-tmux bind-key G command-prompt -p 'New group name:' "run-shell '$CURRENT_DIR/bin/tabby-hook new-group %%'"
+tmux bind-key G command-prompt -p 'New group name:' "run-shell '$CURRENT_DIR/bin/tabby hook new-group %%'"
 
 # Override kill-pane to save layout first (preserves pane ratios)
 tmux bind-key x confirm-before -p 'Close pane? (y/n)' "run-shell '$KILL_PANE_SCRIPT'"

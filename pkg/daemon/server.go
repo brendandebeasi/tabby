@@ -19,6 +19,7 @@ import (
 // ClientInfo tracks per-client state for renderers
 type ClientInfo struct {
 	Conn            net.Conn
+	Target          RenderTarget
 	Width           int
 	Height          int
 	ViewportOffset  int
@@ -253,9 +254,15 @@ func (s *Server) handleClient(conn net.Conn) {
 
 		switch msg.Type {
 		case MsgSubscribe:
-			clientID = msg.ClientID
+			if err := msg.Target.Valid(); err != nil {
+				if s.DebugLog != nil {
+					s.DebugLog("SOCKET_SUBSCRIBE_DROP reason=invalid_target remote=%s err=%v", remoteAddr, err)
+				}
+				return
+			}
+			clientID = msg.Target.Key()
 			if s.DebugLog != nil {
-				s.DebugLog("SOCKET_SUBSCRIBE client=%s remote=%s", clientID, remoteAddr)
+				s.DebugLog("SOCKET_SUBSCRIBE client=%s kind=%s remote=%s", clientID, msg.Target.Kind, remoteAddr)
 			}
 			// Parse resize payload if included
 			width, height := 80, 24 // defaults
@@ -280,6 +287,7 @@ func (s *Server) handleClient(conn net.Conn) {
 			s.clientsMu.Lock()
 			s.clients[clientID] = &ClientInfo{
 				Conn:         conn,
+				Target:       msg.Target,
 				Width:        width,
 				Height:       height,
 				ColorProfile: colorProfile,
@@ -347,51 +355,52 @@ func (s *Server) handleClient(conn net.Conn) {
 			}
 
 		case MsgInput:
-			effectiveClientID := clientID
-			if strings.TrimSpace(effectiveClientID) == "" && strings.TrimSpace(msg.ClientID) != "" {
-				effectiveClientID = strings.TrimSpace(msg.ClientID)
-				clientID = effectiveClientID
-				if s.DebugLog != nil {
-					s.DebugLog("SOCKET_INPUT_CLIENT_FALLBACK remote=%s client=%s", remoteAddr, effectiveClientID)
+			// Typed identity: every input must arrive on a subscribed
+			// connection OR carry a valid Target. No silent fallback.
+			if clientID == "" {
+				if err := msg.Target.Valid(); err != nil {
+					if s.DebugLog != nil {
+						s.DebugLog("SOCKET_INPUT_DROP reason=invalid_target remote=%s err=%v", remoteAddr, err)
+						count, shouldLog := s.recordAnonymousInput(remoteAddr)
+						if shouldLog {
+							s.DebugLog("SOCKET_INPUT_ANON source=%s count=%d err=%v", remoteAddr, count, err)
+						}
+					}
+					continue
 				}
+				clientID = msg.Target.Key()
 			}
 			if msg.Payload == nil {
 				if s.DebugLog != nil {
-					s.DebugLog("SOCKET_INPUT_DROP reason=nil_payload client=%s remote=%s", effectiveClientID, remoteAddr)
+					s.DebugLog("SOCKET_INPUT_DROP reason=nil_payload client=%s remote=%s", clientID, remoteAddr)
 				}
 				continue
 			}
 			payloadBytes, err := json.Marshal(msg.Payload)
 			if err != nil {
 				if s.DebugLog != nil {
-					s.DebugLog("SOCKET_INPUT_DROP reason=payload_marshal client=%s remote=%s err=%v", effectiveClientID, remoteAddr, err)
+					s.DebugLog("SOCKET_INPUT_DROP reason=payload_marshal client=%s remote=%s err=%v", clientID, remoteAddr, err)
 				}
 				continue
 			}
 			var input InputPayload
 			if err := json.Unmarshal(payloadBytes, &input); err != nil {
 				if s.DebugLog != nil {
-					s.DebugLog("SOCKET_INPUT_DROP reason=payload_unmarshal client=%s remote=%s bytes=%d err=%v", effectiveClientID, remoteAddr, len(payloadBytes), err)
+					s.DebugLog("SOCKET_INPUT_DROP reason=payload_unmarshal client=%s remote=%s bytes=%d err=%v", clientID, remoteAddr, len(payloadBytes), err)
 				}
 				continue
 			}
 			if s.DebugLog != nil {
-				s.DebugLog("SOCKET_INPUT client=%s type=%s btn=%s action=%s resolved=%s x=%d y=%d target=%s pane=%s sourcePane=%s remote=%s", effectiveClientID, input.Type, input.Button, input.Action, input.ResolvedAction, input.MouseX, input.MouseY, input.ResolvedTarget, input.PaneID, input.SourcePaneID, remoteAddr)
-				if strings.TrimSpace(effectiveClientID) == "" {
-					count, shouldLog := s.recordAnonymousInput(remoteAddr)
-					if shouldLog {
-						s.DebugLog("SOCKET_INPUT_ANON source=%s count=%d resolved=%s action=%s", remoteAddr, count, input.ResolvedAction, input.Action)
-					}
-				}
+				s.DebugLog("SOCKET_INPUT client=%s type=%s btn=%s action=%s resolved=%s x=%d y=%d target=%s pane=%s sourcePane=%s remote=%s", clientID, input.Type, input.Button, input.Action, input.ResolvedAction, input.MouseX, input.MouseY, input.ResolvedTarget, input.PaneID, input.SourcePaneID, remoteAddr)
 			}
 			if s.OnInput != nil {
 				func() {
 					defer func() {
 						if r := recover(); r != nil {
-							fmt.Fprintf(os.Stderr, "PANIC in OnInput (client=%s): %v\n", effectiveClientID, r)
+							fmt.Fprintf(os.Stderr, "PANIC in OnInput (client=%s): %v\n", clientID, r)
 						}
 					}()
-					s.OnInput(effectiveClientID, &input)
+					s.OnInput(clientID, &input)
 				}()
 			}
 
@@ -456,20 +465,18 @@ func (s *Server) RenderActiveWindowOnly(activeWindowID string) {
 	defer t.Stop()
 
 	s.clientsMu.RLock()
-	clientIDs := make([]string, 0, len(s.clients))
-	for id := range s.clients {
-		clientIDs = append(clientIDs, id)
+	var matches []string
+	for id, client := range s.clients {
+		// Sidebar renderers are keyed per-window; render only the one for the active window.
+		// Headers are per-pane; animation-tick updates are not sent to them.
+		if client.Target.Kind == TargetSidebar && client.Target.WindowID == activeWindowID {
+			matches = append(matches, id)
+		}
 	}
 	s.clientsMu.RUnlock()
 
-	for _, id := range clientIDs {
-		// Render if: sidebar for active window, or header in active window
-		// ClientID format: "@1" for sidebar, "header:%123" for pane headers
-		if id == activeWindowID {
-			s.SendRenderToClient(id)
-		}
-		// Note: headers are per-pane, not per-window, so we skip them during
-		// animation-only renders. They'll get updated on window state changes.
+	for _, id := range matches {
+		s.SendRenderToClient(id)
 	}
 }
 
@@ -591,10 +598,18 @@ func (s *Server) sendRenderToClientImmediate(clientID string) {
 	s.sequenceNum++
 	s.seqMu.Unlock()
 
+	// Pull the typed target for outgoing messages.
+	s.clientsMu.RLock()
+	target := RenderTarget{}
+	if ci, ok := s.clients[clientID]; ok {
+		target = ci.Target
+	}
+	s.clientsMu.RUnlock()
+
 	msg := Message{
-		Type:     MsgRender,
-		ClientID: clientID,
-		Payload:  render,
+		Type:    MsgRender,
+		Target:  target,
+		Payload: render,
 	}
 	// Serialise writes per-client so parallel BroadcastRender goroutines
 	// cannot interleave bytes on the same connection.
@@ -675,13 +690,14 @@ func (s *Server) SendMenuToClient(clientID string, menu *MenuPayload) {
 		return
 	}
 	conn := client.Conn
+	target := client.Target
 	writeMu := &client.writeMu
 	s.clientsMu.RUnlock()
 
 	msg := Message{
-		Type:     MsgMenu,
-		ClientID: clientID,
-		Payload:  menu,
+		Type:    MsgMenu,
+		Target:  target,
+		Payload: menu,
 	}
 	writeMu.Lock()
 	s.sendMessage(conn, msg)
@@ -696,13 +712,14 @@ func (s *Server) SendMarkerPickerToClient(clientID string, picker *MarkerPickerP
 		return
 	}
 	conn := client.Conn
+	target := client.Target
 	writeMu := &client.writeMu
 	s.clientsMu.RUnlock()
 
 	msg := Message{
-		Type:     MsgMarkerPicker,
-		ClientID: clientID,
-		Payload:  picker,
+		Type:    MsgMarkerPicker,
+		Target:  target,
+		Payload: picker,
 	}
 	writeMu.Lock()
 	s.sendMessage(conn, msg)
@@ -717,13 +734,14 @@ func (s *Server) SendColorPickerToClient(clientID string, picker *ColorPickerPay
 		return
 	}
 	conn := client.Conn
+	target := client.Target
 	writeMu := &client.writeMu
 	s.clientsMu.RUnlock()
 
 	msg := Message{
-		Type:     MsgColorPicker,
-		ClientID: clientID,
-		Payload:  picker,
+		Type:    MsgColorPicker,
+		Target:  target,
+		Payload: picker,
 	}
 	writeMu.Lock()
 	s.sendMessage(conn, msg)

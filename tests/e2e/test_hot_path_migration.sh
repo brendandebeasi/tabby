@@ -5,7 +5,7 @@
 # window-style and @tabby_pane_dim flags after a USR1 signal, replacing
 # the old cycle-pane --dim-only shell invocation.
 #
-# Requirements: tmux, tabby-daemon binary built at bin/tabby-daemon
+# Requirements: tmux, tabby-daemon binary built at bin/tabby daemon
 
 set -uo pipefail
 
@@ -13,12 +13,12 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/test_utils.sh"
 
 SESSION="dim-test"
-DAEMON_BIN="$PROJECT_ROOT/bin/tabby-daemon"
+DAEMON_BIN="$PROJECT_ROOT/bin/tabby daemon"
 
 # Build daemon if not present
 if [ ! -x "$DAEMON_BIN" ]; then
     log_info "Building tabby-daemon..."
-    (cd "$PROJECT_ROOT" && go build -o bin/tabby-daemon ./cmd/tabby-daemon)
+    (cd "$PROJECT_ROOT" && go build -o bin/tabby daemon ./cmd/tabby)
 fi
 
 echo "========================================"

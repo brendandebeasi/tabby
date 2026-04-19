@@ -6,6 +6,5 @@ RUN mkdir -p /root/.tmux/plugins/tabby /root/.config/tabby
 RUN cp config.yaml /root/.config/tabby/
 RUN ln -s /plugin /root/.tmux/plugins/tabby
 RUN go build -o bin/render-status cmd/render-status/main.go
-RUN go build -o bin/sidebar-renderer cmd/sidebar-renderer/main.go
-RUN go build -o bin/tabby-daemon cmd/tabby-daemon/main.go
+RUN go build -o bin/tabby ./cmd/tabby
 CMD ["/bin/bash"]

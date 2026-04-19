@@ -4,8 +4,8 @@ set -euo pipefail
 echo "=== Integration Test: Header Height Stability Wiring ==="
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1 && pwd -P)"
-MAIN_GO="$PROJECT_ROOT/cmd/tabby-daemon/main.go"
-PANE_HEADER_GO="$PROJECT_ROOT/cmd/pane-header/main.go"
+MAIN_GO="$PROJECT_ROO./cmd/tabby/main.go"
+PANE_HEADER_GO="$PROJECT_ROO./cmd/tabby/main.go"
 
 if grep -q 'pane-border-status", "off"' "$MAIN_GO" && grep -q 'pane-border-lines", "off"' "$MAIN_GO"; then
   echo "✓ Header panes normalize border status/lines to off"

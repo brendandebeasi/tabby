@@ -31,7 +31,7 @@ if command -v ansi2html >/dev/null 2>&1; then
 fi
 
 echo "=== Capturing: Sidebar Open ==="
-tmux run-shell "$PROJECT_ROOT/bin/tabby-toggle"
+tmux run-shell "$PROJECT_ROOT/bin/tabby toggle"
 sleep 1
 
 SIDEBAR_PANE=$(tmux list-panes -t visual -F "#{pane_id}|#{pane_current_command}" | awk -F'|' '$2 ~ /^(sidebar|sidebar-renderer)$/ {print $1}')

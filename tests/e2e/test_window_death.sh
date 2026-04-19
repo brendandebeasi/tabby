@@ -17,7 +17,7 @@ tmux select-window -t "test-death"
 sleep 0.5
 
 echo "Test 3: Toggling sidebar..."
-$PROJECT_ROOT/bin/tabby-toggle
+$PROJECT_ROOT/bin/tabby toggle
 sleep 1
 
 echo "Test 4: Switching back to original window..."

@@ -42,7 +42,7 @@ test_sidebar_signal_delivery() {
     local session="signal-test"
     setup_test_session "$session"
     
-    tmux run-shell -t "$session" "$PROJECT_ROOT/bin/tabby-toggle"
+    tmux run-shell -t "$session" "$PROJECT_ROOT/bin/tabby toggle"
     sleep 1
     
     local sidebar_pane=$(tmux list-panes -s -t "$session" -F "#{pane_current_command}|#{pane_id}" | grep -E "^(sidebar|sidebar-renderer)\|" | cut -d'|' -f2)

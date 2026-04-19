@@ -45,19 +45,19 @@ echo ""
 
 # Test 1: Build binaries
 echo "--- Test: Build Binaries ---"
-if go build -o bin/tabby-daemon ./cmd/tabby-daemon/ 2>&1; then
+if go build -o bin/tabby daemon ./cmd/tabby/ 2>&1; then
     pass "tabby-daemon builds successfully"
 else
     fail "tabby-daemon build failed"
 fi
 
-if go build -o bin/sidebar-renderer ./cmd/sidebar-renderer/ 2>&1; then
+if go build -o bin/tabby render sidebar ./cmd/tabby/ 2>&1; then
     pass "sidebar-renderer builds successfully"
 else
     fail "sidebar-renderer build failed"
 fi
 
-if go build -o bin/pane-header ./cmd/pane-header/ 2>&1; then
+if go build -o bin/tabby render pane-header ./cmd/tabby/ 2>&1; then
     pass "pane-header builds successfully"
 else
     fail "pane-header build failed"
@@ -90,19 +90,19 @@ fi
 # Test 5: Collapse functionality exists
 echo ""
 echo "--- Test: Collapse/Expand Functionality ---"
-if grep -q "@tabby_collapsed" cmd/tabby-daemon/coordinator.go; then
+if grep -q "@tabby_collapsed" cmd/tabby/internal/daemon/coordinator.go; then
     pass "Window collapse state tracking exists"
 else
     fail "Window collapse state tracking missing"
 fi
 
-if grep -q "@tabby_pane_collapsed" cmd/tabby-daemon/coordinator.go; then
+if grep -q "@tabby_pane_collapsed" cmd/tabby/internal/daemon/coordinator.go; then
     pass "Pane collapse state tracking exists"
 else
     fail "Pane collapse state tracking missing"
 fi
 
-if grep -q "toggle_pane_collapse" cmd/tabby-daemon/coordinator.go; then
+if grep -q "toggle_pane_collapse" cmd/tabby/internal/daemon/coordinator.go; then
     pass "Pane collapse toggle action exists"
 else
     fail "Pane collapse toggle action missing"
