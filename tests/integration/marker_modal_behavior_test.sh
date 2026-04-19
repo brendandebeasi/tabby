@@ -4,7 +4,7 @@ set -e
 echo "=== Integration Test: Marker Modal Wiring ==="
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null 2>&1 && pwd -P)"
-COORDINATOR="$PROJECT_ROO./cmd/tabby/coordinator.go"
+COORDINATOR="$PROJECT_ROOT/cmd/tabby/internal/daemon/coordinator.go"
 
 if grep -q 'tabby-marker-picker:' "$COORDINATOR" || grep -q 'show_marker_results.sh' "$COORDINATOR"; then
     echo "✓ Marker search menu has marker picker command wiring"

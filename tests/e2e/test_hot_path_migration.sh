@@ -13,12 +13,13 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/test_utils.sh"
 
 SESSION="dim-test"
-DAEMON_BIN="$PROJECT_ROOT/bin/tabby daemon"
+TABBY_BIN="$PROJECT_ROOT/bin/tabby"
 
-# Build daemon if not present
-if [ ! -x "$DAEMON_BIN" ]; then
-    log_info "Building tabby-daemon..."
-    (cd "$PROJECT_ROOT" && go build -o bin/tabby daemon ./cmd/tabby)
+# Build tabby if not present. `tabby daemon` is a subcommand — the binary
+# itself is $TABBY_BIN and the subcommand is passed at invocation.
+if [ ! -x "$TABBY_BIN" ]; then
+    log_info "Building tabby..."
+    (cd "$PROJECT_ROOT" && go build -o bin/tabby ./cmd/tabby)
 fi
 
 echo "========================================"
@@ -66,7 +67,7 @@ get_dim_flag() {
 # Start daemon in background
 SESSION_ID=$(tmux display-message -t "$SESSION" -p '#{session_id}')
 DAEMON_LOG=$(mktemp /tmp/tabby-test-daemon.XXXXXX.log)
-"$DAEMON_BIN" -session "$SESSION_ID" > "$DAEMON_LOG" 2>&1 &
+"$TABBY_BIN" daemon -session "$SESSION_ID" > "$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 sleep 3  # let daemon start and complete initial refresh cycle
 

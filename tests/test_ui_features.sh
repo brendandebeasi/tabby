@@ -43,24 +43,12 @@ echo "Tabby UI Features Integration Test"
 echo "=========================================="
 echo ""
 
-# Test 1: Build binaries
-echo "--- Test: Build Binaries ---"
-if go build -o bin/tabby daemon ./cmd/tabby/ 2>&1; then
-    pass "tabby-daemon builds successfully"
+# Test 1: Build binary
+echo "--- Test: Build tabby binary ---"
+if go build -o bin/tabby ./cmd/tabby/ 2>&1; then
+    pass "tabby builds successfully (daemon/sidebar/pane-header are subcommands)"
 else
-    fail "tabby-daemon build failed"
-fi
-
-if go build -o bin/tabby render sidebar ./cmd/tabby/ 2>&1; then
-    pass "sidebar-renderer builds successfully"
-else
-    fail "sidebar-renderer build failed"
-fi
-
-if go build -o bin/tabby render pane-header ./cmd/tabby/ 2>&1; then
-    pass "pane-header builds successfully"
-else
-    fail "pane-header build failed"
+    fail "tabby build failed"
 fi
 
 # Test 2: Shell script syntax validation

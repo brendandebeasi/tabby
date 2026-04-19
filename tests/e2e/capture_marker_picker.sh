@@ -34,8 +34,7 @@ tmux -C attach-session -t "$TEST_SESSION" >/tmp/tabby-marker-picker-control.log 
 CONTROL_CLIENT_PID=$!
 sleep 0.5
 
-(cd "$PROJECT_ROOT" && go build -o bin/tabby render sidebar ./cmd/tabby >/dev/null)
-(cd "$PROJECT_ROOT" && go build -o bin/tabby daemon ./cmd/tabby >/dev/null)
+(cd "$PROJECT_ROOT" && go build -o bin/tabby ./cmd/tabby >/dev/null)
 
 tmux run-shell -b -t "$TEST_SESSION" "TABBY_SKIP_BUILD=1 TABBY_SESSION_TARGET=$TEST_SESSION $PROJECT_ROOT/bin/tabby toggle"
 sleep 2
