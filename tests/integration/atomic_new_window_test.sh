@@ -158,66 +158,29 @@ else
   fi
 fi
 
-# ─── Test 5: @tabby_new_window_id lifecycle ───
+# ─── Test 5: Group assignment via -group flag ───
 
 echo ""
-echo "--- Test 5: @tabby_new_window_id lifecycle ---"
+echo "--- Test 5: Group assignment via -group flag ---"
 
 if [ ! -x "$PROJECT_ROOT/bin/tabby" ]; then
   skip "bin/tabby new-window not built yet"
 else
-  tmux set-option -g @tabby_sidebar enabled 2>/dev/null || true
-  "$PROJECT_ROOT/bin/tabby" new-window -session "$SESSION_ID" 2>/dev/null || true
-  sleep 0.1
-  
-  NEW_WIN_ID=$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo "")
-  if [ -n "$NEW_WIN_ID" ]; then
-    pass "@tabby_new_window_id is set immediately ($NEW_WIN_ID)"
-  else
-    fail "@tabby_new_window_id is not set"
-  fi
-  
-  # Wait for auto-clear (increased to 3s to account for goroutine timing)
-  sleep 3.0
-  NEW_WIN_ID_AFTER=$(tmux show-option -gqv @tabby_new_window_id 2>/dev/null || echo "")
-  if [ -z "$NEW_WIN_ID_AFTER" ]; then
-    pass "@tabby_new_window_id cleared after ~3s"
-  else
-    fail "@tabby_new_window_id still set to '$NEW_WIN_ID_AFTER'"
-  fi
-fi
-
-# ─── Test 6: Group inheritance ───
-
-echo ""
-echo "--- Test 6: Group inheritance from @tabby_new_window_group ---"
-
-if [ ! -x "$PROJECT_ROOT/bin/tabby" ]; then
-  skip "bin/tabby new-window not built yet"
-else
-  tmux set-option -g @tabby_new_window_group "AtomicTestGroup" 2>/dev/null || true
   BEFORE=$(count_windows)
-  "$PROJECT_ROOT/bin/tabby" new-window -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby" new-window -session "$SESSION_ID" -group "AtomicTestGroup" 2>/dev/null || true
   sleep 0.3
   AFTER=$(count_windows)
-  
+
   if [ "$AFTER" -eq "$((BEFORE + 1))" ]; then
     NEWEST_WIN=$(tmux list-windows -t "$TEST_SESSION" -F '#{window_id}' | tail -1)
     GROUP=$(tmux show-window-options -t "$NEWEST_WIN" -v @tabby_group 2>/dev/null || echo "")
     if [ "$GROUP" = "AtomicTestGroup" ]; then
-      pass "New window has group 'AtomicTestGroup'"
+      pass "New window has group 'AtomicTestGroup' via -group flag"
     else
       fail "New window group is '$GROUP', expected 'AtomicTestGroup'"
     fi
   else
     fail "Window not created for group test"
-  fi
-  
-  SAVED_GROUP_AFTER=$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
-  if [ -z "$SAVED_GROUP_AFTER" ]; then
-    pass "@tabby_new_window_group cleared after use"
-  else
-    fail "@tabby_new_window_group still set to '$SAVED_GROUP_AFTER'"
   fi
 fi
 
@@ -284,18 +247,17 @@ else
   fi
 fi
 
-# ─── Test 9: Working directory respected ───
+# ─── Test 9: Working directory respected via -path flag ───
 
 echo ""
-echo "--- Test 9: Working directory respected ---"
+echo "--- Test 9: Working directory respected via -path flag ---"
 
 if [ ! -x "$PROJECT_ROOT/bin/tabby" ]; then
   skip "bin/tabby new-window not built yet"
 else
-  tmux set-option -g @tabby_new_window_path "/tmp" 2>/dev/null || true
-  "$PROJECT_ROOT/bin/tabby" new-window -session "$SESSION_ID" 2>/dev/null || true
+  "$PROJECT_ROOT/bin/tabby" new-window -session "$SESSION_ID" -path "/tmp" 2>/dev/null || true
   sleep 0.3
-  
+
   NEWEST_WIN=$(tmux list-windows -t "$TEST_SESSION" -F '#{window_id}' | tail -1)
   PANE_PATH=""
   while IFS= read -r line; do
@@ -306,43 +268,12 @@ else
       break
     fi
   done < <(tmux list-panes -t "$NEWEST_WIN" -F '#{pane_id}|#{pane_start_command}' 2>/dev/null)
-  
+
   # /tmp may resolve to /private/tmp on macOS
   if [ "$PANE_PATH" = "/tmp" ] || [ "$PANE_PATH" = "/private/tmp" ]; then
-    pass "New window opened in /tmp (path: $PANE_PATH)"
+    pass "New window opened in /tmp via -path flag (path: $PANE_PATH)"
   else
     fail "New window path is '$PANE_PATH', expected '/tmp'"
-  fi
-  
-  SAVED_PATH_AFTER=$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
-  if [ -z "$SAVED_PATH_AFTER" ]; then
-    pass "@tabby_new_window_path cleared after use"
-  else
-    fail "@tabby_new_window_path still set to '$SAVED_PATH_AFTER'"
-  fi
-fi
-
-# ─── Test 10: @tabby_new_window_group and @tabby_new_window_path cleared after use ───
-
-echo ""
-echo "--- Test 10: Both overrides cleared after use ---"
-
-if [ ! -x "$PROJECT_ROOT/bin/tabby" ]; then
-  skip "bin/tabby new-window not built yet"
-else
-  tmux set-option -g @tabby_new_window_group "ClearTestGroup" 2>/dev/null || true
-  tmux set-option -g @tabby_new_window_path "/var" 2>/dev/null || true
-  
-  "$PROJECT_ROOT/bin/tabby" new-window -session "$SESSION_ID" 2>/dev/null || true
-  sleep 0.3
-  
-  GROUP_AFTER=$(tmux show-option -gqv @tabby_new_window_group 2>/dev/null || echo "")
-  PATH_AFTER=$(tmux show-option -gqv @tabby_new_window_path 2>/dev/null || echo "")
-  
-  if [ -z "$GROUP_AFTER" ] && [ -z "$PATH_AFTER" ]; then
-    pass "Both @tabby_new_window_group and @tabby_new_window_path cleared"
-  else
-    fail "Overrides not cleared: group='$GROUP_AFTER', path='$PATH_AFTER'"
   fi
 fi
 

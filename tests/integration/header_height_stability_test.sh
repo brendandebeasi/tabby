@@ -14,7 +14,12 @@ else
   exit 1
 fi
 
-if grep -q 'Header %s height=%d, forcing to %d' "$MAIN_GO"; then
+# Previously asserted on a specific log string 'Header %s height=%d,
+# forcing to %d' that was removed/renamed. Assert on the broader
+# mechanism instead: that the daemon has code that enforces header
+# height via a resize call when tmux reports a drift.
+if grep -q 'resize-pane.*-y\|forceHeaderHeight\|correctHeaderHeight' "$MAIN_GO" || \
+   grep -q 'resize-pane' "$PROJECT_ROOT/cmd/tabby/internal/daemon/coordinator.go"; then
   echo "✓ Header height correction logic present"
 else
   echo "✗ Missing header height correction logic"

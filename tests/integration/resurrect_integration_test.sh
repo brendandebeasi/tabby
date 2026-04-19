@@ -101,13 +101,13 @@ fi
 SAVE_OPT=$(tmux show-option -gqv @resurrect-hook-post-save-layout 2>/dev/null || echo "")
 RESTORE_OPT=$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null || echo "")
 
-if echo "$SAVE_OPT" | grep -q "tabby-hook resurrect-save"; then
+if echo "$SAVE_OPT" | grep -qE "tabby[- ]hook resurrect-save"; then
     pass "Save hook wired in tmux options"
 else
     fail "Save hook not found in @resurrect-hook-post-save-layout (got: '$SAVE_OPT')"
 fi
 
-if echo "$RESTORE_OPT" | grep -q "tabby-hook resurrect-restore"; then
+if echo "$RESTORE_OPT" | grep -qE "tabby[- ]hook resurrect-restore"; then
     pass "Restore hook wired in tmux options"
 else
     fail "Restore hook not found in @resurrect-hook-post-restore-all (got: '$RESTORE_OPT')"
