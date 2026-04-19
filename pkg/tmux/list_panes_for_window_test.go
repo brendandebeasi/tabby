@@ -2,17 +2,21 @@ package tmux
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-// listPanesFields builds a \x1f-delimited line for ListPanesForWindow output.
+// listPanesFields builds a FieldSep-delimited line for ListPanesForWindow output.
 // Fields: pane_id, pane_index, pane_active, pane_current_command, pane_title,
 //
 //	pane_pid, pane_last_activity, @tabby_pane_title, pane_top, pane_left,
 //	pane_current_path, @tabby_pane_collapsed, @tabby_pane_prev_height,
 //	pane_start_command, pane_dead
+//
+// The separator is `"|||"` for Linux tmux compatibility — see the FieldSep
+// declaration in windows.go.
 func listPanesFields(parts ...string) string {
 	return fields(parts...)
 }
@@ -164,7 +168,7 @@ func TestListPanesForWindow_SessionTarget(t *testing.T) {
 func TestListPanesForWindow_ShortLineTooFewFields(t *testing.T) {
 	restoreState(t)
 	mock := newMock()
-	mock.set("list-panes", "%0\x1f0\x1f1\x1fbash\n", nil)
+	mock.set("list-panes", strings.Join([]string{"%0", "0", "1", "bash"}, FieldSep)+"\n", nil)
 	DefaultRunner = mock
 
 	panes, err := ListPanesForWindow(1)

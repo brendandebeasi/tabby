@@ -60,8 +60,14 @@ func restoreState(t *testing.T) {
 	})
 }
 
+// fields joins test inputs with the same separator the production code uses
+// for tmux -F format strings. Keeping this in sync with FieldSep is critical:
+// in 2026-04 the separator changed from \x1f to "|||" for Linux tmux
+// compatibility (Linux tmux escapes non-printable bytes like \037, breaking
+// field parsing). Tests that use \x1f directly will split into a single
+// element and silently skip all rows as "too few fields".
 func fields(parts ...string) string {
-	return strings.Join(parts, "\x1f")
+	return strings.Join(parts, FieldSep)
 }
 
 func TestStripANSI(t *testing.T) {
@@ -359,7 +365,7 @@ func TestListWindows(t *testing.T) {
 
 	t.Run("skips_line_with_too_few_fields", func(t *testing.T) {
 		mock := newMock()
-		mock.set("list-windows", "@1\x1fbad\n", nil)
+		mock.set("list-windows", "@1"+FieldSep+"bad\n", nil)
 		DefaultRunner = mock
 
 		windows, err := ListWindows()
