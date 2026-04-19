@@ -150,8 +150,6 @@ func main() {
 		debugLog("focusFirstContentPane completed")
 	}
 
-	fmt.Println(newWindowID)
-
 	// SIGWINCH broadcast removed: tmux sends SIGWINCH to all panes automatically
 	// during its own reflow, so an explicit broadcast here causes extra resize churn.
 }
