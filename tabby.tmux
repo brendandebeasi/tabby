@@ -286,16 +286,37 @@ tmux bind-key -T root MouseUp1Pane \
 tmux unbind-key -T root MouseUp3Pane 2>/dev/null || true
 tmux bind-key -T root MouseUp3Pane send-keys -M -t =
 
-# Scroll wheel: pass events directly to sidebar (mouse_any_flag is evaluated on the
-# active pane, not the pane under the mouse, so sidebar never gets the default passthrough).
-tmux bind-key -T root WheelUpPane \
-    if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
-        "send-keys -M -t =" \
-        "if-shell -F -t = '#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}' { send-keys -M } { copy-mode -e }"
-tmux bind-key -T root WheelDownPane \
-    if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
-        "send-keys -M -t =" \
-        "if-shell -F -t = '#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}' { send-keys -M } { send-keys -M }"
+# Scroll wheel: sidebar always gets passthrough via send-keys -M.
+# For all other panes:
+# - alternate_on/mouse_any_flag/pane_in_mode: fullscreen TUI has mouse — forward the event
+# - Otherwise (normal screen): enter tmux copy mode on the pane under the mouse (-t =),
+#   which scrolls tmux's captured history. The -e flag auto-exits copy mode when
+#   scrolled back to the bottom. This replicates terminal scrollback for SSH panes
+#   (e.g. claude code) where the terminal emulator can't scroll its own buffer.
+tmux source-file - << 'TMUX_EOF'
+bind-key -T root WheelUpPane {
+    if -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" {
+        send-keys -M -t =
+    } {
+        if -F -t = "#{||:#{alternate_on},#{||:#{pane_in_mode},#{mouse_any_flag}}}" {
+            send-keys -M
+        } {
+            copy-mode -e -t =
+        }
+    }
+}
+bind-key -T root WheelDownPane {
+    if -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" {
+        send-keys -M -t =
+    } {
+        if -F -t = "#{||:#{alternate_on},#{||:#{pane_in_mode},#{mouse_any_flag}}}" {
+            send-keys -M
+        } {
+            copy-mode -e -t =
+        }
+    }
+}
+TMUX_EOF
 
 # Enable focus events
 tmux set-option -g focus-events on
