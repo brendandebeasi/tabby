@@ -1347,7 +1347,13 @@ func clampColorByte(v int) int {
 	return v
 }
 
-// computeDimBG blends terminal background toward gray based on luminance and opacity.
+// computeDimBG computes the background color for inactive (dimmed) panes.
+// For light terminal backgrounds the inactive pane is shifted toward white,
+// making it appear washed-out relative to the active pane's richer color.
+// For dark terminal backgrounds the inactive pane is shifted toward black,
+// making it appear deeper/less prominent.
+// opacity is the fraction of the original color retained (0.0–1.0); the rest
+// is contributed by white (light themes) or black (dark themes).
 // Returns a hex color string like "#1a1a1a", or "" if terminalBG is empty.
 func computeDimBG(terminalBG string, opacity float64) string {
 	if terminalBG == "" {
@@ -1363,17 +1369,19 @@ func computeDimBG(terminalBG string, opacity float64) string {
 
 	lum := (int(tbR)*299 + int(tbG)*587 + int(tbB)*114) / 1000
 
-	var grayR, grayG, grayB int
+	// target is white for light themes (shift inactive toward white = lighter/washed-out),
+	// black for dark themes (shift inactive toward black = deeper/less prominent).
+	var targetR, targetG, targetB int
 	if lum >= 128 {
-		grayR, grayG, grayB = 176, 176, 176
+		targetR, targetG, targetB = 255, 255, 255
 	} else {
-		grayR, grayG, grayB = 64, 64, 64
+		targetR, targetG, targetB = 0, 0, 0
 	}
 
 	inv := 1.0 - opacity
-	dr := int(math.Round(float64(tbR)*opacity + float64(grayR)*inv))
-	dg := int(math.Round(float64(tbG)*opacity + float64(grayG)*inv))
-	db := int(math.Round(float64(tbB)*opacity + float64(grayB)*inv))
+	dr := int(math.Round(float64(tbR)*opacity + float64(targetR)*inv))
+	dg := int(math.Round(float64(tbG)*opacity + float64(targetG)*inv))
+	db := int(math.Round(float64(tbB)*opacity + float64(targetB)*inv))
 	return fmt.Sprintf("#%02x%02x%02x", clampColorByte(dr), clampColorByte(dg), clampColorByte(db))
 }
 
@@ -1413,33 +1421,57 @@ func isDimUtility(cmd string) bool {
 	return isDimSkip(cmd) || isDimHeader(cmd)
 }
 
+// isDimSkipPane checks both current and start command (post-consolidation safety).
+func isDimSkipPane(p dimPaneInfo) bool {
+	return isDimSkip(p.command) || isDimSkip(p.startCommand)
+}
+
+// isDimHeaderPane checks both current and start command.
+func isDimHeaderPane(p dimPaneInfo) bool {
+	return isDimHeader(p.command) || isDimHeader(p.startCommand)
+}
+
+// isDimUtilityPane checks both current and start command.
+func isDimUtilityPane(p dimPaneInfo) bool {
+	return isDimSkipPane(p) || isDimHeaderPane(p)
+}
+
 // dimPaneInfo holds per-pane data needed for dimming decisions.
 type dimPaneInfo struct {
-	id      string
-	active  bool
-	command string
-	left    int
+	id           string
+	active       bool
+	command      string // pane_current_command (may be "tabby" post-consolidation)
+	startCommand string // pane_start_command (retains original invocation)
+	left         int
 }
 
 // listDimPanes queries tmux for panes in the given window, returning info needed for dimming.
+// We check both pane_current_command and pane_start_command because after binary consolidation
+// all subcommand processes show "tabby" as pane_current_command; pane_start_command still
+// contains the original invocation (e.g. "render sidebar", "render pane-header").
 func listDimPanes(windowID string) []dimPaneInfo {
 	out, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
-		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}").Output()
+		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}\t#{pane_start_command}").Output()
 	if err != nil {
 		return nil
 	}
 	var panes []dimPaneInfo
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "\t", 4)
+		parts := strings.SplitN(line, "\t", 5)
 		if len(parts) < 4 {
 			continue
 		}
 		left, _ := strconv.Atoi(parts[3])
+		startCmd := ""
+		if len(parts) >= 5 {
+			startCmd = parts[4]
+		}
 		panes = append(panes, dimPaneInfo{
-			id:      parts[0],
-			active:  parts[1] == "1",
-			command: parts[2],
-			left:    left,
+			id:           parts[0],
+			active:       parts[1] == "1",
+			command:      parts[2],
+			startCommand: startCmd,
+			left:         left,
 		})
 	}
 	return panes
@@ -1471,10 +1503,10 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	if !cfg.PaneHeader.DimInactive {
 		// Dim disabled — clear any leftover styles and dim flags
 		for _, p := range panes {
-			if !isDimSkip(p.command) {
+			if !isDimSkipPane(p) {
 				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
 			}
-			if !isDimUtility(p.command) {
+			if !isDimUtilityPane(p) {
 				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "@tabby_pane_dim").Run()
 			}
 		}
@@ -1493,7 +1525,7 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	colActive := map[int]bool{}
 	hasActiveContent := false
 	for _, p := range panes {
-		if !isDimUtility(p.command) {
+		if !isDimUtilityPane(p) {
 			colActive[p.left] = p.active
 			if p.active {
 				hasActiveContent = true
@@ -1514,17 +1546,17 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	dimBG := computeDimBG(termBG, opacity)
 
 	for _, p := range panes {
-		if isDimSkip(p.command) {
+		if isDimSkipPane(p) {
 			continue
 		}
 
 		// For headers, use their content pane's active state (matched by pane_left)
 		active := p.active
-		if isDimHeader(p.command) {
+		if isDimHeaderPane(p) {
 			active = colActive[p.left]
 		}
 
-		if isDimHeader(p.command) {
+		if isDimHeaderPane(p) {
 			// Headers are rendered by the daemon — don't set window-style.
 			// The daemon reads @tabby_pane_dim from the content pane to decide colors.
 			continue

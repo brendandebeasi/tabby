@@ -33,12 +33,12 @@ func TestComputeDimBG(t *testing.T) {
 	}{
 		{"empty bg returns empty", "", 0.9, ""},
 		{"invalid hex returns empty", "#xyz", 0.9, ""},
-		{"dark bg blends toward dark gray", "#1a1a1a", 0.9, "#1e1e1e"},
-		{"light bg blends toward light gray", "#f0f0f0", 0.9, "#eaeaea"},
+		{"dark bg shifts toward black", "#1a1a1a", 0.9, "#171717"},
+		{"light bg shifts toward white", "#f0f0f0", 0.9, "#f2f2f2"},
 		{"full opacity returns original", "#1a1a1a", 1.0, "#1a1a1a"},
-		{"zero opacity returns gray target", "#1a1a1a", 0.0, "#404040"},
-		{"mid opacity dark", "#000000", 0.5, "#202020"},
-		{"mid opacity light", "#ffffff", 0.5, "#d8d8d8"},
+		{"zero opacity dark returns black", "#1a1a1a", 0.0, "#000000"},
+		{"mid opacity dark", "#000000", 0.5, "#000000"},
+		{"mid opacity light", "#ffffff", 0.5, "#ffffff"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

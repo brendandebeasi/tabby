@@ -241,17 +241,19 @@ func computeDimBG(terminalBG string, opacity float64) string {
 	tbR, tbG, tbB := parseHex(terminalBG)
 	lum := (tbR*299 + tbG*587 + tbB*114) / 1000
 
-	var grayR, grayG, grayB int
+	// Light themes: shift toward white (inactive looks washed-out/lighter).
+	// Dark themes: shift toward black (inactive looks deeper/less prominent).
+	var targetR, targetG, targetB int
 	if lum >= 128 {
-		grayR, grayG, grayB = 176, 176, 176
+		targetR, targetG, targetB = 255, 255, 255
 	} else {
-		grayR, grayG, grayB = 64, 64, 64
+		targetR, targetG, targetB = 0, 0, 0
 	}
 
 	inv := 1.0 - opacity
-	dr := int(math.Round(float64(tbR)*opacity + float64(grayR)*inv))
-	dg := int(math.Round(float64(tbG)*opacity + float64(grayG)*inv))
-	db := int(math.Round(float64(tbB)*opacity + float64(grayB)*inv))
+	dr := int(math.Round(float64(tbR)*opacity + float64(targetR)*inv))
+	dg := int(math.Round(float64(tbG)*opacity + float64(targetG)*inv))
+	db := int(math.Round(float64(tbB)*opacity + float64(targetB)*inv))
 	return fmt.Sprintf("#%02x%02x%02x", clamp(dr), clamp(dg), clamp(db))
 }
 
