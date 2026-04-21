@@ -27,6 +27,10 @@ func doSetIndicator(args []string) {
 	// Resolve the window for this indicator
 	win := resolveIndicatorWindow(indicator, value, session, stateDir)
 	if win == "" {
+		// Local tmux not reachable (e.g. running inside a remote SSH session).
+		// Emit an OSC sequence so the outer bastion tmux can intercept it via
+		// its pipe-pane osc-handler and apply the indicator there instead.
+		emitOSCFallback(indicator, value)
 		return
 	}
 
@@ -193,6 +197,32 @@ func windowExists(win string) bool {
 		}
 	}
 	return false
+}
+
+// emitOSCFallback writes an OSC 7700 sequence to /dev/tty so the outer tmux
+// session (e.g. a bastion host running tabby) can intercept it via pipe-pane
+// and apply the indicator locally. Used when the local tabby daemon is not
+// reachable (no tmux session, or running inside a remote SSH session).
+//
+// If $TMUX is set the sequence is wrapped in a DCS passthrough envelope so it
+// survives any inner tmux session and reaches the outer pane's raw output.
+func emitOSCFallback(indicator, value string) {
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		return
+	}
+	defer tty.Close()
+
+	payload := fmt.Sprintf("\x1b]7700;tabby-indicator;%s;%s\x07", indicator, value)
+
+	// Wrap in tmux DCS passthrough when running inside an inner tmux so the
+	// sequence is forwarded through to the outer pane verbatim.
+	if os.Getenv("TMUX") != "" {
+		escaped := strings.ReplaceAll(payload, "\x1b", "\x1b\x1b")
+		payload = "\x1bPtmux;" + escaped + "\x1b\\"
+	}
+
+	tty.WriteString(payload)
 }
 
 func tmuxSetWindowOpt(target, key, value string) {

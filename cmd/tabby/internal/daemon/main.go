@@ -611,6 +611,39 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 	}
 }
 
+// startOSCPipes attaches a pipe-pane osc-handler to every content pane that
+// doesn't already have one. The handler reads pane output and fires
+// doSetIndicator locally whenever a remote hook emits an OSC 7700 sequence —
+// the fallback path used when tabby-hook runs inside an SSH session on a
+// remote host that can't reach this daemon's socket directly.
+//
+// pipe-pane -o is a no-op if a pipe is already running on the pane, so this
+// is safe to call on every refresh cycle.
+func startOSCPipes(windows []tmux.Window) {
+	exe := tabbyExe()
+	if exe == "" {
+		return
+	}
+	// Prefer the consolidated 'tabby' binary for hook subcommands. When the
+	// daemon runs as a legacy 'tabby-daemon' binary, look for 'tabby' in the
+	// same directory so the osc-handler subcommand is available.
+	tabbyBin := exe
+	if candidate := filepath.Join(filepath.Dir(exe), "tabby"); candidate != exe {
+		if _, err := os.Stat(candidate); err == nil {
+			tabbyBin = candidate
+		}
+	}
+	cmd := fmt.Sprintf("'%s' hook osc-handler", tabbyBin)
+	for _, win := range windows {
+		for _, p := range win.Panes {
+			if paneIsSystemPane(p.Command, p.StartCommand) {
+				continue
+			}
+			exec.Command("tmux", "pipe-pane", "-o", "-t", p.ID, cmd).Run()
+		}
+	}
+}
+
 func paneIsSystemPane(cmd string, startCmd string) bool {
 	return strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") ||
 		strings.Contains(cmd, "tabby") || strings.Contains(cmd, "window-header") || strings.Contains(cmd, "pane-header") ||
@@ -2379,6 +2412,7 @@ func Run(args []string) int {
 			spawnWindowHeaders(server, *sessionID, customBorder, coordinator.desiredWindowHeaderHeight(), windows, coordinator)
 			spawnPaneHeaders(server, *sessionID, customBorder, coordinator.desiredPaneHeaderHeight(), windows)
 			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
+			startOSCPipes(windows)
 			cleanupOrphanedHeaders(customBorder, coordinator, activeWindowID)
 			// NOTE: updateHeaderBorderStyles is NOT called here to avoid
 			// border flickering. It's only called when windows hash changes

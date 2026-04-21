@@ -53,6 +53,9 @@ func Run(allArgs []string) int {
 	case "set-indicator":
 		doSetIndicator(args)
 		return 0
+	case "osc-handler":
+		doOSCHandler()
+		return 0
 	case "resurrect-save":
 		doResurrectSave(args)
 		return 0
