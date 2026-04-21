@@ -1,0 +1,30 @@
+#!/bin/bash
+# Tabby plugin: OSC 52 clipboard-set helper.
+#
+# Pipes the selection on stdin to the pane's pty as an OSC 52 escape. tmux
+# allow-passthrough forwards it to the outer terminal (Ghostty/iTerm/etc.)
+# which writes the payload to the system clipboard.
+#
+# Called two ways:
+#   1. Explicit binding:  copy-pipe-and-cancel '.../osc52-copy "#{pane_tty}"'
+#   2. tmux copy-command: the target pane is derived from $TMUX_PANE
+#
+# Why this indirection: tmux's built-in set-clipboard OSC 52 emission is
+# unreliable over SSH/tmux (`tmux set-buffer -w` silently no-ops on some
+# hosts). /dev/tty is also unreachable from a copy-pipe child (no controlling
+# tty). Writing to the pane's pts path is equivalent to the shell emitting
+# the escape, which allow-passthrough carries out.
+
+set -euo pipefail
+
+pane_tty="${1:-}"
+if [ -z "$pane_tty" ] && [ -n "${TMUX_PANE:-}" ]; then
+  pane_tty=$(tmux display -p -t "$TMUX_PANE" '#{pane_tty}' 2>/dev/null || true)
+fi
+[ -n "$pane_tty" ] || exit 0
+
+sel=$(cat)
+[ "${#sel}" -gt 0 ] || exit 0
+
+payload=$(printf '%s' "$sel" | base64 | tr -d '\n')
+printf '\033]52;c;%s\a' "$payload" > "$pane_tty"

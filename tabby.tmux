@@ -660,3 +660,17 @@ tmux run-shell -b "$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\""
 
 # Status exclusivity enforcement moved to daemon (EnforceStatusExclusivity)
 tmux run-shell -b "$FOCUS_RECOVERY_CMD \"#{session_id}\""
+
+# -----------------------------------------------------------------------------
+# Mouse-drag copy -> system clipboard via OSC 52.
+# scripts/osc52-copy writes an OSC 52 escape directly to the pane's pty, which
+# tmux allow-passthrough forwards to the outer terminal. Works on Mac-local
+# (Ghostty/iTerm) and through SSH + nested tmux.
+#
+# Bound AFTER all tabby tab/sidebar bindings so plugin overrides can't
+# clobber MouseDragEnd1Pane. Also sets copy-command so any `copy-pipe*`
+# invocation without an explicit command uses the same path.
+# -----------------------------------------------------------------------------
+tmux bind-key -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$CURRENT_DIR/scripts/osc52-copy \"#{pane_tty}\""
+tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$CURRENT_DIR/scripts/osc52-copy \"#{pane_tty}\""
+tmux set-option -g copy-command "$CURRENT_DIR/scripts/osc52-copy"
