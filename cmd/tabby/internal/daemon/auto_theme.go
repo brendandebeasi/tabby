@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -32,8 +33,23 @@ func resolveAutoTheme(cfg *config.Config) string {
 }
 
 // isSystemDarkMode returns true if the OS is currently in dark mode.
-// Tries macOS first, then Linux GNOME/KDE.
+// Tries the forwarded CLIENT_DARK_MODE env var first (so remote tabby
+// daemons mirror the attaching client's desktop appearance when the
+// var arrives via SSH SendEnv + tmux update-environment), then macOS,
+// then Linux GNOME/KDE.
 func isSystemDarkMode() bool {
+	// CLIENT_DARK_MODE: "1"/"dark"/"true" -> dark; "0"/"light"/"false" -> light.
+	// Any other value (or unset) falls through to OS-level detection, so this
+	// is an override, not a hard requirement.
+	if v := strings.TrimSpace(os.Getenv("CLIENT_DARK_MODE")); v != "" {
+		switch strings.ToLower(v) {
+		case "1", "dark", "true", "yes":
+			return true
+		case "0", "light", "false", "no":
+			return false
+		}
+	}
+
 	// macOS: `defaults read -g AppleInterfaceStyle` prints "Dark" in dark mode,
 	// exits non-zero (and prints an error) when in light mode.
 	if out, err := exec.Command("defaults", "read", "-g", "AppleInterfaceStyle").Output(); err == nil {
