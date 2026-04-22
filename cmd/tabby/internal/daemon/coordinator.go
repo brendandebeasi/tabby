@@ -9173,11 +9173,20 @@ func (c *Coordinator) renderClockWidget(width int) string {
 	if fgColor != "" {
 		style = style.Foreground(lipgloss.Color(fgColor))
 	}
+	// Paint bg explicitly so trailing/inter-widget cells don't revert to
+	// terminal default after a theme flip. Uses the coordinator's resolved
+	// terminal bg (config override > theme > detector).
+	if bg := c.GetTerminalBg(); bg != "" {
+		style = style.Background(lipgloss.Color(bg))
+	}
 
 	dividerStyle := lipgloss.NewStyle()
 	dividerFg := c.getInactiveTextColorWithFallback(clock.DividerFg)
 	if dividerFg != "" {
 		dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
+	}
+	if bg := c.GetTerminalBg(); bg != "" {
+		dividerStyle = dividerStyle.Background(lipgloss.Color(bg))
 	}
 
 	var result strings.Builder
@@ -9920,6 +9929,15 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	foodStyle := lipgloss.NewStyle()
 	if petFg != "" {
 		foodStyle = foodStyle.Foreground(lipgloss.Color(petFg))
+	}
+	// Match playStyle's bg so the "Feed" line doesn't fall through to the
+	// terminal's underlying bg -- that caused visible seams after theme
+	// flips where trailing cells used the old theme's bg while the rest of
+	// the pet widget painted with the new theme.
+	if petCfg.Bg != "" && !strings.EqualFold(petCfg.Bg, "transparent") {
+		foodStyle = foodStyle.Background(lipgloss.Color(petCfg.Bg))
+	} else if bg := c.GetTerminalBg(); bg != "" {
+		foodStyle = foodStyle.Background(lipgloss.Color(bg))
 	}
 	foodIcon := zone.Mark("pet:drop_food", foodStyle.Render(sprites.Food+" Feed"))
 	result.WriteString(foodIcon + "\n")
