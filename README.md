@@ -282,6 +282,141 @@ export PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }printf '\a'"
 
 This approach doesn't require SSH config changes and won't interfere with other tools.
 
+### Auto Theme + Dark-Mode Forwarding
+
+Tabby can auto-swap between a light and a dark theme based on the operating system appearance. Useful in two scenarios:
+
+1. **Local tabby** (macOS dark-mode toggle) — tabby runs on the same Mac that toggles.
+2. **Remote tabby** (laptop → ssh → bastion with tmux+tabby) — the host running tabby has no desktop, so tabby can't read OS appearance locally. A `CLIENT_DARK_MODE` env var forwarded from the laptop tells the remote daemon which theme to use, and tabby re-reads it on every theme-decision tick so live flips propagate.
+
+#### Config
+
+Add to `~/.config/tabby/config.yaml`:
+
+```yaml
+auto_theme:
+    enabled: true
+    mode: system                   # "system" (macOS/GNOME/KDE) or "time" (HH:MM-based)
+    light: rose-pine-dawn
+    dark: rose-pine
+```
+
+#### Theme resolution order (inside tabby)
+
+`isSystemDarkMode()` consults these in order — first decisive answer wins:
+
+1. **tmux global env `CLIENT_DARK_MODE`** — re-read every tick (see push setup below). Lets external agents override with zero daemon restarts.
+2. **Process env `CLIENT_DARK_MODE`** — snapshot at daemon spawn (via SSH SendEnv + tmux `update-environment` import).
+3. macOS `defaults read -g AppleInterfaceStyle`.
+4. GNOME `gsettings get org.gnome.desktop.interface color-scheme`.
+5. KDE `kreadconfig5 --group General --key ColorScheme`.
+
+Accepted `CLIENT_DARK_MODE` values: `1`/`dark`/`true`/`yes` → dark; `0`/`light`/`false`/`no` → light; anything else falls through.
+
+#### Forwarding setup (remote tabby use-case)
+
+Three plumbing pieces on top of tabby itself:
+
+**1. Laptop shell** — export `CLIENT_DARK_MODE` from macOS appearance, refreshed on every prompt so `ssh` always sends the current value:
+
+```sh
+# ~/.zshrc  (local macOS only, not inside SSH'd-in shells)
+if [[ "$OSTYPE" == darwin* && -z "$SSH_CONNECTION" ]]; then
+  _update_client_dark_mode() {
+    if defaults read -g AppleInterfaceStyle 2>/dev/null | grep -q Dark; then
+      export CLIENT_DARK_MODE=1
+    else
+      export CLIENT_DARK_MODE=0
+    fi
+  }
+  _update_client_dark_mode
+  autoload -Uz add-zsh-hook && add-zsh-hook preexec _update_client_dark_mode
+fi
+```
+
+**2. SSH** — forward the var between hosts:
+
+```ssh
+# ~/.ssh/config  (client side)
+Host *
+    SendEnv COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION CLIENT_DARK_MODE
+```
+
+```
+# /etc/ssh/sshd_config  (server side, each hop)
+AcceptEnv LANG LC_* COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION CLIENT_DARK_MODE
+```
+
+On jump hosts that `ssh` onward, also drop an `ssh_config.d` client file so the var keeps going:
+
+```
+# /etc/ssh/ssh_config.d/10-env-forward.conf
+Host *
+    SendEnv COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION CLIENT_DARK_MODE
+```
+
+Reload the server-side daemon after editing `sshd_config`:
+
+```sh
+sudo systemctl reload ssh     # Linux
+sudo launchctl kickstart -k system/com.openssh.sshd   # macOS
+```
+
+**3. tmux `update-environment`** — import the var from the attaching client into the session env, so new panes and inner `ssh` see it:
+
+```tmux
+set-option -ga update-environment " COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION CLIENT_DARK_MODE"
+```
+
+Add to `/etc/tmux.conf` or `~/.tmux.conf`. Existing tmux servers need `tmux source-file ~/.tmux.conf` to pick it up.
+
+#### Live-flip without reattach (optional LaunchAgent)
+
+With just the above, flipping OS appearance propagates on the next SSH connect + tmux reattach. To make it automatic within a few seconds, run a small agent on the laptop that watches macOS Appearance and pushes changes into each remote's tmux global env:
+
+```sh
+#!/usr/bin/env bash
+# ~/bin/sync-color-theme.sh
+HOSTS=(bdm1 shared-bastion)   # tabby-running hosts
+POLL_SEC=5
+prev=""
+while true; do
+  cur=$(defaults read -g AppleInterfaceStyle 2>/dev/null | grep -q Dark && echo 1 || echo 0)
+  if [[ "$cur" != "$prev" ]]; then
+    for h in "${HOSTS[@]}"; do
+      ssh -o BatchMode=yes -o ConnectTimeout=5 "$h" \
+        "tmux set-environment -g CLIENT_DARK_MODE $cur 2>/dev/null" &
+    done
+    wait
+    prev=$cur
+  fi
+  sleep "$POLL_SEC"
+done
+```
+
+Wrap in a LaunchAgent at `~/Library/LaunchAgents/com.example.colortheme-sync.plist`:
+
+```xml
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.colortheme-sync</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/you/bin/sync-color-theme.sh</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/you/Library/Logs/colortheme-sync.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/Library/Logs/colortheme-sync.log</string>
+</dict></plist>
+```
+
+Bootstrap once:
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.colortheme-sync.plist
+```
+
+With the agent running, a macOS Appearance change pushes `CLIENT_DARK_MODE` to each host's tmux global env. Tabby's next auto-theme tick (a few seconds) re-reads it via `tmux show-environment -g CLIENT_DARK_MODE` and flips theme + global tmux `window-style` accordingly. No daemon restart, no reattach.
+
 ## Configuration
 
 ### File Locations
