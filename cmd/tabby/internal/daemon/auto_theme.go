@@ -182,12 +182,21 @@ func (e *parseError) Error() string { return "invalid time: " + e.s }
 
 // SetTheme updates the coordinator's active color theme at runtime.
 // Safe to call from any goroutine; acquires stateMu for the write.
+//
+// After swapping the theme pointer, re-runs applyThemeToTmux so that
+// global tmux options (window-style, window-active-style, message-style,
+// pane-border-style, etc.) reflect the new theme. Without this, active
+// panes fall through to a stale window-active-style from the previous
+// theme -- e.g. after an auto-theme flip from rose-pine-dawn to rose-pine,
+// inactive panes dim toward black correctly but active panes keep the
+// light theme's terminal bg.
 func (c *Coordinator) SetTheme(themeName string) {
 	t := colors.GetTheme(themeName)
 	c.stateMu.Lock()
 	c.theme = &t
 	c.config.Sidebar.Theme = themeName
 	c.stateMu.Unlock()
+	c.applyThemeToTmux()
 }
 
 // ActiveThemeName returns the name currently stored in the config under Sidebar.Theme.
