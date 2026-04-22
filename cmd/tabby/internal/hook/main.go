@@ -130,6 +130,11 @@ func Run(allArgs []string) int {
 	case "toggle-sidebar":
 		// No args needed
 
+	case "toggle-collapse-sidebar":
+		// No args needed — hides/shows the sidebar by stashing/restoring
+		// panes (matches the phone hamburger path). See coordinator's
+		// "toggle_collapse_sidebar" action handler.
+
 	case "new-group":
 		if len(args) > 0 {
 			target = args[0]
