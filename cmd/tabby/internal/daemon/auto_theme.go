@@ -33,20 +33,26 @@ func resolveAutoTheme(cfg *config.Config) string {
 }
 
 // isSystemDarkMode returns true if the OS is currently in dark mode.
-// Tries the forwarded CLIENT_DARK_MODE env var first (so remote tabby
-// daemons mirror the attaching client's desktop appearance when the
-// var arrives via SSH SendEnv + tmux update-environment), then macOS,
-// then Linux GNOME/KDE.
+// Resolution order:
+//  1. tmux global env CLIENT_DARK_MODE (re-read every call so long-running
+//     daemons pick up changes pushed by e.g. a LaunchAgent on the laptop
+//     without needing a daemon restart).
+//  2. Process env CLIENT_DARK_MODE (imported via SSH + tmux update-environment
+//     at daemon spawn; frozen for the daemon's lifetime).
+//  3. macOS `defaults read -g AppleInterfaceStyle`.
+//  4. Linux GNOME via `gsettings` then KDE via `kreadconfig5`.
 func isSystemDarkMode() bool {
-	// CLIENT_DARK_MODE: "1"/"dark"/"true" -> dark; "0"/"light"/"false" -> light.
-	// Any other value (or unset) falls through to OS-level detection, so this
-	// is an override, not a hard requirement.
+	// 1. tmux global env -- dynamic, updated externally.
+	if v := readTmuxGlobalEnv("CLIENT_DARK_MODE"); v != "" {
+		if b, ok := parseBoolish(v); ok {
+			return b
+		}
+	}
+
+	// 2. Process env -- snapshot at daemon spawn.
 	if v := strings.TrimSpace(os.Getenv("CLIENT_DARK_MODE")); v != "" {
-		switch strings.ToLower(v) {
-		case "1", "dark", "true", "yes":
-			return true
-		case "0", "light", "false", "no":
-			return false
+		if b, ok := parseBoolish(v); ok {
+			return b
 		}
 	}
 
@@ -74,6 +80,44 @@ func isSystemDarkMode() bool {
 	// Returns 0=no preference 1=dark 2=light — too verbose to shell-out easily here.
 	// Fall back to light.
 	return false
+}
+
+// parseBoolish converts a human-typed truthy/falsy string into a bool.
+// Empty input or an unrecognized value returns (false, false). This lets
+// callers distinguish "user wrote something weird" from "user wrote nothing"
+// and fall through to the next detection mechanism.
+func parseBoolish(s string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "dark", "true", "yes", "on":
+		return true, true
+	case "0", "light", "false", "no", "off":
+		return false, true
+	}
+	return false, false
+}
+
+// readTmuxGlobalEnv queries the tmux server's global environment for a
+// single variable. Returns "" if tmux isn't reachable, the variable is
+// unset, or the server responds with the "-NAME" unset marker.
+//
+// Called on every isSystemDarkMode check so that changes pushed via
+// `tmux set-environment -g CLIENT_DARK_MODE ...` (e.g. from the laptop's
+// LaunchAgent watching AppleInterfaceStyle) propagate to the daemon's
+// next decision tick without needing a daemon restart.
+//
+// Cost: one fork+exec of `tmux` per call; ~1-2ms. The daemon's tick
+// loop already runs on the order of seconds, so this is negligible.
+func readTmuxGlobalEnv(name string) string {
+	out, err := exec.Command("tmux", "show-environment", "-g", name).Output()
+	if err != nil {
+		return ""
+	}
+	line := strings.TrimSpace(string(out))
+	// `tmux show-environment -g X` prints either "X=value" or "-X" (unset).
+	if prefix := name + "="; strings.HasPrefix(line, prefix) {
+		return line[len(prefix):]
+	}
+	return ""
 }
 
 // isTimeInDarkPeriod returns true if the current local time falls inside the
