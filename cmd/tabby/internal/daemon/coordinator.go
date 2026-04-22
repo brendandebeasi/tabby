@@ -1336,6 +1336,30 @@ func (c *Coordinator) GetTerminalBg() string {
 	return c.bgDetector.GetDefaultTerminalBg()
 }
 
+// themedStyle returns a lipgloss style pre-populated with the coordinator's
+// resolved terminal background, so any widget-rendered text paints bg on
+// every cell it emits.
+//
+// Without this, widgets that only call .Foreground(...) leave trailing /
+// inter-widget cells at "terminal default", which renders whatever
+// window-style tmux happens to have at that instant -- which during a
+// theme flip momentarily shows the OLD theme's color (the visible "after
+// Feed bg goes light" / "after time block shifts" artifact).
+//
+// Use this as the starting style for any widget text: chain .Foreground(),
+// .Bold() etc. on the returned value.
+//
+// If GetTerminalBg returns "" (no config, no theme, no detector), this
+// falls back to lipgloss.NewStyle() with no bg -- same as before -- so
+// the helper is always safe to use.
+func (c *Coordinator) themedStyle() lipgloss.Style {
+	s := lipgloss.NewStyle()
+	if bg := c.GetTerminalBg(); bg != "" {
+		s = s.Background(lipgloss.Color(bg))
+	}
+	return s
+}
+
 // clampColorByte clamps an int to the valid 0-255 range for color channels.
 func clampColorByte(v int) int {
 	if v < 0 {
@@ -7760,6 +7784,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	}
 	if strings.EqualFold(treeBg, "transparent") {
 		treeBg = ""
+	}
+	// Fall back to resolved terminal bg when config + theme both empty,
+	// so box-drawing chars (│ ─ ├ └ ┌ etc.) don't emit with "default" bg
+	// that can show the previous theme's color for a beat during flips.
+	if treeBg == "" {
+		treeBg = c.GetTerminalBg()
 	}
 	if treeBg != "" {
 		treeStyle = treeStyle.Background(lipgloss.Color(treeBg))
