@@ -4943,7 +4943,7 @@ func hideSidebarPanes() {
 		cur := parts[2]
 		start := parts[3]
 		paneW := parts[4]
-		if !strings.HasPrefix(cur, "sidebar") && !strings.HasPrefix(start, "sidebar") {
+		if !isSidebarPaneCommand(cur, start) {
 			continue
 		}
 		stashName := stashNameForWindow(winID)
@@ -14027,6 +14027,23 @@ func isAuxiliaryPaneCommand(cmd string) bool {
 	}
 	if strings.Contains(lower, "window-header") || strings.Contains(lower, "window_header") {
 		return true
+	}
+	return false
+}
+
+// isSidebarPaneCommand returns true when either the current or start command
+// indicates a sidebar-renderer pane. Post-consolidation, pane_current_command
+// reports "tabby" for every subcommand, so we also check pane_start_command
+// which retains the original "exec -a sidebar-renderer ..." invocation.
+func isSidebarPaneCommand(cur, start string) bool {
+	for _, s := range []string{cur, start} {
+		if s == "" {
+			continue
+		}
+		lower := strings.ToLower(s)
+		if strings.Contains(lower, "sidebar-renderer") || strings.Contains(lower, "render sidebar") {
+			return true
+		}
 	}
 	return false
 }
