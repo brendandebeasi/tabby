@@ -194,7 +194,8 @@ func registerHooks(exe string) {
 		{"client-resized", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
 		{"client-active", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
 		{"client-focus-in", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
-		{"after-select-window", fmt.Sprintf("run-shell -b '%s; tmux refresh-client -S; %s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --dim-only'", signalCmd, hookCmd, cycleCmd)},
+		{"after-select-window", fmt.Sprintf("run-shell -b '%s; tmux refresh-client -S; %s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --ensure-content'", signalCmd, hookCmd, cycleCmd)},
+		{"client-attached", fmt.Sprintf("run-shell -b '%s --ensure-content'", cycleCmd)},
 	}
 	for _, h := range hooks {
 		exec.Command("tmux", "set-hook", "-g", h.name, h.cmd).Run()

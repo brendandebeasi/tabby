@@ -463,7 +463,7 @@ tmux set-hook -g window-linked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -
 tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
 tmux set-hook -g after-new-window "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S'"
 tmux set-hook -g after-resize-pane "run-shell -b '$HOOK_BIN on-pane-resize \"#{hook_pane}\"'"
-tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
+tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $CYCLE_PANE_BIN --ensure-content'"
 
 # Lock window name on manual rename via prefix+, keybinding
 # NOTE: We intentionally do NOT use after-rename-window hook because the daemon's
@@ -482,11 +482,11 @@ PRESERVE_RATIOS_CMD="$HOOK_BIN preserve-pane-ratios"
 tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"'; run-shell -b '$SIGNAL_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
 
 # Restore sidebar when client reattaches to session
-tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_CMD'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'"
+tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_CMD'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
 
 # Client resize: resize windows to client geometry, signal daemon
-tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
-tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
+tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
+tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
 
 # session-created: daemon handles sidebar spawning via USR1
 tmux set-hook -g session-created "run-shell -b '$SIGNAL_CMD'"

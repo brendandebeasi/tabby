@@ -125,7 +125,7 @@ func disable(sessionID, pidFile, sockPath, sentinel, watchdogPidFile, stateFile 
 
 	// Remove resize hooks in parallel
 	var unhookWg sync.WaitGroup
-	for _, h := range []string{"after-resize-pane", "after-resize-window", "client-resized", "after-select-window", "client-active", "client-focus-in"} {
+	for _, h := range []string{"after-resize-pane", "after-resize-window", "client-resized", "after-select-window", "client-active", "client-focus-in", "client-attached"} {
 		unhookWg.Add(1)
 		go func(name string) {
 			defer unhookWg.Done()
@@ -209,7 +209,8 @@ func enable(sessionID, exe, pidFile, sockPath, watchdogPidFile, stateFile string
 		{"client-resized", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
 		{"client-active", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
 		{"client-focus-in", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
-		{"after-select-window", fmt.Sprintf("run-shell -b '%s; tmux refresh-client -S; %s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --dim-only'", signalCmd, hookCmd, cycleCmd)},
+		{"after-select-window", fmt.Sprintf("run-shell -b '%s; tmux refresh-client -S; %s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --ensure-content'", signalCmd, hookCmd, cycleCmd)},
+		{"client-attached", fmt.Sprintf("run-shell -b '%s --ensure-content'", cycleCmd)},
 	}
 	for _, h := range hooks {
 		hookWg.Add(1)

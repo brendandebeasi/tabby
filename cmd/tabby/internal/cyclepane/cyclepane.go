@@ -21,7 +21,7 @@ import (
 // subcommand process (tmux reads it from the executable name, not argv[0],
 // so `exec -a sidebar-renderer` doesn't help). pane_start_command still
 // contains the original `render sidebar` / `render pane-header` invocation.
-var skipCommands = []string{"sidebar-render", "render sidebar", "sidebar-renderer"}
+var skipCommands = []string{"sidebar-render", "render sidebar", "sidebar-renderer", "window-header", "render window-header"}
 
 // headerCommand identifies pane-header processes (dimmed with their content pane).
 // Same rationale: match via either command field.
@@ -37,17 +37,32 @@ type paneInfo struct {
 
 func Run(args []string) int {
 	dimOnly := len(args) > 0 && args[0] == "--dim-only"
+	ensureContent := len(args) > 0 && args[0] == "--ensure-content"
 
 	panes := listPanes()
 	content := filterContent(panes)
 
-	if !dimOnly && len(content) >= 2 {
+	switch {
+	case ensureContent:
+		if len(content) >= 1 && activeIsUtility(panes) {
+			_ = exec.Command("tmux", "select-pane", "-t", content[0].id).Run()
+		}
+	case !dimOnly && len(content) >= 2:
 		cyclePane(content)
 	}
 
 	applyDim()
 	signalDaemon()
 	return 0
+}
+
+func activeIsUtility(panes []paneInfo) bool {
+	for _, p := range panes {
+		if p.active {
+			return isUtility(p)
+		}
+	}
+	return false
 }
 
 func listPanes() []paneInfo {
