@@ -298,22 +298,24 @@ bind-key -T root WheelUpPane {
     if -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" {
         send-keys -M -t =
     } {
-        if -F -t = "#{||:#{alternate_on},#{||:#{pane_in_mode},#{mouse_any_flag}}}" {
+        if -F -t = "#{mouse_any_flag}" {
             send-keys -M
         } {
             copy-mode -e -t =
         }
     }
 }
+# WheelDownPane: always forward. Entering copy-mode on scroll-down from the
+# bottom (which `copy-mode -e -t =` does when there's nothing below to scroll
+# to) makes trackpad inertia pingpong at line 0 in TUIs with mouse reporting
+# (Claude Code, nvim with mouse=a). Dropping the alternate_on/pane_in_mode
+# disjunction also removes a mid-scroll re-evaluation that could flip the
+# branch chosen between consecutive wheel events. See README/scroll notes.
 bind-key -T root WheelDownPane {
     if -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" {
         send-keys -M -t =
     } {
-        if -F -t = "#{||:#{alternate_on},#{||:#{pane_in_mode},#{mouse_any_flag}}}" {
-            send-keys -M
-        } {
-            copy-mode -e -t =
-        }
+        send-keys -M
     }
 }
 TMUX_EOF
