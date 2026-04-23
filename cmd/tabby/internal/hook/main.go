@@ -188,20 +188,45 @@ func Run(allArgs []string) int {
 
 // doOnPaneResize replaces on_pane_resize.sh: only signal daemon if
 // the resized pane is a sidebar pane (prevents feedback loops).
+//
+// Post-consolidation, pane_current_command reports "tabby" for every
+// subcommand, so we also check pane_start_command which retains the
+// original "exec -a sidebar-renderer ..." invocation.
 func doOnPaneResize(args []string) {
 	if len(args) < 1 || args[0] == "" {
 		return
 	}
 	hookPane := args[0]
-	out, err := exec.Command("tmux", "display", "-p", "-t", hookPane, "#{pane_current_command}").Output()
+	out, err := exec.Command("tmux", "display", "-p", "-t", hookPane,
+		"#{pane_current_command}|#{pane_start_command}").Output()
 	if err != nil {
 		return
 	}
-	cmd := strings.TrimSpace(string(out))
-	if !strings.HasPrefix(cmd, "sidebar") {
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 2)
+	cur := parts[0]
+	start := ""
+	if len(parts) == 2 {
+		start = parts[1]
+	}
+	if !isSidebarStartOrCurrent(cur, start) {
 		return
 	}
 	signalDaemon("USR1")
+}
+
+// isSidebarStartOrCurrent is the hook-package copy of the daemon's
+// isSidebarPaneCommand. Kept local to avoid a cross-package import.
+func isSidebarStartOrCurrent(cur, start string) bool {
+	for _, s := range []string{cur, start} {
+		if s == "" {
+			continue
+		}
+		lower := strings.ToLower(s)
+		if strings.Contains(lower, "sidebar-renderer") || strings.Contains(lower, "render sidebar") {
+			return true
+		}
+	}
+	return false
 }
 
 // doSignalClientResize is the handler for tmux's client-resized hook.

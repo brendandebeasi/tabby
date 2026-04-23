@@ -1128,10 +1128,10 @@ func NewCoordinator(sessionID string) *Coordinator {
 	// This handles the case where a phone client previously collapsed sidebars
 	// and the daemon restarted with desktop active.
 	if c.globalWidth >= 10 {
-		out, _ := exec.Command("tmux", "list-panes", "-s", "-F", "#{pane_id} #{pane_current_command} #{pane_width}").Output()
+		out, _ := exec.Command("tmux", "list-panes", "-s", "-F", "#{pane_id}|#{pane_current_command}|#{pane_width}|#{pane_start_command}").Output()
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			parts := strings.Fields(line)
-			if len(parts) >= 3 && strings.HasPrefix(parts[1], "sidebar") {
+			parts := strings.SplitN(line, "|", 4)
+			if len(parts) >= 4 && isSidebarPaneCommand(parts[1], parts[3]) {
 				w, _ := strconv.Atoi(parts[2])
 				if w > 0 && w < 5 {
 					exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", c.globalWidth)).Run()
@@ -4705,10 +4705,10 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 
 		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer listCancel()
-		if out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
+		if out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
 			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-				parts := strings.Split(line, " ")
-				if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+				parts := strings.SplitN(line, "|", 3)
+				if len(parts) >= 3 && isSidebarPaneCommand(parts[1], parts[2]) {
 					coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (inactive sync)", parts[0], targetWidth)
 					resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 					exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
@@ -4767,10 +4767,10 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 
 	listCtx2, listCancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 	defer listCancel2()
-	if out, err := exec.CommandContext(listCtx2, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id} #{pane_current_command}").Output(); err == nil {
+	if out, err := exec.CommandContext(listCtx2, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			parts := strings.Split(line, " ")
-			if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+			parts := strings.SplitN(line, "|", 3)
+			if len(parts) >= 3 && isSidebarPaneCommand(parts[1], parts[2]) {
 				coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (active sync)", parts[0], targetWidth)
 				resizeCtx2, resizeCancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 				exec.CommandContext(resizeCtx2, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
@@ -5432,10 +5432,10 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	// the DEADLOCK WARNING + LOOP_SKIP task=client_geometry_tick stalls.
 	actualPaneWidths := make(map[string]int)
 	paneCtx, paneCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	if paneOut, err := exec.CommandContext(paneCtx, "tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{window_id}|#{pane_width}").Output(); err == nil {
+	if paneOut, err := exec.CommandContext(paneCtx, "tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{window_id}|#{pane_width}|#{pane_start_command}").Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
-			parts := strings.SplitN(line, "|", 3)
-			if len(parts) == 3 && strings.HasPrefix(parts[0], "sidebar") {
+			parts := strings.SplitN(line, "|", 4)
+			if len(parts) == 4 && isSidebarPaneCommand(parts[0], parts[3]) {
 				if w, err := strconv.Atoi(parts[2]); err == nil {
 					actualPaneWidths[parts[1]] = w
 				}
@@ -5445,6 +5445,33 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 		logEvent("WIDTH_SYNC_PANE_LIST_TIMEOUT ms=1500")
 	}
 	paneCancel()
+
+	// If the active window's sidebar was resized by the user, adopt the new
+	// width as global BEFORE computing per-client targets. Without this,
+	// RunWidthSync computes targets against the stale global and reverts the
+	// drag on the next pass instead of propagating it to other windows.
+	// Prefer actual tmux pane width over client-reported width (the latter
+	// can lag a drag by a render cycle).
+	adoptedActiveWidth := 0
+	if activeWindowID != "" {
+		effectiveActive := clientSnapshot[activeWindowID]
+		if w, ok := actualPaneWidths[activeWindowID]; ok {
+			effectiveActive = w
+		}
+		if effectiveActive >= 10 && c.globalWidth != 0 && effectiveActive != c.globalWidth && syncSettings[activeWindowID] {
+			coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global",
+				activeWindowID, c.globalWidth, effectiveActive)
+			logEvent("WIDTH_SYNC_ADOPT active=%s from=%d to=%d", activeWindowID, c.globalWidth, effectiveActive)
+			c.globalWidth = effectiveActive
+			exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", effectiveActive)).Run()
+			// Persist the per-profile width NOW (before per-client target
+			// computation) so sidebarReasonableMaxForWindow reads the new
+			// value, not the stale one. Otherwise the clamp would revert the
+			// drag on the same pass.
+			c.persistSidebarWidthProfile(activeWindowID, effectiveActive)
+			adoptedActiveWidth = effectiveActive
+		}
+	}
 
 	for clientID, currentWidth := range clientSnapshot {
 		currentHeight := clientHeightSnapshot[clientID]
@@ -5552,17 +5579,19 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 		logEvent("WIDTH_SYNC_EXEC active=%s force=%v ops=%d duration_ms=%d since_last_ms=%d", activeWindowID, force, len(ops), elapsed.Milliseconds(), sinceLast.Milliseconds())
 	}
 
+	_ = adoptedActiveWidth // (profile persistence done inline above, before target computation)
+
 	// Execute tmux resize operations AFTER releasing all locks
 	for _, op := range ops {
 		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", op.clientID, "-F", "#{pane_id} #{pane_current_command}").Output()
+		out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", op.clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output()
 		listCancel()
 		if err != nil {
 			continue
 		}
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			parts := strings.Split(line, " ")
-			if len(parts) >= 2 && strings.HasPrefix(parts[1], "sidebar") {
+			parts := strings.SplitN(line, "|", 3)
+			if len(parts) >= 3 && isSidebarPaneCommand(parts[1], parts[2]) {
 				coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (batch sync)", parts[0], op.targetWidth)
 				logEvent("WIDTH_SYNC_RESIZE client=%s pane=%s width=%d", op.clientID, parts[0], op.targetWidth)
 				resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -7390,14 +7419,14 @@ func (c *Coordinator) ResizeAllWindowsNow() {
 	}
 
 	out, err := tmuxOutputCtx("list-panes", "-a", "-F",
-		"#{pane_id}|#{window_id}|#{?@tabby_sync_width,#{@tabby_sync_width},1}|#{pane_current_command}")
+		"#{pane_id}|#{window_id}|#{?@tabby_sync_width,#{@tabby_sync_width},1}|#{pane_current_command}|#{pane_start_command}")
 	if err != nil {
 		return
 	}
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.Split(line, "|")
-		if len(parts) < 4 || !strings.HasPrefix(parts[3], "sidebar") {
+		parts := strings.SplitN(line, "|", 5)
+		if len(parts) < 5 || !isSidebarPaneCommand(parts[3], parts[4]) {
 			continue
 		}
 		paneID := parts[0]
@@ -7426,13 +7455,13 @@ func syncOtherSidebarWidths(newWidth int, skipWindowID string) {
 // If skipWindowID is non-empty, skips the sidebar in that window.
 // Respects @tabby_sync_width window option (default true).
 func syncSidebarWidthsExcept(newWidth int, skipWindowID string) {
-	out, err := tmuxOutputCtx("list-panes", "-a", "-F", "#{pane_id}|#{window_id}|#{?@tabby_sync_width,#{@tabby_sync_width},1}|#{pane_current_command}")
+	out, err := tmuxOutputCtx("list-panes", "-a", "-F", "#{pane_id}|#{window_id}|#{?@tabby_sync_width,#{@tabby_sync_width},1}|#{pane_current_command}|#{pane_start_command}")
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.Split(line, "|")
-		if len(parts) >= 4 && strings.HasPrefix(parts[3], "sidebar") {
+		parts := strings.SplitN(line, "|", 5)
+		if len(parts) >= 5 && isSidebarPaneCommand(parts[3], parts[4]) {
 			paneID := parts[0]
 			windowID := parts[1]
 			syncSetting := parts[2]
@@ -13752,7 +13781,7 @@ func (c *Coordinator) showSidebarSettingsMenu(clientID string, pos menuPosition)
 	args = append(args, "", "", "")
 
 	// Reset width (set to 25 and sync all sidebars)
-	resetCmd := `set-option -gq @tabby_sidebar_width 25; run-shell -b 'for p in $(tmux list-panes -a -F "#{pane_id} #{pane_current_command}" | grep sidebar-renderer | cut -d" " -f1); do tmux resize-pane -t $p -x 25; done'`
+	resetCmd := `set-option -gq @tabby_sidebar_width 25; run-shell -b 'for p in $(tmux list-panes -a -F "#{pane_id}|#{pane_start_command}" | grep sidebar-renderer | cut -d"|" -f1); do tmux resize-pane -t $p -x 25; done'`
 	args = append(args, "Reset Width (25)", "w", resetCmd)
 
 	// Sync Width toggle
