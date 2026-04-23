@@ -33,7 +33,13 @@ ss_tmux() {
     command tmux -L "$SS_SOCKET" -f "$SS_TMUX_CONF" "$@"
 }
 
-ss_log() { echo "[harness] $*" >&2; }
+ss_log() {
+    if [ "${SS_VERBOSE:-0}" = "1" ]; then
+        echo "[harness] $*" >&2
+    else
+        echo "[harness] $*" >> "${SS_LOG_DIR:-/tmp}/harness.log" 2>/dev/null || true
+    fi
+}
 
 ss_cleanup() {
     local ec=$?
@@ -97,25 +103,31 @@ sidebar:
   mobile_max_window_cols: 110
   tablet_max_window_cols: 170
   pane_headers: true
+  # Override disclosure/tree glyphs that aren't in agg's bundled fonts. The
+  # defaults (⊟, ⊞) fall back to a blocky "E"-shaped glyph in JetBrains Mono,
+  # which looks broken in the recorded gifs. ASCII substitutes render cleanly.
+  colors:
+    disclosure_expanded: "-"
+    disclosure_collapsed: "+"
 groups:
   - name: StudioDome
     pattern: '^SD\|'
     theme:
       bg: '#b4637a'
       active_bg: '#9d4e6a'
-      icon: 🎬
+      icon: '■'
   - name: Gunpowder
     pattern: '^GP\|'
     theme:
       bg: '#907aa9'
       active_bg: '#7a6593'
-      icon: 💥
+      icon: '●'
   - name: Default
     pattern: '.*'
     theme:
       bg: '#56949f'
       active_bg: '#286983'
-      icon: •
+      icon: '•'
 EOF
 
     # Minimal tmux config applied from server startup so window names aren't

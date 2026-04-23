@@ -20,9 +20,10 @@ OUT_DIR="$REPO/tests/demos/out"
 SCEN_DIR="$REPO/tests/demos/scenarios"
 mkdir -p "$OUT_DIR"
 
-ASC_COLS="${ASC_COLS:-80}"
-ASC_ROWS="${ASC_ROWS:-60}"
-AGG_FONT_SIZE="${AGG_FONT_SIZE:-13}"
+ASC_COLS="${ASC_COLS:-40}"
+ASC_ROWS="${ASC_ROWS:-55}"
+AGG_FONT_SIZE="${AGG_FONT_SIZE:-15}"
+AGG_FONT_FAMILY="${AGG_FONT_FAMILY:-JetBrains Mono,Menlo,DejaVu Sans Mono}"
 AGG_THEME="${AGG_THEME:-monokai}"
 AGG_FPS="${AGG_FPS:-15}"
 
@@ -49,6 +50,7 @@ record_one() {
     if command -v agg >/dev/null 2>&1; then
         agg --theme "$AGG_THEME" \
             --font-size "$AGG_FONT_SIZE" \
+            --font-family "$AGG_FONT_FAMILY" \
             --fps-cap "$AGG_FPS" \
             "$cast" "$gif" >/dev/null 2>&1
         echo "  → gif:  $(du -h "$gif" | cut -f1)  ($gif)"

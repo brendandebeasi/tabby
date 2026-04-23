@@ -1,39 +1,37 @@
 #!/usr/bin/env bash
 # Narrated-driver helpers: print captions + inline sidebar snapshots so a
-# recorder (vhs, asciinema, script) can capture the demo as a sequence of
-# annotated frames. Renders a static "tabby stage" around the snapshot so the
-# viewer sees window+sidebar chrome rather than raw ANSI output.
+# recorder (asciinema → agg) can capture the demo as a sequence of annotated
+# frames.
 
 set -uo pipefail
 
-# Colours for the narrator chrome
-NARR_BG_RESET=$'\033[0m'
-NARR_DIM=$'\033[2m'
-NARR_BOLD=$'\033[1m'
-NARR_CYAN=$'\033[38;2;86;147;159m'
-NARR_ROSE=$'\033[38;2;180;99;122m'
-NARR_IRIS=$'\033[38;2;144;122;169m'
-NARR_FG=$'\033[38;2;75;72;82m'
+# Plain-foreground colour codes. No backgrounds — the sidebar has its own
+# group-coloured backgrounds and any chrome we add would clash with them.
+_NC='\033[0m'          # reset
+_BOLD='\033[1m'
+_CYAN='\033[38;2;86;147;159m'
+_MUTED='\033[38;2;121;117;147m'
 
 # narr_caption <text>
-# Clear screen, print a boxed caption, leave room below for the snapshot.
+# Print a short header announcing the next scene. Always resets colour state
+# at the end so the sidebar snapshot below starts from a clean baseline.
 narr_caption() {
     local text="$1"
-    printf '\n\n%s%s▸ %s%s\n' "$NARR_BOLD" "$NARR_CYAN" "$text" "$NARR_BG_RESET"
-    printf '%s' "$NARR_FG"
-    printf -- '─%.0s' {1..60}
-    printf '%s\n' "$NARR_BG_RESET"
+    printf '\n%b▸ %s%b\n' "${_BOLD}${_CYAN}" "$text" "$_NC"
+    printf '%b' "$_MUTED"
+    printf -- '─%.0s' {1..40}
+    printf '%b\n' "$_NC"
 }
 
 # narr_snapshot <pane_id>
-# Capture a sidebar pane (ANSI preserved) and render it as a boxed frame so
-# the viewer can tell it's the actual tabby output. Uses unicode box-drawing.
+# Capture a sidebar pane (ANSI preserved) and print it verbatim. No wrapping
+# frame — the sidebar already has its own group-coloured backgrounds, and
+# anything we overlay bleeds into them. Trailing blank rows are trimmed.
 narr_snapshot() {
     local pane="$1"
-    local capture
-    capture="$(ss_tmux capture-pane -p -e -t "$pane")"
-    # Trim trailing whitespace-only lines so the frame isn't 42 rows tall.
-    capture="$(printf '%s' "$capture" | awk '
+    # Each line ends with a hard reset so the sidebar's own background colour
+    # can't leak onto the next caption / blank row after the snapshot ends.
+    ss_tmux capture-pane -p -e -t "$pane" | awk '
         { lines[NR] = $0 }
         END {
             last = NR
@@ -44,23 +42,10 @@ narr_snapshot() {
                 if (length(line) > 0) break
                 last--
             }
-            for (i = 1; i <= last; i++) print lines[i]
+            for (i = 1; i <= last; i++) printf "%s\033[0m\n", lines[i]
         }
-    ')"
-    # Box it
-    local width=26
-    printf '%s┌' "$NARR_FG"
-    printf -- '─%.0s' $(seq 1 "$width")
-    printf '┐%s\n' "$NARR_BG_RESET"
-    while IFS= read -r line; do
-        printf '%s│%s %s %s│%s\n' "$NARR_FG" "$NARR_BG_RESET" "$line" "$NARR_FG" "$NARR_BG_RESET"
-    done <<< "$capture"
-    printf '%s└' "$NARR_FG"
-    printf -- '─%.0s' $(seq 1 "$width")
-    printf '┘%s\n' "$NARR_BG_RESET"
+    '
 }
 
-# narr_pause <secs>  — sleep + show a faint "..." for recorder pacing
-narr_pause() {
-    sleep "${1:-1.5}"
-}
+# narr_pause <secs>
+narr_pause() { sleep "${1:-1.5}"; }
