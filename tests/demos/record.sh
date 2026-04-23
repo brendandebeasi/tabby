@@ -16,7 +16,7 @@
 set -euo pipefail
 
 REPO="${TABBY_REPO:-/Users/b/git/tabby}"
-OUT_DIR="$REPO/tests/demos/out"
+OUT_DIR="${TABBY_DEMO_OUT:-$REPO/tests/demos/out}"
 SCEN_DIR="$REPO/tests/demos/scenarios"
 mkdir -p "$OUT_DIR"
 
