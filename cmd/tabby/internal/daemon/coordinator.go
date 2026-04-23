@@ -5102,15 +5102,29 @@ func (c *Coordinator) selectNeighborWindow(delta int) {
 func (c *Coordinator) selectNeighborWindowFrom(currentWindowID string, delta int) {
 	c.stateMu.RLock()
 	wins := make([]string, 0, len(c.windows))
+	unfiltered := make([]string, 0, len(c.windows))
 	active := ""
+	srcID := strings.TrimSpace(currentWindowID)
 	for _, w := range c.windows {
 		if strings.HasPrefix(w.Name, sidebarStashWindowPrefix) {
+			continue
+		}
+		unfiltered = append(unfiltered, w.ID)
+		// Skip minimized windows unless it's the one we're cycling from —
+		// keeping the source in the list lets modulo arithmetic land on a
+		// sensible neighbor when the user is on a minimized window itself.
+		if w.Minimized && w.ID != srcID && !w.Active {
 			continue
 		}
 		wins = append(wins, w.ID)
 		if w.Active {
 			active = w.ID
 		}
+	}
+	// If every window is minimized, fall back to the unfiltered list so the
+	// user can still cycle.
+	if len(wins) == 0 {
+		wins = unfiltered
 	}
 	c.stateMu.RUnlock()
 
@@ -5459,17 +5473,26 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 			effectiveActive = w
 		}
 		if effectiveActive >= 10 && c.globalWidth != 0 && effectiveActive != c.globalWidth && syncSettings[activeWindowID] {
-			coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global",
-				activeWindowID, c.globalWidth, effectiveActive)
-			logEvent("WIDTH_SYNC_ADOPT active=%s from=%d to=%d", activeWindowID, c.globalWidth, effectiveActive)
-			c.globalWidth = effectiveActive
-			exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", effectiveActive)).Run()
-			// Persist the per-profile width NOW (before per-client target
-			// computation) so sidebarReasonableMaxForWindow reads the new
-			// value, not the stale one. Otherwise the clamp would revert the
-			// drag on the same pass.
-			c.persistSidebarWidthProfile(activeWindowID, effectiveActive)
-			adoptedActiveWidth = effectiveActive
+			if justBecameActive {
+				// First sync tick after a window switch. The discrepancy is a
+				// stale width about to be synced TO this window, not a drag
+				// coming FROM it. Adopting here would flip globalWidth to the
+				// new active's stored/cached size and ping-pong all sidebars
+				// on every window switch.
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=just_became_active active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
+			} else {
+				coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global",
+					activeWindowID, c.globalWidth, effectiveActive)
+				logEvent("WIDTH_SYNC_ADOPT active=%s from=%d to=%d", activeWindowID, c.globalWidth, effectiveActive)
+				c.globalWidth = effectiveActive
+				exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", effectiveActive)).Run()
+				// Persist the per-profile width NOW (before per-client target
+				// computation) so sidebarReasonableMaxForWindow reads the new
+				// value, not the stale one. Otherwise the clamp would revert the
+				// drag on the same pass.
+				c.persistSidebarWidthProfile(activeWindowID, effectiveActive)
+				adoptedActiveWidth = effectiveActive
+			}
 		}
 	}
 
@@ -8082,6 +8105,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			if isActive {
 				style = style.Bold(true)
 			}
+			if win.Minimized {
+				style = style.Faint(true)
+			}
 
 			// Build alert indicator
 			alertIcon := ""
@@ -8642,6 +8668,9 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 		if isActive {
 			style = style.Bold(true)
+		}
+		if win.Minimized {
+			style = style.Faint(true)
 		}
 
 		// Build alert indicator
@@ -11468,6 +11497,31 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		coordinatorDebugLog.Printf("Sidebar grow: %d -> %d (syncing all)", currentWidth, newWidth)
 		return false
 
+	case "toggle_minimize_window":
+		// Flip @tabby_minimized for the target window. Target may be a window
+		// index ("3"), a pane ID ("%7"), or empty (current window).
+		target := strings.TrimSpace(input.ResolvedTarget)
+		winIdx := ""
+		if target == "" {
+			out, _ := exec.Command("tmux", "display-message", "-p", "#{window_index}").Output()
+			winIdx = strings.TrimSpace(string(out))
+		} else if strings.HasPrefix(target, "%") {
+			out, _ := exec.Command("tmux", "display-message", "-t", target, "-p", "#{window_index}").Output()
+			winIdx = strings.TrimSpace(string(out))
+		} else {
+			winIdx = target
+		}
+		if winIdx == "" {
+			return false
+		}
+		out, err := exec.Command("tmux", "show-window-option", "-v", "-t", ":"+winIdx, "@tabby_minimized").Output()
+		if err == nil && strings.TrimSpace(string(out)) == "1" {
+			exec.Command("tmux", "set-window-option", "-t", ":"+winIdx, "-u", "@tabby_minimized").Run()
+		} else {
+			exec.Command("tmux", "set-window-option", "-t", ":"+winIdx, "@tabby_minimized", "1").Run()
+		}
+		return true
+
 	case "toggle_collapse_sidebar", "collapse_sidebar", "expand_sidebar":
 		// Legacy action names from the old 1-col collapse feature. They now
 		// toggle sidebar visibility via break-pane stash / join-pane restore,
@@ -11578,19 +11632,24 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	case "window_header:close_window":
 		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, input.ResolvedTarget)
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:close_window")
-		// Kill the target window (no confirmation, per plan).
-		// ResolvedTarget is the window ID.
+		// Show a tap-friendly confirm dialog before killing. `confirm-before`
+		// would work but expects a y/n keypress at the status-line prompt,
+		// which is awkward on touch clients; display-menu gives two tappable
+		// options instead.
 		target := input.ResolvedTarget
 		if target == "" {
-			// Fall back to active window
 			if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
 				target = strings.TrimSpace(string(out))
 			}
 		}
 		if target != "" {
-			ctxKill, cancelKill := context.WithTimeout(context.Background(), tmuxCmdTimeout)
-			defer cancelKill()
-			exec.CommandContext(ctxKill, "tmux", "kill-window", "-t", target).Run()
+			exec.Command("tmux", "display-menu",
+				"-T", "Close window?",
+				"-x", "C", "-y", "C",
+				"Cancel", "n", "",
+				"", "", "",
+				"CLOSE", "y", fmt.Sprintf("kill-window -t %s", target),
+			).Run()
 		}
 		return true
 
@@ -12999,29 +13058,6 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 
 	// Set Color submenu
 	args = append(args, "-Set Tab Color", "", "")
-	colorOptions := []struct {
-		name string
-		hex  string
-		key  string
-	}{
-		{"Red", "#e74c3c", "r"},
-		{"Orange", "#e67e22", "o"},
-		{"Yellow", "#f1c40f", "y"},
-		{"Green", "#27ae60", "g"},
-		{"Blue", "#3498db", "b"},
-		{"Purple", "#9b59b6", "p"},
-		{"Pink", "#e91e63", "i"},
-		{"Cyan", "#00bcd4", "c"},
-		{"Gray", "#7f8c8d", "a"},
-		{"Transparent", "transparent", "t"},
-	}
-	if !c.config.Sidebar.HidePredefinedColors {
-		for _, color := range colorOptions {
-			setColorCmd := fmt.Sprintf("tabby-set-window-color:%d:%s", win.Index, color.hex)
-			args = append(args, fmt.Sprintf("  %s", color.name), color.key, setColorCmd)
-		}
-	}
-
 	colorTarget := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(win.Index)))
 	currentColor := win.CustomColor
 	colorPickerCmd := fmt.Sprintf("tabby-color-picker:window:%s:%s", colorTarget, currentColor)
@@ -13050,6 +13086,15 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	} else {
 		pinCmd := fmt.Sprintf("set-window-option -t :%d @tabby_pinned 1", win.Index)
 		args = append(args, "Pin to Top", "p", pinCmd)
+	}
+
+	// Minimize/Unminimize — minimized windows are skipped by cmd+]/cmd+[ cycling
+	if win.Minimized {
+		unminCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_minimized", win.Index)
+		args = append(args, "Unminimize", "z", unminCmd)
+	} else {
+		minCmd := fmt.Sprintf("set-window-option -t :%d @tabby_minimized 1", win.Index)
+		args = append(args, "Minimize", "z", minCmd)
 	}
 
 	// --- Window actions section ---
@@ -13119,7 +13164,7 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 
 	exe, _ := os.Executable()
 	hookPath := filepath.Join(filepath.Dir(exe), "tabby-hook")
-	killCmd := fmt.Sprintf("run-shell '%s kill-window %d'", hookPath, win.Index)
+	killCmd := fmt.Sprintf("confirm-before -p 'Close window? (y/n)' \"run-shell '%s kill-window %d'\"", hookPath, win.Index)
 	args = append(args, "Kill", "k", killCmd)
 
 	c.executeOrSendMenu(clientID, args, pos)
@@ -14206,21 +14251,31 @@ func focusContentPaneInActiveWindow() {
 	selectContentPaneInWindow(windowID)
 }
 
-// selectContentPaneInWindow selects the first non-auxiliary pane in the given window.
+// selectContentPaneInWindow selects the first non-auxiliary pane in the given
+// window. Post-consolidation, pane_current_command is just "tabby" for sidebar /
+// pane-header / window-header panes too — the renderer identity lives in
+// pane_start_command. Check both so auxiliary panes are correctly skipped.
 func selectContentPaneInWindow(windowID string) {
 	out, err := exec.Command("tmux", "list-panes", "-t", windowID,
-		"-F", "#{pane_id}|||#{pane_current_command}").Output()
+		"-F", "#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "|||", 2)
-		if len(parts) == 2 {
-			if !isAuxiliaryPaneCommand(parts[1]) {
-				exec.Command("tmux", "select-pane", "-t", parts[0]).Run()
-				return
-			}
+		parts := strings.SplitN(line, "|||", 3)
+		if len(parts) < 2 {
+			continue
 		}
+		cur := parts[1]
+		start := ""
+		if len(parts) >= 3 {
+			start = parts[2]
+		}
+		if isAuxiliaryPaneCommand(cur) || isAuxiliaryPaneCommand(start) {
+			continue
+		}
+		exec.Command("tmux", "select-pane", "-t", parts[0]).Run()
+		return
 	}
 }
 

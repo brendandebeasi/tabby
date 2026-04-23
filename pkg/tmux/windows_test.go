@@ -266,7 +266,7 @@ func TestListWindows(t *testing.T) {
 		mock := newMock()
 		line := fields(
 			"@1", "0", "main", "1", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "",
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "",
 		)
 		mock.set("list-windows", line+"\n", nil)
 		DefaultRunner = mock
@@ -288,7 +288,7 @@ func TestListWindows(t *testing.T) {
 	t.Run("ansi_stripped_from_name", func(t *testing.T) {
 		mock := newMock()
 		line := fields("@2", "1", "\x1b[32mcolored\x1b[0m", "0", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 		mock.set("list-windows", line+"\n", nil)
 		DefaultRunner = mock
 
@@ -302,7 +302,7 @@ func TestListWindows(t *testing.T) {
 	t.Run("busy_bell_pinned_icon_color_group_parsed", func(t *testing.T) {
 		mock := newMock()
 		line := fields("@3", "2", "work", "0", "0", "1", "0", "0",
-			"#ff0000", "dev", "1", "", "", "", "", "", "", "1", "$0", "1", "🔥", "layout")
+			"#ff0000", "dev", "1", "", "", "", "", "", "", "1", "$0", "1", "🔥", "layout", "")
 		mock.set("list-windows", line+"\n", nil)
 		DefaultRunner = mock
 
@@ -320,10 +320,24 @@ func TestListWindows(t *testing.T) {
 		}
 	})
 
+	t.Run("minimized_parsed", func(t *testing.T) {
+		mock := newMock()
+		line := fields("@7", "6", "hidden", "0", "0", "0", "0", "0",
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "1")
+		mock.set("list-windows", line+"\n", nil)
+		DefaultRunner = mock
+
+		windows, err := ListWindows()
+		assert.NoError(t, err)
+		if assert.Len(t, windows, 1) {
+			assert.True(t, windows[0].Minimized)
+		}
+	})
+
 	t.Run("tabby_bell_sets_bell_true", func(t *testing.T) {
 		mock := newMock()
 		line := fields("@4", "3", "win", "0", "0", "0", "0", "0",
-			"", "", "0", "1", "", "", "", "", "", "1", "$0", "", "", "")
+			"", "", "0", "1", "", "", "", "", "", "1", "$0", "", "", "", "")
 		mock.set("list-windows", line+"\n", nil)
 		DefaultRunner = mock
 
@@ -337,7 +351,7 @@ func TestListWindows(t *testing.T) {
 	t.Run("sync_width_false_when_zero", func(t *testing.T) {
 		mock := newMock()
 		line := fields("@5", "4", "win", "0", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "0", "$0", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "0", "$0", "", "", "", "")
 		mock.set("list-windows", line+"\n", nil)
 		DefaultRunner = mock
 
@@ -351,7 +365,7 @@ func TestListWindows(t *testing.T) {
 	t.Run("collapsed_and_input_parsed", func(t *testing.T) {
 		mock := newMock()
 		line := fields("@6", "5", "win", "0", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "1", "1", "", "1", "$0", "", "", "")
+			"", "", "0", "", "", "", "1", "1", "", "1", "$0", "", "", "", "")
 		mock.set("list-windows", line+"\n", nil)
 		DefaultRunner = mock
 
@@ -397,7 +411,7 @@ func TestListWindows(t *testing.T) {
 		mock := newMock()
 		SetSessionTarget("$1")
 		line := fields("@1", "0", "mine", "1", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "1", "$2", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "1", "$2", "", "", "", "")
 		mock.set("list-windows", line+"\n", nil)
 		DefaultRunner = mock
 
@@ -409,9 +423,9 @@ func TestListWindows(t *testing.T) {
 	t.Run("multiple_windows_parsed", func(t *testing.T) {
 		mock := newMock()
 		line1 := fields("@1", "0", "alpha", "1", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 		line2 := fields("@2", "1", "beta", "0", "0", "0", "0", "1",
-			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 		mock.set("list-windows", line1+"\n"+line2+"\n", nil)
 		DefaultRunner = mock
 
@@ -558,7 +572,7 @@ func TestListWindowsWithPanes(t *testing.T) {
 	t.Run("panes_assigned_to_window", func(t *testing.T) {
 		mock := newMock()
 		winLine := fields("@1", "0", "main", "1", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 		mock.set("list-windows", winLine+"\n", nil)
 		paneLine := fields("0", "%0", "0", "1", "bash", "shell",
 			"99985", "0", "", "0", "0", "/home", "", "", "bash", "80", "24")
@@ -576,7 +590,7 @@ func TestListWindowsWithPanes(t *testing.T) {
 	t.Run("panes_sorted_by_visual_position", func(t *testing.T) {
 		mock := newMock()
 		winLine := fields("@1", "0", "main", "1", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 		mock.set("list-windows", winLine+"\n", nil)
 
 		// pane B at left=40; pane A at left=0 — A must sort first
@@ -598,7 +612,7 @@ func TestListWindowsWithPanes(t *testing.T) {
 	t.Run("window_busy_set_from_busy_pane", func(t *testing.T) {
 		mock := newMock()
 		winLine := fields("@1", "0", "main", "1", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 		mock.set("list-windows", winLine+"\n", nil)
 		paneLine := fields("0", "%0", "0", "1", "make", "build",
 			"99982", "0", "", "0", "0", "/tmp", "", "", "make", "80", "24")
@@ -615,7 +629,7 @@ func TestListWindowsWithPanes(t *testing.T) {
 	t.Run("sidebar_panes_filtered_in_post_pass", func(t *testing.T) {
 		mock := newMock()
 		winLine := fields("@1", "0", "main", "1", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 		mock.set("list-windows", winLine+"\n", nil)
 
 		normalPane := fields("0", "%0", "0", "1", "bash", "t",
@@ -636,7 +650,7 @@ func TestListWindowsWithPanes(t *testing.T) {
 	t.Run("panes_reindexed_after_sort", func(t *testing.T) {
 		mock := newMock()
 		winLine := fields("@1", "0", "main", "1", "0", "0", "0", "0",
-			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+			"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 		mock.set("list-windows", winLine+"\n", nil)
 
 		pane1 := fields("0", "%0", "0", "1", "bash", "t",
@@ -876,9 +890,9 @@ func TestListWindows_InvalidWindowIndex(t *testing.T) {
 	restoreState(t)
 	mock := newMock()
 	bad := fields("@1", "bad", "win", "1", "0", "0", "0", "0",
-		"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+		"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 	good := fields("@2", "1", "win2", "0", "0", "0", "0", "0",
-		"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+		"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 	mock.set("list-windows", bad+"\n"+good+"\n", nil)
 	DefaultRunner = mock
 
@@ -894,7 +908,7 @@ func TestListWindows_TabbyActivitySetsActivity(t *testing.T) {
 	restoreState(t)
 	mock := newMock()
 	line := fields("@1", "0", "win", "1", "0", "0", "0", "0",
-		"", "", "0", "", "1", "", "", "", "", "1", "$0", "", "", "")
+		"", "", "0", "", "1", "", "", "", "", "1", "$0", "", "", "", "")
 	mock.set("list-windows", line+"\n", nil)
 	DefaultRunner = mock
 
@@ -910,7 +924,7 @@ func TestListWindows_TabbySilenceSetsSilence(t *testing.T) {
 	restoreState(t)
 	mock := newMock()
 	line := fields("@1", "0", "win", "1", "0", "0", "0", "0",
-		"", "", "0", "", "", "1", "", "", "", "1", "$0", "", "", "")
+		"", "", "0", "", "", "1", "", "", "", "1", "$0", "", "", "", "")
 	mock.set("list-windows", line+"\n", nil)
 	DefaultRunner = mock
 
@@ -996,7 +1010,7 @@ func TestListWindowsWithPanes_ListWindowsError(t *testing.T) {
 func TestListWindowsWithPanes_ListAllPanesFallback(t *testing.T) {
 	restoreState(t)
 	winLine := fields("@1", "0", "window0", "1", "0", "0", "0", "0",
-		"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "")
+		"", "", "0", "", "", "", "", "", "", "1", "$0", "", "", "", "")
 	// ListPanesForWindow format (15 fields, no window_index)
 	paneLine := listPanesFields("%0", "0", "1", "bash", "Shell",
 		"99990", "1700000000", "", "0", "0", "/home", "", "", "bash", "0")

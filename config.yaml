@@ -54,6 +54,7 @@ bindings:
 
   new_window_global: "cmd+shift+n"
   kill_window_global: "cmd+shift+w"
+  toggle_minimize_window: "cmd+shift+m"
   new_window: "prefix + c"
   kill_pane: "prefix + x"
   split_horizontal: "prefix + \""

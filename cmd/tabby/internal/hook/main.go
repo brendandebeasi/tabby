@@ -167,6 +167,19 @@ func Run(allArgs []string) int {
 	case "exit-if-no-main":
 		// No args needed
 
+	case "next-window", "prev-window":
+		// No args needed — daemon resolves current active window.
+
+	case "toggle-minimize-window":
+		// Default to current active pane; daemon resolves its window.
+		target = os.Getenv("TMUX_PANE")
+		for i := 0; i < len(args); i++ {
+			if (args[i] == "-t" || args[i] == "--target") && i+1 < len(args) {
+				target = args[i+1]
+				break
+			}
+		}
+
 	default:
 		fatal("Unknown action: " + action)
 	}

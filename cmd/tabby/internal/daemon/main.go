@@ -1351,7 +1351,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 		watchdogArgs = append(watchdogArgs, "-t", sessionID)
 	}
 	watchdogArgs = append(watchdogArgs, "-F",
-		"#{pane_id}|||#{pane_current_command}|||#{pane_pid}|||#{window_id}|||#{pane_dead}|||#{pane_width}|||#{window_width}")
+		"#{pane_id}|||#{pane_current_command}|||#{pane_pid}|||#{window_id}|||#{pane_dead}|||#{pane_width}|||#{window_width}|||#{pane_start_command}")
 	out, err := exec.Command("tmux", watchdogArgs...).Output()
 	if err != nil {
 		return
@@ -1365,7 +1365,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|||", 7)
+		parts := strings.SplitN(line, "|||", 8)
 		if len(parts) < 7 {
 			continue
 		}
@@ -1376,10 +1376,18 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 		paneDead := parts[4]
 		paneWidth, _ := strconv.Atoi(parts[5])
 		windowWidth, _ := strconv.Atoi(parts[6])
+		start := ""
+		if len(parts) >= 8 {
+			start = parts[7]
+		}
 
-		// Only check sidebar/renderer panes
-		isSidebar := strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer")
-		isHeader := strings.Contains(cmd, "window-header") || strings.Contains(cmd, "pane-header")
+		// Identify sidebar/header panes. Post-consolidation, pane_current_command
+		// is just "tabby" — the sidebar/header identity lives in pane_start_command
+		// (`exec -a sidebar-renderer ...` or `... render sidebar ...`). Check both so
+		// LAYOUT_CORRUPT_SIDEBAR and ZOMBIE_PANE detection actually fires.
+		combined := cmd + " " + start
+		isSidebar := strings.Contains(combined, "sidebar-renderer") || strings.Contains(combined, "render sidebar")
+		isHeader := strings.Contains(combined, "window-header") || strings.Contains(combined, "pane-header")
 		if !isSidebar && !isHeader {
 			continue
 		}

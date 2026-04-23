@@ -300,6 +300,7 @@ type Window struct {
 	SyncWidth   bool   // Sync sidebar width with global setting (set via @tabby_sync_width, default true)
 	Pinned      bool   // Window is pinned to top of sidebar (set via @tabby_pinned option)
 	Icon        string // Custom icon/emoji for window (set via @tabby_icon option)
+	Minimized   bool   // Window is hidden from next/prev cycling (set via @tabby_minimized option)
 	Panes       []Pane
 	Layout      string // Window layout string from tmux (e.g., "abc1,80x24,0,0{40x24,0,0,1,39x24,41,0,2}")
 }
@@ -313,7 +314,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}"}, tmuxFieldSep))
+		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}"}, tmuxFieldSep))
 	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -414,6 +415,12 @@ func ListWindows() ([]Window, error) {
 		if len(parts) >= 22 {
 			layout = strings.TrimSpace(parts[21])
 		}
+		// Minimized state from @tabby_minimized option
+		minimized := false
+		if len(parts) >= 23 {
+			tabbyMinimized := strings.TrimSpace(parts[22])
+			minimized = tabbyMinimized == "1" || tabbyMinimized == "true"
+		}
 		// Session ID safety net: skip windows that belong to a different session.
 		// tmux list-windows -t $SESSION can transiently return wrong-session windows.
 		if sessionTarget != "" && len(parts) >= 19 {
@@ -447,6 +454,7 @@ func ListWindows() ([]Window, error) {
 			SyncWidth:   syncWidth,
 			Pinned:      pinned,
 			Icon:        icon,
+			Minimized:   minimized,
 			Layout:      layout,
 		})
 	}

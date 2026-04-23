@@ -571,11 +571,15 @@ fi
 
 NEW_WINDOW_BINDING=$(grep "new_window_global:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
 KILL_WINDOW_BINDING=$(grep "kill_window_global:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
+TOGGLE_MINIMIZE_BINDING=$(grep "toggle_minimize_window:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
 
-bind_from_config "$NEXT_WINDOW_BINDING" "next-window"
-bind_from_config "$PREV_WINDOW_BINDING" "previous-window"
+# Route next/prev through tabby-hook so the daemon filter (which skips
+# minimized windows) runs on keybinding presses, matching the sidebar path.
+bind_from_config "$NEXT_WINDOW_BINDING" "run-shell -b '$HOOK_BIN next-window'"
+bind_from_config "$PREV_WINDOW_BINDING" "run-shell -b '$HOOK_BIN prev-window'"
 bind_from_config "$NEW_WINDOW_BINDING" "run-shell '$NEW_WINDOW_SCRIPT #{client_tty}'"
 bind_from_config "$KILL_WINDOW_BINDING" "run-shell '$KILL_WINDOW_SCRIPT #{window_index}'"
+bind_from_config "$TOGGLE_MINIMIZE_BINDING" "run-shell -b '$HOOK_BIN toggle-minimize-window'"
 
 # Swap/cycle active pane within current window (skips utility panes, signals daemon)
 # Uses Go binary: bin/cycle-pane (also handles dimming)
@@ -598,6 +602,12 @@ tmux bind-key G command-prompt -p 'New group name:' "run-shell '$CURRENT_DIR/bin
 # Override kill-pane to save layout first (preserves pane ratios)
 tmux bind-key x confirm-before -p 'Close pane? (y/n)' "run-shell '$KILL_PANE_SCRIPT'"
 tmux bind-key '&' confirm-before -p 'Close window? (y/n)' "run-shell '$KILL_WINDOW_SCRIPT #{window_index}'"
+
+# Mirror context-menu shortcuts at the prefix layer so menu keys double as
+# keyboard shortcuts (prefix+r rename, prefix+k kill window). Split shortcuts
+# (prefix+|, prefix+-) are already bound elsewhere in this file.
+tmux bind-key r command-prompt -I '#W' "rename-window '%%' ; set-window-option @tabby_name_locked 1"
+tmux bind-key k confirm-before -p 'Close window? (y/n)' "run-shell '$KILL_WINDOW_SCRIPT #{window_index}'"
 
 # Keyboard shortcuts follow tmux conventions (prefix-based)
 # Standard tmux bindings preserved:
