@@ -1,5 +1,6 @@
 # Binaries
 bin/
+bin-linux/
 
 # IDE
 .idea/
@@ -65,6 +66,8 @@ web/tsconfig.tsbuildinfo
 .sisyphus/
 .archive/
 .entire/
+.kilo/
+.letta/
 
 # Zellij port (lives in its own repo: github.com/brendandebeasi/tabby-zj)
 tabby-zj/

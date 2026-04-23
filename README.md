@@ -21,6 +21,8 @@ A modern tab manager for tmux with grouping, a clickable vertical sidebar, and d
 - [Usage](#usage)
 - [Configuration](#configuration)
 - [Tab Grouping](#tab-grouping)
+- [Widgets](#widgets)
+- [Command-Line Reference](#command-line-reference)
 - [Development](#development)
 - [macOS Notifications with Deep Links](#macos-notifications-with-deep-links)
 - [Session Persistence (tmux-resurrect)](#session-persistence-tmux-resurrect)
@@ -59,17 +61,23 @@ terminal-notifier -title "Build Done" -message "Click to return" \
 
 ## All Features
 
-- **Vertical sidebar** - clickable, persistent across windows with collapse/expand
-- **Window grouping** - color-coded project organization with working directories
-- **Deep link navigation** - click notifications to jump to exact pane
-- **Automatic window naming** - shows running command, locks on manual rename
-- **Activity indicators** - bell, activity, silence, busy, and input alerts
-- **Mouse support** - click, right-click menus, middle-click close
-- **Custom tab colors** - per-window color overrides, including transparent mode
-- **Pane management** - rename panes with title locking
-- **Group management** - create, rename, color, collapse, and set working directories
-- **SSH bell notifications** - auto-enable bells on remote command completion
-- **Keyboard navigation** - intuitive shortcuts for everything
+- **Vertical sidebar** — clickable, persistent across windows; collapse via hamburger, keyboard, or CLI
+- **Window grouping** — color-coded project organization with per-group working directories
+- **Deep link navigation** — click notifications to jump to exact pane
+- **Automatic window naming** — shows running command, locks on manual rename
+- **Activity indicators** — bell, activity, silence, busy, input, and SSH CC hook indicators forwarded via OSC 7700
+- **Mouse support** — click, right-click menus, middle-click close, mouse-drag OSC 52 clipboard copy
+- **Custom tab colors** — per-window color overrides, including transparent mode
+- **Pane headers** — per-pane titles, inactive-pane dimming, border styling
+- **Pane management** — rename with title locking, swap/cycle, smart kill-pane that preserves ratios
+- **Group management** — create, rename, color, collapse, set working directories
+- **Responsive mobile/tablet/desktop profiles** — sidebar adapts per-client width, phone gets a window-header with nav buttons
+- **Cross-window sidebar width sync** — drag in one window, all windows in the same profile follow
+- **Auto theme + CLIENT_DARK_MODE forwarding** — follow system light/dark, even on remote hosts over SSH
+- **Widgets** — pinnable clock, pet, stats, git, session, and Claude cost widgets
+- **tmux-resurrect integration** — clean save/restore of sidebar state
+- **SSH bell notifications** — auto-enable bells on remote command completion
+- **Keyboard navigation** — intuitive shortcuts for everything
 
 ## Installation
 
@@ -123,10 +131,9 @@ Tabby follows standard tmux keybindings. All standard tmux shortcuts work as exp
 
 | Key | Action |
 |-----|--------|
-| `prefix + Tab` | Toggle vertical sidebar |
+| `prefix + Tab` | Toggle vertical sidebar (enable/disable daemon) |
 | `prefix + G` | Create new group |
-| `Ctrl + <` or `Alt + <` | Collapse/expand sidebar |
-| `Cmd + Shift + \` | Collapse/expand sidebar (requires [terminal config](#sidebar-collapse-shortcut)) |
+| `Cmd + Shift + \` | Hide/show sidebar (stash/restore — requires [terminal config](#sending-cmdshift-to-tmux)) |
 | `Alt + a` | Toggle all-windows overview mode |
 
 When the sidebar is focused, press `m` to open the marker picker for the active window.
@@ -180,23 +187,21 @@ Toggle the sidebar off and on (`prefix + Tab` twice) after changing these option
 
 ### Sidebar Collapse
 
-The sidebar can be collapsed to maximize screen space:
+Hide the sidebar temporarily to reclaim screen space. Collapse is a stash/restore operation (tmux `break-pane` / `join-pane` under the hood), not a shrink — the sidebar-renderer process keeps running in a hidden holding window, so bringing it back is instant.
 
-- **Click the right edge** (divider area) to collapse
-- **Keyboard**: `Ctrl+<` or `Alt+<` to toggle
-- **Collapsed state**: Shows `>` down the entire height - click anywhere to expand
+**How to trigger:**
+- **Mobile**: tap the `≡` (hamburger) button on the window header
+- **Keyboard**: `Cmd + Shift + \` (requires [terminal config](#sending-cmdshift-to-tmux))
+- **Shell**: `tabby hook toggle-collapse-sidebar` — fires the same action the hamburger does
 
-When collapsed, the sidebar takes only 2 characters of width. When expanded, it restores to your configured width.
+`prefix + Tab` is different — it fully *disables* tabby for the session (stops the daemon, removes hooks). Use the collapse path when you just want to reclaim space temporarily.
 
-#### Sidebar Collapse Shortcut
+#### Sending Cmd+Shift+\ to tmux
 
-Tabby includes `scripts/toggle_sidebar_collapse.sh` which collapses or expands the sidebar without killing the daemon. Unlike `prefix + Tab` (which fully toggles the sidebar on/off), this keeps the daemon running and just shrinks/restores the sidebar pane.
-
-The script is bound in tmux to `Ctrl+Shift+\` using CSI u encoding:
+`Cmd + Shift + \` is bound in tmux to `tabby hook toggle-collapse-sidebar`, reached via CSI u encoding. tabby.tmux registers the binding automatically; to rebind manually:
 
 ```bash
-# Already configured by tabby.tmux — add to ~/.tmux.conf if needed:
-bind-key -n 'C-S-\' run-shell -b '/path/to/tabby/scripts/toggle_sidebar_collapse.sh'
+bind-key -n 'C-S-\' run-shell -b '/path/to/tabby/bin/tabby hook toggle-collapse-sidebar'
 ```
 
 **Requires `extended-keys`** in your tmux.conf (tmux 3.2+):
@@ -247,6 +252,36 @@ map cmd+shift+backslash send_text all \x1b[92;6u
 ```
 
 **Other terminals** — any terminal that can send arbitrary escape sequences will work. Map `Cmd+Shift+\` (or your preferred shortcut) to send the bytes `\x1b[92;6u` (ESC `[` `9` `2` `;` `6` `u`).
+
+### Mobile / Responsive Profiles
+
+Tabby adapts its chrome to the attached client's dimensions. The same tmux session works on a desktop monitor and a phone attached to the same server without manual reconfig.
+
+**Three profiles, selected by window width:**
+
+| Profile | Window width | Default sidebar width |
+|---------|--------------|----------------------|
+| Mobile  | ≤ 110 cols   | 15 |
+| Tablet  | ≤ 170 cols   | 20 |
+| Desktop | > 170 cols   | 25 |
+
+Override the default widths via tmux options:
+
+```bash
+tmux set-option -g @tabby_sidebar_width_mobile  15
+tmux set-option -g @tabby_sidebar_width_tablet  20
+tmux set-option -g @tabby_sidebar_width_desktop 25
+
+# Breakpoints
+tmux set-option -g @tabby_sidebar_mobile_max_window_cols 110
+tmux set-option -g @tabby_sidebar_tablet_max_window_cols 170
+```
+
+**Window header (phone only):** narrow clients get a one-row window-header pane above each window with buttons: `◀` previous, `≡` hamburger (hide/show sidebar), `+` new, `×` close, `▶` next.
+
+**Sidebar width sync:** drag the sidebar border in any window and all other windows in the same profile follow on the next signal tick. The new width is also persisted to the active window's `@tabby_sidebar_width_<profile>` so it survives daemon restarts.
+
+**Keyboard clamp:** when a client's height drops below the keyboard threshold (default 38 rows, set via `@tabby_sidebar_mobile_keyboard_rows`), the sidebar clamps to `@tabby_sidebar_width_mobile_keyboard` for ~4 s so the on-screen keyboard doesn't crush the content pane.
 
 ### SSH Bell Notifications
 
@@ -599,6 +634,38 @@ tmux set-option -p -t %123 @tabby_pane_title "My Pane"
 # Clear locked title
 tmux set-option -p -t %123 -u @tabby_pane_title
 ```
+
+## Widgets
+
+The sidebar hosts pinnable widgets below the window list. Enable and configure per widget in `config.yaml` under `widgets:`.
+
+| Widget | Default | What it shows |
+|--------|---------|---------------|
+| `clock` | on | Local time and date |
+| `pet` | on | Terminal pet with Claude-powered thought bubbles, hunger/happiness state, feeding, and adventure mode |
+| `stats` | on | CPU, memory, and battery — emoji or bar style |
+| `git` | off | Branch, dirty/clean, ahead/behind, stash count for the active pane's cwd |
+| `session` | off | Current tmux session, client, and window count |
+| `claude` | off | Claude Code usage for today / week / month / total, read from the sqlite history DB |
+
+Each widget supports `pin`, `priority` (render order), `position: top|bottom`, padding, margins, dividers, and per-field colors. See `config.yaml` for the full schema.
+
+## Command-Line Reference
+
+User-facing entry points. Internal subcommands (`daemon`, `watchdog`, `render …`) are spawned automatically by `tabby.tmux` and shouldn't be invoked by hand.
+
+| Command | What it does |
+|---------|--------------|
+| `tabby toggle` | Enable or disable tabby for the current tmux session (daemon lifecycle). Bound by default to `prefix + Tab`. |
+| `tabby hook toggle-collapse-sidebar` | Hide/show the sidebar via stash/restore. Same action as the mobile hamburger. Bound by default to `Cmd+Shift+\`. |
+| `tabby hook focus-pane <session:window.pane>` | Jump to a specific pane. Useful from macOS notification deep-links. |
+| `tabby cycle-pane [--ensure-content \| --dim-only]` | Cycle the active content pane. `--ensure-content` moves focus to a content pane only if a sidebar/header is active (invoked from window-switch hooks). `--dim-only` just re-applies inactive-pane dimming. |
+| `tabby new-window [name]` | Create a new window that inherits the current group's working directory and color. |
+| `tabby manage-group` | Interactive TUI to edit window-group entries in `config.yaml`. |
+| `tabby pane-picker` | Interactive pane picker for keyboard-driven pane selection. |
+| `tabby setup` | Guided wizard for first-time configuration. |
+
+`tabby hook` has many more subcommands used by tmux hook lines — `ensure-sidebar`, `on-pane-resize`, `preserve-pane-ratios`, `kill-pane`, `kill-window`, `split-pane`, `new-group`, `set-indicator`, `osc-handler`, `resurrect-save`, `resurrect-restore`, etc. These are registered by `tabby.tmux` and not meant for manual use.
 
 ## Development
 
