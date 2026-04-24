@@ -2,7 +2,7 @@ package tmux
 
 import "testing"
 
-func TestParseSSHHost(t *testing.T) {
+func TestParseRemoteHost(t *testing.T) {
 	tests := []struct {
 		cmdline string
 		want    string
@@ -24,11 +24,17 @@ func TestParseSSHHost(t *testing.T) {
 		{"ssh -p", ""},
 		{"ssh myhost:path", "myhost"},
 		{"ssh user@myhost:22", "myhost"},
+		{"mosh myhost", "myhost"},
+		{"mosh user@myhost", "myhost"},
+		{"mosh -p 60001 user@myhost", "myhost"},
+		{"mosh --ssh=\"ssh -p 22\" myhost", "myhost"},
+		{"mosh-client 1.2.3.4 60001", "1.2.3.4"},
+		{"/usr/bin/ssh user@myhost", "myhost"},
 	}
 	for _, tt := range tests {
-		got := parseSSHHost(tt.cmdline)
+		got := parseRemoteHost(tt.cmdline)
 		if got != tt.want {
-			t.Errorf("parseSSHHost(%q) = %q, want %q", tt.cmdline, got, tt.want)
+			t.Errorf("parseRemoteHost(%q) = %q, want %q", tt.cmdline, got, tt.want)
 		}
 	}
 }

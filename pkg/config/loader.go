@@ -259,6 +259,10 @@ func applyDefaults(cfg *Config) {
 		cfg.BusyDetection.IdleTimeout = 10
 	}
 
+	if cfg.AI.TabSummary.MaxWords == 0 {
+		cfg.AI.TabSummary.MaxWords = 3
+	}
+
 	// AutoTheme defaults
 	if cfg.AutoTheme.Mode == "" {
 		cfg.AutoTheme.Mode = "system"

@@ -166,11 +166,18 @@ var remoteCommands = map[string]bool{
 
 // SSHHostForPane returns the SSH destination hostname for a pane's process.
 // Returns empty string if the pane isn't running ssh or host can't be determined.
+// Kept for back-compat; new callers should use RemoteHostForPane.
 func SSHHostForPane(pid int) string {
+	return RemoteHostForPane(pid)
+}
+
+// RemoteHostForPane returns the remote destination hostname for a pane's process.
+// Detects ssh, mosh, and mosh-client. Returns empty if no remote connection found.
+func RemoteHostForPane(pid int) string {
 	if pid <= 0 {
 		return ""
 	}
-	// pane_pid is the shell; the ssh process is a child. Walk children first.
+	// pane_pid is the shell; the remote process is a child. Walk children first.
 	if out, err := exec.Command("pgrep", "-P", strconv.Itoa(pid)).Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			childPID := strings.TrimSpace(line)
@@ -178,7 +185,7 @@ func SSHHostForPane(pid int) string {
 				continue
 			}
 			if argsOut, err2 := exec.Command("ps", "-o", "args=", "-p", childPID).Output(); err2 == nil {
-				if host := parseSSHHost(strings.TrimSpace(string(argsOut))); host != "" {
+				if host := parseRemoteHost(strings.TrimSpace(string(argsOut))); host != "" {
 					return host
 				}
 			}
@@ -189,17 +196,40 @@ func SSHHostForPane(pid int) string {
 	if err != nil {
 		return ""
 	}
-	return parseSSHHost(strings.TrimSpace(string(out)))
+	return parseRemoteHost(strings.TrimSpace(string(out)))
 }
 
-// parseSSHHost extracts the hostname from an ssh command line string.
-// Handles: ssh host, ssh user@host, ssh -p 22 user@host, ssh -J jump host, etc.
-func parseSSHHost(cmdline string) string {
-	if !strings.HasPrefix(cmdline, "ssh ") && cmdline != "ssh" {
-		return ""
-	}
+// parseRemoteHost extracts the hostname from an ssh / mosh command line string.
+// Handles ssh, mosh, and mosh-client invocations with the usual flag forms.
+func parseRemoteHost(cmdline string) string {
 	fields := strings.Fields(cmdline)
 	if len(fields) < 2 {
+		return ""
+	}
+	prog := fields[0]
+	// Strip path component (e.g. /usr/bin/ssh -> ssh).
+	if i := strings.LastIndex(prog, "/"); i >= 0 {
+		prog = prog[i+1:]
+	}
+	var sshFlagTakesArg func(byte) bool
+	switch prog {
+	case "ssh":
+		sshFlagTakesArg = func(c byte) bool {
+			switch c {
+			case 'b', 'c', 'D', 'E', 'e', 'F', 'I', 'i', 'J', 'L', 'l',
+				'm', 'O', 'o', 'p', 'Q', 'R', 'S', 'W', 'w':
+				return true
+			}
+			return false
+		}
+	case "mosh":
+		// mosh wrapper: only --ssh, --port, --client, --server, --bind-server,
+		// --predict take args (long forms). Short -p takes an arg.
+		sshFlagTakesArg = func(c byte) bool { return c == 'p' }
+	case "mosh-client":
+		// `mosh-client IP PORT` — host is the first positional.
+		sshFlagTakesArg = func(c byte) bool { return false }
+	default:
 		return ""
 	}
 	skipNext := false
@@ -208,14 +238,26 @@ func parseSSHHost(cmdline string) string {
 			skipNext = false
 			continue
 		}
-		if strings.HasPrefix(f, "-") {
-			// SSH flags that consume the next argument as a value
-			if len(f) == 2 {
-				switch f[1] {
-				case 'b', 'c', 'D', 'E', 'e', 'F', 'I', 'i', 'J', 'L', 'l',
-					'm', 'O', 'o', 'p', 'Q', 'R', 'S', 'W', 'w':
-					skipNext = true
+		if strings.HasPrefix(f, "--") {
+			// Long flags that take an argument (mosh-specific).
+			if prog == "mosh" {
+				switch f {
+				case "--ssh", "--port", "--client", "--server",
+					"--bind-server", "--predict", "--predict-overwrite",
+					"--family", "--ssh-pty", "--no-ssh-pty":
+					// Some are bool, but consuming the next field is harmless
+					// only for the value-taking ones; be conservative.
+					if f == "--ssh" || f == "--port" || f == "--client" ||
+						f == "--server" || f == "--bind-server" || f == "--predict" {
+						skipNext = true
+					}
 				}
+			}
+			continue
+		}
+		if strings.HasPrefix(f, "-") && len(f) >= 2 {
+			if sshFlagTakesArg != nil && sshFlagTakesArg(f[1]) && len(f) == 2 {
+				skipNext = true
 			}
 			continue
 		}
@@ -301,6 +343,8 @@ type Window struct {
 	Pinned      bool   // Window is pinned to top of sidebar (set via @tabby_pinned option)
 	Icon        string // Custom icon/emoji for window (set via @tabby_icon option)
 	Minimized   bool   // Window is hidden from next/prev cycling (set via @tabby_minimized option)
+	AITitle     string // AI-supplied display title (set via @tabby_ai_title option, takes precedence over Name)
+	RemoteHost  string // Hostname if active pane is in an ssh/mosh session; populated by ListWindowsWithPanes
 	Panes       []Pane
 	Layout      string // Window layout string from tmux (e.g., "abc1,80x24,0,0{40x24,0,0,1,39x24,41,0,2}")
 }
@@ -314,7 +358,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}"}, tmuxFieldSep))
+		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}", "#{@tabby_ai_title}"}, tmuxFieldSep))
 	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -421,6 +465,11 @@ func ListWindows() ([]Window, error) {
 			tabbyMinimized := strings.TrimSpace(parts[22])
 			minimized = tabbyMinimized == "1" || tabbyMinimized == "true"
 		}
+		// AI-supplied display title from @tabby_ai_title option (set by `tabby hook set-title`).
+		aiTitle := ""
+		if len(parts) >= 24 {
+			aiTitle = strings.TrimSpace(stripANSI(parts[23]))
+		}
 		// Session ID safety net: skip windows that belong to a different session.
 		// tmux list-windows -t $SESSION can transiently return wrong-session windows.
 		if sessionTarget != "" && len(parts) >= 19 {
@@ -455,6 +504,7 @@ func ListWindows() ([]Window, error) {
 			Pinned:      pinned,
 			Icon:        icon,
 			Minimized:   minimized,
+			AITitle:     aiTitle,
 			Layout:      layout,
 		})
 	}
@@ -795,6 +845,33 @@ func ListWindowsWithPanes() ([]Window, error) {
 					break
 				}
 			}
+		}
+	}
+
+	// Resolve remote host (ssh/mosh) for any pane whose foreground command is a
+	// remote-connection helper. Prefer the active pane; fall back to the first
+	// remote pane in visual order. Walking pgrep/ps is cheap (one fork per
+	// remote pane) and only fires when the pane is actually running ssh/mosh.
+	for i := range windows {
+		var chosen *Pane
+		for j := range windows[i].Panes {
+			p := &windows[i].Panes[j]
+			if !remoteCommands[p.Command] {
+				continue
+			}
+			if p.Active {
+				chosen = p
+				break
+			}
+			if chosen == nil {
+				chosen = p
+			}
+		}
+		if chosen == nil {
+			continue
+		}
+		if host := RemoteHostForPane(chosen.PID); host != "" {
+			windows[i].RemoteHost = host
 		}
 	}
 

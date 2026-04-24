@@ -19,6 +19,18 @@ type Config struct {
 	BusyDetection BusyDetection `yaml:"busy_detection"`
 	TerminalTitle TerminalTitle `yaml:"terminal_title"`
 	AutoTheme     AutoTheme     `yaml:"auto_theme"`
+	AI            AIConfig      `yaml:"ai"`
+}
+
+// AIConfig holds settings for AI-tool integrations (e.g. Claude Code, OpenCode hooks).
+type AIConfig struct {
+	TabSummary AITabSummary `yaml:"tab_summary"`
+}
+
+// AITabSummary controls how `tabby hook set-title` truncates AI-supplied summaries
+// before they're displayed as the window's tab title.
+type AITabSummary struct {
+	MaxWords int `yaml:"max_words"` // first N words kept; 0 means no truncation
 }
 
 // AutoTheme configures automatic theme switching based on time of day or system dark/light mode.

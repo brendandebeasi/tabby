@@ -8188,6 +8188,16 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			if isRawWindowID(displayName) {
 				displayName = "~" // automatic-rename hasn't fired yet
 			}
+			if win.AITitle != "" {
+				displayName = win.AITitle
+			}
+			// SSH/mosh: tab line shows the host; the actual window name is
+			// rendered as a continuation row below.
+			remoteContinuation := ""
+			if win.RemoteHost != "" {
+				remoteContinuation = displayName
+				displayName = win.RemoteHost
+			}
 			if win.Icon != "" {
 				displayName = win.Icon + " " + displayName
 			}
@@ -8304,6 +8314,15 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					menuBtn = c.applyBackgroundFill(menuBtn, bgColor, menuBtnW)
 				}
 				s.WriteString(prefix + contentRendered + menuBtn + "\n")
+				currentLine++
+			}
+
+			// SSH/mosh continuation row: "│ name" indented one past the prefix.
+			// Same bgColor as the tab line so the two rows read as one tab.
+			// windowStartLine was captured before the tab render, so the click
+			// regions below cover both rows.
+			if remoteContinuation != "" {
+				c.writeRemoteNameRow(&s, remoteContinuation, width, bgColor, fgColor, treeStyle, treeContinueChar)
 				currentLine++
 			}
 
@@ -8745,6 +8764,15 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		if isRawWindowID(displayName) {
 			displayName = "~" // automatic-rename hasn't fired yet
 		}
+		if win.AITitle != "" {
+			displayName = win.AITitle
+		}
+		// SSH/mosh: tab line shows host; window name renders as a continuation.
+		remoteContinuation := ""
+		if win.RemoteHost != "" {
+			remoteContinuation = displayName
+			displayName = win.RemoteHost
+		}
 		if win.Icon != "" {
 			displayName = win.Icon + " " + displayName
 		}
@@ -8824,6 +8852,16 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				renderedLine = c.applyBackgroundFill(renderedLine, effectiveBg, width)
 			}
 			s.WriteString(renderedLine + "\n")
+			currentLine++
+		}
+
+		// SSH/mosh continuation row: "│ name" as a chip extending right.
+		if remoteContinuation != "" {
+			rowBg := bgColor
+			if rowBg == "" {
+				rowBg = theme.Bg
+			}
+			c.writeRemoteNameRow(&s, remoteContinuation, width, rowBg, fgColor, treeStyle, treeContinueChar)
 			currentLine++
 		}
 
@@ -13091,10 +13129,10 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	// Minimize/Unminimize — minimized windows are skipped by cmd+]/cmd+[ cycling
 	if win.Minimized {
 		unminCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_minimized", win.Index)
-		args = append(args, "Unminimize", "z", unminCmd)
+		args = append(args, "Unminimize", "m", unminCmd)
 	} else {
 		minCmd := fmt.Sprintf("set-window-option -t :%d @tabby_minimized 1", win.Index)
-		args = append(args, "Minimize", "z", minCmd)
+		args = append(args, "Minimize", "m", minCmd)
 	}
 
 	// --- Window actions section ---
@@ -14015,6 +14053,43 @@ func (c *Coordinator) GetSidebarBg() string {
 	}
 	// Fallback to detector
 	return c.bgDetector.GetDefaultSidebarBg()
+}
+
+// writeRemoteNameRow writes the window-name continuation row below the main
+// tab line for ssh/mosh windows. Layout: " │ │<name-chip>" — two tree pipes
+// (outer matches column where panes would draw their tree-continue, inner
+// sits one col before the chip), then the chip extends to the right edge.
+// Same color as other tree chars in the sidebar.
+func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width int, bgColor, fgColor string, treeStyle lipgloss.Style, treeContinueChar string) {
+	leading := " " + treeContinueChar + " " + treeContinueChar
+	leadingW := lipgloss.Width(leading)
+	if width <= leadingW+1 {
+		return
+	}
+	avail := width - leadingW
+	if lipgloss.Width(name) > avail {
+		truncated := ""
+		for _, r := range name {
+			if lipgloss.Width(truncated+string(r)) > avail-1 {
+				break
+			}
+			truncated += string(r)
+		}
+		name = truncated + "~"
+	}
+	leadingRendered := " " + treeStyle.Render(treeContinueChar) + " " + treeStyle.Render(treeContinueChar)
+	nameStyle := lipgloss.NewStyle()
+	if fgColor != "" {
+		nameStyle = nameStyle.Foreground(lipgloss.Color(fgColor))
+	}
+	if bgColor != "" {
+		nameStyle = nameStyle.Background(lipgloss.Color(bgColor))
+	}
+	chip := nameStyle.Render(name)
+	if bgColor != "" {
+		chip = c.applyBackgroundFill(chip, bgColor, avail)
+	}
+	s.WriteString(leadingRendered + chip + "\n")
 }
 
 // applyBackgroundFill applies the sidebar background color to all content lines

@@ -53,6 +53,9 @@ func Run(allArgs []string) int {
 	case "set-indicator":
 		doSetIndicator(args)
 		return 0
+	case "set-title":
+		doSetTitle(args)
+		return 0
 	case "osc-handler":
 		doOSCHandler()
 		return 0
