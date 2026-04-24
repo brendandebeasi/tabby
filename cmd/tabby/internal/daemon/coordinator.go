@@ -7157,14 +7157,14 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 	}
 	buttonsWidth := uniseg.StringWidth(buttonsStr)
 
-	label := foundPane.Command
+	title := foundPane.Command
 	if foundPane.LockedTitle != "" {
-		label = foundPane.LockedTitle
+		title = foundPane.LockedTitle
 	} else if foundPane.Title != "" && foundPane.Title != foundPane.Command && foundPane.Title != foundWindow.Name {
-		label = foundPane.Title
+		title = foundPane.Title
 	}
 	winVisualNum := c.windowVisualPos[foundWindow.ID]
-	labelText := fmt.Sprintf("%d.%d %s", winVisualNum, foundPane.Index, label)
+	numPrefix := fmt.Sprintf("%d.%d", winVisualNum, foundPane.Index)
 
 	groupIcon := ""
 	for _, group := range c.grouped {
@@ -7179,11 +7179,22 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 		}
 	}
 	windowIcon := strings.TrimSpace(foundWindow.Icon)
-	if groupIcon != "" {
-		labelText = groupIcon + " " + labelText
+
+	// SSH/mosh: prepend the remote hostname so the header reads
+	//   "<icons> N.M HOST: PATH: Title"
+	// Local panes get "<icons> N.M PATH: Title".
+	hostName := ""
+	if foundPane.Remote {
+		hostName = tmux.RemoteHostForPane(foundPane.PID)
 	}
+
+	// Assemble the icon/number prefix that always appears before host/path.
+	prefixText := numPrefix
 	if windowIcon != "" {
-		labelText = windowIcon + " " + labelText
+		prefixText = windowIcon + " " + prefixText
+	}
+	if groupIcon != "" {
+		prefixText = groupIcon + " " + prefixText
 	}
 
 	groupAccent := ""
@@ -7192,25 +7203,31 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 	}
 	groupAccentWidth := uniseg.StringWidth(stripAnsi(groupAccent))
 
-	if foundPane.CurrentPath != "" {
-		availWidth := width - groupAccentWidth - 1 - buttonsWidth
-		if availWidth < 4 {
-			availWidth = 4
-		}
-		baseWidth := uniseg.StringWidth(labelText)
-		pathMaxWidth := availWidth - baseWidth - 1
-		if pathMaxWidth > 8 {
-			abbrevPath := abbreviatePath(foundPane.CurrentPath, pathMaxWidth)
-			if abbrevPath != "" {
-				labelText = fmt.Sprintf("%s %s", labelText, abbrevPath)
-			}
-		}
-	}
-
+	// Available width for the prefix + host + path + title.
 	availWidth := width - groupAccentWidth - 1 - buttonsWidth
 	if availWidth < 4 {
 		availWidth = 4
 	}
+
+	// Build the full label: "<prefix> [HOST: ][PATH: ]Title"
+	// PATH gets whatever space remains after prefix, host, separators, and title.
+	hostSeg := ""
+	if hostName != "" {
+		hostSeg = hostName + ": "
+	}
+	titleSeg := title
+	usedW := uniseg.StringWidth(prefixText) + 1 + uniseg.StringWidth(hostSeg) + uniseg.StringWidth(titleSeg)
+	pathSeg := ""
+	if foundPane.CurrentPath != "" {
+		pathBudget := availWidth - usedW - 2 // 2 for ": " separator after path
+		if pathBudget > 8 {
+			if abbrevPath := abbreviatePath(foundPane.CurrentPath, pathBudget); abbrevPath != "" {
+				pathSeg = abbrevPath + ": "
+			}
+		}
+	}
+	labelText := prefixText + " " + hostSeg + pathSeg + titleSeg
+
 	if uniseg.StringWidth(labelText) > availWidth {
 		labelText = runewidth.Truncate(labelText, availWidth, "~")
 	}
@@ -8322,7 +8339,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			// windowStartLine was captured before the tab render, so the click
 			// regions below cover both rows.
 			if remoteContinuation != "" {
-				c.writeRemoteNameRow(&s, remoteContinuation, width, bgColor, fgColor, treeStyle, treeContinueChar)
+				c.writeRemoteNameRow(&s, remoteContinuation, width, bgColor, fgColor, treeStyle, treeContinueChar, win.Minimized)
 				currentLine++
 			}
 
@@ -8861,7 +8878,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			if rowBg == "" {
 				rowBg = theme.Bg
 			}
-			c.writeRemoteNameRow(&s, remoteContinuation, width, rowBg, fgColor, treeStyle, treeContinueChar)
+			c.writeRemoteNameRow(&s, remoteContinuation, width, rowBg, fgColor, treeStyle, treeContinueChar, win.Minimized)
 			currentLine++
 		}
 
@@ -14060,7 +14077,7 @@ func (c *Coordinator) GetSidebarBg() string {
 // (outer matches column where panes would draw their tree-continue, inner
 // sits one col before the chip), then the chip extends to the right edge.
 // Same color as other tree chars in the sidebar.
-func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width int, bgColor, fgColor string, treeStyle lipgloss.Style, treeContinueChar string) {
+func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width int, bgColor, fgColor string, treeStyle lipgloss.Style, treeContinueChar string, faint bool) {
 	leading := " " + treeContinueChar + " " + treeContinueChar
 	leadingW := lipgloss.Width(leading)
 	if width <= leadingW+1 {
@@ -14077,7 +14094,6 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 		}
 		name = truncated + "~"
 	}
-	leadingRendered := " " + treeStyle.Render(treeContinueChar) + " " + treeStyle.Render(treeContinueChar)
 	nameStyle := lipgloss.NewStyle()
 	if fgColor != "" {
 		nameStyle = nameStyle.Foreground(lipgloss.Color(fgColor))
@@ -14085,6 +14101,11 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 	if bgColor != "" {
 		nameStyle = nameStyle.Background(lipgloss.Color(bgColor))
 	}
+	if faint {
+		nameStyle = nameStyle.Faint(true)
+		treeStyle = treeStyle.Faint(true)
+	}
+	leadingRendered := " " + treeStyle.Render(treeContinueChar) + " " + treeStyle.Render(treeContinueChar)
 	chip := nameStyle.Render(name)
 	if bgColor != "" {
 		chip = c.applyBackgroundFill(chip, bgColor, avail)
