@@ -581,6 +581,10 @@ bind_from_config "$NEW_WINDOW_BINDING" "run-shell '$NEW_WINDOW_SCRIPT #{client_t
 bind_from_config "$KILL_WINDOW_BINDING" "run-shell '$KILL_WINDOW_SCRIPT #{window_index}'"
 bind_from_config "$TOGGLE_MINIMIZE_BINDING" "run-shell -b '$HOOK_BIN toggle-minimize-window'"
 
+# prefix+m marks the current window as minimized (hidden from cmd+]/cmd+[
+# cycling). prefix+z is left as tmux's default (zoom pane).
+tmux bind-key m run-shell -b "$HOOK_BIN toggle-minimize-window"
+
 # Swap/cycle active pane within current window (skips utility panes, signals daemon)
 # Uses Go binary: bin/cycle-pane (also handles dimming)
 SWAP_PANE_BINDING=$(grep "swap_pane:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
