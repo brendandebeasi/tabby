@@ -1409,6 +1409,27 @@ func computeDimBG(terminalBG string, opacity float64) string {
 	return fmt.Sprintf("#%02x%02x%02x", clampColorByte(dr), clampColorByte(dg), clampColorByte(db))
 }
 
+// blendHexToward blends fg toward bg by ratio (0 = fg unchanged, 1 = bg).
+// Returns fg unchanged if either input isn't a 6-digit hex.
+func blendHexToward(fg, bg string, ratio float64) string {
+	fHex := strings.TrimPrefix(fg, "#")
+	bHex := strings.TrimPrefix(bg, "#")
+	if len(fHex) != 6 || len(bHex) != 6 {
+		return fg
+	}
+	fR, _ := strconv.ParseInt(fHex[0:2], 16, 32)
+	fG, _ := strconv.ParseInt(fHex[2:4], 16, 32)
+	fB, _ := strconv.ParseInt(fHex[4:6], 16, 32)
+	bR, _ := strconv.ParseInt(bHex[0:2], 16, 32)
+	bG, _ := strconv.ParseInt(bHex[2:4], 16, 32)
+	bB, _ := strconv.ParseInt(bHex[4:6], 16, 32)
+	inv := 1.0 - ratio
+	dr := int(math.Round(float64(fR)*inv + float64(bR)*ratio))
+	dg := int(math.Round(float64(fG)*inv + float64(bG)*ratio))
+	db := int(math.Round(float64(fB)*inv + float64(bB)*ratio))
+	return fmt.Sprintf("#%02x%02x%02x", clampColorByte(dr), clampColorByte(dg), clampColorByte(db))
+}
+
 // extractStyleColor pulls a color value for a key ("fg" or "bg") from a
 // tmux style string like "fg=#56949f,bg=#56949f".
 func extractStyleColor(style, key string) string {
@@ -8113,11 +8134,20 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				bgColor = theme.Bg
 				fgColor = inactiveFg
 			}
-			// Minimized windows read as dimmed regardless of active state —
-			// force the inactive fg and skip bold so terminals that collapse
-			// Bold+Faint (macOS Terminal, some others) still show dimming.
+			// Minimized windows read as dimmed regardless of active state.
+			// Blend the fg ~50% toward the row bg so the dim is visible even
+			// on terminals that collapse Bold+Faint into Bold (macOS Terminal
+			// and others). Falls back to plain inactiveFg if we can't blend.
 			if win.Minimized {
-				fgColor = inactiveFg
+				blendBg := bgColor
+				if blendBg == "" {
+					blendBg = theme.Bg
+				}
+				dimmed := blendHexToward(fgColor, blendBg, 0.55)
+				if dimmed == fgColor {
+					dimmed = inactiveFg
+				}
+				fgColor = dimmed
 			}
 			// Build style
 			style := lipgloss.NewStyle()
@@ -8215,11 +8245,17 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				displayName = win.AITitle
 			}
 			// SSH/mosh: tab line shows the host; the actual window name is
-			// rendered as a continuation row below.
+			// rendered as a continuation row below. The window name may be a
+			// " | "-joined list of dir basenames (see syncWindowNames) where
+			// one segment is the ssh host itself — drop that segment so row 2
+			// only shows the local dirs. Skip row 2 entirely if nothing's left.
 			remoteContinuation := ""
 			if win.RemoteHost != "" {
-				remoteContinuation = displayName
+				remoteContinuation = dropHostSegment(stripRemotePrefix(displayName), win.RemoteHost)
 				displayName = win.RemoteHost
+				if strings.EqualFold(remoteContinuation, win.RemoteHost) {
+					remoteContinuation = ""
+				}
 			}
 			if win.Icon != "" {
 				displayName = win.Icon + " " + displayName
@@ -8458,6 +8494,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						paneLabel = pane.LockedTitle
 					} else if pane.Title != "" && pane.Title != pane.Command {
 						paneLabel = pane.Title
+					}
+					// SSH/mosh: avoid duplicating the host (already on row 1).
+					// Most remote shells set pane.Title to "user@host" or the
+					// hostname — fall back to the command when that happens.
+					if win.RemoteHost != "" && paneLabel != pane.Command && titleLooksLikeShellPrompt(paneLabel, win.RemoteHost) {
+						paneLabel = pane.Command
 					}
 					paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
 
@@ -8702,13 +8744,28 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			fgColor = inactiveFg
 		}
 
+		// Minimized windows read as dimmed regardless of active state.
+		// Blend the fg ~50% toward the row bg so the dim is visible even
+		// on terminals that collapse Bold+Faint into Bold (macOS Terminal
+		// and others). Falls back to plain inactiveFg if we can't blend.
+		if win.Minimized {
+			blendBg := bgColor
+			if blendBg == "" {
+				blendBg = theme.Bg
+			}
+			dimmed := blendHexToward(fgColor, blendBg, 0.55)
+			if dimmed == fgColor {
+				dimmed = inactiveFg
+			}
+			fgColor = dimmed
+		}
 		// Build style
 		style := lipgloss.NewStyle()
 		if fgColor != "" {
 			style = style.Foreground(lipgloss.Color(fgColor))
 		}
 
-		if isActive {
+		if isActive && !win.Minimized {
 			style = style.Bold(true)
 		}
 		if win.Minimized {
@@ -8791,10 +8848,15 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			displayName = win.AITitle
 		}
 		// SSH/mosh: tab line shows host; window name renders as a continuation.
+		// Drop the host segment from " | "-joined names and skip the row when
+		// it would just repeat the host.
 		remoteContinuation := ""
 		if win.RemoteHost != "" {
-			remoteContinuation = displayName
+			remoteContinuation = dropHostSegment(stripRemotePrefix(displayName), win.RemoteHost)
 			displayName = win.RemoteHost
+			if strings.EqualFold(remoteContinuation, win.RemoteHost) {
+				remoteContinuation = ""
+			}
 		}
 		if win.Icon != "" {
 			displayName = win.Icon + " " + displayName
@@ -8972,6 +9034,9 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					paneLabel = pane.LockedTitle
 				} else if pane.Title != "" && pane.Title != pane.Command {
 					paneLabel = pane.Title
+				}
+				if win.RemoteHost != "" && paneLabel != pane.Command && titleLooksLikeShellPrompt(paneLabel, win.RemoteHost) {
+					paneLabel = pane.Command
 				}
 				paneText := fmt.Sprintf("%s %s", paneNum, paneLabel)
 
@@ -14076,6 +14141,54 @@ func (c *Coordinator) GetSidebarBg() string {
 	}
 	// Fallback to detector
 	return c.bgDetector.GetDefaultSidebarBg()
+}
+
+// titleLooksLikeShellPrompt reports whether a pane title is just an echo of
+// a shell prompt ("user@host[: path]" or bare "host") rather than useful
+// user-set context. Suppressed on SSH windows since the host is already on
+// row 1 and the pattern is almost always just PS1 noise.
+var shellPromptRe = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+(:.*)?$`)
+
+func titleLooksLikeShellPrompt(title, host string) bool {
+	t := strings.TrimSpace(title)
+	if t == "" {
+		return false
+	}
+	if strings.EqualFold(t, host) {
+		return true
+	}
+	return shellPromptRe.MatchString(t)
+}
+
+// dropHostSegment removes any " | "-separated segment that equals (or after
+// stripping "ssh "/"mosh " equals) the given host. Used on auto-generated
+// window names like "client-studiodome | hosting-questions" so the row-2
+// continuation shows only the local dirs.
+func dropHostSegment(name, host string) string {
+	if !strings.Contains(name, " | ") {
+		return name
+	}
+	parts := strings.Split(name, " | ")
+	keep := parts[:0]
+	for _, p := range parts {
+		seg := strings.TrimSpace(stripRemotePrefix(p))
+		if strings.EqualFold(seg, host) {
+			continue
+		}
+		keep = append(keep, p)
+	}
+	return strings.Join(keep, " | ")
+}
+
+// stripRemotePrefix removes a leading "ssh " or "mosh " from a window name so
+// we can detect when the name is just the auto-renamed remote command.
+func stripRemotePrefix(name string) string {
+	for _, p := range []string{"ssh ", "mosh "} {
+		if strings.HasPrefix(name, p) {
+			return strings.TrimSpace(strings.TrimPrefix(name, p))
+		}
+	}
+	return name
 }
 
 // writeRemoteNameRow writes the window-name continuation row below the main
