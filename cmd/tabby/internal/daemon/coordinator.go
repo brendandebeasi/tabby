@@ -8339,7 +8339,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			// windowStartLine was captured before the tab render, so the click
 			// regions below cover both rows.
 			if remoteContinuation != "" {
-				c.writeRemoteNameRow(&s, remoteContinuation, width, bgColor, fgColor, treeStyle, treeContinueChar, win.Minimized)
+				c.writeRemoteNameRow(&s, remoteContinuation, width, bgColor, fgColor, treeStyle, treeContinueChar, win.Minimized, isLastInGroup)
 				currentLine++
 			}
 
@@ -8878,7 +8878,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			if rowBg == "" {
 				rowBg = theme.Bg
 			}
-			c.writeRemoteNameRow(&s, remoteContinuation, width, rowBg, fgColor, treeStyle, treeContinueChar, win.Minimized)
+			c.writeRemoteNameRow(&s, remoteContinuation, width, rowBg, fgColor, treeStyle, treeContinueChar, win.Minimized, isLastWindow)
 			currentLine++
 		}
 
@@ -14073,26 +14073,32 @@ func (c *Coordinator) GetSidebarBg() string {
 }
 
 // writeRemoteNameRow writes the window-name continuation row below the main
-// tab line for ssh/mosh windows. Layout: " │ │<name-chip>" — two tree pipes
-// (outer matches column where panes would draw their tree-continue, inner
-// sits one col before the chip), then the chip extends to the right edge.
-// Same color as other tree chars in the sidebar.
-func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width int, bgColor, fgColor string, treeStyle lipgloss.Style, treeContinueChar string, faint bool) {
-	leading := " " + treeContinueChar + " " + treeContinueChar
+// tab line for ssh/mosh windows. Layout: " │ <bg-padded-chip>" — one tree
+// pipe in tree color, a sidebar-bg gap, then the chip (tab bg) starting
+// with one bg-only column before the name and extending to the right edge.
+// When isLast is true (last sibling in its group), the column-1 pipe is
+// replaced with a blank so the tree doesn't continue into nothing.
+func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width int, bgColor, fgColor string, treeStyle lipgloss.Style, treeContinueChar string, faint, isLast bool) {
+	col1 := treeContinueChar
+	if isLast {
+		col1 = " "
+	}
+	leading := " " + col1 + " "
 	leadingW := lipgloss.Width(leading)
 	if width <= leadingW+1 {
 		return
 	}
 	avail := width - leadingW
-	if lipgloss.Width(name) > avail {
+	chipText := " " + name // 1 col of bg-only padding before the name
+	if lipgloss.Width(chipText) > avail {
 		truncated := ""
-		for _, r := range name {
+		for _, r := range chipText {
 			if lipgloss.Width(truncated+string(r)) > avail-1 {
 				break
 			}
 			truncated += string(r)
 		}
-		name = truncated + "~"
+		chipText = truncated + "~"
 	}
 	nameStyle := lipgloss.NewStyle()
 	if fgColor != "" {
@@ -14105,8 +14111,8 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 		nameStyle = nameStyle.Faint(true)
 		treeStyle = treeStyle.Faint(true)
 	}
-	leadingRendered := " " + treeStyle.Render(treeContinueChar) + " " + treeStyle.Render(treeContinueChar)
-	chip := nameStyle.Render(name)
+	leadingRendered := " " + treeStyle.Render(col1) + " "
+	chip := nameStyle.Render(chipText)
 	if bgColor != "" {
 		chip = c.applyBackgroundFill(chip, bgColor, avail)
 	}
