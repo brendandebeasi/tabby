@@ -8113,13 +8113,19 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				bgColor = theme.Bg
 				fgColor = inactiveFg
 			}
+			// Minimized windows read as dimmed regardless of active state —
+			// force the inactive fg and skip bold so terminals that collapse
+			// Bold+Faint (macOS Terminal, some others) still show dimming.
+			if win.Minimized {
+				fgColor = inactiveFg
+			}
 			// Build style
 			style := lipgloss.NewStyle()
 			if fgColor != "" {
 				style = style.Foreground(lipgloss.Color(fgColor))
 			}
 
-			if isActive {
+			if isActive && !win.Minimized {
 				style = style.Bold(true)
 			}
 			if win.Minimized {
@@ -14089,7 +14095,7 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 		return
 	}
 	avail := width - leadingW
-	chipText := " " + name // 1 col of bg-only padding before the name
+	chipText := "  " + name // 2 cols of bg-only padding before the name
 	if lipgloss.Width(chipText) > avail {
 		truncated := ""
 		for _, r := range chipText {
