@@ -1458,6 +1458,329 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 	}
 }
 
+// panelAuditApplyFixes controls whether panelAudit applies fixes or only logs.
+// Flip to false to run in detect-only mode if the auditor starts misfiring.
+const panelAuditApplyFixes = true
+
+// panelAudit checks utility-panel state for cross-window inconsistencies and
+// drift between coordinator memory and live tmux state. Fires from the same
+// 5s watchdog tick as watchdogCheckRenderers but covers a different concern:
+// watchdogCheckRenderers handles dead processes; panelAudit handles structural
+// drift (sidebar widths diverging across windows, missing/duplicate headers,
+// hidden-state divergence). Each detected issue logs an AUDIT_* event whether
+// or not it is auto-fixed.
+//
+// Source-of-truth policy:
+//   - sidebarHidden vs. physical stash window  -> physical (tmux) wins
+//   - sidebar width vs. coordinator.globalWidth -> coordinator wins, fix via RunWidthSync
+//   - duplicate header panes                    -> lowest pane_id wins, kill the rest
+//   - missing pane-header on a content pane     -> trigger OnRefreshLayout, do not spawn directly
+func panelAudit(sessionID string, coordinator *Coordinator) {
+	if !isWatchdogEnabled() {
+		return
+	}
+
+	// Skip during legitimate state transitions to avoid false positives.
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
+		return
+	}
+	if status := coordinator.NewWindowStatus(); status.State == "inFlight" {
+		return
+	}
+
+	type paneInfo struct {
+		paneID, windowID, cmd, startCmd string
+		width, height, top              int
+	}
+	type windowPanels struct {
+		windowHeight  int
+		sidebars      []paneInfo
+		windowHeaders []paneInfo
+		paneHeaders   []paneInfo
+		contentPanes  []paneInfo
+	}
+
+	// Single snapshot of all panes for this pass — every check reads from it.
+	snapArgs := []string{"list-panes", "-s"}
+	if sessionID != "" {
+		snapArgs = append(snapArgs, "-t", sessionID)
+	}
+	snapArgs = append(snapArgs, "-F",
+		"#{pane_id}|||#{window_id}|||#{pane_current_command}|||#{pane_start_command}|||#{pane_width}|||#{pane_top}|||#{pane_height}|||#{window_height}")
+	out, err := exec.Command("tmux", snapArgs...).Output()
+	if err != nil {
+		logEvent("AUDIT_SNAPSHOT_ERR err=%v", err)
+		return
+	}
+
+	byWindow := map[string]*windowPanels{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|||", 8)
+		if len(parts) < 8 {
+			continue
+		}
+		w, _ := strconv.Atoi(parts[4])
+		t, _ := strconv.Atoi(parts[5])
+		h, _ := strconv.Atoi(parts[6])
+		wh, _ := strconv.Atoi(parts[7])
+		p := paneInfo{paneID: parts[0], windowID: parts[1], cmd: parts[2], startCmd: parts[3], width: w, height: h, top: t}
+		win := byWindow[p.windowID]
+		if win == nil {
+			win = &windowPanels{}
+			byWindow[p.windowID] = win
+		}
+		if wh > win.windowHeight {
+			win.windowHeight = wh
+		}
+		combined := p.cmd + " " + p.startCmd
+		switch {
+		case strings.Contains(combined, "sidebar-renderer") || strings.Contains(combined, "render sidebar"):
+			win.sidebars = append(win.sidebars, p)
+		case strings.Contains(combined, "window-header"):
+			win.windowHeaders = append(win.windowHeaders, p)
+		case strings.Contains(combined, "pane-header"):
+			win.paneHeaders = append(win.paneHeaders, p)
+		default:
+			if !paneIsSystemPane(p.cmd, p.startCmd) {
+				win.contentPanes = append(win.contentPanes, p)
+			}
+		}
+	}
+
+	profile := coordinator.ActiveClientProfile()
+	activeWindowID := ""
+	for _, w := range coordinator.GetWindows() {
+		if w.Active {
+			activeWindowID = w.ID
+			break
+		}
+	}
+
+	// Track if any check requested a layout refresh so we only call once.
+	needLayoutRefresh := false
+
+	// --- Check 1: sidebarHidden flag vs. physical stash state -----------------
+	{
+		memory := coordinator.sidebarHidden
+		physical := sidebarIsStashed()
+		if memory != physical {
+			if panelAuditApplyFixes && profile == "desktop" {
+				logEvent("AUDIT_HIDDEN_DRIFT memory=%v physical=%v profile=%s action=fix", memory, physical, profile)
+				coordinator.sidebarHidden = physical
+			} else {
+				logEvent("AUDIT_HIDDEN_DRIFT memory=%v physical=%v profile=%s action=defer", memory, physical, profile)
+			}
+		}
+	}
+
+	// --- Check 2: sidebar presence + height -----------------------------------
+	// Every window should have exactly one sidebar pane spanning roughly the
+	// full window height (minus header rows). Catches:
+	//   - missing sidebar (window has none at all — width-consistency below
+	//     would silently skip this window)
+	//   - squashed sidebar (pane exists but height collapsed to a few rows;
+	//     pane_dead=0 so watchdogCheckRenderers can't see it either)
+	// Fix: kill the bad pane; next watchdogCheckRenderers tick respawns it
+	// at the correct geometry via the existing dead-pane respawn path.
+	if !coordinator.sidebarHidden && profile != "phone" {
+		for winID, win := range byWindow {
+			if win.windowHeight <= 0 {
+				continue
+			}
+			// Allow up to 4 rows for window-header (1-3 row strip) + tmux border.
+			minExpectedHeight := win.windowHeight - 4
+			if minExpectedHeight < 5 {
+				minExpectedHeight = 5
+			}
+			switch {
+			case len(win.sidebars) == 0:
+				logEvent("AUDIT_SIDEBAR_MISSING window=%s window_height=%d action=%s",
+					winID, win.windowHeight, fixOrLog("await_watchdog_respawn"))
+				// Nothing to kill; watchdogCheckRenderers won't see a missing pane,
+				// but spawnRenderersForNewWindows runs on windowCheckTicker (3s) and
+				// will detect the empty window and spawn the sidebar.
+			default:
+				for _, sb := range win.sidebars {
+					if sb.height < minExpectedHeight {
+						logEvent("AUDIT_SIDEBAR_SQUASHED window=%s pane=%s height=%d window_height=%d action=%s",
+							winID, sb.paneID, sb.height, win.windowHeight, fixOrLog("kill_for_respawn"))
+						if panelAuditApplyFixes {
+							markSkipPreserveForWindow(sb.paneID)
+							exec.Command("tmux", "kill-pane", "-t", sb.paneID).Run()
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// --- Check 3: sidebar width consistency across windows --------------------
+	// Skipped on phone (keyboard-clamp creates legitimate variance) and when
+	// sidebar is hidden (no sidebars to compare).
+	if !coordinator.sidebarHidden && profile != "phone" {
+		globalWidth := coordinator.GetGlobalWidth()
+		minW, maxW := 0, 0
+		var widthList []string
+		first := true
+		drift := false
+		for winID, win := range byWindow {
+			if len(win.sidebars) == 0 {
+				continue
+			}
+			// Use the lowest-id sidebar's width (dedup of duplicate sidebars
+			// is watchdogCheckRenderers' job, not ours).
+			sb := win.sidebars[0]
+			for _, s := range win.sidebars[1:] {
+				if s.paneID < sb.paneID {
+					sb = s
+				}
+			}
+			widthList = append(widthList, fmt.Sprintf("%s=%d", winID, sb.width))
+			if first {
+				minW, maxW = sb.width, sb.width
+				first = false
+			} else {
+				if sb.width < minW {
+					minW = sb.width
+				}
+				if sb.width > maxW {
+					maxW = sb.width
+				}
+			}
+			// Allow ±1 col tmux rounding slop.
+			if globalWidth > 0 && (sb.width < globalWidth-1 || sb.width > globalWidth+1) {
+				drift = true
+			}
+		}
+		if !first && (maxW-minW > 1) {
+			drift = true
+		}
+		if drift {
+			sort.Strings(widthList)
+			action := "log"
+			if panelAuditApplyFixes && activeWindowID != "" {
+				action = "run_width_sync"
+			}
+			logEvent("AUDIT_WIDTH_DRIFT windows=%d min=%d max=%d global=%d list=%s action=%s",
+				len(widthList), minW, maxW, coordinator.GetGlobalWidth(), strings.Join(widthList, ","), action)
+			if panelAuditApplyFixes && activeWindowID != "" {
+				coordinator.RunWidthSync(activeWindowID, true)
+			}
+		}
+	}
+
+	// --- Check 4: window-header count per window ------------------------------
+	// Phone profile expects exactly one per window when @tabby_pane_headers=on.
+	// Desktop profile expects zero (any leak should be killed).
+	headersOpt, _ := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output()
+	headersEnabled := strings.TrimSpace(string(headersOpt)) == "on"
+
+	for winID, win := range byWindow {
+		if profile == "desktop" {
+			if len(win.windowHeaders) > 0 {
+				logEvent("AUDIT_WINDOW_HEADER window=%s count=%d profile=desktop expected=0 action=%s",
+					winID, len(win.windowHeaders), fixOrLog("kill_desktop"))
+				if panelAuditApplyFixes {
+					for _, p := range win.windowHeaders {
+						markSkipPreserveForWindow(p.paneID)
+						exec.Command("tmux", "kill-pane", "-t", p.paneID).Run()
+					}
+				}
+			}
+			continue
+		}
+		// phone profile
+		if !headersEnabled {
+			continue
+		}
+		switch {
+		case len(win.windowHeaders) == 0:
+			logEvent("AUDIT_WINDOW_HEADER window=%s count=0 profile=phone expected=1 action=%s",
+				winID, fixOrLog("request_refresh"))
+			needLayoutRefresh = true
+		case len(win.windowHeaders) > 1:
+			// Keep lowest pane_id, kill the rest (mirror WINDOW_HEADER_DEDUP).
+			sorted := append([]paneInfo(nil), win.windowHeaders...)
+			sort.Slice(sorted, func(i, j int) bool { return sorted[i].paneID < sorted[j].paneID })
+			logEvent("AUDIT_WINDOW_HEADER window=%s count=%d profile=phone expected=1 action=%s",
+				winID, len(sorted), fixOrLog("dedup"))
+			if panelAuditApplyFixes {
+				for _, p := range sorted[1:] {
+					markSkipPreserveForWindow(p.paneID)
+					exec.Command("tmux", "kill-pane", "-t", p.paneID).Run()
+				}
+			}
+		}
+	}
+
+	// --- Check 5: pane-header count per content pane --------------------------
+	// When @tabby_pane_headers=on, expect exactly one pane-header targeting
+	// each content pane. Detect missing, duplicate, and orphan (target gone).
+	if headersEnabled {
+		for winID, win := range byWindow {
+			contentByID := map[string]bool{}
+			for _, c := range win.contentPanes {
+				contentByID[c.paneID] = true
+			}
+			headersByTarget := map[string][]paneInfo{}
+			for _, h := range win.paneHeaders {
+				target := paneTargetFromStartCmd(h.startCmd)
+				headersByTarget[target] = append(headersByTarget[target], h)
+			}
+			// Orphans + duplicates
+			for target, hdrs := range headersByTarget {
+				if target == "" || !contentByID[target] {
+					logEvent("AUDIT_PANE_HEADER window=%s target=%s count=%d action=%s",
+						winID, target, len(hdrs), fixOrLog("kill_orphan"))
+					if panelAuditApplyFixes {
+						for _, h := range hdrs {
+							markSkipPreserveForWindow(h.paneID)
+							exec.Command("tmux", "kill-pane", "-t", h.paneID).Run()
+						}
+					}
+					continue
+				}
+				if len(hdrs) > 1 {
+					sort.Slice(hdrs, func(i, j int) bool { return hdrs[i].paneID < hdrs[j].paneID })
+					logEvent("AUDIT_PANE_HEADER window=%s target=%s count=%d action=%s",
+						winID, target, len(hdrs), fixOrLog("dedup"))
+					if panelAuditApplyFixes {
+						for _, h := range hdrs[1:] {
+							markSkipPreserveForWindow(h.paneID)
+							exec.Command("tmux", "kill-pane", "-t", h.paneID).Run()
+						}
+					}
+				}
+			}
+			// Missing
+			for _, c := range win.contentPanes {
+				if _, ok := headersByTarget[c.paneID]; !ok {
+					logEvent("AUDIT_PANE_HEADER window=%s target=%s count=0 action=%s",
+						winID, c.paneID, fixOrLog("request_refresh"))
+					needLayoutRefresh = true
+				}
+			}
+		}
+	}
+
+	if needLayoutRefresh && panelAuditApplyFixes && coordinator.OnRefreshLayout != nil {
+		coordinator.OnRefreshLayout()
+	}
+}
+
+// fixOrLog returns the fix action name when fixes are enabled, otherwise
+// "detect_only" — keeps log events readable in either mode.
+func fixOrLog(fixAction string) string {
+	if panelAuditApplyFixes {
+		return fixAction
+	}
+	return "detect_only"
+}
+
 // restoreSidebarWidths is deprecated. Use coordinator.RunWidthSync(activeWindowID, true) instead.
 // Kept as empty stub for backwards compatibility.
 func restoreSidebarWidths() {
@@ -2644,6 +2967,7 @@ func Run(args []string) int {
 				ok := runLoopTask("watchdog", 6*time.Second, func() {
 					logInput("HEALTH clients=%d", server.ClientCount())
 					watchdogCheckRenderers(server, *sessionID, coordinator)
+					panelAudit(*sessionID, coordinator)
 				})
 				if !ok {
 					return
