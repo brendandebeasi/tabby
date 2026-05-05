@@ -24,7 +24,6 @@ import (
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/paths"
-	"github.com/brendandebeasi/tabby/pkg/perf"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -2502,33 +2501,22 @@ func Run(args []string) int {
 			}
 		}
 
-		refreshTicker := time.NewTicker(30 * time.Second)              // Window list poll (fallback, signal_refresh handles real-time)
-		windowCheckTicker := time.NewTicker(3 * time.Second)           // Spawn/cleanup poll (fallback, reduced from 10s for faster new-window response)
-		clientGeometryTicker := time.NewTicker(250 * time.Millisecond) // Fallback for client switches that do not emit hooks
-		animationTicker := time.NewTicker(100 * time.Millisecond)      // Combined spinner + pet animation (was two separate tickers)
-		gitTicker := time.NewTicker(5 * time.Second)                   // Git status
-		watchdogTicker := time.NewTicker(5 * time.Second)              // Watchdog: check renderer health
-		autoThemeTicker := time.NewTicker(60 * time.Second)            // Auto-theme: check system dark/light mode or time schedule
-		defer refreshTicker.Stop()
-		defer windowCheckTicker.Stop()
-		defer clientGeometryTicker.Stop()
-		defer animationTicker.Stop()
-		defer gitTicker.Stop()
-		defer watchdogTicker.Stop()
-		defer autoThemeTicker.Stop()
-
 		// Apply auto-theme immediately on startup (don't wait for first tick).
 		if want := coordinator.ResolveAutoTheme(); want != "" && want != coordinator.ActiveThemeName() {
 			coordinator.SetTheme(want)
 		}
 
-		lastWindowsHash := ""
-		lastGitState := ""
-		lastAutoTheme := coordinator.ActiveThemeName()
-		lastClientGeometry := ""
-		lastResizeKey := ""          // tty+WxH only: drives resizeAllWindowsToClient dedupe
-		lastWindowCheckSyncKey := "" // active window + active client geometry at last window_check width sync
-		activeWindowID := ""         // Track active window for optimized rendering
+		// Step 2 of the daemon refactor: tickers run via loop.go now.
+		// activeWindowID and lastWindowsHash are still mutated by this
+		// goroutine's refreshCh / updateActiveWindow path, so they remain
+		// locals here; we mirror them onto the Loop after each write so
+		// tick handlers (which run on the loop goroutine) can observe the
+		// latest values without racing. Step 3 moves the refresh handler
+		// onto the loop and these locals collapse.
+		loop.SetLastAutoTheme(coordinator.ActiveThemeName())
+
+		lastWindowsHash := ""        // mirrored to loop via loop.SetLastWindowsHash
+		activeWindowID := ""         // mirrored to loop via loop.SetActiveWindowID
 
 		lastWindowCount := 0 // Track window count for close detection
 
@@ -2617,6 +2605,7 @@ func Run(args []string) int {
 						logEvent("UPDATE_ACTIVE_WINDOW_TMUX_OBSERVE old=%s new=%s coordinator_active=%s", activeWindowID, newID, coordActive)
 					}
 					activeWindowID = newID
+					loop.SetActiveWindowID(newID)
 				}
 			} else {
 				logEvent("UPDATE_ACTIVE_WINDOW_TMUX_ERR err=%v", err)
@@ -2711,6 +2700,29 @@ func Run(args []string) int {
 		// where spawn/cleanup tmux ops trigger hooks that send more USR1 signals.
 		var lastFullRefresh time.Time
 		fullRefreshCooldown := 100 * time.Millisecond
+
+		// Wire ticker dependencies onto the loop and start ticker goroutines
+		// (Step 2 of the daemon refactor). The migrated handler bodies live
+		// on Loop in loop.go; runTicker drives the submitCoalesced producer
+		// for each cadence. SetTickDeps must precede any tick submission.
+		loop.SetTickDeps(LoopTickDeps{
+			RunLoopTask:         runLoopTask,
+			RunLoopTaskNonFatal: runLoopTaskNonFatal,
+			UpdateActiveWindow:  updateActiveWindow,
+			SessionID:           *sessionID,
+			MyPid:               os.Getpid(),
+			SocketPath:          server.GetSocketPath(),
+			SigCh:               sigCh,
+		})
+		go runTicker(loopCtx, 250*time.Millisecond, func() { loop.submitCoalesced(&loop.flags.geom, ClientGeomTickEvent{}) })
+		go runTicker(loopCtx, 100*time.Millisecond, func() { loop.submitCoalesced(&loop.flags.anim, AnimationTickEvent{}) })
+		go runTicker(loopCtx, 3*time.Second, func() { loop.submitCoalesced(&loop.flags.window, WindowCheckTickEvent{}) })
+		go runTicker(loopCtx, 30*time.Second, func() { loop.submitCoalesced(&loop.flags.refresh, RefreshTickEvent{}) })
+		go runTicker(loopCtx, 5*time.Second, func() { loop.submitCoalesced(&loop.flags.git, GitTickEvent{}) })
+		go runTicker(loopCtx, 5*time.Second, func() { loop.submitCoalesced(&loop.flags.watchdog, WatchdogTickEvent{}) })
+		go runTicker(loopCtx, 60*time.Second, func() { loop.submitCoalesced(&loop.flags.autoTheme, AutoThemeTickEvent{}) })
+		go runTicker(loopCtx, 3*time.Second, func() { loop.submitCoalesced(&loop.flags.socket, SocketCheckTickEvent{}) })
+		go runTicker(loopCtx, 10*time.Second, func() { loop.submitCoalesced(&loop.flags.idle, IdleTickEvent{}) })
 
 		for {
 			// Record heartbeat at each loop iteration for deadlock detection
@@ -2820,6 +2832,7 @@ func Run(args []string) int {
 							server.BroadcastRender()
 						}
 						lastWindowsHash = currentHash
+						loop.SetLastWindowsHash(currentHash)
 						lastFullRefresh = time.Now()
 
 						debugLog.Printf("PERF: RefreshWindows=%v EarlyRender=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v TOTAL=%v",
@@ -2847,202 +2860,15 @@ func Run(args []string) int {
 				if !ok {
 					return
 				}
-			case <-windowCheckTicker.C: // Fallback polling: spawn/cleanup for missed events
-				// Window check is a polling task — stalls are non-fatal (skip and retry next tick)
-				runLoopTaskNonFatal("window_check", 8*time.Second, func() {
-					logEvent("WINDOW_CHECK_TICK")
-					// Use cached window state — signal_refresh keeps it fresh via USR1.
-					// Calling RefreshWindows() here added a redundant ListWindowsWithPanes()
-					// tmux round-trip that caused lock contention and task stalls under load.
-					windows := coordinator.GetWindows()
-					windowIDs := make([]string, len(windows))
-					for i, w := range windows {
-						windowIDs[i] = w.ID
-					}
-					logEvent("WINDOW_CHECK_LIST count=%d ids=%v", len(windows), windowIDs)
-
-					spawnRenderersForNewWindows(server, *sessionID, windows, coordinator)
-					cleanupOrphanedSidebars(windows, coordinator)
-					cleanupOrphanWindowsByTmux(*sessionID, coordinator)
-					// Persist current layouts to disk for restart recovery
-					saveLayoutsToDisk(windows)
-					// Width sync as fallback for missed events, only when active context changed
-					activeTTY := ""
-					activeW := 0
-					if w, _, tty, _, ok := activeClientGeometry(); ok {
-						activeTTY = strings.TrimSpace(tty)
-						activeW = w
-					}
-					syncKey := fmt.Sprintf("%s|%s|%d", activeWindowID, activeTTY, activeW)
-					if syncKey != lastWindowCheckSyncKey {
-						logEvent("WIDTH_SYNC_REQUEST trigger=window_check active=%s force=0 key=%s", activeWindowID, syncKey)
-						coordinator.RunWidthSync(activeWindowID, false)
-						lastWindowCheckSyncKey = syncKey
-					} else {
-						logEvent("WIDTH_SYNC_SKIP trigger=window_check reason=stable_context key=%s", syncKey)
-					}
-				})
-			case <-clientGeometryTicker.C:
-				runLoopTaskNonFatal("client_geometry_tick", 2*time.Second, func() {
-					res := activeClientElector.Elect()
-					if !res.OK {
-						return
-					}
-					ac := res.Client
-					geomKey := fmt.Sprintf("%s:%dx%d:%d", ac.TTY, ac.Width, ac.Height, res.Activity/5)
-					if geomKey == lastClientGeometry {
-						return
-					}
-					lastClientGeometry = geomKey
-					logEvent("CLIENT_GEOMETRY_CHANGE tty=%s size=%dx%d activity=%d", ac.TTY, ac.Width, ac.Height, res.Activity)
-					coordinator.SetActiveClient(ac)
-					resizeKey := fmt.Sprintf("%s:%dx%d", ac.TTY, ac.Width, ac.Height)
-					if resizeKey != lastResizeKey {
-						lastResizeKey = resizeKey
-						resizeAllWindowsToClient(ac.Width, ac.Height, "geometry_tick")
-					}
-					syncClientSizesFromTmux(server, coordinator, "geometry_tick")
-					activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
-					logEvent("WIDTH_SYNC_REQUEST trigger=geometry_tick active=%s force=1", activeWin)
-					coordinator.RunWidthSync(activeWin, true)
-					coordinator.RunHeaderHeightSync(activeWin)
-					coordinator.RunZoomSync(activeWin)
-					server.BroadcastRender()
-				})
-			case <-watchdogTicker.C:
-				ok := runLoopTask("watchdog", 6*time.Second, func() {
-					logInput("HEALTH clients=%d", server.ClientCount())
-					watchdogCheckRenderers(server, *sessionID, coordinator)
-					panelAudit(*sessionID, coordinator)
-				})
-				if !ok {
-					return
-				}
-			case <-refreshTicker.C:
-				ok := runLoopTask("refresh_tick", 8*time.Second, func() {
-					// Fallback polling: always refresh windows (needed for staleness
-					// detection of stuck @tabby_busy), but only broadcast render and
-					// update header styles if the hash actually changed.
-					coordinator.RefreshWindows()
-					currentHash := coordinator.GetWindowsHash()
-					if currentHash != lastWindowsHash {
-						updateHeaderBorderStyles(coordinator)
-						server.BroadcastRender()
-						lastWindowsHash = currentHash
-					}
-				})
-				if !ok {
-					return
-				}
-			case <-animationTicker.C:
-				// Combined spinner + pet animation tick with timeout protection.
-				// Animation is cosmetic — a stall just skips the frame (non-fatal).
-				runLoopTaskNonFatal("animation_tick", 2*time.Second, func() {
-					spinnerVisible := coordinator.IncrementSpinner()
-					petChanged := coordinator.UpdatePetState()
-					indicatorAnimated := coordinator.HasActiveIndicatorAnimation()
-					if spinnerVisible || petChanged || indicatorAnimated {
-						perf.Log("animationTick (render)")
-						server.RenderActiveWindowOnly(activeWindowID)
-					}
-				})
-			case <-gitTicker.C:
-				ok := runLoopTask("git_tick", 6*time.Second, func() {
-					// Only broadcast if git state changed
-					currentGitState := coordinator.GetGitStateHash()
-					if currentGitState != lastGitState {
-						perf.Log("gitTick (changed)")
-						coordinator.RefreshGit()
-						coordinator.RefreshSession()
-						server.BroadcastRender()
-						lastGitState = currentGitState
-					}
-				})
-				if !ok {
-					return
-				}
-			case <-autoThemeTicker.C:
-				runLoopTaskNonFatal("auto_theme_tick", 5*time.Second, func() {
-					want := coordinator.ResolveAutoTheme()
-					if want != "" && want != lastAutoTheme {
-						logEvent("AUTO_THEME_SWITCH from=%s to=%s", lastAutoTheme, want)
-						coordinator.SetTheme(want)
-						server.BroadcastRender()
-						lastAutoTheme = want
-					}
-				})
 			}
 		}
 	}()
 
-	// Monitor for idle shutdown (no clients for 30s), session existence, and socket/PID health
-	go func() {
-		defer recoverAndLog("idle-monitor")
-		idleTicker := time.NewTicker(10 * time.Second)
-		socketCheckTicker := time.NewTicker(3 * time.Second)
-		defer idleTicker.Stop()
-		defer socketCheckTicker.Stop()
-		idleStart := time.Time{}
-		myPid := os.Getpid()
-		socketPath := server.GetSocketPath()
-
-		for {
-			select {
-			case <-socketCheckTicker.C:
-				// Check if our socket still exists
-				if _, err := os.Stat(socketPath); os.IsNotExist(err) {
-					logEvent("SHUTDOWN_REASON session=%s reason=socket_gone pid=%d", *sessionID, myPid)
-					debugLog.Printf("Socket %s no longer exists, shutting down", socketPath)
-					sigCh <- syscall.SIGTERM
-					return
-				}
-
-				// Check if PID file still has our PID (another daemon may have taken over)
-				pidPath := daemon.RuntimePath(*sessionID, ".pid")
-				if data, err := os.ReadFile(pidPath); err == nil {
-					pidStr := strings.TrimSpace(string(data))
-					if pid, err := strconv.Atoi(pidStr); err == nil && pid != myPid {
-						logEvent("SHUTDOWN_REASON session=%s reason=pid_replaced our=%d new=%d", *sessionID, myPid, pid)
-						debugLog.Printf("PID file replaced (ours=%d, new=%d), shutting down", myPid, pid)
-						sigCh <- syscall.SIGTERM
-						return
-					}
-				}
-
-			case <-idleTicker.C:
-				// Check if session still exists
-				if _, err := exec.Command("tmux", "has-session", "-t", *sessionID).Output(); err != nil {
-					logEvent("SHUTDOWN_REASON session=%s reason=session_gone", *sessionID)
-					debugLog.Printf("Session %s no longer exists, shutting down", *sessionID)
-					sigCh <- syscall.SIGTERM
-					return
-				}
-
-				// Check if any windows remain
-				out, err := exec.Command("tmux", "list-windows", "-t", *sessionID, "-F", "#{window_id}").Output()
-				if err != nil || strings.TrimSpace(string(out)) == "" {
-					logEvent("SHUTDOWN_REASON session=%s reason=no_windows", *sessionID)
-					debugLog.Printf("No windows remaining, shutting down")
-					sigCh <- syscall.SIGTERM
-					return
-				}
-
-				// Idle timeout if no clients
-				if server.ClientCount() == 0 {
-					if idleStart.IsZero() {
-						idleStart = time.Now()
-					} else if time.Since(idleStart) > 30*time.Second {
-						logEvent("SHUTDOWN_REASON session=%s reason=idle_timeout clients=0", *sessionID)
-						debugLog.Printf("No clients for 30s, shutting down")
-						sigCh <- syscall.SIGTERM
-						return
-					}
-				} else {
-					idleStart = time.Time{}
-				}
-			}
-		}
-	}()
+	// Idle/socket monitoring (idle-shutdown, session-existence, socket/PID
+	// health) was migrated into the loop's handleIdleTick / handleSocketCheckTick
+	// in Step 2 of the daemon refactor. The dedicated idle-monitor goroutine
+	// is gone; ticks are submitted via runTicker calls wired alongside the
+	// other tick goroutines above.
 
 	sig := <-sigCh
 	uptime := time.Since(daemonStartTime).Truncate(time.Second)
