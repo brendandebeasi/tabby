@@ -2215,10 +2215,17 @@ func Run(args []string) int {
 	}
 
 	refreshCh := make(chan struct{}, 10)
-	var lastExplicitNavAt time.Time
-	var lastExplicitNavWindow string
-	var navSettleUntil time.Time
-	var navSettledWindow string
+
+	// Build the event loop. Step 1 of the daemon refactor (see
+	// /Users/b/.claude/plans/nifty-jingling-tulip.md): the loop owns
+	// coordinator mutations driven by renderer input, so we no longer
+	// have one server-worker goroutine per connection mutating state in
+	// parallel with the main select loop. Tickers, signals, and tmux
+	// hooks remain on their existing goroutines for now (Steps 2-4).
+	loop := NewLoop(coordinator, server, activeClientElector, refreshCh)
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	defer loopCancel()
+	go loop.Run(loopCtx)
 
 	// Ignore SIGPIPE — daemon runs backgrounded and stdout/stderr may become broken pipes
 	signal.Ignore(syscall.SIGPIPE)
@@ -2231,73 +2238,11 @@ func Run(args []string) int {
 	// Set up input callback with panic recovery.
 	// The server validates msg.Target before calling OnInput, so clientID
 	// is always non-empty and corresponds to a known renderer kind.
+	// The body of the handler now runs on the loop goroutine via
+	// Loop.handleRendererInput; this shim only forwards the event.
 	server.OnInput = func(clientID string, input *daemon.InputPayload) {
 		logEvent("INPUT_START client=%s type=%s btn=%s action=%s resolved=%s x=%d y=%d target=%s pane=%s sourcePane=%s", clientID, input.Type, input.Button, input.Action, input.ResolvedAction, input.MouseX, input.MouseY, input.ResolvedTarget, input.PaneID, input.SourcePaneID)
-		resolvedAction := strings.TrimSpace(input.ResolvedAction)
-		pinFocus := true
-		if daemon.KindOf(clientID) == daemon.TargetHook && (resolvedAction == "" || resolvedAction == "exit_if_no_main" || resolvedAction == "exit_if_no_main_windows") {
-			pinFocus = false
-		}
-		if pinFocus {
-			sourceWin := sourceWindowIDFromClientID(clientID)
-			sourceTTY := ""
-			if input.PaneID != "" {
-				sourceTTY = clientTTYForPane(input.PaneID)
-			}
-			if sourceTTY == "" && sourceWin != "" {
-				sourceTTY = clientTTYForWindow(sourceWin)
-			}
-			if sourceTTY == "" {
-				sourceTTY = latestAttachedClientTTY()
-			}
-			if sourceTTY != "" {
-				setPreferredClientTTY(sourceTTY, fmt.Sprintf("input:%s:%s", clientID, input.ResolvedAction))
-			}
-		} else {
-			logEvent("CLIENT_FOCUS_PIN_SKIP client=%s resolved=%s", clientID, input.ResolvedAction)
-		}
-		defer func() {
-			if r := recover(); r != nil {
-				debugLog.Printf("PANIC in OnInput handler (client=%s): %v", clientID, r)
-				logEvent("PANIC_INPUT client=%s err=%v", clientID, r)
-			}
-		}()
-		if daemon.KindOf(clientID) == daemon.TargetWindowHeader {
-			if resolvedAction == "window_header:prev_window" || resolvedAction == "window_header:next_window" || resolvedAction == "window_header:new_window" {
-				lastExplicitNavAt = time.Now()
-				lastExplicitNavWindow = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
-				navSettledWindow = lastExplicitNavWindow
-				navSettleUntil = time.Now().Add(1200 * time.Millisecond)
-				logEvent("EXPLICIT_NAV_MARK action=%s window=%s settle_until_ms=%d", resolvedAction, lastExplicitNavWindow, time.Until(navSettleUntil).Milliseconds())
-			}
-		}
-		needsRefresh := coordinator.HandleInput(clientID, input)
-		logEvent("INPUT_HANDLED client=%s needsRefresh=%v", clientID, needsRefresh)
-		if needsRefresh {
-			// Immediate optimistic render: HandleInput already updated the
-			// coordinator state (e.g. SetActiveWindowOptimistic for select_window)
-			// so rendering NOW gives the requesting client the correct header
-			// color without waiting for the full BroadcastRender round-trip.
-			server.SendRenderToClient(clientID)
-			// Broadcast to remaining clients asynchronously so the input
-			// goroutine is not blocked by O(n) renders before returning.
-			go server.BroadcastRender()
-			// Signal the main refresh loop for full state sync
-			// (spawn/cleanup renderers, update pane colors, etc.)
-			select {
-			case refreshCh <- struct{}{}:
-			default:
-				// Channel full, refresh already pending
-			}
-			logEvent("INPUT_SIGNALED_REFRESH client=%s", clientID)
-		} else {
-			// Internal-only state change (e.g. toggle_group) - render the
-			// requesting client immediately for snappy response, then broadcast
-			// to remaining clients asynchronously.
-			server.SendRenderToClient(clientID)
-			go server.BroadcastRender()
-		}
-		logEvent("INPUT_DONE client=%s", clientID)
+		loop.Submit(RendererInputEvent{ClientID: clientID, Input: input})
 	}
 
 	// Set up connect/disconnect callbacks
@@ -2661,12 +2606,13 @@ func Run(args []string) int {
 								return
 							}
 						}
-						if !navSettleUntil.IsZero() && time.Now().Before(navSettleUntil) && navSettledWindow != "" {
-							if newID != navSettledWindow {
-								logEvent("UPDATE_ACTIVE_WINDOW_TMUX_SUPPRESS_NAV old=%s new=%s settled=%s remaining_ms=%d marked_window=%s", activeWindowID, newID, navSettledWindow, time.Until(navSettleUntil).Milliseconds(), lastExplicitNavWindow)
+						navAt, navWindow, settleUntil, settledWindow := loop.NavSettleState()
+						if !settleUntil.IsZero() && time.Now().Before(settleUntil) && settledWindow != "" {
+							if newID != settledWindow {
+								logEvent("UPDATE_ACTIVE_WINDOW_TMUX_SUPPRESS_NAV old=%s new=%s settled=%s remaining_ms=%d marked_window=%s", activeWindowID, newID, settledWindow, time.Until(settleUntil).Milliseconds(), navWindow)
 								return
 							}
-							logEvent("UPDATE_ACTIVE_WINDOW_TMUX_NAV_CONFIRMED old=%s new=%s settled=%s age_ms=%d", activeWindowID, newID, navSettledWindow, time.Since(lastExplicitNavAt).Milliseconds())
+							logEvent("UPDATE_ACTIVE_WINDOW_TMUX_NAV_CONFIRMED old=%s new=%s settled=%s age_ms=%d", activeWindowID, newID, settledWindow, time.Since(navAt).Milliseconds())
 						}
 						logEvent("UPDATE_ACTIVE_WINDOW_TMUX_OBSERVE old=%s new=%s coordinator_active=%s", activeWindowID, newID, coordActive)
 					}
