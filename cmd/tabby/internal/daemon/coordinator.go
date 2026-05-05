@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -46,17 +47,9 @@ var globalCoordinator *Coordinator
 var (
 	lastHeartbeat     int64 // Unix nano timestamp of last main loop tick
 	heartbeatMu       sync.Mutex
-	lockHolders       = make(map[string]lockInfo) // lock name -> holder info
-	lockHoldersMu     sync.Mutex
 	deadlockWatchdog  bool
 	deadlockThreshold = 5 * time.Second // Alert if no heartbeat for this long
 )
-
-type lockInfo struct {
-	goroutine string
-	acquired  time.Time
-	location  string
-}
 
 type CWDColorMapping struct {
 	Color string `json:"color,omitempty"`
@@ -303,32 +296,9 @@ func StartDeadlockWatchdog() {
 			if elapsed > deadlockThreshold {
 				coordinatorDebugLog.Printf("DEADLOCK WARNING: No heartbeat for %v", elapsed)
 
-				// Dump lock holders
-				lockHoldersMu.Lock()
-				holders := make(map[string]lockInfo, len(lockHolders))
-				for k, v := range lockHolders {
-					holders[k] = v
-				}
-				lockHoldersMu.Unlock()
-
-				if len(holders) > 0 {
-					coordinatorDebugLog.Printf("DEADLOCK: Current lock holders:")
-					for name, info := range holders {
-						coordinatorDebugLog.Printf("  %s: held by %s at %s for %v",
-							name, info.goroutine, info.location, time.Since(info.acquired))
-					}
-				}
-
 				// Also write to crash log (debug log may be /dev/null in non-debug mode)
 				if crashLog != nil {
 					crashLog.Printf("DEADLOCK WARNING: No heartbeat for %v", elapsed)
-					if len(holders) > 0 {
-						crashLog.Printf("DEADLOCK: Lock holders:")
-						for name, info := range holders {
-							crashLog.Printf("  %s: held by %s at %s for %v",
-								name, info.goroutine, info.location, time.Since(info.acquired))
-						}
-					}
 				}
 			}
 		}
@@ -345,24 +315,6 @@ func recordHeartbeat() {
 	heartbeatMu.Lock()
 	lastHeartbeat = time.Now().UnixNano()
 	heartbeatMu.Unlock()
-}
-
-// trackLock records when a lock is acquired
-func trackLock(name, location string) {
-	lockHoldersMu.Lock()
-	lockHolders[name] = lockInfo{
-		goroutine: fmt.Sprintf("goroutine-%d", time.Now().UnixNano()%10000),
-		acquired:  time.Now(),
-		location:  location,
-	}
-	lockHoldersMu.Unlock()
-}
-
-// untrackLock removes lock tracking when released
-func untrackLock(name string) {
-	lockHoldersMu.Lock()
-	delete(lockHolders, name)
-	lockHoldersMu.Unlock()
 }
 
 // Coordinator manages centralized state and rendering for all renderers
@@ -410,19 +362,25 @@ type Coordinator struct {
 	// via SetActiveClient (which also updates activeClientWidth for the hot
 	// path that only cares about width). Read by renderers via
 	// ActiveClientSnapshot so RenderPayload.ActiveClient is fully populated.
-	activeClient        daemon.ActiveClient
-	activeClientWidth   int
-	activeClientWidthMu sync.RWMutex
+	//
+	// Step 5 of the daemon refactor: replaced activeClientWidthMu (RWMutex)
+	// with two atomics. activeClient is a small (4-string-field) struct
+	// rebuilt fresh on each Set; readers grab a pointer, no torn struct.
+	// activeClientWidth is the hot path used by render-time clamps.
+	activeClient      atomic.Pointer[daemon.ActiveClient]
+	activeClientWidth atomic.Int64
 
 	// Mobile border hide state: tracks whether tmux pane-border-style has been
 	// overridden to the terminal background (invisible) because a narrow client
-	// is active. Set by syncMobileBorders().
+	// is active. Set by syncMobileBorders() — currently dead code, but the
+	// fields stay so the struct shape doesn't churn.
 	mobileBorderHidden bool
 	mobileBorderInit   bool
-	mobileBorderMu     sync.Mutex
 
 	// Window-header button press feedback: maps windowID -> (action, timestamp).
 	// Used to render a pressed/highlighted button for ~150ms after a tap.
+	// Mutex is retained: activeWindowHeaderPress is read from server worker
+	// goroutines via RenderHeaderForClient.
 	windowHeaderPressMu sync.Mutex
 	windowHeaderPress   map[string]windowHeaderPressEntry
 
@@ -438,9 +396,9 @@ type Coordinator struct {
 	clientProfile   map[string]string
 	clientProfileMu sync.RWMutex
 
-	// Auto-zoom ownership: tracks which windows were zoomed by phone profile
-	windowZoomOwner   map[string]string // windowID -> "phone" | ""
-	windowZoomOwnerMu sync.RWMutex
+	// Auto-zoom ownership: tracks which windows were zoomed by phone profile.
+	// (Map currently unreferenced; mutex dropped in Step 5.)
+	windowZoomOwner map[string]string // windowID -> "phone" | ""
 
 	// Sidebar visibility state (true while the sidebar pane is stashed in a
 	// holding window via break-pane; false when it is live in its parent window).
@@ -486,18 +444,18 @@ type Coordinator struct {
 	// the header topology follows the active client's form factor.
 	OnRefreshLayout func()
 
-	// Context menu state (for in-renderer menus)
+	// Context menu state (for in-renderer menus). pendingMenus,
+	// lastWindowSelect/lastWindowByClient, and lastPaneMenuOpen are loop-only
+	// dedup state — written and read exclusively from HandleInput on the
+	// loop goroutine, so no mutex is needed (Step 5 of the daemon refactor).
 	OnSendMenu         func(clientID string, menu *daemon.MenuPayload)
 	OnSendMarkerPicker func(clientID string, picker *daemon.MarkerPickerPayload)
 	OnSendColorPicker  func(clientID string, picker *daemon.ColorPickerPayload)
 	pendingMenus       map[string][]menuItemDef
-	pendingMenusMu     sync.Mutex
 
 	lastWindowSelect   map[string]time.Time
 	lastWindowByClient map[string]time.Time
-	lastWindowSelectMu sync.Mutex
 	lastPaneMenuOpen   map[string]time.Time
-	lastPaneMenuOpenMu sync.Mutex
 
 	// Background theme detector (deprecated, kept for fallback)
 	bgDetector *colors.BackgroundDetector
@@ -4674,7 +4632,6 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	}
 	c.stateMu.RUnlock()
 
-	trackLock("widthSyncMu", "handleWidthSync")
 	c.widthSyncMu.Lock()
 
 	// Detect if this window just became active
@@ -4691,7 +4648,6 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
-		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 		return
 	}
@@ -4700,7 +4656,6 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
-		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 		return
 	}
@@ -4721,7 +4676,6 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if targetWidth < 10 {
 			targetWidth = 25
 		}
-		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 
 		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -4750,7 +4704,6 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
-		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 		c.persistSidebarWidthProfile(clientID, currentWidth)
 		return
@@ -4773,7 +4726,6 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
-		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 		return
 	}
@@ -4783,7 +4735,6 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	}
 	c.lastWidthSync = time.Now()
 	coordinatorDebugLog.Printf("Width sync: window=%s current=%d target=%d", clientID, currentWidth, targetWidth)
-	untrackLock("widthSyncMu")
 	c.widthSyncMu.Unlock()
 
 	listCtx2, listCancel2 := context.WithTimeout(context.Background(), 2*time.Second)
@@ -4822,14 +4773,19 @@ const profileTransitionDelay = 750 * time.Millisecond
 // a debounced profile transition to avoid reacting to intermediate sizes
 // during client resize animations.
 func (c *Coordinator) SetActiveClientWidth(w int) {
-	c.activeClientWidthMu.Lock()
-	prev := c.activeClientWidth
-	c.activeClientWidth = w
+	prev := int(c.activeClientWidth.Load())
+	c.activeClientWidth.Store(int64(w))
 	// Keep the snapshot's Width in sync; callers that only have a width
-	// (not a full ActiveClient) land here.
-	c.activeClient.Width = w
-	c.activeClient.Profile = c.computeProfile(w)
-	c.activeClientWidthMu.Unlock()
+	// (not a full ActiveClient) land here. We swap a fresh struct so readers
+	// observe a consistent snapshot (no torn fields).
+	cur := c.activeClient.Load()
+	var ac daemon.ActiveClient
+	if cur != nil {
+		ac = *cur
+	}
+	ac.Width = w
+	ac.Profile = c.computeProfile(w)
+	c.activeClient.Store(&ac)
 
 	prevProfile := c.computeProfile(prev)
 	newProfile := c.computeProfile(w)
@@ -5295,14 +5251,10 @@ func (c *Coordinator) activeWindowHeaderPress(windowID string) string {
 // to match the terminal background so borders disappear visually; on desktop
 // the override is removed. Tracks last-applied state to avoid spamming tmux.
 func (c *Coordinator) syncMobileBorders() {
-	c.activeClientWidthMu.RLock()
-	acw := c.activeClientWidth
-	c.activeClientWidthMu.RUnlock()
+	acw := int(c.activeClientWidth.Load())
 
 	wantHidden := acw > 0 && acw < 100
 
-	c.mobileBorderMu.Lock()
-	defer c.mobileBorderMu.Unlock()
 	if c.mobileBorderHidden == wantHidden && c.mobileBorderInit {
 		return
 	}
@@ -5368,9 +5320,7 @@ func (c *Coordinator) syncMobileBorders() {
 // content pane. Returns target unchanged if no active client info is known.
 func (c *Coordinator) capTargetToActiveClient(target int) int {
 	const minContentPaneCols = 40
-	c.activeClientWidthMu.RLock()
-	acw := c.activeClientWidth
-	c.activeClientWidthMu.RUnlock()
+	acw := int(c.activeClientWidth.Load())
 	if acw <= 0 {
 		return target
 	}
@@ -5431,7 +5381,6 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	expiredHolds := make([]string, 0)
 	extendHolds := make([]string, 0)
 
-	trackLock("widthSyncMu", "RunWidthSync")
 	c.widthSyncMu.Lock()
 
 	// Detect active window change
@@ -5449,7 +5398,6 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	}
 	if !force && hasLast && sinceLast < 500*time.Millisecond {
 		logEvent("WIDTH_SYNC_SKIP reason=debounce active=%s force=%v since_last_ms=%d", activeWindowID, force, sinceLast.Milliseconds())
-		untrackLock("widthSyncMu")
 		c.widthSyncMu.Unlock()
 		return
 	}
@@ -5592,7 +5540,6 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 		c.lastWidthSync = time.Now()
 	}
 
-	untrackLock("widthSyncMu")
 	c.widthSyncMu.Unlock()
 
 	if len(expiredHolds) > 0 || len(extendHolds) > 0 {
@@ -5662,9 +5609,7 @@ func (c *Coordinator) desiredPaneHeaderHeight() int {
 // touch-client threshold (< 100 cols = 3-row fat-touch button bar) so that spawning
 // and height-sync agree; otherwise the spawn-time default of 1 would flicker up to 3.
 func (c *Coordinator) desiredWindowHeaderHeight() int {
-	c.activeClientWidthMu.RLock()
-	acw := c.activeClientWidth
-	c.activeClientWidthMu.RUnlock()
+	acw := int(c.activeClientWidth.Load())
 	if acw > 0 && acw < 100 {
 		return 3
 	}
@@ -10953,9 +10898,7 @@ func (c *Coordinator) SetClientProfile(clientID string, profile string) {
 // ActiveClientProfile returns the profile of the active client.
 // It computes the profile directly from the active terminal width.
 func (c *Coordinator) ActiveClientProfile() string {
-	c.activeClientWidthMu.RLock()
-	acw := c.activeClientWidth
-	c.activeClientWidthMu.RUnlock()
+	acw := int(c.activeClientWidth.Load())
 	if acw <= 0 {
 		return "desktop"
 	}
@@ -10967,26 +10910,28 @@ func (c *Coordinator) ActiveClientProfile() string {
 // every render site touching the elector. Call from the geometry tick
 // whenever the election result changes.
 func (c *Coordinator) SetActiveClient(ac daemon.ActiveClient) {
-	c.activeClientWidthMu.Lock()
-	c.activeClient = ac
+	// Store a copy so callers can't mutate our state through the original.
+	stored := ac
+	c.activeClient.Store(&stored)
 	if ac.Width > 0 {
-		c.activeClientWidth = ac.Width
+		c.activeClientWidth.Store(int64(ac.Width))
 	}
-	c.activeClientWidthMu.Unlock()
 }
 
 // ActiveClientSnapshot returns a copy of the current elected-client state.
 // Safe to call from any goroutine.
 func (c *Coordinator) ActiveClientSnapshot() daemon.ActiveClient {
-	c.activeClientWidthMu.RLock()
-	defer c.activeClientWidthMu.RUnlock()
-	ac := c.activeClient
+	cur := c.activeClient.Load()
+	var ac daemon.ActiveClient
+	if cur != nil {
+		ac = *cur
+	}
 	if ac.Profile == "" {
 		// Fallback for cases where only Width has been set (e.g. legacy
 		// sync paths that used SetActiveClientWidth).
-		if c.activeClientWidth > 0 {
-			ac.Width = c.activeClientWidth
-			ac.Profile = c.computeProfile(c.activeClientWidth)
+		if w := int(c.activeClientWidth.Load()); w > 0 {
+			ac.Width = w
+			ac.Profile = c.computeProfile(w)
 		} else {
 			ac.Profile = "desktop"
 		}
@@ -11160,20 +11105,18 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 		now := time.Now()
 		selectKey := clientID + "|" + targetWindow
-		c.lastWindowSelectMu.Lock()
+		// Loop-only dedup state (Step 5): HandleInput runs exclusively on the
+		// event-loop goroutine, so no mutex is needed.
 		if lastAny, ok := c.lastWindowByClient[clientID]; ok && now.Sub(lastAny) < 300*time.Millisecond {
-			c.lastWindowSelectMu.Unlock()
 			logEvent("SELECT_WINDOW_DEBOUNCED_CLIENT client=%s raw=%s target=%s age_ms=%d", clientID, rawTarget, targetWindow, now.Sub(lastAny).Milliseconds())
 			return false
 		}
 		if last, ok := c.lastWindowSelect[selectKey]; ok && now.Sub(last) < 450*time.Millisecond {
-			c.lastWindowSelectMu.Unlock()
 			logEvent("SELECT_WINDOW_DEBOUNCED client=%s raw=%s target=%s age_ms=%d", clientID, rawTarget, targetWindow, now.Sub(last).Milliseconds())
 			return false
 		}
 		c.lastWindowByClient[clientID] = now
 		c.lastWindowSelect[selectKey] = now
-		c.lastWindowSelectMu.Unlock()
 		logEvent("SELECT_WINDOW client=%s raw=%s target=%s", clientID, rawTarget, targetWindow)
 
 		if err := c.SelectWindow(targetWindow, "semantic_select_window", clientID); err != nil {
@@ -12189,17 +12132,15 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	case "pane_menu":
 		// Debounce header-triggered menu opens to avoid press/release reopen flashes.
+		// Loop-only dedup (Step 5).
 		if strings.HasPrefix(clientID, "window-header:") {
 			key := clientID + "|" + input.ResolvedTarget
 			now := time.Now()
-			c.lastPaneMenuOpenMu.Lock()
 			last := c.lastPaneMenuOpen[key]
 			if now.Sub(last) < 900*time.Millisecond {
-				c.lastPaneMenuOpenMu.Unlock()
 				return true
 			}
 			c.lastPaneMenuOpen[key] = now
-			c.lastPaneMenuOpenMu.Unlock()
 		}
 
 		// Header panes have BubbleTea mouse capture which intercepts clicks
@@ -12898,10 +12839,10 @@ func (c *Coordinator) executeOrSendMenu(clientID string, args []string, pos menu
 		title, items := parseTmuxMenuArgs(args)
 		logEvent("MENU_SEND client=%s title=%s items=%d", clientID, title, len(items))
 
-		// Store items for later execution
-		c.pendingMenusMu.Lock()
+		// Store items for later execution. Loop-only state (Step 5):
+		// executeOrSendMenu and HandleMenuSelect both run on the loop
+		// goroutine via HandleInput, so no mutex is needed.
 		c.pendingMenus[clientID] = items
-		c.pendingMenusMu.Unlock()
 
 		// Convert to protocol items
 		protoItems := make([]daemon.MenuItemPayload, len(items))
@@ -12928,10 +12869,8 @@ func (c *Coordinator) executeOrSendMenu(clientID string, args []string, pos menu
 // HandleMenuSelect executes the tmux command for the selected menu item
 func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 	logEvent("MENU_SELECT_START client=%s index=%d", clientID, index)
-	c.pendingMenusMu.Lock()
 	items, ok := c.pendingMenus[clientID]
 	delete(c.pendingMenus, clientID)
-	c.pendingMenusMu.Unlock()
 
 	if !ok || index < 0 || index >= len(items) {
 		logEvent("MENU_SELECT_SKIP client=%s index=%d ok=%v items=%d", clientID, index, ok, len(items))

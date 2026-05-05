@@ -127,19 +127,24 @@ type Loop struct {
 	navSettledWindow      string
 
 	// Tick-handler state. These were locals in the surrounding Daemon
-	// closure pre-migration. activeWindowID and lastWindowsHash are also
-	// mutated by the refreshCh handler in main.go, which still runs on a
-	// different goroutine until Step 3 of the refactor; both are guarded by
-	// stateMu and accessed via getters/setters from outside the loop. The
-	// remaining fields are touched only from loop-goroutine handlers.
-	stateMu          sync.RWMutex
-	activeWindowID   string
-	lastWindowsHash  string
-	lastGitState     string
-	lastAutoTheme    string
-	lastClientGeom   string
-	lastResizeKey    string
-	lastWindowCheck  string
+	// closure pre-migration. activeWindowID and lastWindowsHash are still
+	// mutated by the refreshCh consumer in main.go's `Run` (a separate
+	// goroutine from the loop), which mirrors them back via SetActiveWindowID
+	// / SetLastWindowsHash. The mirror exists because there is one off-loop
+	// writer (the spawn/cleanup pipeline). Step 5 chose Option B (keep the
+	// mirror, rename the mutex to make the cross-goroutine intent explicit)
+	// rather than Option A (migrate the refreshCh consumer onto the loop) —
+	// the latter is a much larger diff that would not fit safely in this
+	// step. The remaining fields are touched only from loop-goroutine
+	// handlers and need no synchronization.
+	sharedStateMu   sync.RWMutex
+	activeWindowID  string
+	lastWindowsHash string
+	lastGitState    string
+	lastAutoTheme   string
+	lastClientGeom  string
+	lastResizeKey   string
+	lastWindowCheck string
 
 	// Off-loop ticker state.
 	idleStart time.Time
@@ -169,29 +174,29 @@ func (l *Loop) SetTickDeps(deps LoopTickDeps) {
 // publish the latest active-window observation to the loop. Step 3 will move
 // this writer onto the loop itself, at which point the mutex can drop.
 func (l *Loop) SetActiveWindowID(id string) {
-	l.stateMu.Lock()
+	l.sharedStateMu.Lock()
 	l.activeWindowID = id
-	l.stateMu.Unlock()
+	l.sharedStateMu.Unlock()
 }
 
 // ActiveWindowID returns the currently-tracked active window ID.
 func (l *Loop) ActiveWindowID() string {
-	l.stateMu.RLock()
-	defer l.stateMu.RUnlock()
+	l.sharedStateMu.RLock()
+	defer l.sharedStateMu.RUnlock()
 	return l.activeWindowID
 }
 
 // SetLastWindowsHash is used by the main-goroutine refreshCh handler.
 func (l *Loop) SetLastWindowsHash(h string) {
-	l.stateMu.Lock()
+	l.sharedStateMu.Lock()
 	l.lastWindowsHash = h
-	l.stateMu.Unlock()
+	l.sharedStateMu.Unlock()
 }
 
 // LastWindowsHash returns the most recently observed windows hash.
 func (l *Loop) LastWindowsHash() string {
-	l.stateMu.RLock()
-	defer l.stateMu.RUnlock()
+	l.sharedStateMu.RLock()
+	defer l.sharedStateMu.RUnlock()
 	return l.lastWindowsHash
 }
 

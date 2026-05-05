@@ -33,26 +33,6 @@ func TestRecordHeartbeat(t *testing.T) {
 	assert.Greater(t, ts, int64(0))
 }
 
-func TestTrackAndUntrackLock(t *testing.T) {
-	lockHoldersMu.Lock()
-	lockHolders = make(map[string]lockInfo)
-	lockHoldersMu.Unlock()
-
-	trackLock("testLock", "test_location")
-
-	lockHoldersMu.Lock()
-	_, ok := lockHolders["testLock"]
-	lockHoldersMu.Unlock()
-	assert.True(t, ok)
-
-	untrackLock("testLock")
-
-	lockHoldersMu.Lock()
-	_, ok = lockHolders["testLock"]
-	lockHoldersMu.Unlock()
-	assert.False(t, ok)
-}
-
 func TestWindowTargetForIndex_WithSession(t *testing.T) {
 	c := newTestCoordinator(t)
 	c.sessionID = "test-session"
