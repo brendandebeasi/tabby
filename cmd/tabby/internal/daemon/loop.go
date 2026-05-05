@@ -470,6 +470,14 @@ func (l *Loop) handleRefreshTick() {
 }
 
 // handleAnimationTick is the migrated body of the animationTicker case.
+//
+// The render gate combines three signals: a visible spinner (busy/bell/
+// activity/AIBusy/AIInput on any window or pane), a pet-state change, and an
+// "indicator animation configured" capability check. The third is a static
+// config check that returns true whenever multi-frame active-indicator
+// frames are configured — which is the default — so the gate effectively
+// runs at full 10 Hz on most installs. Logged below so we can confirm the
+// driver in events.log when investigating render churn.
 func (l *Loop) handleAnimationTick() {
 	l.flags.anim.Store(false)
 	// Combined spinner + pet animation tick with timeout protection.
@@ -479,6 +487,8 @@ func (l *Loop) handleAnimationTick() {
 		petChanged := l.coord.UpdatePetState()
 		indicatorAnimated := l.coord.HasActiveIndicatorAnimation()
 		if spinnerVisible || petChanged || indicatorAnimated {
+			logEvent("ANIMATION_TICK_RENDER spinner=%v pet=%v indicator=%v",
+				spinnerVisible, petChanged, indicatorAnimated)
 			perf.Log("animationTick (render)")
 			l.server.RenderActiveWindowOnly(l.ActiveWindowID())
 		}
