@@ -23,6 +23,11 @@ const (
 	MsgColorPicker    MessageType = "color_picker"
 	MsgPing           MessageType = "ping"
 	MsgPong           MessageType = "pong"
+	// MsgHook carries a tmux-hook event from `tabby hook` into the daemon
+	// event loop. Replaces the SIGUSR1 / SIGUSR2 signaling path used by
+	// pre-Step-4 hook subcommands. Step 4 of the daemon refactor; see
+	// /Users/b/.claude/plans/nifty-jingling-tulip.md.
+	MsgHook MessageType = "hook"
 )
 
 // TargetKind identifies what KIND of renderer a message is for or from.
@@ -243,6 +248,18 @@ type ResizePayload struct {
 // ViewportUpdatePayload contains scroll position update
 type ViewportUpdatePayload struct {
 	ViewportOffset int `json:"viewport_offset"`
+}
+
+// HookPayload carries a tmux-hook delivery from the `tabby hook` CLI into the
+// daemon. Kind is the tmux hook name (e.g. "client-resized",
+// "after-select-window"); Args carries hook-specific format-string values
+// captured by tmux at hook time (e.g. {"tty": "/dev/ttys003", "width": "180",
+// "height": "50"}). The daemon translates this into a TmuxHookEvent on its
+// internal event loop. See /Users/b/.claude/plans/nifty-jingling-tulip.md
+// Step 4.
+type HookPayload struct {
+	Kind string            `json:"kind"`
+	Args map[string]string `json:"args"`
 }
 
 // GitState holds git repository information

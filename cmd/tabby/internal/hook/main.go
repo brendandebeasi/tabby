@@ -65,6 +65,25 @@ func Run(allArgs []string) int {
 	case "resurrect-restore":
 		doResurrectRestore(args)
 		return 0
+
+	// Tmux-hook subcommands (Step 4 of daemon refactor; see
+	// /Users/b/.claude/plans/nifty-jingling-tulip.md). Each forwards the
+	// hook over the daemon socket as a typed MsgHook. Failures are silent
+	// (no error to tmux) so a stopped/restarting daemon doesn't surface
+	// errors to the user. The daemon also still accepts SIGUSR1/SIGUSR2
+	// during this rollout, so older binaries on disk continue to work.
+	case "client-resized":
+		doHookClientResized(args)
+		return 0
+	case "after-select-window":
+		doHookAfterSelectWindow(args)
+		return 0
+	case "after-resize-pane":
+		doHookAfterResizePane(args)
+		return 0
+	case "client-attached":
+		doHookClientAttached(args)
+		return 0
 	}
 
 	// Socket-based commands
@@ -495,6 +514,93 @@ func ensureSidebar(sessionID, windowID string) {
 		}
 		exec.Command("tmux", "set-option", "-gu", "@tabby_spawning").Run()
 	}
+}
+
+// ── Tmux-hook subcommands (Step 4) ──────────────────────────────────────
+
+// doHookClientResized forwards a tmux client-resized hook to the daemon as a
+// MsgHook over the unix socket. Replaces the old `kill -USR2` path used by
+// `tabby hook signal-client-resize`. The args carry the firing client's tty
+// + size at hook time, captured by tmux format strings; the daemon reads
+// them for diagnostics but still re-elects the active client via its own
+// elector (so a non-active client's resize doesn't drag every window).
+//
+// Backward compat: the daemon still accepts SIGUSR2; older `tabby hook`
+// binaries on disk during a partial deploy continue to function. The
+// daemon's lastResizeKey dedup absorbs any duplicate signal+hook fires.
+func doHookClientResized(args []string) {
+	hookArgs := map[string]string{}
+	if len(args) >= 1 {
+		hookArgs["tty"] = args[0]
+	}
+	if len(args) >= 2 {
+		hookArgs["width"] = args[1]
+	}
+	if len(args) >= 3 {
+		hookArgs["height"] = args[2]
+	}
+	_ = sendHook("client-resized", hookArgs)
+}
+
+// doHookAfterSelectWindow forwards a tmux after-select-window hook. Replaces
+// the inline `kill -USR1` previously embedded in the hook command string.
+func doHookAfterSelectWindow(args []string) {
+	hookArgs := map[string]string{}
+	if len(args) >= 1 {
+		hookArgs["window"] = args[0]
+	}
+	_ = sendHook("after-select-window", hookArgs)
+}
+
+// doHookAfterResizePane forwards a tmux after-resize-pane hook. The
+// sidebar/header filter still lives in doOnPaneResize on the CLI side; this
+// path is for callers that have already filtered.
+func doHookAfterResizePane(args []string) {
+	hookArgs := map[string]string{}
+	if len(args) >= 1 {
+		hookArgs["pane"] = args[0]
+	}
+	_ = sendHook("after-resize-pane", hookArgs)
+}
+
+// doHookClientAttached forwards a tmux client-attached hook so the daemon
+// pokes refresh and observes the new client immediately. The cycle-pane
+// `--ensure-content` step still runs from the tmux command string, not the
+// daemon, so this is purely a refresh nudge.
+func doHookClientAttached(args []string) {
+	_ = args
+	_ = sendHook("client-attached", nil)
+}
+
+// sendHook dials the daemon socket and sends a MsgHook envelope. Mirrors
+// sendAction's graceful-failure pattern: dial timeout 200ms (tmux hooks are
+// hot paths), and any error returns nil so tmux sees no failure.
+func sendHook(kind string, args map[string]string) error {
+	sessionID, err := getSessionID()
+	if err != nil {
+		return nil
+	}
+	sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
+	conn, err := net.DialTimeout("unix", sockPath, 200*time.Millisecond)
+	if err != nil {
+		// Daemon down or starting up — silent no-op matches signalDaemon.
+		return nil
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	msg := daemon.Message{
+		Type:    daemon.MsgHook,
+		Payload: daemon.HookPayload{Kind: kind, Args: args},
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return nil
+	}
+	data = append(data, '\n')
+	if _, err := conn.Write(data); err != nil {
+		return nil
+	}
+	return nil
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

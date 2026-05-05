@@ -61,6 +61,19 @@ type SignalEvent struct{ Sig syscall.Signal }
 
 func (SignalEvent) kind() string { return "signal" }
 
+// TmuxHookEvent carries a tmux-hook delivery from the `tabby hook` CLI into
+// the loop. Step 4 of the daemon refactor (see
+// /Users/b/.claude/plans/nifty-jingling-tulip.md): tmux hooks now flow over
+// the daemon socket as MsgHook instead of `kill -USR1`/`kill -USR2`. The
+// SIGUSR1/SIGUSR2 paths remain intact for backward compatibility during
+// rollout — `lastResizeKey` dedup absorbs any duplicate signal+hook fires.
+type TmuxHookEvent struct {
+	Kind string
+	Args map[string]string
+}
+
+func (e TmuxHookEvent) kind() string { return "hook:" + e.Kind }
+
 // LoopTickDeps bundles the closures and references that the migrated ticker
 // handlers (handle*Tick methods on Loop) need from the surrounding Daemon
 // scope. They are wired in by main.go after the Daemon-local closures
@@ -244,6 +257,8 @@ func (l *Loop) dispatch(ev Event) {
 		l.handleSocketCheckTick()
 	case SignalEvent:
 		l.handleSignal(e)
+	case TmuxHookEvent:
+		l.handleTmuxHook(e)
 	default:
 		logEvent("LOOP_UNKNOWN_EVENT kind=%s", ev.kind())
 	}
@@ -635,5 +650,42 @@ func (l *Loop) handleIdleTick() {
 		}
 	} else {
 		l.idleStart = time.Time{}
+	}
+}
+
+// handleTmuxHook routes a tmux-hook delivery (now arriving as a socket
+// message) into the existing loop-side handlers. Each hook ultimately wants
+// to either trigger a refresh poke (USR1 path) or a resize-recheck (USR2
+// path); both paths already exist from Step 3, so this is just routing.
+//
+// Backward compat: the daemon still accepts SIGUSR1/SIGUSR2, and
+// `lastResizeKey` (shared with handleClientGeomTick / handleClientResized)
+// dedups any duplicate signal+hook fires during a partial-upgrade window
+// where an older `tabby hook` binary still uses `kill -USR2`.
+func (l *Loop) handleTmuxHook(e TmuxHookEvent) {
+	logEvent("HOOK_RECV kind=%s args=%v", e.Kind, e.Args)
+	switch e.Kind {
+	case "client-resized":
+		// Mirror the SIGUSR2 path. The args carry tty/width/height directly,
+		// but handleClientResized re-queries activeClientGeometry() because
+		// the elector may have a more current pin than the firing client's
+		// raw geometry. lastResizeKey dedup applies.
+		l.handleClientResized()
+	case "after-select-window":
+		// Mirror the SIGUSR1 path: poke refresh so spawn/cleanup runs.
+		l.handleRefreshSignal()
+	case "after-resize-pane":
+		// The hook fires for any pane resize; the `tabby hook on-pane-resize`
+		// CLI side already filters to sidebar/header panes before sending,
+		// so if the daemon sees this hook the filter has already passed.
+		l.handleRefreshSignal()
+	case "client-attached":
+		// `tabby cycle-pane --ensure-content` runs from the tmux-hook
+		// command string itself (not via the daemon); the daemon-side hook
+		// event is just a refresh poke so spawn/cleanup observes the new
+		// client immediately.
+		l.handleRefreshSignal()
+	default:
+		logEvent("HOOK_UNKNOWN_KIND kind=%s", e.Kind)
 	}
 }

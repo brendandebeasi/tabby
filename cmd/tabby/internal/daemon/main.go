@@ -2273,6 +2273,18 @@ func Run(args []string) int {
 		logEvent("CLIENT_DISCONNECT client=%s", clientID)
 	}
 
+	// OnHook: tmux hooks now arrive as socket messages (Step 4 of the daemon
+	// refactor; see /Users/b/.claude/plans/nifty-jingling-tulip.md). Forward
+	// onto the loop where handleTmuxHook routes by kind. The SIGUSR1/SIGUSR2
+	// paths are intentionally retained for backward compatibility — see
+	// handler comments in loop.go.
+	server.OnHook = func(p *daemon.HookPayload) {
+		if p == nil {
+			return
+		}
+		loop.Submit(TmuxHookEvent{Kind: p.Kind, Args: p.Args})
+	}
+
 	// Set up menu send callback for in-renderer context menus
 	coordinator.OnSendMenu = func(clientID string, menu *daemon.MenuPayload) {
 		server.SendMenuToClient(clientID, menu)

@@ -70,6 +70,12 @@ type Server struct {
 	// Callback for client disconnect
 	OnDisconnect func(clientID string)
 
+	// Callback for tmux-hook deliveries from `tabby hook` CLI. The daemon
+	// wires this to push a TmuxHookEvent onto its event loop, replacing the
+	// SIGUSR1 / SIGUSR2 signaling path used by pre-Step-4 hook subcommands.
+	// See /Users/b/.claude/plans/nifty-jingling-tulip.md Step 4.
+	OnHook func(p *HookPayload)
+
 	// Debug logging callback (set by daemon for diagnostics)
 	DebugLog func(format string, args ...interface{})
 }
@@ -415,6 +421,45 @@ func (s *Server) handleClient(conn net.Conn) {
 				writeMu.Lock()
 				s.sendMessage(conn, Message{Type: MsgPong})
 				writeMu.Unlock()
+			}
+
+		case MsgHook:
+			// MsgHook carries a tmux-hook delivery from `tabby hook`. The
+			// hook CLI dials the socket, sends one Message, and disconnects;
+			// it does not subscribe, so clientID may be "". That's fine —
+			// the payload itself identifies which hook fired.
+			if msg.Payload == nil {
+				if s.DebugLog != nil {
+					s.DebugLog("SOCKET_HOOK_DROP reason=nil_payload remote=%s", remoteAddr)
+				}
+				continue
+			}
+			payloadBytes, err := json.Marshal(msg.Payload)
+			if err != nil {
+				if s.DebugLog != nil {
+					s.DebugLog("SOCKET_HOOK_DROP reason=payload_marshal remote=%s err=%v", remoteAddr, err)
+				}
+				continue
+			}
+			var hp HookPayload
+			if err := json.Unmarshal(payloadBytes, &hp); err != nil {
+				if s.DebugLog != nil {
+					s.DebugLog("SOCKET_HOOK_DROP reason=payload_unmarshal remote=%s bytes=%d err=%v", remoteAddr, len(payloadBytes), err)
+				}
+				continue
+			}
+			if s.DebugLog != nil {
+				s.DebugLog("SOCKET_HOOK kind=%s args=%v remote=%s", hp.Kind, hp.Args, remoteAddr)
+			}
+			if s.OnHook != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Fprintf(os.Stderr, "PANIC in OnHook (kind=%s): %v\n", hp.Kind, r)
+						}
+					}()
+					s.OnHook(&hp)
+				}()
 			}
 		}
 	}

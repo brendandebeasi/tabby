@@ -182,20 +182,29 @@ func fileExists(path string) bool {
 
 // registerHooks ensures tmux hooks for resize/focus/select are registered.
 // Invokes the consolidated `tabby hook` and `tabby cycle-pane` subcommands.
+//
+// Step 4 of the daemon refactor (see
+// /Users/b/.claude/plans/nifty-jingling-tulip.md): tmux hooks now flow into
+// the daemon over its unix socket as MsgHook envelopes. The legacy
+// `kill -USR1` / `kill -USR2` paths remain in place inside the daemon for
+// backward compatibility with older `tabby hook` binaries during rollout,
+// but new hook strings no longer emit signals.
+//
+// `client-active` and `client-focus-in` were dropped: they fire on focus
+// shifts that don't change geometry, and `client-resized` already covers
+// every real size change. Removing them eliminates a redundant resize storm
+// (4-8 RESIZE_ALL_WINDOWS per opencode launch → 1).
 func registerHooks(exe string) {
 	hookCmd := fmt.Sprintf("%s hook", exe)
 	cycleCmd := fmt.Sprintf("%s cycle-pane", exe)
-	signalCmd := `kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true`
 
 	type hook struct{ name, cmd string }
 	hooks := []hook{
 		{"after-resize-pane", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{hook_pane}\"'", hookCmd)},
-		{"after-resize-window", fmt.Sprintf("run-shell -b '%s'", signalCmd)},
-		{"client-resized", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
-		{"client-active", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
-		{"client-focus-in", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
-		{"after-select-window", fmt.Sprintf("run-shell -b '%s; tmux refresh-client -S; %s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --ensure-content'", signalCmd, hookCmd, cycleCmd)},
-		{"client-attached", fmt.Sprintf("run-shell -b '%s --ensure-content'", cycleCmd)},
+		{"after-resize-window", fmt.Sprintf("run-shell -b '%s after-resize-pane \"#{hook_pane}\"'", hookCmd)},
+		{"client-resized", fmt.Sprintf("run-shell -b '%s client-resized \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'", hookCmd, hookCmd)},
+		{"after-select-window", fmt.Sprintf("run-shell -b '%s after-select-window \"#{window_id}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --ensure-content'", hookCmd, hookCmd, cycleCmd)},
+		{"client-attached", fmt.Sprintf("run-shell -b '%s client-attached'; run-shell -b '%s --ensure-content'", hookCmd, cycleCmd)},
 	}
 	for _, h := range hooks {
 		exec.Command("tmux", "set-hook", "-g", h.name, h.cmd).Run()

@@ -29,7 +29,7 @@ func Run(args []string) int {
 
 	sessionID := tmuxGetValue("display-message", "-p", "#{session_id}")
 	if sessionID == "" {
-		return 1
+		return 0
 	}
 
 	stateFile := fmt.Sprintf("/tmp/tabby-sidebar-%s.state", sessionID)
@@ -123,7 +123,12 @@ func disable(sessionID, pidFile, sockPath, sentinel, watchdogPidFile, stateFile 
 
 	run("tmux", "refresh-client", "-S")
 
-	// Remove resize hooks in parallel
+	// Remove resize hooks in parallel.
+	// Step 4 of the daemon refactor (see
+	// /Users/b/.claude/plans/nifty-jingling-tulip.md) dropped client-active
+	// and client-focus-in, but we still send `set-hook -gu` for them here
+	// in case a previous tabby version registered them — `set-hook -gu` on
+	// an unregistered hook is a safe no-op.
 	var unhookWg sync.WaitGroup
 	for _, h := range []string{"after-resize-pane", "after-resize-window", "client-resized", "after-select-window", "client-active", "client-focus-in", "client-attached"} {
 		unhookWg.Add(1)
@@ -195,22 +200,24 @@ func enable(sessionID, exe, pidFile, sockPath, watchdogPidFile, stateFile string
 
 	// Register hooks using the consolidated tabby binary. Each hook invokes
 	// `tabby hook <subcommand>` or `tabby cycle-pane` etc.
+	//
+	// Step 4 of the daemon refactor (see
+	// /Users/b/.claude/plans/nifty-jingling-tulip.md): tmux hooks now flow
+	// into the daemon over its unix socket as MsgHook envelopes instead of
+	// `kill -USR1` / `kill -USR2`. The daemon retains its SIGUSR handlers
+	// for backward compat. `client-active` and `client-focus-in` were
+	// dropped — `client-resized` already covers every real geometry change.
 	hookCmd := fmt.Sprintf("%s hook", exe)
 	cycleCmd := fmt.Sprintf("%s cycle-pane", exe)
-
-	// shellcheck disable equivalent: these use $() which tmux expands at hook time
-	signalCmd := `kill -USR1 $(tmux show-option -gqv @tabby_daemon_pid) 2>/dev/null || true`
 
 	// Register hooks in parallel
 	var hookWg sync.WaitGroup
 	hooks := [][2]string{
 		{"after-resize-pane", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{hook_pane}\"'", hookCmd)},
-		{"after-resize-window", fmt.Sprintf("run-shell -b '%s'", signalCmd)},
-		{"client-resized", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
-		{"client-active", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
-		{"client-focus-in", fmt.Sprintf("run-shell '%s signal-client-resize \"#{client_width}\" \"#{client_height}\"'; run-shell '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s'", hookCmd, hookCmd, signalCmd)},
-		{"after-select-window", fmt.Sprintf("run-shell -b '%s; tmux refresh-client -S; %s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --ensure-content'", signalCmd, hookCmd, cycleCmd)},
-		{"client-attached", fmt.Sprintf("run-shell -b '%s --ensure-content'", cycleCmd)},
+		{"after-resize-window", fmt.Sprintf("run-shell -b '%s after-resize-pane \"#{hook_pane}\"'", hookCmd)},
+		{"client-resized", fmt.Sprintf("run-shell -b '%s client-resized \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'", hookCmd, hookCmd)},
+		{"after-select-window", fmt.Sprintf("run-shell -b '%s after-select-window \"#{window_id}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --ensure-content'", hookCmd, hookCmd, cycleCmd)},
+		{"client-attached", fmt.Sprintf("run-shell -b '%s client-attached'; run-shell -b '%s --ensure-content'", hookCmd, cycleCmd)},
 	}
 	for _, h := range hooks {
 		hookWg.Add(1)

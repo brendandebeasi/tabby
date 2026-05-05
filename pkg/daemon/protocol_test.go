@@ -24,8 +24,9 @@ func TestMessageTypeConstants(t *testing.T) {
 			MsgColorPicker:    true,
 			MsgPing:           true,
 			MsgPong:           true,
+			MsgHook:           true,
 		}
-		assert.Equal(t, 12, len(expected), "should have exactly 12 message types")
+		assert.Equal(t, 13, len(expected), "should have exactly 13 message types")
 	})
 
 	t.Run("constants_have_correct_string_values", func(t *testing.T) {
@@ -45,6 +46,7 @@ func TestMessageTypeConstants(t *testing.T) {
 			{MsgColorPicker, "color_picker"},
 			{MsgPing, "ping"},
 			{MsgPong, "pong"},
+			{MsgHook, "hook"},
 		}
 
 		for _, tt := range tests {
@@ -58,7 +60,7 @@ func TestMessageTypeConstants(t *testing.T) {
 		constants := []MessageType{
 			MsgSubscribe, MsgUnsubscribe, MsgRender, MsgInput, MsgResize,
 			MsgViewportUpdate, MsgMenu, MsgMenuSelect, MsgMarkerPicker,
-			MsgColorPicker, MsgPing, MsgPong,
+			MsgColorPicker, MsgPing, MsgPong, MsgHook,
 		}
 
 		seen := make(map[MessageType]bool)
@@ -66,7 +68,7 @@ func TestMessageTypeConstants(t *testing.T) {
 			assert.False(t, seen[c], "MessageType %s appears more than once", c)
 			seen[c] = true
 		}
-		assert.Equal(t, 12, len(seen), "should have exactly 12 unique constants")
+		assert.Equal(t, 13, len(seen), "should have exactly 13 unique constants")
 	})
 }
 
@@ -213,6 +215,69 @@ func TestJSONRoundTrip(t *testing.T) {
 		}
 
 		assert.Equal(t, original, restored)
+	})
+
+	t.Run("HookPayload", func(t *testing.T) {
+		original := HookPayload{
+			Kind: "client-resized",
+			Args: map[string]string{
+				"tty":    "/dev/ttys003",
+				"width":  "180",
+				"height": "50",
+			},
+		}
+
+		data, err := json.Marshal(original)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		var restored HookPayload
+		err = json.Unmarshal(data, &restored)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		assert.Equal(t, original, restored)
+	})
+
+	t.Run("Message_with_HookPayload", func(t *testing.T) {
+		payload := HookPayload{
+			Kind: "after-select-window",
+			Args: map[string]string{"window": "@5"},
+		}
+
+		original := Message{
+			Type:    MsgHook,
+			Payload: payload,
+		}
+
+		data, err := json.Marshal(original)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		// Round-trip the envelope through the same json.Marshal path the
+		// server uses to re-decode an interface{} payload.
+		var restored Message
+		err = json.Unmarshal(data, &restored)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		assert.Equal(t, original.Type, restored.Type)
+		assert.NotNil(t, restored.Payload)
+
+		payloadBytes, err := json.Marshal(restored.Payload)
+		if !assert.NoError(t, err) {
+			return
+		}
+		var restoredHP HookPayload
+		err = json.Unmarshal(payloadBytes, &restoredHP)
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.Equal(t, payload, restoredHP)
 	})
 
 	t.Run("ViewportUpdatePayload", func(t *testing.T) {
