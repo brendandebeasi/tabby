@@ -51,6 +51,16 @@ func (WatchdogTickEvent) kind() string    { return "tick:watchdog" }
 func (IdleTickEvent) kind() string        { return "tick:idle" }
 func (SocketCheckTickEvent) kind() string { return "tick:socket_check" }
 
+// SignalEvent carries a SIGUSR1 / SIGUSR2 delivery into the loop. Step 3 of
+// the daemon refactor (see /Users/b/.claude/plans/nifty-jingling-tulip.md)
+// migrates the two former signal-handler goroutines onto the loop so the
+// SIGUSR2 path can dedup against lastResizeKey (the geom-tick path already
+// dedups; SIGUSR2 was the bypass that today causes redundant resize storms
+// on opencode launch).
+type SignalEvent struct{ Sig syscall.Signal }
+
+func (SignalEvent) kind() string { return "signal" }
+
 // LoopTickDeps bundles the closures and references that the migrated ticker
 // handlers (handle*Tick methods on Loop) need from the surrounding Daemon
 // scope. They are wired in by main.go after the Daemon-local closures
@@ -232,6 +242,8 @@ func (l *Loop) dispatch(ev Event) {
 		l.handleIdleTick()
 	case SocketCheckTickEvent:
 		l.handleSocketCheckTick()
+	case SignalEvent:
+		l.handleSignal(e)
 	default:
 		logEvent("LOOP_UNKNOWN_EVENT kind=%s", ev.kind())
 	}
@@ -515,6 +527,69 @@ func (l *Loop) handleSocketCheckTick() {
 			return
 		}
 	}
+}
+
+// handleSignal dispatches SIGUSR1 / SIGUSR2 events on the loop goroutine.
+// The flag is cleared at entry (matching the tick-handler convention) so a
+// signal arriving while this handler is mid-run can re-queue.
+func (l *Loop) handleSignal(e SignalEvent) {
+	switch e.Sig {
+	case syscall.SIGUSR1:
+		l.flags.usr1.Store(false)
+		l.handleRefreshSignal()
+	case syscall.SIGUSR2:
+		l.flags.usr2.Store(false)
+		l.handleClientResized()
+	default:
+		logEvent("LOOP_UNKNOWN_SIGNAL sig=%v", e.Sig)
+	}
+}
+
+// handleRefreshSignal is the migrated body of the former SIGUSR1 goroutine in
+// main.go. refreshCh is still sourced by coordinator.OnRefreshLayout and by
+// handleRendererInput, so we keep the channel and just poke it from here;
+// the heavy signal_refresh handler still lives in main.go's for-select for
+// now (its activeWindowID / lastWindowsHash mutations are migrated by Step 5).
+func (l *Loop) handleRefreshSignal() {
+	logEvent("SIGNAL_USR1")
+	// Non-blocking send: l.flags.usr1 already gives us at-most-one-pending
+	// semantics at the loop level, so the prior burst-collapse dance in
+	// main.go is redundant here. If refreshCh is full, the existing pending
+	// refresh will pick up our intent.
+	select {
+	case l.refreshCh <- struct{}{}:
+	default:
+		logEvent("SIGNAL_USR1 queue=full action=skipped")
+	}
+}
+
+// handleClientResized is the migrated body of the former SIGUSR2 goroutine
+// in main.go, with the lastResizeKey dedup applied BEFORE resize work. The
+// geom-tick handler at handleClientGeomTick already writes lastResizeKey;
+// both paths share the same field so SIGUSR2 and the 250ms geom tick dedup
+// against each other. This is the deliberate behavior change in Step 3.
+func (l *Loop) handleClientResized() {
+	logEvent("SIGNAL_USR2_CLIENT_RESIZED")
+	w, h, tty, _, ok := activeClientGeometry()
+	if !ok {
+		return
+	}
+	key := fmt.Sprintf("%s:%dx%d", tty, w, h)
+	if key == l.lastResizeKey {
+		logEvent("CLIENT_RESIZED_NOOP key=%s", key)
+		return
+	}
+	l.lastResizeKey = key
+
+	l.coord.SetActiveClientWidth(w)
+	resizeAllWindowsToClient(w, h, "sigusr2")
+	logEvent("SIGUSR2_ACTIVE_CLIENT tty=%s size=%dx%d", tty, w, h)
+	syncClientSizesFromTmux(l.server, l.coord, "sigusr2")
+	activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+	logEvent("WIDTH_SYNC_REQUEST trigger=sigusr2 active=%s force=1", activeWin)
+	l.coord.RunWidthSync(activeWin, true /* force */)
+	go l.server.BroadcastRender()
+	logEvent("SIGNAL_USR2_DONE active=%s", activeWin)
 }
 
 // handleIdleTick is the migrated body of the idleTicker case in the

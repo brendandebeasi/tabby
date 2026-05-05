@@ -2303,52 +2303,29 @@ func Run(args []string) int {
 		}
 	}
 
-	// Register SIGUSR1 handler BEFORE server.Start() creates the socket.
-	// ensure_sidebar.sh sends USR1 the moment it detects the socket, so the
-	// handler must be in place before the socket appears or the signal arrives
-	// before Notify and kills the process (Go uses the OS default — terminate).
-	refreshSigCh := make(chan os.Signal, 10)
-	signal.Notify(refreshSigCh, syscall.SIGUSR1)
+	// Register SIGUSR1/SIGUSR2 handlers BEFORE server.Start() creates the
+	// socket. ensure_sidebar.sh sends USR1 the moment it detects the socket,
+	// so the handler must be in place before the socket appears or the signal
+	// arrives before Notify and kills the process (Go uses the OS default —
+	// terminate).
+	//
+	// Step 3 of the daemon refactor (see
+	// /Users/b/.claude/plans/nifty-jingling-tulip.md): both former
+	// signal-handler goroutine bodies now live on Loop (handleRefreshSignal /
+	// handleClientResized). This goroutine is just a producer that drops
+	// duplicate signals at submitCoalesced via flags.usr1 / flags.usr2.
+	// SIGUSR2 now dedups against lastResizeKey (shared with the 250ms
+	// clientGeometryTicker) — that is the deliberate behavioral fix.
+	sigUSRCh := make(chan os.Signal, 16)
+	signal.Notify(sigUSRCh, syscall.SIGUSR1, syscall.SIGUSR2)
 	go func() {
-		for range refreshSigCh {
-			logEvent("SIGNAL_USR1 session=%s", *sessionID)
-
-			select {
-			case refreshCh <- struct{}{}:
-			default:
-				select {
-				case <-refreshCh:
-				default:
-				}
-				select {
-				case refreshCh <- struct{}{}:
-				default:
-				}
-				logEvent("SIGNAL_USR1 queue=full action=coalesced")
+		for sig := range sigUSRCh {
+			switch sig {
+			case syscall.SIGUSR1:
+				loop.submitCoalesced(&loop.flags.usr1, SignalEvent{Sig: syscall.SIGUSR1})
+			case syscall.SIGUSR2:
+				loop.submitCoalesced(&loop.flags.usr2, SignalEvent{Sig: syscall.SIGUSR2})
 			}
-		}
-	}()
-
-	// SIGUSR2 = client-resized: immediately force a full width sync across all windows.
-	// Using a separate signal bypasses the 500ms debounce on the normal USR1 path.
-	clientResizedCh := make(chan os.Signal, 5)
-	signal.Notify(clientResizedCh, syscall.SIGUSR2)
-	go func() {
-		for range clientResizedCh {
-			logEvent("SIGNAL_USR2_CLIENT_RESIZED session=%s", *sessionID)
-			go func() {
-				if w, h, tty, _, ok := activeClientGeometry(); ok {
-					coordinator.SetActiveClientWidth(w)
-					resizeAllWindowsToClient(w, h, "sigusr2")
-					logEvent("SIGUSR2_ACTIVE_CLIENT tty=%s size=%dx%d", tty, w, h)
-				}
-				syncClientSizesFromTmux(server, coordinator, "sigusr2")
-				activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
-				logEvent("WIDTH_SYNC_REQUEST trigger=sigusr2 active=%s force=1", activeWin)
-				coordinator.RunWidthSync(activeWin, true /* force */)
-				server.BroadcastRender()
-				logEvent("SIGNAL_USR2_DONE session=%s active=%s", *sessionID, activeWin)
-			}()
 		}
 	}()
 
