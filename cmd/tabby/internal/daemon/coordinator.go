@@ -135,6 +135,66 @@ func clientTTYForWindow(windowID string) string {
 	return bestTTY
 }
 
+func (c *Coordinator) getTTYWidth(tty string) int {
+	tty = strings.TrimSpace(tty)
+	if tty == "" {
+		return 0
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "-c", tty, "#{client_width}").Output()
+	if err != nil {
+		return 0
+	}
+	w, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return w
+}
+
+// navSourceWindowFromTarget resolves a tabby-hook bare-nav target to a
+// window ID for use as the cycle anchor. Targets are either a window
+// (@NN) — which we use directly — or a pane (%NN) forwarded from
+// TMUX_PANE, which we resolve to its window via tmux. Anchoring on the
+// originating window makes M-}/M-{ navigation consistent regardless of
+// which client tmux happens to consider globally active (the same
+// multi-client attribution issue commit 71ed7b9 fixed for header
+// remaps). Returns "" on any failure — empty source falls back to the
+// daemon's existing default-client heuristic, preserving prior behavior.
+func navSourceWindowFromTarget(target string) string {
+	t := strings.TrimSpace(target)
+	if strings.HasPrefix(t, "@") {
+		return t
+	}
+	if strings.HasPrefix(t, "%") {
+		out, err := exec.Command("tmux", "display-message", "-p", "-t", t, "#{window_id}").Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	return ""
+}
+
+// logNavKeyTrigger emits a diagnostic line for bare next_window/prev_window
+// actions arriving from tabby-hook (i.e. real M-}/M-{ keystrokes hitting
+// tmux's root keytable, normalized from the user's cmd+]/cmd+[ config).
+// tabby-hook forwards TMUX_PANE (or a tmux-display fallback) in target and
+// the most-recently-active client TTY in pickerValue so we can trace which
+// client/pane fired the keystroke — useful for multi-client (phone+desktop)
+// debugging where the source is otherwise opaque. The action itself still
+// runs unchanged; this is log-only.
+func logNavKeyTrigger(action, sourcePane, activeClientTTY string) {
+	winID := ""
+	if sourcePane != "" {
+		if out, err := exec.Command("tmux", "display-message", "-p", "-t", sourcePane, "#{window_id}").Output(); err == nil {
+			winID = strings.TrimSpace(string(out))
+		}
+	}
+	resolvedTTY := strings.TrimSpace(clientTTYForWindow(winID))
+	logEvent("NAV_KEY_TRIGGER action=%s source_pane=%q source_window=%s pane_owner_tty=%s ctx=%s",
+		action, sourcePane, winID, resolvedTTY, activeClientTTY)
+}
+
 func tmuxClientWindowSnapshot() string {
 	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}=#{window_id}(#{client_flags})").Output()
 	if err != nil {
@@ -222,6 +282,25 @@ func windowFocusRestoreTarget(activeWindowID, pendingNewWindowID string) string 
 	return pendingNewWindowID
 }
 
+// preferredWindowFocusTarget returns the window the post-spawn focus-restore
+// should re-target, or "" to skip the restore. The original implementation
+// compared the new window against an unscoped `display-message -p
+// #{window_id}` query, but on multi-client sessions that query returns
+// whichever client tmux happened to elect as default at that instant — and
+// the elector flips between attached clients as their `client_activity`
+// changes. Each flip from "phone on @new" to "desktop on @other" was
+// detected as drift, restored via global `select-window`, which yanked all
+// clients to @new, which generated more activity, which flipped the elector
+// again. That feedback loop was the post-`+` cycling bug.
+//
+// The fix: when a FiringTTY was captured at spawn, query *that* client's
+// current window via `display-message -c <tty>`. Only fire the restore if
+// the firing client itself drifted off the new window. Other clients that
+// stayed on their previous windows are no longer the daemon's concern.
+//
+// When no FiringTTY is set (legacy callers, or when client lookup failed),
+// fall back to the prior global-active behaviour — preserved so we don't
+// regress non-multi-client setups, but logged so we can spot the path.
 func preferredWindowFocusTarget(c *Coordinator, activeWindowID string) string {
 	if c == nil {
 		return ""
@@ -233,16 +312,42 @@ func preferredWindowFocusTarget(c *Coordinator, activeWindowID string) string {
 		}
 		return ""
 	}
+	if status.WindowID == "" {
+		logEvent("FOCUS_TARGET_CHECK pending= active=%s result= state=%s reason=pending_empty age_ms=%d", activeWindowID, status.State, time.Since(status.Created).Milliseconds())
+		return ""
+	}
+
+	// Firing-TTY-scoped path: only restore if the originating client drifted.
+	if status.FiringTTY != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-c", status.FiringTTY, "#{window_id}").Output()
+		cancel()
+		if err == nil {
+			firingActive := strings.TrimSpace(string(out))
+			result := windowFocusRestoreTarget(firingActive, status.WindowID)
+			reason := "firing_differs"
+			if firingActive == status.WindowID {
+				reason = "firing_on_pending"
+			} else if firingActive == "" {
+				reason = "firing_empty"
+			}
+			logEvent("FOCUS_TARGET_CHECK pending=%s active=%s firing_tty=%s firing_active=%s result=%s state=%s reason=%s age_ms=%d", status.WindowID, activeWindowID, status.FiringTTY, firingActive, result, status.State, reason, time.Since(status.Created).Milliseconds())
+			return result
+		}
+		// display-message -c failed (client gone, etc.) — skip the restore
+		// rather than fall through to the legacy path. The firing client
+		// no longer being attached is a benign reason to drop the restore.
+		logEvent("FOCUS_TARGET_SKIP pending=%s firing_tty=%s reason=display_message_err err=%v", status.WindowID, status.FiringTTY, err)
+		return ""
+	}
+
+	// Legacy fallback: no FiringTTY captured. Use the pre-fix behaviour.
 	target := windowFocusRestoreTarget(activeWindowID, status.WindowID)
 	reason := "pending_differs"
-	if status.WindowID == "" {
-		reason = "pending_empty"
-	} else if status.WindowID == activeWindowID {
+	if status.WindowID == activeWindowID {
 		reason = "pending_equals_active"
 	}
-	if status.WindowID != "" {
-		logEvent("FOCUS_TARGET_CHECK pending=%s active=%s result=%s state=%s reason=%s age_ms=%d", status.WindowID, activeWindowID, target, status.State, reason, time.Since(status.Created).Milliseconds())
-	}
+	logEvent("FOCUS_TARGET_CHECK pending=%s active=%s result=%s state=%s reason=%s age_ms=%d firing_tty=", status.WindowID, activeWindowID, target, status.State, reason, time.Since(status.Created).Milliseconds())
 	return target
 }
 
@@ -253,6 +358,15 @@ type NewWindowStatus struct {
 	Group      string
 	WorkingDir string
 	Created    time.Time
+	// FiringTTY is the tmux client that initiated the new-window action
+	// (the phone, in the canonical mobile case). Used by
+	// preferredWindowFocusTarget so the post-spawn focus-restore only fires
+	// when *this* client has drifted off the new window — not when an
+	// unrelated multi-client elector flip moves the daemon's idea of
+	// "active" to a desktop client that never followed the new-window
+	// switch in the first place. Empty when not captured (e.g. legacy
+	// callers); restore falls back to the prior global-active heuristic.
+	FiringTTY string
 }
 
 type WindowTransition struct {
@@ -262,9 +376,34 @@ type WindowTransition struct {
 	StartedAt      time.Time
 }
 
+// restoreWindowFocus re-targets the firing client back to the just-created
+// new window. When a FiringTTY is recorded on the pending status it uses
+// `tmux switch-client -c <tty>` so only that client moves; other clients
+// are left wherever they happen to be. This is the per-client scoping that
+// fixes the "+ then cycles other windows" bug — global `select-window`
+// previously yanked every attached client and the resulting activity
+// burst flipped tmux's default-client elector, which the daemon then
+// mis-read as the firing client drifting again, restarting the loop.
+//
+// Falls back to the global `select-window` path when no FiringTTY is set
+// (legacy spawn paths or when client lookup failed) so single-client setups
+// continue to behave identically.
 func restoreWindowFocus(windowID string) {
 	if windowID == "" {
 		return
+	}
+	firingTTY := ""
+	if globalCoordinator != nil {
+		firingTTY = strings.TrimSpace(globalCoordinator.NewWindowStatus().FiringTTY)
+	}
+	if firingTTY != "" {
+		if err := tmuxRun("switch-client", "-c", firingTTY, "-t", windowID); err != nil {
+			logEvent("RESTORE_WINDOW_FOCUS_PERCLIENT_ERR target=%s tty=%s err=%v", windowID, firingTTY, err)
+			// Fall through to global path so we still attempt recovery.
+		} else {
+			logEvent("RESTORE_WINDOW_FOCUS_PERCLIENT target=%s tty=%s", windowID, firingTTY)
+			return
+		}
 	}
 	if globalCoordinator != nil {
 		if err := globalCoordinator.SelectWindow(windowID, "restore_window_focus", "refresh_windows"); err == nil {
@@ -457,6 +596,16 @@ type Coordinator struct {
 	lastWindowByClient map[string]time.Time
 	lastPaneMenuOpen   map[string]time.Time
 
+	// Diagnostic state for the "+ tap then cycles through other windows" bug.
+	// Loop-only: written and read exclusively from handleSemanticAction on the
+	// loop goroutine, so no mutex is needed. All three are timestamps of the
+	// most recent event of that kind, used to compute deltas in WINDOW_HEADER_CLICK
+	// log lines so we can distinguish iOS auto-repeat (tight delta, same x)
+	// from drift-to-next_window (delta gap, x jumped) from render-driven replay.
+	lastWindowHeaderClickAt time.Time
+	lastNewWindowAt         time.Time
+	lastNewWindowID         string
+
 	// Background theme detector (deprecated, kept for fallback)
 	bgDetector *colors.BackgroundDetector
 
@@ -487,17 +636,18 @@ func (c *Coordinator) NewWindowStatus() NewWindowStatus {
 	return status
 }
 
-func (c *Coordinator) SetNewWindowInFlight(group, workingDir string) {
+func (c *Coordinator) SetNewWindowInFlight(group, workingDir, firingTTY string) {
 	c.newWindowMu.Lock()
 	c.newWindowStatus = NewWindowStatus{
 		State:      "inFlight",
 		SessionID:  c.sessionID,
 		Group:      strings.TrimSpace(group),
 		WorkingDir: strings.TrimSpace(workingDir),
+		FiringTTY:  strings.TrimSpace(firingTTY),
 		Created:    time.Now(),
 	}
 	c.newWindowMu.Unlock()
-	logEvent("NEW_WINDOW_INFLIGHT session=%s group=%s path=%s", c.sessionID, strings.TrimSpace(group), strings.TrimSpace(workingDir))
+	logEvent("NEW_WINDOW_INFLIGHT session=%s group=%s path=%s firing_tty=%s", c.sessionID, strings.TrimSpace(group), strings.TrimSpace(workingDir), strings.TrimSpace(firingTTY))
 }
 
 func (c *Coordinator) SetNewWindowReady(windowID string) {
@@ -510,10 +660,11 @@ func (c *Coordinator) SetNewWindowReady(windowID string) {
 		SessionID:  c.sessionID,
 		Group:      prev.Group,
 		WorkingDir: prev.WorkingDir,
+		FiringTTY:  prev.FiringTTY,
 		Created:    time.Now(),
 	}
 	c.newWindowMu.Unlock()
-	logEvent("NEW_WINDOW_READY windowID=%s group=%s", windowID, prev.Group)
+	logEvent("NEW_WINDOW_READY windowID=%s group=%s firing_tty=%s", windowID, prev.Group, prev.FiringTTY)
 }
 
 func (c *Coordinator) ClearNewWindowStatus() {
@@ -1111,7 +1262,51 @@ func NewCoordinator(sessionID string) *Coordinator {
 	c.sidebarHidden = sidebarIsStashed()
 	logEvent("COORDINATOR_INIT sidebarHidden=%v (from stash windows)", c.sidebarHidden)
 
+	// Reconcile any pre-existing stash windows whose tmux indices fall below
+	// sidebarStashParkBase. They were created before the park-on-stash fix
+	// landed (or by an older daemon), and leaving them at low indices keeps
+	// the post-`+`-tap window-cycling bug present until the next sidebar
+	// toggle. Park them now so syncWindowIndices' first run is healthy.
+	parkExistingStashWindows()
+
 	return c
+}
+
+// parkExistingStashWindows scans for stash windows whose tmux index is
+// below sidebarStashParkBase and moves them to a high index using
+// `move-window -a -t :<base>`. Idempotent — windows already >= base are
+// skipped. Safe to call any time; only runs tmux move-window for stashes
+// that need moving.
+func parkExistingStashWindows() {
+	out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}|#{window_index}|#{window_name}").Output()
+	if err != nil {
+		return
+	}
+	moved := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		winID := parts[0]
+		idxStr := parts[1]
+		name := parts[2]
+		if !strings.HasPrefix(name, sidebarStashWindowPrefix) {
+			continue
+		}
+		idx, convErr := strconv.Atoi(idxStr)
+		if convErr != nil || idx >= sidebarStashParkBase {
+			continue
+		}
+		if err := exec.Command("tmux", "move-window", "-d", "-a", "-s", winID, "-t", fmt.Sprintf(":%d", sidebarStashParkBase)).Run(); err != nil {
+			coordinatorDebugLog.Printf("parkExistingStashWindows: move %s (idx=%d) failed: %v", winID, idx, err)
+			continue
+		}
+		moved++
+	}
+	if moved > 0 {
+		logEvent("STASH_RECONCILE moved=%d park_base=%d", moved, sidebarStashParkBase)
+	}
 }
 
 // GetConfig returns the coordinator's config (for use by main.go)
@@ -2422,16 +2617,37 @@ func (c *Coordinator) RefreshWindows() {
 	for _, op := range pendingMoves {
 		tmuxRun("move-window", "-s", op.src, "-t", op.dst)
 	}
-	// Only restore window focus when a new window is pending (to ensure the
-	// newly created window stays active after tmux renumbering via move-window).
-	// Unconditionally calling restoreWindowFocus(activeWindowID) on every
-	// RefreshWindows causes spurious window switches: if a stale USR1 signal
-	// (queued before a Cmd+[/] key press) triggers RefreshWindows, the
-	// activeWindowID captured inside will be the OLD window, and select-window
-	// jumps back to it. See: Tabby issue "meta+[/] sometimes skips back".
-	if focusTarget := preferredWindowFocusTarget(c, activeWindowID); focusTarget != "" {
-		restoreWindowFocus(focusTarget)
-		logEvent("RESTORE_WINDOW_FOCUS target=%s active=%s", focusTarget, activeWindowID)
+	// Restore focus to the pending new window ONLY when this RefreshWindows
+	// actually performed window renumbering via move-window — that's the
+	// scenario the restore was originally added for (tmux's renumbering
+	// briefly drops the active marker, and we need to re-assert it).
+	//
+	// Firing on every RefreshWindows during the 3-second "ready" hold (the
+	// previous behaviour) caused the post-`+`-tap cycling bug on phone with
+	// sidebar detached: an unrelated session-active-window flip (driven by
+	// the after-kill-pane storm tmux runs while the new window's pane
+	// layout settles) was detected as drift, restored via select-window,
+	// which fed activity back into the system, etc. The restore-on-every-
+	// refresh was structurally broken for any case other than move-window
+	// renumbering. See coordinator.go preferredWindowFocusTarget for the
+	// detection-side notes.
+	//
+	// Single-session multi-client setups don't actually support per-client
+	// current windows in tmux 3.x — `switch-client -c <tty> -t <window>`
+	// is equivalent to `select-window` for the session — so we cannot
+	// scope the restore to just the firing client to dodge the cycle.
+	if len(pendingMoves) > 0 {
+		if focusTarget := preferredWindowFocusTarget(c, activeWindowID); focusTarget != "" {
+			restoreWindowFocus(focusTarget)
+			logEvent("RESTORE_WINDOW_FOCUS target=%s active=%s pending_moves=%d", focusTarget, activeWindowID, len(pendingMoves))
+		}
+	} else {
+		// Diagnostic: confirm we're skipping the restore on the cycling path.
+		// Cheap because preferredWindowFocusTarget is only consulted to log.
+		status := c.NewWindowStatus()
+		if status.State == "ready" && status.WindowID != "" {
+			logEvent("RESTORE_WINDOW_FOCUS_SKIP reason=no_pending_moves pending=%s active=%s firing_tty=%s age_ms=%d", status.WindowID, activeWindowID, status.FiringTTY, time.Since(status.Created).Milliseconds())
+		}
 	}
 }
 
@@ -2986,8 +3202,33 @@ type tmuxWindowMove struct {
 // positions shown in the sidebar. This ensures prefix+N selects the window
 // the user sees as "N" in the sidebar.
 // Returns pending move operations to execute after stateMu is released.
+//
+// Algorithm: cycle decomposition of the (current → desired) permutation.
+// Each non-trivial cycle of length k resolves in k+1 moves (one to a temp
+// index, k to the targets, walking the cycle in reverse). Fixed points
+// (windows already at their desired index) emit zero moves. Chains
+// (target slot empty — e.g., a new window's desired slot has no current
+// occupant) walk in reverse with no temp.
+//
+// Why not the brute-force "all to temp 1000+i, then all to desired" pass?
+// Each move-window fires both window-linked and window-unlinked tmux
+// hooks, each fires SIGNAL_CMD/USR1, which signals the daemon to refresh
+// and re-run syncWindowIndices. With 2*N moves per pass that's 4*N hook
+// fires; the next syncWindowIndices runs while the previous batch's moves
+// are still settling and emits its own (not-yet-converged) batch. The two
+// batches fight, convergence is ~1 window per refresh, and the user sees
+// 5+ window flips after a `+` tap on phone with sidebar detached. Cycle
+// decomposition emits the minimum N+c moves (c = number of non-trivial
+// cycles), which usually means 3 moves for the common new-window case
+// (one cycle of length 2: the new window swaps with its visual-order
+// neighbour). With one batch per real reorder the hook cascade no longer
+// produces overlapping batches.
+//
+// Temp index allocation: cycles use indices in [tempBase, tempBase+N).
+// tempBase is below sidebarStashParkBase (9000), above any plausible
+// real-window count, so it never collides with stash windows or real
+// windows.
 func (c *Coordinator) syncWindowIndices() []tmuxWindowMove {
-	// Build desired mapping: visual position -> window ID
 	type winMapping struct {
 		id           string
 		currentIndex int
@@ -3014,30 +3255,92 @@ func (c *Coordinator) syncWindowIndices() []tmuxWindowMove {
 		return nil // Already in order
 	}
 
-	coordinatorDebugLog.Printf("syncWindowIndices: reordering %d windows", len(mappings))
+	// Build "who is at each tmux index" + "what does each window want" maps
+	// for cycle decomposition.
+	idAtIndex := make(map[int]string, len(mappings))
+	mapByID := make(map[string]winMapping, len(mappings))
+	for _, m := range mappings {
+		idAtIndex[m.currentIndex] = m.id
+		mapByID[m.id] = m
+	}
 
-	// Collect pending moves: Phase 1 (to temp indices) + Phase 2 (to desired indices).
+	visited := make(map[string]bool, len(mappings))
 	var pending []tmuxWindowMove
+	const tempBase = 8000 // above visual indices, below sidebarStashParkBase
+	tempCounter := 0
 
-	// Phase 1: Move all windows to high temporary indices to avoid conflicts.
-	for i, m := range mappings {
-		tmpIdx := 1000 + i
-		if m.currentIndex != tmpIdx {
+	for _, start := range mappings {
+		if visited[start.id] {
+			continue
+		}
+		if start.currentIndex == start.desiredIndex {
+			visited[start.id] = true
+			continue
+		}
+
+		// Walk the chain/cycle: start.id wants start.desiredIndex; whoever
+		// is currently at start.desiredIndex wants their own desiredIndex;
+		// keep walking until we either circle back to start.id (a cycle)
+		// or fall off the end (a chain — desired slot is currently empty).
+		cycle := []winMapping{start}
+		visited[start.id] = true
+		isCycle := false
+		next := start.desiredIndex
+		for {
+			nextID, ok := idAtIndex[next]
+			if !ok {
+				// Chain: target slot empty. cycle stays as-is.
+				break
+			}
+			if nextID == start.id {
+				isCycle = true
+				break
+			}
+			if visited[nextID] {
+				// Defensive: shouldn't happen in a well-formed permutation.
+				break
+			}
+			visited[nextID] = true
+			next = mapByID[nextID].desiredIndex
+			cycle = append(cycle, mapByID[nextID])
+		}
+
+		if isCycle {
+			// Cycle resolution: move first to temp, then walk the cycle in
+			// reverse moving each window directly to its desired index.
+			// Indices vacate in the right order so each move can succeed
+			// without `-k` (which would destroy a colliding window).
+			tmp := tempBase + tempCounter
+			tempCounter++
 			pending = append(pending, tmuxWindowMove{
-				src: m.id,
-				dst: fmt.Sprintf(":%d", tmpIdx),
+				src: cycle[0].id,
+				dst: fmt.Sprintf(":%d", tmp),
 			})
+			for i := len(cycle) - 1; i >= 1; i-- {
+				pending = append(pending, tmuxWindowMove{
+					src: cycle[i].id,
+					dst: fmt.Sprintf(":%d", cycle[i].desiredIndex),
+				})
+			}
+			pending = append(pending, tmuxWindowMove{
+				src: fmt.Sprintf(":%d", tmp),
+				dst: fmt.Sprintf(":%d", cycle[0].desiredIndex),
+			})
+		} else {
+			// Chain resolution: walk in reverse, moving each window
+			// directly to its desired index. Each step's target was
+			// vacated by the previous step (or was already empty for the
+			// last entry).
+			for i := len(cycle) - 1; i >= 0; i-- {
+				pending = append(pending, tmuxWindowMove{
+					src: cycle[i].id,
+					dst: fmt.Sprintf(":%d", cycle[i].desiredIndex),
+				})
+			}
 		}
 	}
 
-	// Phase 2: Move windows from temp indices to their desired positions.
-	for i, m := range mappings {
-		tmpIdx := 1000 + i
-		pending = append(pending, tmuxWindowMove{
-			src: fmt.Sprintf(":%d", tmpIdx),
-			dst: fmt.Sprintf(":%d", m.desiredIndex),
-		})
-	}
+	coordinatorDebugLog.Printf("syncWindowIndices: %d windows, %d cycles, %d moves", len(mappings), tempCounter, len(pending))
 
 	// Update local state to reflect new indices
 	for i := range c.windows {
@@ -3046,7 +3349,6 @@ func (c *Coordinator) syncWindowIndices() []tmuxWindowMove {
 		}
 	}
 
-	coordinatorDebugLog.Printf("syncWindowIndices: done")
 	return pending
 }
 
@@ -4896,6 +5198,15 @@ func hasNarrowClient() bool {
 // back to the original window, and join-pane them in at the left edge.
 const sidebarStashWindowPrefix = "_tabby_stash_"
 
+// sidebarStashParkBase is the lowest tmux window index used for sidebar
+// stash windows. Stashes are parked at indices >= this value so they never
+// collide with the contiguous visual numbering (0..N) that
+// syncWindowIndices assigns to real windows. Without this, stash windows
+// occupy low indices on multi-window mobile sessions, blocking Phase 2 of
+// the renumber and causing the focus-restore feedback loop responsible
+// for the post-`+`-tap window-cycling bug.
+const sidebarStashParkBase = 9000
+
 func stashNameForWindow(windowID string) string {
 	return sidebarStashWindowPrefix + strings.TrimPrefix(windowID, "@")
 }
@@ -4934,19 +5245,43 @@ func hideSidebarPanes() {
 		}
 		stashName := stashNameForWindow(winID)
 		// break-pane -d: don't switch the current client to the new window.
-		if err := exec.Command("tmux", "break-pane", "-d", "-s", paneID, "-n", stashName).Run(); err != nil {
+		// -P -F prints the new stash window's window_id so we can park it
+		// at a high tmux index immediately afterwards (see below).
+		out, err := exec.Command("tmux", "break-pane", "-d", "-P", "-F", "#{window_id}", "-s", paneID, "-n", stashName).Output()
+		if err != nil {
 			coordinatorDebugLog.Printf("hideSidebarPanes: break-pane failed for %s: %v", paneID, err)
 			continue
 		}
+		stashWinID := strings.TrimSpace(string(out))
+		// Park the stash window at a high tmux index (>= sidebarStashParkBase)
+		// so it never collides with the sequential visual indices (0..N) that
+		// syncWindowIndices wants to assign to real windows. Without this,
+		// stash windows occupy low indices, which causes syncWindowIndices'
+		// Phase 2 (move from temp 1000+ to desired 0..N) to fail or shuffle
+		// — the underlying cause of the post-`+`-tap window cycling bug on
+		// phone with sidebar detached. `move-window -a -t :<base>` picks the
+		// first free index >= base, so each stash gets its own slot without
+		// us needing to track allocations.
+		if stashWinID != "" {
+			parkArgs := []string{"move-window", "-d", "-a", "-s", stashWinID, "-t", fmt.Sprintf(":%d", sidebarStashParkBase)}
+			if err := exec.Command("tmux", parkArgs...).Run(); err != nil {
+				coordinatorDebugLog.Printf("hideSidebarPanes: park-stash move-window failed for %s: %v", stashWinID, err)
+			}
+		}
 		// Persist the pre-stash width on the new stash window so restoreSidebarPanes
-		// can join the pane back at its original size.
+		// can join the pane back at its original size. Use the stash window_id
+		// (not its name) because move-window may have changed the index.
+		target := stashWinID
+		if target == "" {
+			target = stashName
+		}
 		if paneW != "" {
 			if w, convErr := strconv.Atoi(strings.TrimSpace(paneW)); convErr == nil && w > 0 {
-				exec.Command("tmux", "set-option", "-w", "-t", stashName,
+				exec.Command("tmux", "set-option", "-w", "-t", target,
 					"@tabby_stashed_width", strconv.Itoa(w)).Run()
 			}
 		}
-		coordinatorDebugLog.Printf("hideSidebarPanes: %s (window %s) -> %s width=%s", paneID, winID, stashName, paneW)
+		coordinatorDebugLog.Printf("hideSidebarPanes: %s (window %s) -> %s width=%s parked_at=>=%d", paneID, winID, stashName, paneW, sidebarStashParkBase)
 	}
 }
 
@@ -5021,8 +5356,16 @@ func (c *Coordinator) restoreSidebarPanes() {
 			exec.Command("tmux", "kill-window", "-t", stashWinID).Run()
 			continue
 		}
+		// -d: don't activate the joined pane in its destination window.
+		// Without -d, tmux makes the sidebar pane active in the destination
+		// window AND follows that focus to switch the session's active
+		// window — which means the LAST join in the loop wins, dragging
+		// the user from whatever window they were on to whichever window's
+		// stash got restored last (alphabetic-by-stash-name order, not
+		// any user-meaningful order). The user reported this as "cycle
+		// all the way to the topmost window and stop" on hamburger-open.
 		// -h -b -l <width>: horizontal split, before target, sized in cols.
-		if err := exec.Command("tmux", "join-pane", "-h", "-b", "-l", fmt.Sprintf("%d", width),
+		if err := exec.Command("tmux", "join-pane", "-d", "-h", "-b", "-l", fmt.Sprintf("%d", width),
 			"-s", stashPane, "-t", targetPane).Run(); err != nil {
 			coordinatorDebugLog.Printf("restoreSidebarPanes: join-pane failed for %s: %v", stashPane, err)
 			continue
@@ -5082,10 +5425,10 @@ func (c *Coordinator) restoreSidebarPanes() {
 // drops _tabby_stash_ windows) so we never land on a sidebar holding window.
 // Wraps around at the ends.
 func (c *Coordinator) selectNeighborWindow(delta int) {
-	c.selectNeighborWindowFrom("", delta)
+	c.selectNeighborWindowFrom("", delta, "internal")
 }
 
-func (c *Coordinator) selectNeighborWindowFrom(currentWindowID string, delta int) {
+func (c *Coordinator) selectNeighborWindowFrom(currentWindowID string, delta int, trigger string) {
 	c.stateMu.RLock()
 	wins := make([]string, 0, len(c.windows))
 	unfiltered := make([]string, 0, len(c.windows))
@@ -5161,9 +5504,9 @@ func (c *Coordinator) selectNeighborWindowFrom(currentWindowID string, delta int
 		idx = (idx + delta + len(wins)) % len(wins)
 	}
 	target := wins[idx]
-	logEvent("WINDOW_NAV_SELECT trigger=window_header delta=%d active=%s source=%s target=%s candidates=%v", delta, active, strings.TrimSpace(currentWindowID), target, wins)
+	logEvent("WINDOW_NAV_SELECT trigger=%s delta=%d active=%s source=%s target=%s candidates=%v", trigger, delta, active, strings.TrimSpace(currentWindowID), target, wins)
 	before := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
-	if err := c.SelectWindow(target, "window_neighbor_nav", "window_header"); err != nil {
+	if err := c.SelectWindow(target, "window_neighbor_nav", trigger); err != nil {
 		logEvent("WINDOW_NAV_SELECT_ERR target=%s err=%v", target, err)
 		return
 	}
@@ -5172,6 +5515,107 @@ func (c *Coordinator) selectNeighborWindowFrom(currentWindowID string, delta int
 	if after != target {
 		logEvent("WINDOW_NAV_NOOP source=%s target=%s before=%s after=%s", strings.TrimSpace(currentWindowID), target, before, after)
 	}
+}
+
+// selectNeighborWindowPerClient cycles by `delta` from `sourceWindowID`,
+// switching ONLY the tmux clients currently viewing that source window
+// via `tmux switch-client -c <tty>` rather than the global `select-window`.
+//
+// Motivation: `tmux select-window -t @target` (used by selectNeighborWindowFrom
+// → SelectWindow) is global — it pulls every attached client to @target. On
+// multi-client sessions (e.g. desktop + phone both attached), one client's
+// M-}/M-{ keystroke dragged ALL clients along. Per-client switching means
+// only the clients on the originating window move; clients viewing a
+// different window stay put.
+//
+// Returns true if at least one client was switched (caller skips the global
+// fallback). Returns false if no clients are on `sourceWindowID` or if the
+// neighbor calculation yields no target — caller falls back to the global
+// path so single-client setups behave identically to before.
+func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta int, trigger string) bool {
+	src := strings.TrimSpace(sourceWindowID)
+	if src == "" {
+		return false
+	}
+
+	c.stateMu.RLock()
+	wins := make([]string, 0, len(c.windows))
+	unfiltered := make([]string, 0, len(c.windows))
+	for _, w := range c.windows {
+		if strings.HasPrefix(w.Name, sidebarStashWindowPrefix) {
+			continue
+		}
+		unfiltered = append(unfiltered, w.ID)
+		if w.Minimized && w.ID != src && !w.Active {
+			continue
+		}
+		wins = append(wins, w.ID)
+	}
+	if len(wins) == 0 {
+		wins = unfiltered
+	}
+	c.stateMu.RUnlock()
+
+	if len(wins) < 2 {
+		logEvent("WINDOW_NAV_PERCLIENT_SKIP reason=insufficient_windows source=%s count=%d", src, len(wins))
+		return false
+	}
+
+	idx := -1
+	for i, id := range wins {
+		if id == src {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		logEvent("WINDOW_NAV_PERCLIENT_SKIP reason=source_not_in_filtered source=%s candidates=%v", src, wins)
+		return false
+	}
+	target := wins[(idx+delta+len(wins))%len(wins)]
+
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|#{client_window}").Output()
+	if err != nil {
+		logEvent("WINDOW_NAV_PERCLIENT_LIST_ERR err=%v", err)
+		return false
+	}
+	ttys := []string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		tty := strings.TrimSpace(parts[0])
+		win := strings.TrimSpace(parts[1])
+		if tty == "" {
+			continue
+		}
+		// client_window resolves to a window index (e.g. "3"), not the
+		// @id, so look up the client's actual current window via
+		// display-message -c.
+		curOut, _ := exec.Command("tmux", "display-message", "-p", "-c", tty, "#{window_id}").Output()
+		curWin := strings.TrimSpace(string(curOut))
+		if curWin == src {
+			ttys = append(ttys, tty)
+		}
+		_ = win
+	}
+	if len(ttys) == 0 {
+		logEvent("WINDOW_NAV_PERCLIENT_SKIP reason=no_clients_on_source source=%s target=%s", src, target)
+		return false
+	}
+
+	switched := []string{}
+	for _, tty := range ttys {
+		if err := exec.Command("tmux", "switch-client", "-c", tty, "-t", target).Run(); err != nil {
+			logEvent("WINDOW_NAV_PERCLIENT_SWITCH_ERR tty=%s target=%s err=%v", tty, target, err)
+			continue
+		}
+		switched = append(switched, tty)
+	}
+	logEvent("WINDOW_NAV_PERCLIENT trigger=%s delta=%d source=%s target=%s candidates=%v switched=%v",
+		trigger, delta, src, target, wins, switched)
+	return len(switched) > 0
 }
 
 // sidebarIsStashed reports whether any stash window exists.
@@ -11046,14 +11490,35 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	// daemon knows about. Use to investigate region-table-vs-renderer
 	// width drift (e.g. mobile + click cycling through windows). Match
 	// the click x-coord against where the daemon would expect each cell.
+	//
+	// Augmented with delta-since-last-click and delta-since-last-new-window
+	// fields to distinguish three theories for the post-`+` cycling bug:
+	//   - iOS auto-repeat at same x       -> small delta_click_ms, same x
+	//   - finger drift to next_window     -> small delta_click_ms, x jumped
+	//   - render-driven replay            -> very small delta_click_ms (<50)
+	// The since_new_window_ms field shows whether the click happened during
+	// the suspected post-spawn window where bursts have been observed.
 	if strings.HasPrefix(clientID, "window-header:") && strings.EqualFold(strings.TrimSpace(input.Action), "press") {
 		windowID := strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
 		paneWidth := 0
 		if out, err := exec.Command("tmux", "display-message", "-p", "-t", input.SourcePaneID, "#{pane_width}").Output(); err == nil {
 			paneWidth, _ = strconv.Atoi(strings.TrimSpace(string(out)))
 		}
-		logEvent("WINDOW_HEADER_CLICK client=%s window=%s pane=%s pane_width=%d x=%d y=%d resolved=%q",
-			clientID, windowID, input.SourcePaneID, paneWidth, input.MouseX, input.MouseY, input.ResolvedAction)
+		now := time.Now()
+		deltaClickMs := int64(-1)
+		if !c.lastWindowHeaderClickAt.IsZero() {
+			deltaClickMs = now.Sub(c.lastWindowHeaderClickAt).Milliseconds()
+		}
+		sinceNewWindowMs := int64(-1)
+		recentNewWindow := ""
+		if !c.lastNewWindowAt.IsZero() {
+			sinceNewWindowMs = now.Sub(c.lastNewWindowAt).Milliseconds()
+			recentNewWindow = c.lastNewWindowID
+		}
+		logEvent("WINDOW_HEADER_CLICK client=%s window=%s pane=%s pane_width=%d x=%d y=%d resolved=%q delta_click_ms=%d since_new_window_ms=%d new_window_id=%s",
+			clientID, windowID, input.SourcePaneID, paneWidth, input.MouseX, input.MouseY,
+			input.ResolvedAction, deltaClickMs, sinceNewWindowMs, recentNewWindow)
+		c.lastWindowHeaderClickAt = now
 	}
 
 	if input.ResolvedAction == "" && strings.HasPrefix(clientID, "window-header:") && strings.EqualFold(strings.TrimSpace(input.Action), "press") {
@@ -11439,21 +11904,68 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		selectContentPaneInActiveWindow()
 		return true
 
-	case "prev_window":
-		sourceWindowID := ""
-		if strings.HasPrefix(strings.TrimSpace(input.ResolvedTarget), "@") {
-			sourceWindowID = strings.TrimSpace(input.ResolvedTarget)
+	case "prev_window", "next_window":
+		// Suppress bare M-}/M-{ (the keybind normalized from cmd+]/cmd+[
+		// in tabby.tmux:526-545) when the client that fired the binding
+		// is phone-sized. The iOS terminal app's touch-gesture
+		// interpretation can synthesize these keystrokes from a
+		// slightly-imperfect `+` tap on the mobile button bar,
+		// producing the "tap + then it cycles over and over" symptom.
+		//
+		// We check BOTH the globally active profile AND the invoking
+		// TTY's profile (sent from tabby-hook) for maximum robustness.
+		// Navigation from the tabby-hook client is also debounced to
+		// 300ms to absorb rapid synthesized bursts.
+		invokingTTY := ""
+		if parts := strings.Split(input.PickerValue, ";"); len(parts) > 0 {
+			for _, p := range parts {
+				if strings.HasPrefix(p, "invoking=") {
+					invokingTTY = strings.TrimPrefix(p, "invoking=")
+					break
+				}
+			}
 		}
-		c.selectNeighborWindowFrom(sourceWindowID, -1)
-		focusContentPaneInActiveWindow()
-		return true
 
-	case "next_window":
-		sourceWindowID := ""
-		if strings.HasPrefix(strings.TrimSpace(input.ResolvedTarget), "@") {
-			sourceWindowID = strings.TrimSpace(input.ResolvedTarget)
+		now := time.Now()
+		if last, ok := c.lastWindowByClient[clientID]; ok && now.Sub(last) < 300*time.Millisecond {
+			logEvent("NAV_KEY_DEBOUNCED action=%s client=%s age_ms=%d",
+				input.ResolvedAction, clientID, now.Sub(last).Milliseconds())
+			return false
 		}
-		c.selectNeighborWindowFrom(sourceWindowID, +1)
+		c.lastWindowByClient[clientID] = now
+
+		suppress := false
+		reason := ""
+		if c.ActiveClientProfile() == "phone" {
+			suppress = true
+			reason = "phone_active_client"
+		} else if invokingTTY != "" {
+			// Fallback: global elector might still pick desktop (e.g. if
+			// phone sidebar is stashed and has less activity), so check
+			// the invoking TTY's actual width.
+			if w := c.getTTYWidth(invokingTTY); w > 0 && w < 100 {
+				suppress = true
+				reason = "phone_invoking_tty"
+			}
+		}
+
+		if suppress {
+			logEvent("NAV_KEY_SUPPRESSED action=%s reason=%s target=%s invoking=%s",
+				input.ResolvedAction, reason, strings.TrimSpace(input.ResolvedTarget), invokingTTY)
+			return false
+		}
+
+		delta := -1
+		if input.ResolvedAction == "next_window" {
+			delta = +1
+		}
+		sourceWindowID := navSourceWindowFromTarget(input.ResolvedTarget)
+		logNavKeyTrigger(input.ResolvedAction, strings.TrimSpace(input.ResolvedTarget), strings.TrimSpace(input.PickerValue))
+		if sourceWindowID != "" && c.selectNeighborWindowPerClient(sourceWindowID, delta, "global_key") {
+			focusContentPaneInActiveWindow()
+			return true
+		}
+		c.selectNeighborWindowFrom(sourceWindowID, delta, "global_key")
 		focusContentPaneInActiveWindow()
 		return true
 
@@ -11706,20 +12218,28 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	case "window_header:prev_window":
 		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, strings.TrimPrefix(clientID, "window-header:"))
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:prev_window")
-		c.selectNeighborWindowFrom(strings.TrimPrefix(clientID, "window-header:"), -1)
+		c.selectNeighborWindowFrom(strings.TrimPrefix(clientID, "window-header:"), -1, "window_header")
 		focusContentPaneInActiveWindow()
 		return true
 
 	case "window_header:next_window":
 		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, strings.TrimPrefix(clientID, "window-header:"))
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:next_window")
-		c.selectNeighborWindowFrom(strings.TrimPrefix(clientID, "window-header:"), +1)
+		c.selectNeighborWindowFrom(strings.TrimPrefix(clientID, "window-header:"), +1, "window_header")
 		focusContentPaneInActiveWindow()
 		return true
 
 	case "window_header:new_window":
 		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, strings.TrimPrefix(clientID, "window-header:"))
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:new_window")
+		// Record the press time + the source window so subsequent
+		// WINDOW_HEADER_CLICK lines can show "since_new_window_ms" and
+		// "new_window_id" — used to confirm the post-`+` cycling theory.
+		// The source window (not the spawned window) is recorded because
+		// the bug is about clicks landing on the *original* header right
+		// after the spawn switches all clients away from it.
+		c.lastNewWindowAt = time.Now()
+		c.lastNewWindowID = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
 		c.createNewWindowInCurrentGroup(clientID)
 		return true
 
@@ -13688,7 +14208,19 @@ func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
 func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, workingDir string) {
 	logEvent("NEW_WINDOW_CREATE client=%s group=%s path=%s", clientID, currentGroup, workingDir)
 
-	c.SetNewWindowInFlight(currentGroup, workingDir)
+	// Capture the firing client's TTY: the click came from a window-header
+	// in some window, and the client viewing that window is the one that
+	// will follow the new-window switch. preferredWindowFocusTarget uses
+	// this to scope the post-spawn focus-restore to that one client and
+	// avoid yanking other attached clients on every multi-client elector
+	// flip (which produced the "+ then cycles other windows" bug).
+	firingTTY := ""
+	if strings.HasPrefix(clientID, "window-header:") {
+		sourceWindowID := strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+		firingTTY = strings.TrimSpace(clientTTYForWindow(sourceWindowID))
+	}
+
+	c.SetNewWindowInFlight(currentGroup, workingDir, firingTTY)
 
 	// Find the new-window binary (sibling of this daemon binary)
 	newWindowBin := ""
@@ -13968,8 +14500,15 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			for _, op := range moves {
 				tmuxRun("move-window", "-s", op.src, "-t", op.dst)
 			}
-			if focusTarget := preferredWindowFocusTarget(c, activeWindowID); focusTarget != "" {
-				restoreWindowFocus(focusTarget)
+			// Mirror the gating in RefreshWindows: only restore focus when
+			// move-window actually renumbered something, since that's the
+			// only case the restore was designed for. See coordinator.go
+			// near the matching block in RefreshWindows for the full
+			// rationale and the post-`+` cycling bug it fixes.
+			if len(moves) > 0 {
+				if focusTarget := preferredWindowFocusTarget(c, activeWindowID); focusTarget != "" {
+					restoreWindowFocus(focusTarget)
+				}
 			}
 		}
 	case "m":

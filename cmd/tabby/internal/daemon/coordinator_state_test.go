@@ -286,11 +286,12 @@ func TestNewWindowStatusLifecycle(t *testing.T) {
 	assert.Equal(t, "none", initial.State)
 	assert.Empty(t, initial.WindowID)
 
-	c.SetNewWindowInFlight("Dev", "/tmp/project")
+	c.SetNewWindowInFlight("Dev", "/tmp/project", "/dev/ttys999")
 	inFlight := c.NewWindowStatus()
 	assert.Equal(t, "inFlight", inFlight.State)
 	assert.Equal(t, "Dev", inFlight.Group)
 	assert.Equal(t, "/tmp/project", inFlight.WorkingDir)
+	assert.Equal(t, "/dev/ttys999", inFlight.FiringTTY)
 	assert.NotZero(t, inFlight.Created)
 
 	c.SetNewWindowReady("@123")
@@ -299,6 +300,7 @@ func TestNewWindowStatusLifecycle(t *testing.T) {
 	assert.Equal(t, "@123", ready.WindowID)
 	assert.Equal(t, "Dev", ready.Group)
 	assert.Equal(t, "/tmp/project", ready.WorkingDir)
+	assert.Equal(t, "/dev/ttys999", ready.FiringTTY, "FiringTTY should survive in-flight -> ready transition")
 
 	c.ClearNewWindowStatus()
 	cleared := c.NewWindowStatus()
@@ -306,6 +308,7 @@ func TestNewWindowStatusLifecycle(t *testing.T) {
 	assert.Empty(t, cleared.WindowID)
 	assert.Empty(t, cleared.Group)
 	assert.Empty(t, cleared.WorkingDir)
+	assert.Empty(t, cleared.FiringTTY)
 }
 
 func TestWindowTransitionLifecycle(t *testing.T) {

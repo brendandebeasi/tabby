@@ -190,7 +190,49 @@ func Run(allArgs []string) int {
 		// No args needed
 
 	case "next-window", "prev-window":
-		// No args needed — daemon resolves current active window.
+		// Daemon resolves the active window itself. We forward
+		// TMUX_PANE + the most-recently-active client TTY purely for
+		// diagnostic logging (NAV_KEY_TRIGGER) so multi-client phone
+		// vs desktop traces can be distinguished. Daemon ignores
+		// non-window targets here, so behaviour is unchanged.
+		target = os.Getenv("TMUX_PANE")
+		if target == "" {
+			if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
+				target = strings.TrimSpace(string(out))
+			}
+		}
+		// Capture two TTYs to disambiguate which client fired the
+		// binding. `display-message` without -c uses tmux's "default
+		// client" — when run-shell is dispatched from a key binding,
+		// that's the client that invoked it. We *also* record the
+		// most-recently-active client TTY (sorted by client_activity)
+		// as a sanity check, in case the default-client doesn't
+		// reflect the keystroke origin.
+		// TABBY_INVOKING_TTY is substituted by tmux at binding-dispatch
+		// time using #{client_tty} — that's the firing client. If the
+		// keybinding doesn't set it (older tabby.tmux), fall back to
+		// display-message which uses tmux's default-client heuristic.
+		invokingTTY := strings.TrimSpace(os.Getenv("TABBY_INVOKING_TTY"))
+		if invokingTTY == "" {
+			if out, err := exec.Command("tmux", "display-message", "-p", "#{client_tty}").Output(); err == nil {
+				invokingTTY = strings.TrimSpace(string(out))
+			}
+		}
+		mostActiveTTY := ""
+		if out, err := exec.Command("tmux", "list-clients", "-F", "#{client_activity}|#{client_tty}").Output(); err == nil {
+			bestAct := int64(-1)
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				parts := strings.SplitN(strings.TrimSpace(line), "|", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				if act, err := strconv.ParseInt(parts[0], 10, 64); err == nil && act > bestAct {
+					bestAct = act
+					mostActiveTTY = parts[1]
+				}
+			}
+		}
+		value = "invoking=" + invokingTTY + ";most_active=" + mostActiveTTY
 
 	case "toggle-minimize-window":
 		// Default to current active pane; daemon resolves its window.

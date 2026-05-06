@@ -575,9 +575,9 @@ TOGGLE_MINIMIZE_BINDING=$(grep "toggle_minimize_window:" "$CONFIG_FILE" 2>/dev/n
 
 # Route next/prev through tabby-hook so the daemon filter (which skips
 # minimized windows) runs on keybinding presses, matching the sidebar path.
-bind_from_config "$NEXT_WINDOW_BINDING" "run-shell -b '$HOOK_BIN next-window'"
-bind_from_config "$PREV_WINDOW_BINDING" "run-shell -b '$HOOK_BIN prev-window'"
-bind_from_config "$NEW_WINDOW_BINDING" "run-shell '$NEW_WINDOW_SCRIPT #{client_tty}'"
+bind_from_config "$NEXT_WINDOW_BINDING" "run-shell -b 'TABBY_INVOKING_TTY=\"#{client_tty}\" $HOOK_BIN next-window'"
+bind_from_config "$PREV_WINDOW_BINDING" "run-shell -b 'TABBY_INVOKING_TTY=\"#{client_tty}\" $HOOK_BIN prev-window'"
+bind_from_config "$NEW_WINDOW_BINDING" "run-shell '$NEW_WINDOW_BIN -client-tty \"#{client_tty}\"'"
 bind_from_config "$KILL_WINDOW_BINDING" "run-shell '$KILL_WINDOW_SCRIPT #{window_index}'"
 bind_from_config "$TOGGLE_MINIMIZE_BINDING" "run-shell -b '$HOOK_BIN toggle-minimize-window'"
 
@@ -642,8 +642,8 @@ tmux bind-key 9 select-window -t :9
 # Legacy Alt-key shortcuts kept for fast navigation
 tmux bind-key -n M-h previous-window
 tmux bind-key -n M-l next-window
-tmux bind-key -n M-n run-shell "$NEW_WINDOW_SCRIPT '#{client_tty}'"
-tmux bind-key -n M-N run-shell "$NEW_WINDOW_SCRIPT '#{client_tty}'"
+tmux bind-key -n M-n run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
+tmux bind-key -n M-N run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux unbind-key -n M-x 2>/dev/null || true
 tmux bind-key -n M-q display-panes
 tmux bind-key -n M-0 select-window -t :0
