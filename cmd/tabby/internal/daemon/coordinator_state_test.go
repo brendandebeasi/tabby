@@ -86,9 +86,10 @@ func TestIncrementSpinner_ReturnsFalseWhenNoActivity(t *testing.T) {
 	c.stateMu.Unlock()
 
 	before := c.spinnerFrame
-	result := c.IncrementSpinner()
-	assert.False(t, result)
+	visible, slowFrame := c.IncrementSpinner()
+	assert.False(t, visible)
 	assert.Equal(t, before+1, c.spinnerFrame)
+	assert.Equal(t, c.spinnerFrame/2, slowFrame)
 }
 
 func TestIncrementSpinner_ReturnsTrueWhenWindowBusy(t *testing.T) {
@@ -99,10 +100,14 @@ func TestIncrementSpinner_ReturnsTrueWhenWindowBusy(t *testing.T) {
 	c.windows = []tmux.Window{w}
 	c.stateMu.Unlock()
 
-	assert.True(t, c.IncrementSpinner())
+	visible, _ := c.IncrementSpinner()
+	assert.True(t, visible)
 }
 
-func TestIncrementSpinner_ReturnsTrueWhenWindowHasBell(t *testing.T) {
+// Bell is a sticky badge, not a frame-by-frame spinner — IncrementSpinner
+// must NOT report it as visible animation, otherwise the animation tick
+// would render at 10 Hz forever after any beep until the user acks it.
+func TestIncrementSpinner_IgnoresWindowBell(t *testing.T) {
 	c := newTestCoordinator(t)
 	w := testWindow("bell", false, "bash")
 	w.Bell = true
@@ -110,7 +115,22 @@ func TestIncrementSpinner_ReturnsTrueWhenWindowHasBell(t *testing.T) {
 	c.windows = []tmux.Window{w}
 	c.stateMu.Unlock()
 
-	assert.True(t, c.IncrementSpinner())
+	visible, _ := c.IncrementSpinner()
+	assert.False(t, visible)
+}
+
+// Activity is also a sticky badge (tmux's window-activity flag persists
+// until the user visits the window). Same rationale as the Bell test.
+func TestIncrementSpinner_IgnoresWindowActivity(t *testing.T) {
+	c := newTestCoordinator(t)
+	w := testWindow("activity", false, "bash")
+	w.Activity = true
+	c.stateMu.Lock()
+	c.windows = []tmux.Window{w}
+	c.stateMu.Unlock()
+
+	visible, _ := c.IncrementSpinner()
+	assert.False(t, visible)
 }
 
 func TestIncrementSpinner_ReturnsTrueWhenPaneAIBusy(t *testing.T) {
@@ -121,7 +141,8 @@ func TestIncrementSpinner_ReturnsTrueWhenPaneAIBusy(t *testing.T) {
 	c.windows = []tmux.Window{w}
 	c.stateMu.Unlock()
 
-	assert.True(t, c.IncrementSpinner())
+	visible, _ := c.IncrementSpinner()
+	assert.True(t, visible)
 }
 
 func TestIncrementSpinner_ReturnsTrueWhenPaneAIInput(t *testing.T) {
@@ -132,7 +153,8 @@ func TestIncrementSpinner_ReturnsTrueWhenPaneAIInput(t *testing.T) {
 	c.windows = []tmux.Window{w}
 	c.stateMu.Unlock()
 
-	assert.True(t, c.IncrementSpinner())
+	visible, _ := c.IncrementSpinner()
+	assert.True(t, visible)
 }
 
 func TestIncrementSpinner_IncrementsMonotonically(t *testing.T) {

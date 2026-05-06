@@ -3423,29 +3423,38 @@ func (c *Coordinator) RefreshSession() {
 	c.stateMu.Unlock()
 }
 
-// IncrementSpinner advances the spinner frame and returns true if any spinner is visible
-func (c *Coordinator) IncrementSpinner() bool {
+// IncrementSpinner advances the spinner frame and returns whether any
+// frame-by-frame animation is currently visible plus the resulting
+// slow-frame index (spinnerFrame/2).
+//
+// "Visible" here is narrower than tmux's window-flag set: it covers only
+// states that animate frame-by-frame — Busy and per-pane AIBusy/AIInput.
+// Bell and Activity are sticky badges, not spinners, and were previously
+// (incorrectly) keeping the animation gate true forever once any window
+// had output. The active-window indicator on the sidebar's active row
+// animates independently via getAnimatedActiveIndicator and is gated by
+// HasActiveIndicatorAnimation, not by this function.
+func (c *Coordinator) IncrementSpinner() (visible bool, slowFrame int) {
 	c.stateMu.Lock()
 	c.spinnerFrame++
-	// Check if any pane has a visible spinner (AIBusy or AIInput)
-	hasVisibleSpinner := false
+	slowFrame = c.spinnerFrame / 2
 	for _, win := range c.windows {
-		if win.Busy || win.Bell || win.Activity {
-			hasVisibleSpinner = true
+		if win.Busy {
+			visible = true
 			break
 		}
 		for _, pane := range win.Panes {
 			if pane.AIBusy || pane.AIInput {
-				hasVisibleSpinner = true
+				visible = true
 				break
 			}
 		}
-		if hasVisibleSpinner {
+		if visible {
 			break
 		}
 	}
 	c.stateMu.Unlock()
-	return hasVisibleSpinner
+	return visible, slowFrame
 }
 
 // UpdatePetState updates the pet's state (called periodically)
