@@ -11081,25 +11081,27 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	if strings.HasPrefix(input.ResolvedAction, "window_header:") {
 		sourceWindow := strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
-		activeWindow := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 		status := c.NewWindowStatus()
-		logEvent("WINDOW_HEADER_TRACE phase=entry action=%s client=%s source=%s active=%s state=%s ready=%s age_ms=%d", input.ResolvedAction, clientID, sourceWindow, activeWindow, status.State, status.WindowID, time.Since(status.Created).Milliseconds())
 		if status.State == "ready" && time.Since(status.Created) > 3*time.Second {
 			logEvent("WINDOW_HEADER_READY_TIMEOUT action=%s source=%s ready=%s age_ms=%d", input.ResolvedAction, sourceWindow, status.WindowID, time.Since(status.Created).Milliseconds())
 			c.ClearNewWindowStatus()
 			status = c.NewWindowStatus()
 		}
-		if status.State == "ready" && status.WindowID != "" {
-			activeWindow = status.WindowID
-		}
-		if sourceWindow != "" && activeWindow != "" && sourceWindow != activeWindow {
-			logEvent("WINDOW_HEADER_ACTION_REMAP action=%s source=%s active=%s state=%s ready=%s", input.ResolvedAction, sourceWindow, activeWindow, status.State, status.WindowID)
-			if status.State == "ready" {
-				logEvent("WINDOW_HEADER_REMAP_CLEAR_READY source=%s active=%s", sourceWindow, activeWindow)
-				c.ClearNewWindowStatus()
-			}
-			clientID = "window-header:" + activeWindow
-			input.ResolvedTarget = activeWindow
+		// Remap is ONLY for the just-created-new-window flow: the user
+		// clicked a header right after spawning, and we want subsequent
+		// actions to land on the new window rather than its source.
+		// Outside that flow, the click's source window (encoded in the
+		// per-header clientID) IS the right target — querying tmux's
+		// "active window" without a `-c <tty>` returns whatever client
+		// tmux happens to consider current, which on multi-client
+		// sessions (desktop + phone) silently retargeted clicks to the
+		// wrong window.
+		logEvent("WINDOW_HEADER_TRACE phase=entry action=%s client=%s source=%s state=%s ready=%s age_ms=%d", input.ResolvedAction, clientID, sourceWindow, status.State, status.WindowID, time.Since(status.Created).Milliseconds())
+		if status.State == "ready" && status.WindowID != "" && sourceWindow != "" && sourceWindow != status.WindowID {
+			logEvent("WINDOW_HEADER_ACTION_REMAP action=%s source=%s ready=%s", input.ResolvedAction, sourceWindow, status.WindowID)
+			c.ClearNewWindowStatus()
+			clientID = "window-header:" + status.WindowID
+			input.ResolvedTarget = status.WindowID
 			logEvent("WINDOW_HEADER_TRACE phase=remap action=%s remapped_client=%s remapped_target=%s", input.ResolvedAction, clientID, input.ResolvedTarget)
 		}
 	}
