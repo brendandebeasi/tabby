@@ -11042,6 +11042,20 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	// Debug logging for semantic actions
 	coordinatorDebugLog.Printf("handleSemanticAction: clientID=%s resolvedAction=%s target=%s", clientID, input.ResolvedAction, input.ResolvedTarget)
 
+	// Diagnostic: log every window-header click with the pane width the
+	// daemon knows about. Use to investigate region-table-vs-renderer
+	// width drift (e.g. mobile + click cycling through windows). Match
+	// the click x-coord against where the daemon would expect each cell.
+	if strings.HasPrefix(clientID, "window-header:") && strings.EqualFold(strings.TrimSpace(input.Action), "press") {
+		windowID := strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+		paneWidth := 0
+		if out, err := exec.Command("tmux", "display-message", "-p", "-t", input.SourcePaneID, "#{pane_width}").Output(); err == nil {
+			paneWidth, _ = strconv.Atoi(strings.TrimSpace(string(out)))
+		}
+		logEvent("WINDOW_HEADER_CLICK client=%s window=%s pane=%s pane_width=%d x=%d y=%d resolved=%q",
+			clientID, windowID, input.SourcePaneID, paneWidth, input.MouseX, input.MouseY, input.ResolvedAction)
+	}
+
 	if input.ResolvedAction == "" && strings.HasPrefix(clientID, "window-header:") && strings.EqualFold(strings.TrimSpace(input.Action), "press") {
 		windowID := strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
 		if fallback := fallbackWindowHeaderAction(windowID, input.MouseX); fallback != "" {
