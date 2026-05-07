@@ -135,10 +135,63 @@ func clientTTYForWindow(windowID string) string {
 	return bestTTY
 }
 
+// tmuxOptionCacheEntry caches a `tmux show-option -gqv` result. These
+// @tabby_* settings change only when the user edits config (rare), but
+// RunWidthSync re-reads them on every tick — burning 5+ fork/execs per
+// call that compounded into ~300ms blocking the event loop. A 30s TTL
+// is safely longer than any reasonable runtime change frequency.
+type tmuxOptionCacheEntry struct {
+	value string
+	at    time.Time
+}
+
+var tmuxOptionCache sync.Map // key: option name, value: tmuxOptionCacheEntry
+
+const tmuxOptionCacheTTL = 30 * time.Second
+
+// tmuxGlobalOption reads a global tmux option through the cache. Empty
+// return value covers both the unset and error cases (matches the
+// behavior of -gqv). Callers that branch on emptiness keep the same
+// semantics they had with a direct exec.Command call.
+func tmuxGlobalOption(name string) string {
+	if v, ok := tmuxOptionCache.Load(name); ok {
+		e := v.(tmuxOptionCacheEntry)
+		if time.Since(e.at) < tmuxOptionCacheTTL {
+			return e.value
+		}
+	}
+	out, err := exec.Command("tmux", "show-option", "-gqv", name).Output()
+	if err != nil {
+		return ""
+	}
+	val := strings.TrimSpace(string(out))
+	tmuxOptionCache.Store(name, tmuxOptionCacheEntry{value: val, at: time.Now()})
+	return val
+}
+
+// ttyWidthCacheEntry tracks a recent #{client_width} observation for a
+// single TTY. The geometry tick refreshes width state at ~250ms cadence,
+// so a 500ms TTL on this cache means we serve the nav-suppression check
+// from memory without ever being more than one missed tick stale.
+type ttyWidthCacheEntry struct {
+	width int
+	at    time.Time
+}
+
+var ttyWidthCache sync.Map // key: tty string, value: ttyWidthCacheEntry
+
+const ttyWidthCacheTTL = 500 * time.Millisecond
+
 func (c *Coordinator) getTTYWidth(tty string) int {
 	tty = strings.TrimSpace(tty)
 	if tty == "" {
 		return 0
+	}
+	if v, ok := ttyWidthCache.Load(tty); ok {
+		e := v.(ttyWidthCacheEntry)
+		if time.Since(e.at) < ttyWidthCacheTTL {
+			return e.width
+		}
 	}
 	out, err := exec.Command("tmux", "display-message", "-p", "-c", tty, "#{client_width}").Output()
 	if err != nil {
@@ -148,29 +201,57 @@ func (c *Coordinator) getTTYWidth(tty string) int {
 	if err != nil {
 		return 0
 	}
+	ttyWidthCache.Store(tty, ttyWidthCacheEntry{width: w, at: time.Now()})
 	return w
 }
 
 // navSourceWindowFromTarget resolves a tabby-hook bare-nav target to a
 // window ID for use as the cycle anchor. Targets are either a window
 // (@NN) — which we use directly — or a pane (%NN) forwarded from
-// TMUX_PANE, which we resolve to its window via tmux. Anchoring on the
-// originating window makes M-}/M-{ navigation consistent regardless of
-// which client tmux happens to consider globally active (the same
-// multi-client attribution issue commit 71ed7b9 fixed for header
-// remaps). Returns "" on any failure — empty source falls back to the
-// daemon's existing default-client heuristic, preserving prior behavior.
+// TMUX_PANE, which we resolve via cached coordinator state when possible
+// (every nav keystroke fires this; tmux fork/exec was ~10ms on the hot
+// path) and fall back to a tmux query if the pane isn't in the cache.
+// Anchoring on the originating window makes M-}/M-{ navigation consistent
+// regardless of which client tmux happens to consider globally active.
+// Returns "" on any failure — empty source falls back to the daemon's
+// existing default-client heuristic, preserving prior behavior.
 func navSourceWindowFromTarget(target string) string {
 	t := strings.TrimSpace(target)
 	if strings.HasPrefix(t, "@") {
 		return t
 	}
 	if strings.HasPrefix(t, "%") {
+		if globalCoordinator != nil {
+			if winID := globalCoordinator.windowIDForPaneCached(t); winID != "" {
+				return winID
+			}
+		}
 		out, err := exec.Command("tmux", "display-message", "-p", "-t", t, "#{window_id}").Output()
 		if err != nil {
 			return ""
 		}
 		return strings.TrimSpace(string(out))
+	}
+	return ""
+}
+
+// windowIDForPaneCached looks up the parent window ID for a pane from the
+// coordinator's cached window list. Returns "" if not found — caller can
+// fall back to a tmux query. Read-locks stateMu briefly.
+func (c *Coordinator) windowIDForPaneCached(paneID string) string {
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" {
+		return ""
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	for i := range c.windows {
+		w := &c.windows[i]
+		for j := range w.Panes {
+			if w.Panes[j].ID == paneID {
+				return w.ID
+			}
+		}
 	}
 	return ""
 }
@@ -5574,45 +5655,110 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 	}
 	target := wins[(idx+delta+len(wins))%len(wins)]
 
-	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|#{client_window}").Output()
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|#{client_session}|#{client_window}").Output()
 	if err != nil {
 		logEvent("WINDOW_NAV_PERCLIENT_LIST_ERR err=%v", err)
 		return false
 	}
-	ttys := []string{}
+
+	// Build an index→@id map from cached coordinator state for the
+	// daemon's session. Per-tty `tmux display-message` was the previous
+	// resolution path (~10-15ms each) — eliminating it removes the bulk
+	// of remaining nav-path fork/exec.
+	c.stateMu.RLock()
+	idxToID := make(map[string]string, len(c.windows))
+	for i := range c.windows {
+		w := &c.windows[i]
+		idxToID[strconv.Itoa(w.Index)] = w.ID
+	}
+	c.stateMu.RUnlock()
+	daemonSession := strings.TrimSpace(c.sessionID)
+
+	type ttyResolution struct {
+		tty    string
+		window string
+	}
+	var fallbackTTYs []string
+	resolutions := []ttyResolution{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "|", 2)
-		if len(parts) != 2 {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 3)
+		if len(parts) != 3 {
 			continue
 		}
 		tty := strings.TrimSpace(parts[0])
-		win := strings.TrimSpace(parts[1])
+		sess := strings.TrimSpace(parts[1])
+		idx := strings.TrimSpace(parts[2])
 		if tty == "" {
 			continue
 		}
-		// client_window resolves to a window index (e.g. "3"), not the
-		// @id, so look up the client's actual current window via
-		// display-message -c.
-		curOut, _ := exec.Command("tmux", "display-message", "-p", "-c", tty, "#{window_id}").Output()
-		curWin := strings.TrimSpace(string(curOut))
-		if curWin == src {
-			ttys = append(ttys, tty)
+		// Cache hit path: client is on our session, index resolves.
+		if sess == daemonSession || daemonSession == "" {
+			if winID, ok := idxToID[idx]; ok {
+				resolutions = append(resolutions, ttyResolution{tty: tty, window: winID})
+				continue
+			}
 		}
-		_ = win
+		// Fallback: client on a different session (or our cache stale).
+		// Resolve via display-message in parallel with any other fallbacks.
+		fallbackTTYs = append(fallbackTTYs, tty)
+	}
+
+	if len(fallbackTTYs) > 0 {
+		fallbackResults := make([]ttyResolution, len(fallbackTTYs))
+		var wg sync.WaitGroup
+		wg.Add(len(fallbackTTYs))
+		for i, tty := range fallbackTTYs {
+			i, tty := i, tty
+			go func() {
+				defer wg.Done()
+				curOut, _ := exec.Command("tmux", "display-message", "-p", "-c", tty, "#{window_id}").Output()
+				fallbackResults[i] = ttyResolution{tty: tty, window: strings.TrimSpace(string(curOut))}
+			}()
+		}
+		wg.Wait()
+		resolutions = append(resolutions, fallbackResults...)
+	}
+
+	ttys := []string{}
+	for _, r := range resolutions {
+		if r.window == src {
+			ttys = append(ttys, r.tty)
+		}
 	}
 	if len(ttys) == 0 {
 		logEvent("WINDOW_NAV_PERCLIENT_SKIP reason=no_clients_on_source source=%s target=%s", src, target)
 		return false
 	}
 
-	switched := []string{}
-	for _, tty := range ttys {
-		if err := exec.Command("tmux", "switch-client", "-c", tty, "-t", target).Run(); err != nil {
-			logEvent("WINDOW_NAV_PERCLIENT_SWITCH_ERR tty=%s target=%s err=%v", tty, target, err)
+	// Switch matched clients in parallel — each switch-client is
+	// independent and the fork/exec cost dominates.
+	switched := make([]string, len(ttys))
+	switchErrs := make([]error, len(ttys))
+	var swg sync.WaitGroup
+	swg.Add(len(ttys))
+	for i, tty := range ttys {
+		i, tty := i, tty
+		go func() {
+			defer swg.Done()
+			if err := exec.Command("tmux", "switch-client", "-c", tty, "-t", target).Run(); err != nil {
+				switchErrs[i] = err
+				return
+			}
+			switched[i] = tty
+		}()
+	}
+	swg.Wait()
+	successes := switched[:0]
+	for i, tty := range switched {
+		if switchErrs[i] != nil {
+			logEvent("WINDOW_NAV_PERCLIENT_SWITCH_ERR tty=%s target=%s err=%v", ttys[i], target, switchErrs[i])
 			continue
 		}
-		switched = append(switched, tty)
+		if tty != "" {
+			successes = append(successes, tty)
+		}
 	}
+	switched = successes
 	logEvent("WINDOW_NAV_PERCLIENT trigger=%s delta=%d source=%s target=%s candidates=%v switched=%v",
 		trigger, delta, src, target, wins, switched)
 	return len(switched) > 0
@@ -6228,16 +6374,12 @@ func (c *Coordinator) boundedSidebarWidthForWindow(windowID string, requested in
 
 func (c *Coordinator) getMobileKeyboardSettings() (int, int) {
 	keyboardWidth := 0
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_mobile_keyboard").Output(); err == nil {
-		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 6 {
-			keyboardWidth = v
-		}
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_width_mobile_keyboard")); err == nil && v >= 6 {
+		keyboardWidth = v
 	}
 	if keyboardWidth <= 0 {
-		if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_mobile").Output(); err == nil {
-			if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
-				keyboardWidth = v
-			}
+		if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_width_mobile")); err == nil && v >= 10 {
+			keyboardWidth = v
 		}
 	}
 	if keyboardWidth <= 0 {
@@ -6248,10 +6390,8 @@ func (c *Coordinator) getMobileKeyboardSettings() (int, int) {
 	}
 
 	keyboardThreshold := 38
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_keyboard_rows").Output(); err == nil {
-		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
-			keyboardThreshold = v
-		}
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_mobile_keyboard_rows")); err == nil && v >= 10 {
+		keyboardThreshold = v
 	}
 	return keyboardWidth, keyboardThreshold
 }
@@ -6291,10 +6431,8 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 		if c.globalWidth > 0 {
 			windowWidth := c.globalWidth
 			maxPercent := 20
-			if out, err2 := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_percent").Output(); err2 == nil {
-				if v, err3 := strconv.Atoi(strings.TrimSpace(string(out))); err3 == nil && v >= 10 && v <= 60 {
-					maxPercent = v
-				}
+			if v, err2 := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_mobile_max_percent")); err2 == nil && v >= 10 && v <= 60 {
+				maxPercent = v
 			}
 			maxWidth := windowWidth * maxPercent / 100
 			if maxWidth < 15 {
@@ -6319,41 +6457,31 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 	}
 
 	maxPercent := 20
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_percent").Output(); err == nil {
-		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 && v <= 60 {
-			maxPercent = v
-		}
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_mobile_max_percent")); err == nil && v >= 10 && v <= 60 {
+		maxPercent = v
 	}
 
 	minContentCols := 40
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_min_content_cols").Output(); err == nil {
-		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 20 {
-			minContentCols = v
-		}
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_mobile_min_content_cols")); err == nil && v >= 20 {
+		minContentCols = v
 	}
 
 	maxWindowCols := 110
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_window_cols").Output(); err == nil {
-		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 60 {
-			maxWindowCols = v
-		}
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_mobile_max_window_cols")); err == nil && v >= 60 {
+		maxWindowCols = v
 	}
 
 	tabletMaxWindowCols := 170
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_tablet_max_window_cols").Output(); err == nil {
-		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= maxWindowCols {
-			tabletMaxWindowCols = v
-		}
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_tablet_max_window_cols")); err == nil && v >= maxWindowCols {
+		tabletMaxWindowCols = v
 	}
 
 	widthDesktop := c.globalWidth
 	if widthDesktop < 15 {
 		widthDesktop = 25
 	}
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_desktop").Output(); err == nil {
-		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 15 {
-			widthDesktop = v
-		}
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_width_desktop")); err == nil && v >= 15 {
+		widthDesktop = v
 	}
 
 	if windowWidth > tabletMaxWindowCols {
@@ -6361,10 +6489,8 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 	}
 
 	widthTablet := 20
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_tablet").Output(); err == nil {
-		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 15 {
-			widthTablet = v
-		}
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_width_tablet")); err == nil && v >= 15 {
+		widthTablet = v
 	}
 
 	if windowWidth > maxWindowCols {
@@ -6375,10 +6501,8 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 	}
 
 	widthMobile := 15
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_mobile").Output(); err == nil {
-		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
-			widthMobile = v
-		}
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_width_mobile")); err == nil && v >= 10 {
+		widthMobile = v
 	}
 
 	widthMobileKeyboard := widthMobile
@@ -11392,6 +11516,52 @@ func (c *Coordinator) ActiveClientSnapshot() daemon.ActiveClient {
 	return ac
 }
 
+// autoPickContentPane focuses a non-auxiliary pane in targetWindow if the
+// currently active pane is auxiliary (header/sidebar). Runs off the loop
+// goroutine — see select_window in HandleInput. Each tmux call has its own
+// 2s timeout; failures are logged but never escalate.
+func autoPickContentPane(targetWindow string) {
+	defer func() {
+		if r := recover(); r != nil {
+			logEvent("AUTO_PICK_PANE_PANIC target=%s err=%v", targetWindow, r)
+		}
+	}()
+
+	activeCtx, activeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	activeOut, activeErr := exec.CommandContext(activeCtx, "tmux", "display-message", "-p", "-t", targetWindow,
+		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
+	activeCancel()
+	if activeErr == nil {
+		parts := strings.SplitN(strings.TrimSpace(string(activeOut)), "|||", 3)
+		if len(parts) == 3 && !isAuxiliaryPaneCommand(parts[1]) && !isAuxiliaryPaneCommand(parts[2]) {
+			return
+		}
+	}
+
+	listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", targetWindow,
+		"-F", "#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
+	listCancel()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "|||", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		paneID := parts[0]
+		cmd := parts[1]
+		startCmd := parts[2]
+		if !isAuxiliaryPaneCommand(cmd) && !isAuxiliaryPaneCommand(startCmd) {
+			switchCtx, switchCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			exec.CommandContext(switchCtx, "tmux", "select-pane", "-t", paneID).Run()
+			switchCancel()
+			return
+		}
+	}
+}
+
 // HandleInput processes input events from renderers
 // Returns true if window list refresh is needed (expensive tmux calls)
 func (c *Coordinator) HandleInput(clientID string, input *daemon.InputPayload) bool {
@@ -11614,38 +11784,14 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			return false
 		}
 
-		activeCtx, activeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		activeOut, activeErr := exec.CommandContext(activeCtx, "tmux", "display-message", "-p", "-t", targetWindow,
-			"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
-		activeCancel()
-		if activeErr == nil {
-			parts := strings.SplitN(strings.TrimSpace(string(activeOut)), "|||", 3)
-			if len(parts) == 3 && !isAuxiliaryPaneCommand(parts[1]) && !isAuxiliaryPaneCommand(parts[2]) {
-				return true
-			}
-		}
-
-		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", targetWindow,
-			"-F", "#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
-		listCancel()
-		if err == nil {
-			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-				parts := strings.SplitN(line, "|||", 3)
-				if len(parts) != 3 {
-					continue
-				}
-				paneID := parts[0]
-				cmd := parts[1]
-				startCmd := parts[2]
-				if !isAuxiliaryPaneCommand(cmd) && !isAuxiliaryPaneCommand(startCmd) {
-					switchCtx, switchCancel := context.WithTimeout(context.Background(), 2*time.Second)
-					exec.CommandContext(switchCtx, "tmux", "select-pane", "-t", paneID).Run()
-					switchCancel()
-					break
-				}
-			}
-		}
+		// Content-pane auto-pick runs off the loop goroutine. The optimistic
+		// render fires from the caller (handleRendererInput) using state
+		// already updated by SelectWindow; nothing on the immediate response
+		// path depends on which pane is focused. Up to three tmux subprocess
+		// calls (display-message, list-panes, select-pane) can stack here
+		// under load — keeping them on the loop directly tracked as
+		// window-switch lag after the event-loop centralization.
+		go autoPickContentPane(targetWindow)
 		return true
 
 	case "toggle_panes":
@@ -11914,8 +12060,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		//
 		// We check BOTH the globally active profile AND the invoking
 		// TTY's profile (sent from tabby-hook) for maximum robustness.
-		// Navigation from the tabby-hook client is also debounced to
-		// 300ms to absorb rapid synthesized bursts.
+		// The original iOS-synthesized "+ tap → cycle over and over"
+		// burst was eliminated at the source in commit 2d9026b, so the
+		// historic 300ms input-side debounce is no longer load-bearing.
+		// With nav-path execution down to ~45ms per switch, rapid
+		// keypresses simply queue and execute in order; no smoothing
+		// needed at this layer.
 		invokingTTY := ""
 		if parts := strings.Split(input.PickerValue, ";"); len(parts) > 0 {
 			for _, p := range parts {
@@ -11925,14 +12075,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				}
 			}
 		}
-
-		now := time.Now()
-		if last, ok := c.lastWindowByClient[clientID]; ok && now.Sub(last) < 300*time.Millisecond {
-			logEvent("NAV_KEY_DEBOUNCED action=%s client=%s age_ms=%d",
-				input.ResolvedAction, clientID, now.Sub(last).Milliseconds())
-			return false
-		}
-		c.lastWindowByClient[clientID] = now
 
 		suppress := false
 		reason := ""
@@ -11960,13 +12102,23 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			delta = +1
 		}
 		sourceWindowID := navSourceWindowFromTarget(input.ResolvedTarget)
-		logNavKeyTrigger(input.ResolvedAction, strings.TrimSpace(input.ResolvedTarget), strings.TrimSpace(input.PickerValue))
+		// logNavKeyTrigger does 2 tmux fork/execs for diagnostics
+		// (display-message + list-clients). Off the hot path.
+		action := input.ResolvedAction
+		rt := strings.TrimSpace(input.ResolvedTarget)
+		pv := strings.TrimSpace(input.PickerValue)
+		go logNavKeyTrigger(action, rt, pv)
+		// focusContentPaneInActiveWindow does up to 4 tmux fork/execs
+		// (show-option, display-message, list-panes, select-pane). On the
+		// nav hot path the user's screen has already switched by the time
+		// we'd run those — defer to a goroutine so the input handler
+		// returns and the loop can render the broadcast immediately.
 		if sourceWindowID != "" && c.selectNeighborWindowPerClient(sourceWindowID, delta, "global_key") {
-			focusContentPaneInActiveWindow()
+			go focusContentPaneInActiveWindow()
 			return true
 		}
 		c.selectNeighborWindowFrom(sourceWindowID, delta, "global_key")
-		focusContentPaneInActiveWindow()
+		go focusContentPaneInActiveWindow()
 		return true
 
 	case "drop_food":
@@ -13681,7 +13833,7 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	if !strings.HasPrefix(clientID, "window-header:") {
 		target := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(win.Index)))
 		searchCmd := fmt.Sprintf("tabby-marker-picker:window:%s", target)
-		args = append(args, "Set Marker", "m", searchCmd)
+		args = append(args, "Set Marker", "s", searchCmd)
 		// Show remove option only if a marker is currently set
 		if win.Icon != "" {
 			resetIconCmd := fmt.Sprintf("tabby-set-window-icon:%d:", win.Index)

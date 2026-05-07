@@ -103,6 +103,14 @@ type LoopTickDeps struct {
 // select loop in main.go) is exposed via accessor methods that take an
 // internal mutex.
 type Loop struct {
+	// inputs carries priority events (renderer inputs, tmux hooks) — events
+	// directly downstream of a user action. Run() drains inputs ahead of
+	// events so a queued cmd+]/cmd+[ keystroke jumps any backlog of
+	// background ticks. A small per-iteration budget prevents sustained
+	// input pressure from starving background work entirely.
+	inputs chan Event
+	// events carries background work (ticks, signals). submitCoalesced
+	// always targets this channel.
 	events chan Event
 	drops  atomic.Uint64
 
@@ -156,11 +164,25 @@ type Loop struct {
 // that needs a full refresh.
 func NewLoop(coord *Coordinator, server *daemon.Server, elector *daemon.ClientElector, refreshCh chan<- struct{}) *Loop {
 	return &Loop{
+		inputs:    make(chan Event, 256),
 		events:    make(chan Event, 256),
 		coord:     coord,
 		server:    server,
 		elector:   elector,
 		refreshCh: refreshCh,
+	}
+}
+
+// isPriorityEvent reports whether ev belongs on the priority (inputs) lane.
+// Priority events are anything directly tied to a user action: renderer
+// clicks/keystrokes and tmux hooks (which fire in response to user-driven
+// tmux commands). Ticks and signals stay on the background lane.
+func isPriorityEvent(ev Event) bool {
+	switch ev.(type) {
+	case RendererInputEvent, TmuxHookEvent:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -208,12 +230,19 @@ func (l *Loop) SetLastAutoTheme(name string) {
 	l.lastAutoTheme = name
 }
 
-// Submit enqueues an event for the loop. If the queue is full, the event is
-// dropped and a LOOP_DROP line is logged. This is intentional: a backed-up
-// loop dropping a redundant tick is preferable to blocking the producer.
+// Submit enqueues an event for the loop. Priority events (renderer inputs,
+// tmux hooks) go on the inputs lane and are dispatched ahead of background
+// work in Run(). All other events go on the background lane. If the chosen
+// queue is full, the event is dropped and a LOOP_DROP line is logged: a
+// backed-up loop dropping a redundant event is preferable to blocking the
+// producer.
 func (l *Loop) Submit(ev Event) {
+	ch := l.events
+	if isPriorityEvent(ev) {
+		ch = l.inputs
+	}
 	select {
-	case l.events <- ev:
+	case ch <- ev:
 	default:
 		l.drops.Add(1)
 		logEvent("LOOP_DROP kind=%s queue_full drops_total=%d", ev.kind(), l.drops.Load())
@@ -227,12 +256,37 @@ func (l *Loop) Submit(ev Event) {
 // now driving the loop, the loop is the natural heartbeat source.
 func (l *Loop) Run(ctx context.Context) {
 	logEvent("LOOP_START")
+	// Priority budget: at most this many consecutive priority events before
+	// we yield to the combined select, where the background lane gets a
+	// fair shot. Prevents pathological keystroke storms from starving
+	// ticks. Human keystroke rates are well below this threshold so the
+	// budget is invisible in normal use.
+	const priorityBudget = 4
+	priorityRun := 0
 	for {
 		recordHeartbeat()
 		select {
 		case <-ctx.Done():
 			logEvent("LOOP_STOP drops=%d", l.drops.Load())
 			return
+		default:
+		}
+		if priorityRun < priorityBudget {
+			select {
+			case ev := <-l.inputs:
+				priorityRun++
+				l.dispatch(ev)
+				continue
+			default:
+			}
+		}
+		priorityRun = 0
+		select {
+		case <-ctx.Done():
+			logEvent("LOOP_STOP drops=%d", l.drops.Load())
+			return
+		case ev := <-l.inputs:
+			l.dispatch(ev)
 		case ev := <-l.events:
 			l.dispatch(ev)
 		}
