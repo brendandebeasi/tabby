@@ -2223,15 +2223,12 @@ func Run(args []string) int {
 		return coordinator.RenderForClient(renderClientID, width, height)
 	}
 
-	refreshCh := make(chan struct{}, 10)
-
-	// Build the event loop. Step 1 of the daemon refactor (see
-	// /Users/b/.claude/plans/nifty-jingling-tulip.md): the loop owns
-	// coordinator mutations driven by renderer input, so we no longer
-	// have one server-worker goroutine per connection mutating state in
-	// parallel with the main select loop. Tickers, signals, and tmux
-	// hooks remain on their existing goroutines for now (Steps 2-4).
-	loop := NewLoop(coordinator, server, activeClientElector, refreshCh)
+	// Build the event loop. The loop owns every coordinator mutation —
+	// renderer input, ticks, signals, tmux hooks, and the refresh
+	// pipeline (signal_refresh). The refresh trigger that previously
+	// flowed over a refreshCh channel from this scope is now delivered
+	// in-loop as RefreshSignalEvent via Loop.SubmitRefresh.
+	loop := NewLoop(coordinator, server, activeClientElector)
 	loopCtx, loopCancel := context.WithCancel(context.Background())
 	defer loopCancel()
 	go loop.Run(loopCtx)
@@ -2316,13 +2313,9 @@ func Run(args []string) int {
 		server.SendRenderToClient(clientID)
 	}
 	coordinator.OnRefreshLayout = func() {
-		// Non-blocking poke: the main loop will pick this up and run
-		// doPaneLayoutOps next tick. Used on profile transitions so the
-		// window-header topology follows the active client's form factor.
-		select {
-		case refreshCh <- struct{}{}:
-		default:
-		}
+		// Queue a RefreshSignalEvent — coalesced via flags.usr1 so a burst
+		// of profile transitions collapses to one signal_refresh body run.
+		loop.SubmitRefresh()
 	}
 
 	// Register SIGUSR1/SIGUSR2 handlers BEFORE server.Start() creates the
@@ -2505,25 +2498,16 @@ func Run(args []string) int {
 			coordinator.SetTheme(want)
 		}
 
-		// Step 2 of the daemon refactor: tickers run via loop.go now.
-		// activeWindowID and lastWindowsHash are still mutated by this
-		// goroutine's refreshCh / updateActiveWindow path, so they remain
-		// locals here; we mirror them onto the Loop after each write so
-		// tick handlers (which run on the loop goroutine) can observe the
-		// latest values without racing. The next commit moves the refresh
-		// handler onto the loop and these locals collapse.
+		// All refresh-related state (activeWindowID, lastWindowsHash,
+		// lastWindowCount, lastFullRefresh) lives on Loop now. The refresh
+		// body itself runs on the loop goroutine via handleRefreshSignal,
+		// driven by RefreshSignalEvent submitted through SubmitRefresh.
 		loop.SetLastAutoTheme(coordinator.ActiveThemeName())
 
-		// updateActiveWindow / doPaneLayoutOps now live as Loop methods —
-		// see loop.go. The closures here are gone; the refresh-loop
-		// goroutine just calls loop.updateActiveWindow() and
-		// loop.doPaneLayoutOps(). Once Commit B moves the refresh body
-		// onto the loop itself, the residual `activeWindowID` /
-		// `lastWindowsHash` / `lastWindowCount` locals here disappear.
-		loop.updateActiveWindow() // Initial fetch
-		activeWindowID := loop.ActiveWindowID()
-		lastWindowsHash := ""
-		lastWindowCount := len(coordinator.GetWindows())
+		// Initial active-window fetch so tick handlers see a non-empty
+		// activeWindowID before the first refresh body runs.
+		loop.updateActiveWindow()
+		loop.SetLastWindowCount(len(coordinator.GetWindows()))
 
 		// Initial call to set sidebar pane backgrounds (before any events)
 		go func() {
@@ -2563,7 +2547,6 @@ func Run(args []string) int {
 		// doPaneLayoutOps now lives as a Loop method (loop.go). The
 		// spawn/cleanup heavy path is gated by loopPaneLayoutCooldown and
 		// loopFullRefreshCooldown — both promoted to package-level consts.
-		var lastFullRefresh time.Time
 
 		// Wire ticker dependencies onto the loop and start ticker goroutines
 		// (Step 2 of the daemon refactor). The migrated handler bodies live
@@ -2586,159 +2569,10 @@ func Run(args []string) int {
 		go runTicker(loopCtx, 60*time.Second, func() { loop.submitCoalesced(&loop.flags.autoTheme, AutoThemeTickEvent{}) })
 		go runTicker(loopCtx, 3*time.Second, func() { loop.submitCoalesced(&loop.flags.socket, SocketCheckTickEvent{}) })
 		go runTicker(loopCtx, 10*time.Second, func() { loop.submitCoalesced(&loop.flags.idle, IdleTickEvent{}) })
-
-		for {
-			// Record heartbeat at each loop iteration for deadlock detection
-			recordHeartbeat()
-
-			select {
-			case <-refreshCh:
-				ok := runLoopTask("signal_refresh", 20*time.Second, func() {
-					start := time.Now()
-					logEvent("SIGNAL_REFRESH session=%s", *sessionID)
-
-					prevActive := activeWindowID
-					loop.updateActiveWindow()
-					activeWindowID = loop.ActiveWindowID()
-					windowChanged := activeWindowID != prevActive
-					// Sync client sizes first so width sync sees real tmux dimensions
-					// for both active and inactive windows after a client resize.
-					sizesChanged := syncClientSizesFromTmux(server, coordinator, "signal_refresh")
-
-					// Optimistic render is the 972d718 perf trick: flip the active
-					// window flag and send only to the active sidebar so the
-					// highlight follows Cmd+[/] before the full RefreshWindows
-					// round-trip completes (~500ms → ~50ms perceived). Gate on
-					// actual window change so unrelated refreshes don't pay the
-					// per-client send.
-					if windowChanged {
-						coordinator.SetActiveWindowOptimistic(activeWindowID)
-						server.SendRenderToClient(activeWindowID)
-					}
-
-					coordinator.RefreshWindows()
-					t1 := time.Now()
-
-					windowsAfterRefresh := coordinator.GetWindows()
-					currentWindowCount := len(windowsAfterRefresh)
-					if currentWindowCount < lastWindowCount && lastWindowCount > 0 {
-						activeStillExists := false
-						for _, w := range windowsAfterRefresh {
-							if w.ID == activeWindowID {
-								activeStillExists = true
-								break
-							}
-						}
-						if !activeStillExists {
-							logEvent("WINDOW_CLOSE_RESTORE_TRIGGER active=%s prev_count=%d count=%d", activeWindowID, lastWindowCount, currentWindowCount)
-							coordinator.SelectPreviousWindow()
-							loop.updateActiveWindow() // Re-fetch after selecting
-							activeWindowID = loop.ActiveWindowID()
-						} else {
-							logEvent("WINDOW_CLOSE_RESTORE_SKIP reason=active_exists active=%s prev_count=%d count=%d", activeWindowID, lastWindowCount, currentWindowCount)
-						}
-					}
-					lastWindowCount = currentWindowCount
-
-					// Save window layouts inline (replaces save_pane_layout.sh hook)
-					coordinator.SaveWindowLayouts()
-
-					// Apply pane dimming inline (replaces cycle-pane --dim-only shell call)
-					coordinator.ApplyPaneDimming(activeWindowID)
-
-					// Enforce status bar exclusivity (replaces enforce_status_exclusivity.sh)
-					coordinator.EnforceStatusExclusivity(*sessionID)
-
-					// Heavy ops (spawn/cleanup/layout) only if enough time has
-					// passed since the last full refresh. This breaks the feedback
-					// loop: doPaneLayoutOps triggers tmux hooks → USR1 → signal_refresh
-					// → doPaneLayoutOps again. With debounce, rapid signals only do
-					// the fast path (Reconcile + final broadcast).
-					structureChanged := false
-					if time.Since(lastFullRefresh) >= loopFullRefreshCooldown {
-						windows := coordinator.GetWindows()
-						spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows, coordinator)
-						t2 := time.Now()
-
-						cleanupOrphanedSidebars(windows, coordinator)
-						cleanupOrphanWindowsByTmux(*sessionID, coordinator)
-						t3 := time.Now()
-
-						cleanupSidebarsForClosedWindows(server, windows)
-						t4 := time.Now()
-
-						loop.doPaneLayoutOps()
-						t5 := time.Now()
-
-						_ = spawnedRenderer
-
-						// Apply new window group + preserve grouped window names
-						// (replaces apply_new_window_group.sh + preserve_window_name.sh)
-						coordinator.ApplyNewWindowGroup()
-						coordinator.PreserveWindowNames()
-
-						currentHash := coordinator.GetWindowsHash()
-						if currentHash != lastWindowsHash {
-							updateHeaderBorderStyles(coordinator)
-						}
-						structureChanged = spawnedRenderer || currentHash != lastWindowsHash
-						lastWindowsHash = currentHash
-						loop.SetLastWindowsHash(currentHash)
-						lastFullRefresh = time.Now()
-
-						debugLog.Printf("PERF: RefreshWindows=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v",
-							t1.Sub(start), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4))
-					} else {
-						debugLog.Printf("PERF: RefreshWindows=%v (fast-path, heavy ops skipped)",
-							t1.Sub(start))
-					}
-
-					// Single coalesced reconcile: width-sync + header-height-sync
-					// + (if structure changed) lock-windows-to-active. All ops
-					// land as one chained tmux command, then exactly one
-					// trailing BroadcastRender. Replaces the prior sequence of
-					// RunWidthSync + RunHeaderHeightSync + (resizeAllWindowsToClient
-					// + syncClientSizesFromTmux + BroadcastRender) which fired up
-					// to 3 broadcasts and N+M separate resize-pane subprocesses.
-					var lockTo *daemon.ActiveClient
-					if structureChanged {
-						if w, h, tty, _, ok := activeClientGeometry(); ok {
-							lockTo = &daemon.ActiveClient{TTY: tty, Width: w, Height: h}
-						}
-					}
-					reason := "signal_refresh"
-					if structureChanged {
-						reason = "signal_refresh.structure"
-					}
-					logEvent("WIDTH_SYNC_REQUEST trigger=%s active=%s force=%v window_changed=%v",
-						reason, activeWindowID, sizesChanged, windowChanged)
-					loop.Reconcile(ReconcileOpts{
-						Reason:              reason,
-						ActiveWindowID:      activeWindowID,
-						ForceWidthSync:      sizesChanged,
-						LockWindowsToActive: lockTo,
-					})
-
-					// Drain stale USR1 signals our tmux commands generated via hooks
-					drainCount := 0
-					for {
-						select {
-						case <-refreshCh:
-							drainCount++
-						default:
-							goto drained
-						}
-					}
-				drained:
-					if drainCount > 0 {
-						logEvent("DRAIN_STALE count=%d", drainCount)
-					}
-				})
-				if !ok {
-					return
-				}
-			}
-		}
+		// Setup-only goroutine: nothing to do after wiring tickers and
+		// restoring layouts. The signal_refresh consumer that lived here
+		// in earlier revisions is now Loop.handleRefreshSignal — every
+		// refresh trigger goes through Loop.SubmitRefresh.
 	}()
 
 	// Idle/socket monitoring (idle-shutdown, session-existence, socket/PID
