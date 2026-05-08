@@ -458,12 +458,105 @@ func (l *Loop) handleWindowCheckTick() {
 		syncKey := fmt.Sprintf("%s|%s|%d", activeWindowID, activeTTY, activeW)
 		if syncKey != l.lastWindowCheck {
 			logEvent("WIDTH_SYNC_REQUEST trigger=window_check active=%s force=0 key=%s", activeWindowID, syncKey)
-			l.coord.RunWidthSync(activeWindowID, false)
+			// Fallback path: width-only reconcile. SkipBroadcast — window-check
+			// is a polling task, not a user-driven event; if no ops are needed
+			// nothing changed worth re-rendering for.
+			res := l.Reconcile(ReconcileOpts{
+				Reason:         "window_check",
+				ActiveWindowID: activeWindowID,
+				ForceWidthSync: false,
+				SkipBroadcast:  true,
+			})
+			if res.WindowOps+res.WidthOps+res.HeaderOps > 0 {
+				l.server.BroadcastRender()
+			}
 			l.lastWindowCheck = syncKey
 		} else {
 			logEvent("WIDTH_SYNC_SKIP trigger=window_check reason=stable_context key=%s", syncKey)
 		}
 	})
+}
+
+// ReconcileOpts controls a single reconcile cycle. Reason is recorded in
+// log lines; SkipBroadcast suppresses the trailing render (used when the
+// caller will broadcast itself, e.g. signal_refresh after spawn/cleanup).
+// If LockWindowsToActive is non-nil, every window is forced to that
+// geometry as part of the chained tmux command.
+type ReconcileOpts struct {
+	Reason              string
+	ActiveWindowID      string
+	ForceWidthSync      bool
+	LockWindowsToActive *daemon.ActiveClient
+	SkipBroadcast       bool
+}
+
+// ReconcileResult reports counts so callers can surface diagnostics.
+type ReconcileResult struct {
+	WindowOps int
+	WidthOps  int
+	HeaderOps int
+}
+
+// Reconcile is the single entry point for "compute desired tmux geometry,
+// emit one batched tmux command, then broadcast once." Replaces the
+// previously interleaved sequence of resizeAllWindowsToClient + RunWidthSync
+// + RunHeaderHeightSync + multiple BroadcastRenders that fired one
+// after-resize-pane hook per resize-pane subprocess.
+//
+// All three planners run, their ops are concatenated, and a single chained
+// `tmux ... ; ... ; ...` command applies them all under @tabby_spawning=1
+// so the spawn / focus-restore paths are suppressed during the cycle and
+// hooks coalesce to one trailing fire (which the loop's flags.usr1 dedup
+// then collapses to at most one follow-up signal_refresh).
+func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
+	activeWin := strings.TrimSpace(opts.ActiveWindowID)
+	if activeWin == "" {
+		activeWin = tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+	}
+
+	var ops []ResizeOp
+	var windowOps int
+
+	if opts.LockWindowsToActive != nil {
+		ac := opts.LockWindowsToActive
+		if ac.Width > 0 && ac.Height > 0 {
+			windowOpsList := planAllWindowsToClient(ac.Width, ac.Height, "reconcile:"+opts.Reason)
+			windowOps = len(windowOpsList)
+			ops = append(ops, windowOpsList...)
+		}
+	}
+
+	logEvent("RECONCILE_START reason=%s active=%s force=%v lock_windows=%v",
+		opts.Reason, activeWin, opts.ForceWidthSync, opts.LockWindowsToActive != nil)
+
+	widthOps := l.coord.PlanWidthSync(activeWin, opts.ForceWidthSync)
+	headerOps := l.coord.PlanHeaderHeights(activeWin)
+	ops = append(ops, widthOps...)
+	ops = append(ops, headerOps...)
+
+	// Sync the in-memory client snapshot against the geometry we are about
+	// to apply. Done after planning, before flush, so render-time clamps
+	// see the correct widths even if the tmux command races a redraw.
+	syncClientSizesFromTmux(l.server, l.coord, "reconcile:"+opts.Reason)
+
+	if len(ops) > 0 {
+		flushOpsBatched(ops, "reconcile:"+opts.Reason)
+	} else {
+		logEvent("RECONCILE_NOOP reason=%s active=%s", opts.Reason, activeWin)
+	}
+
+	if !opts.SkipBroadcast {
+		l.server.BroadcastRender()
+	}
+
+	logEvent("RECONCILE_END reason=%s window_ops=%d width_ops=%d header_ops=%d total=%d skip_broadcast=%v",
+		opts.Reason, windowOps, len(widthOps), len(headerOps), len(ops), opts.SkipBroadcast)
+
+	return ReconcileResult{
+		WindowOps: windowOps,
+		WidthOps:  len(widthOps),
+		HeaderOps: len(headerOps),
+	}
 }
 
 // handleClientGeomTick is the migrated body of the clientGeometryTicker case.
@@ -483,17 +576,18 @@ func (l *Loop) handleClientGeomTick() {
 		logEvent("CLIENT_GEOMETRY_CHANGE tty=%s size=%dx%d activity=%d", ac.TTY, ac.Width, ac.Height, res.Activity)
 		l.coord.SetActiveClient(ac)
 		resizeKey := fmt.Sprintf("%s:%dx%d", ac.TTY, ac.Width, ac.Height)
+		var lockTo *daemon.ActiveClient
 		if resizeKey != l.lastResizeKey {
 			l.lastResizeKey = resizeKey
-			resizeAllWindowsToClient(ac.Width, ac.Height, "geometry_tick")
+			ac := ac // copy so we can take its address safely
+			lockTo = &ac
 		}
-		syncClientSizesFromTmux(l.server, l.coord, "geometry_tick")
-		activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
-		logEvent("WIDTH_SYNC_REQUEST trigger=geometry_tick active=%s force=1", activeWin)
-		l.coord.RunWidthSync(activeWin, true)
-		l.coord.RunHeaderHeightSync(activeWin)
-		l.coord.RunZoomSync(activeWin)
-		l.server.BroadcastRender()
+		l.Reconcile(ReconcileOpts{
+			Reason:              "geometry_tick",
+			ForceWidthSync:      true,
+			LockWindowsToActive: lockTo,
+		})
+		l.coord.RunZoomSync("") // intentional no-op (kept for symmetry / future use)
 	})
 }
 
@@ -678,14 +772,14 @@ func (l *Loop) handleClientResized() {
 	l.lastResizeKey = key
 
 	l.coord.SetActiveClientWidth(w)
-	resizeAllWindowsToClient(w, h, "sigusr2")
 	logEvent("SIGUSR2_ACTIVE_CLIENT tty=%s size=%dx%d", tty, w, h)
-	syncClientSizesFromTmux(l.server, l.coord, "sigusr2")
-	activeWin := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
-	logEvent("WIDTH_SYNC_REQUEST trigger=sigusr2 active=%s force=1", activeWin)
-	l.coord.RunWidthSync(activeWin, true /* force */)
-	go l.server.BroadcastRender()
-	logEvent("SIGNAL_USR2_DONE active=%s", activeWin)
+	ac := daemon.ActiveClient{TTY: tty, Width: w, Height: h}
+	l.Reconcile(ReconcileOpts{
+		Reason:              "client_resized",
+		ForceWidthSync:      true,
+		LockWindowsToActive: &ac,
+	})
+	logEvent("SIGNAL_USR2_DONE")
 }
 
 // handleIdleTick is the migrated body of the idleTicker case in the

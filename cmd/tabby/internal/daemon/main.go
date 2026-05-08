@@ -1855,15 +1855,20 @@ func restoreFocusState(coordinator *Coordinator) {
 
 	logEvent("RESTORE_FOCUS window=%s pane=%s", savedWindow, savedPane)
 
-	// Restore window focus
+	// Batch the focus selects under @tabby_spawning so the after-select-window
+	// / pane-focus-in hooks they fire are suppressed (the hook scripts check
+	// @tabby_spawning before signalling the daemon). This stops the boot
+	// 300ms restore-focus from triggering an extra signal_refresh + reconcile
+	// cycle that the user would see as a second resize/redraw.
+	args := []string{"set-option", "-g", "@tabby_spawning", "1"}
 	if savedWindow != "" {
-		exec.Command("tmux", "select-window", "-t", savedWindow).Run()
+		args = append(args, ";", "select-window", "-t", savedWindow)
 	}
-
-	// Restore pane focus
 	if savedPane != "" {
-		exec.Command("tmux", "select-pane", "-t", savedPane).Run()
+		args = append(args, ";", "select-pane", "-t", savedPane)
 	}
+	args = append(args, ";", "set-option", "-g", "@tabby_spawning", "0")
+	exec.Command("tmux", args...).Run()
 }
 
 func shouldRestoreFocus() bool {
@@ -2069,30 +2074,35 @@ func latestAttachedClientTTY() string {
 	return activeClientElector.LatestAttachedTTY()
 }
 
+// planAllWindowsToClient returns ResizeOps that lock every tmux window to
+// the elected active client's dimensions. Pure: no side effects, no exec.
+// Caller flushes via flushOpsBatched (or Loop.Reconcile concatenates with
+// width-sync / header ops for a single chained tmux command).
+//
+// resizeAllWindowsToClient is the legacy wrapper that flushes immediately;
+// callers that participate in a reconcile cycle should plan-then-flush
+// alongside other ops to avoid emitting one resize-window subprocess per
+// window (each of which fires its own after-resize-pane hook).
+func planAllWindowsToClient(width, height int, reason string) []ResizeOp {
+	if width <= 0 || height <= 0 {
+		return nil
+	}
+	ids := listAllWindowIDs()
+	ops := planWindowSizes(width, height, ids)
+	for i := range ops {
+		ops[i].Reason = reason
+	}
+	return ops
+}
+
 // resizeAllWindowsToClient authoritatively locks every tmux window to the
 // elected active client's dimensions, overriding tmux's `window-size latest`
 // auto-reflow. This is the single source of truth for window geometry —
 // inactive clients (e.g. an idle phone) must not be able to shrink windows.
 func resizeAllWindowsToClient(width, height int, reason string) {
-	if width <= 0 || height <= 0 {
-		return
-	}
-	out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}").Output()
-	if err != nil {
-		logEvent("RESIZE_ALL_WINDOWS_ERR reason=%s err=%v", reason, err)
-		return
-	}
-	count := 0
-	for _, wid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		wid = strings.TrimSpace(wid)
-		if wid == "" {
-			continue
-		}
-		if err := exec.Command("tmux", "resize-window", "-x", fmt.Sprintf("%d", width), "-y", fmt.Sprintf("%d", height), "-t", wid).Run(); err == nil {
-			count++
-		}
-	}
-	logEvent("RESIZE_ALL_WINDOWS reason=%s size=%dx%d count=%d", reason, width, height, count)
+	ops := planAllWindowsToClient(width, height, reason)
+	flushOpsBatched(ops, "resize_all_windows:"+reason)
+	logEvent("RESIZE_ALL_WINDOWS reason=%s size=%dx%d count=%d", reason, width, height, len(ops))
 }
 
 // resetTerminalModes sends escape sequences to disable mouse tracking modes
@@ -2626,11 +2636,17 @@ func Run(args []string) int {
 		// Eager initial spawn: don't wait for the 3s windowCheckTicker.
 		// The coordinator already has windows from NewCoordinator, so spawn
 		// renderers immediately to cut cold-boot sidebar latency.
+		//
+		// No BroadcastRender here: the server.SendRenderToClient call inside
+		// MsgConnect (pkg/daemon/server.go) already gives each connecting
+		// renderer its initial frame, and the 250ms clientGeomTick will
+		// shortly drive the first full Reconcile against the elected client's
+		// real geometry. Broadcasting here against the boot-time globalWidth
+		// produced the visible "spawn at width A → resize to width B" jump.
 		{
 			windows := coordinator.GetWindows()
 			if spawnRenderersForNewWindows(server, *sessionID, windows, coordinator) {
 				logEvent("INITIAL_SPAWN_COMPLETE")
-				server.BroadcastRender()
 			}
 		}
 
@@ -2723,17 +2739,23 @@ func Run(args []string) int {
 					start := time.Now()
 					logEvent("SIGNAL_REFRESH session=%s", *sessionID)
 
+					prevActive := activeWindowID
 					updateActiveWindow()
+					windowChanged := activeWindowID != prevActive
 					// Sync client sizes first so width sync sees real tmux dimensions
 					// for both active and inactive windows after a client resize.
 					sizesChanged := syncClientSizesFromTmux(server, coordinator, "signal_refresh")
 
-					// Optimistic render: flip the active window flag and render
-					// immediately so the sidebar highlights the correct window
-					// before the slow RefreshWindows round-trip completes.
-					// This cuts perceived lag from ~500ms to ~50ms on Cmd+[/].
-					coordinator.SetActiveWindowOptimistic(activeWindowID)
-					server.SendRenderToClient(activeWindowID)
+					// Optimistic render is the 972d718 perf trick: flip the active
+					// window flag and send only to the active sidebar so the
+					// highlight follows Cmd+[/] before the full RefreshWindows
+					// round-trip completes (~500ms → ~50ms perceived). Gate on
+					// actual window change so unrelated refreshes don't pay the
+					// per-client send.
+					if windowChanged {
+						coordinator.SetActiveWindowOptimistic(activeWindowID)
+						server.SendRenderToClient(activeWindowID)
+					}
 
 					coordinator.RefreshWindows()
 					t1 := time.Now()
@@ -2761,18 +2783,6 @@ func Run(args []string) int {
 					// Save window layouts inline (replaces save_pane_layout.sh hook)
 					coordinator.SaveWindowLayouts()
 
-					// Full render after RefreshWindows to pick up any state changes
-					// (pane titles, AI indicators, git status, etc.).
-					server.BroadcastRender()
-					t1b := time.Now()
-					// Force a coordinated width sync when tmux reported actual pane
-					// size changes; this prevents inactive windows from catching up
-					// one by one as the user later visits them.
-					logEvent("WIDTH_SYNC_REQUEST trigger=signal_refresh active=%s force=%v", activeWindowID, sizesChanged)
-					coordinator.RunWidthSync(activeWindowID, sizesChanged)
-					coordinator.RunHeaderHeightSync(activeWindowID)
-					coordinator.RunZoomSync(activeWindowID)
-
 					// Apply pane dimming inline (replaces cycle-pane --dim-only shell call)
 					coordinator.ApplyPaneDimming(activeWindowID)
 
@@ -2783,7 +2793,8 @@ func Run(args []string) int {
 					// passed since the last full refresh. This breaks the feedback
 					// loop: doPaneLayoutOps triggers tmux hooks → USR1 → signal_refresh
 					// → doPaneLayoutOps again. With debounce, rapid signals only do
-					// the fast path above (RefreshWindows + BroadcastRender).
+					// the fast path (Reconcile + final broadcast).
+					structureChanged := false
 					if time.Since(lastFullRefresh) >= fullRefreshCooldown {
 						windows := coordinator.GetWindows()
 						spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows, coordinator)
@@ -2810,26 +2821,43 @@ func Run(args []string) int {
 						if currentHash != lastWindowsHash {
 							updateHeaderBorderStyles(coordinator)
 						}
-
-						// Second broadcast only if structure changed (new/removed renderers)
-						structureChanged := spawnedRenderer || currentHash != lastWindowsHash
-						if structureChanged {
-							if w, h, _, _, ok := activeClientGeometry(); ok {
-								resizeAllWindowsToClient(w, h, "structure_refresh")
-							}
-							syncClientSizesFromTmux(server, coordinator, "structure_refresh")
-							server.BroadcastRender()
-						}
+						structureChanged = spawnedRenderer || currentHash != lastWindowsHash
 						lastWindowsHash = currentHash
 						loop.SetLastWindowsHash(currentHash)
 						lastFullRefresh = time.Now()
 
-						debugLog.Printf("PERF: RefreshWindows=%v EarlyRender=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v TOTAL=%v",
-							t1.Sub(start), t1b.Sub(t1), t2.Sub(t1b), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4), t5.Sub(start))
+						debugLog.Printf("PERF: RefreshWindows=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v",
+							t1.Sub(start), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4))
 					} else {
-						debugLog.Printf("PERF: RefreshWindows=%v EarlyRender=%v (fast-path, heavy ops skipped)",
-							t1.Sub(start), t1b.Sub(t1))
+						debugLog.Printf("PERF: RefreshWindows=%v (fast-path, heavy ops skipped)",
+							t1.Sub(start))
 					}
+
+					// Single coalesced reconcile: width-sync + header-height-sync
+					// + (if structure changed) lock-windows-to-active. All ops
+					// land as one chained tmux command, then exactly one
+					// trailing BroadcastRender. Replaces the prior sequence of
+					// RunWidthSync + RunHeaderHeightSync + (resizeAllWindowsToClient
+					// + syncClientSizesFromTmux + BroadcastRender) which fired up
+					// to 3 broadcasts and N+M separate resize-pane subprocesses.
+					var lockTo *daemon.ActiveClient
+					if structureChanged {
+						if w, h, tty, _, ok := activeClientGeometry(); ok {
+							lockTo = &daemon.ActiveClient{TTY: tty, Width: w, Height: h}
+						}
+					}
+					reason := "signal_refresh"
+					if structureChanged {
+						reason = "signal_refresh.structure"
+					}
+					logEvent("WIDTH_SYNC_REQUEST trigger=%s active=%s force=%v window_changed=%v",
+						reason, activeWindowID, sizesChanged, windowChanged)
+					loop.Reconcile(ReconcileOpts{
+						Reason:              reason,
+						ActiveWindowID:      activeWindowID,
+						ForceWidthSync:      sizesChanged,
+						LockWindowsToActive: lockTo,
+					})
 
 					// Drain stale USR1 signals our tmux commands generated via hooks
 					drainCount := 0

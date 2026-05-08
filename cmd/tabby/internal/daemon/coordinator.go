@@ -5933,15 +5933,23 @@ func (c *Coordinator) capTargetToActiveClient(target int) int {
 	return target
 }
 
-// RunWidthSync checks all connected sidebar clients and resizes any whose width
-// doesn't match the global target. Called from the main event loop (not the render path)
-// to avoid blocking BroadcastRender with tmux subprocess calls.
-// When force=true, skips the 500ms debounce (used for immediate restoration after layout changes).
-func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
+// PlanWidthSync computes the resize ops needed to reconcile every sidebar
+// pane's width with the global target. Returns ops without executing — the
+// caller chooses whether to flush directly (RunWidthSync wrapper) or
+// concatenate with header / window-size ops for one batched tmux invocation
+// (Loop.Reconcile).
+//
+// State side-effects: may adopt the active window's measured width as the
+// new globalWidth (when the user drags the active sidebar) and persists it
+// via persistSidebarWidthProfile. Updates lastWidthSync, keyboardHoldUntil.
+//
+// When force=true, skips the 500ms debounce (used for immediate restoration
+// after layout changes).
+func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeOp {
 	start := time.Now()
 	if c.sidebarHidden {
 		logEvent("WIDTH_SYNC_SKIP reason=sidebar_collapsed active=%s force=%v", activeWindowID, force)
-		return
+		return nil
 	}
 
 	// Snapshot client widths/heights
@@ -5964,7 +5972,7 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 
 	if len(clientSnapshot) == 0 {
 		logEvent("WIDTH_SYNC_SKIP reason=no_clients active=%s force=%v duration_ms=%d", activeWindowID, force, time.Since(start).Milliseconds())
-		return
+		return nil
 	}
 
 	// Read per-window SyncWidth settings under stateMu BEFORE acquiring widthSyncMu
@@ -5998,28 +6006,35 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 	if !force && hasLast && sinceLast < 500*time.Millisecond {
 		logEvent("WIDTH_SYNC_SKIP reason=debounce active=%s force=%v since_last_ms=%d", activeWindowID, force, sinceLast.Milliseconds())
 		c.widthSyncMu.Unlock()
-		return
+		return nil
 	}
 
 	// Build list of panes to resize (compute under lock, execute after unlock)
 	type resizeOp struct {
 		clientID    string
 		targetWidth int
+		paneID      string // resolved upfront from list-panes; empty = skip
 	}
 	var ops []resizeOp
 
-	// Read actual tmux pane widths to detect stale client data.
+	// Read actual tmux pane widths AND sidebar pane IDs in one round-trip.
+	// Capturing the paneID here means the execution phase doesn't need a
+	// per-window list-panes call to resolve the sidebar — it can hand the
+	// resolved IDs directly to flushOpsBatched as one chained tmux command.
 	// Wrapped in a bounded context so a stalled tmux server cannot hold
-	// widthSyncMu indefinitely — previously this was the blocking point behind
-	// the DEADLOCK WARNING + LOOP_SKIP task=client_geometry_tick stalls.
+	// widthSyncMu indefinitely.
 	actualPaneWidths := make(map[string]int)
+	sidebarPaneIDs := make(map[string]string)
 	paneCtx, paneCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	if paneOut, err := exec.CommandContext(paneCtx, "tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{window_id}|#{pane_width}|#{pane_start_command}").Output(); err == nil {
+	if paneOut, err := exec.CommandContext(paneCtx, "tmux", "list-panes", "-s", "-F", "#{pane_id}|#{pane_current_command}|#{window_id}|#{pane_width}|#{pane_start_command}").Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
-			parts := strings.SplitN(line, "|", 4)
-			if len(parts) == 4 && isSidebarPaneCommand(parts[0], parts[3]) {
-				if w, err := strconv.Atoi(parts[2]); err == nil {
-					actualPaneWidths[parts[1]] = w
+			parts := strings.SplitN(line, "|", 5)
+			if len(parts) == 5 && isSidebarPaneCommand(parts[1], parts[4]) {
+				if w, err := strconv.Atoi(parts[3]); err == nil {
+					actualPaneWidths[parts[2]] = w
+				}
+				if _, dup := sidebarPaneIDs[parts[2]]; !dup {
+					sidebarPaneIDs[parts[2]] = parts[0]
 				}
 			}
 		}
@@ -6128,7 +6143,7 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 		// so reaching here means an honest resize is needed.
 		coordinatorDebugLog.Printf("Width sync: window=%s current=%d target=%d", clientID, currentWidth, targetWidth)
 		logEvent("WIDTH_SYNC_PLAN client=%s active=%s current=%d target=%d", clientID, activeWindowID, currentWidth, targetWidth)
-		ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth})
+		ops = append(ops, resizeOp{clientID: clientID, targetWidth: targetWidth, paneID: sidebarPaneIDs[clientID]})
 		if applyKeyboardClamp {
 			extendHolds = append(extendHolds, clientID)
 		}
@@ -6171,26 +6186,35 @@ func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
 
 	_ = adoptedActiveWidth // (profile persistence done inline above, before target computation)
 
-	// Execute tmux resize operations AFTER releasing all locks
+	// Convert internal ops (windowID-keyed) into ResizeOps (paneID-keyed) so
+	// the caller can batch them with header / window-size ops in a single
+	// chained tmux invocation. Skip ops whose sidebar pane wasn't found in
+	// the upfront list-panes (window may have been killed mid-cycle).
+	out := make([]ResizeOp, 0, len(ops))
 	for _, op := range ops {
-		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", op.clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output()
-		listCancel()
-		if err != nil {
+		paneID := op.paneID
+		if paneID == "" {
 			continue
 		}
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			parts := strings.SplitN(line, "|", 3)
-			if len(parts) >= 3 && isSidebarPaneCommand(parts[1], parts[2]) {
-				coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (batch sync)", parts[0], op.targetWidth)
-				logEvent("WIDTH_SYNC_RESIZE client=%s pane=%s width=%d", op.clientID, parts[0], op.targetWidth)
-				resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-				exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", op.targetWidth)).Run()
-				resizeCancel()
-				break
-			}
-		}
+		out = append(out, ResizeOp{
+			Kind:    OpResizePaneX,
+			Target:  paneID,
+			X:       op.targetWidth,
+			Reason:  "width_sync",
+			Subject: op.clientID,
+		})
+		coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (planned)", paneID, op.targetWidth)
+		logEvent("WIDTH_SYNC_RESIZE client=%s pane=%s width=%d", op.clientID, paneID, op.targetWidth)
 	}
+	return out
+}
+
+// RunWidthSync is the standalone-caller wrapper around PlanWidthSync. It
+// flushes the planned ops through flushOpsBatched so the per-window
+// resize-pane calls land as a single chained tmux command instead of N
+// separate invocations.
+func (c *Coordinator) RunWidthSync(activeWindowID string, force bool) {
+	flushOpsBatched(c.PlanWidthSync(activeWindowID, force), "width_sync")
 }
 
 // desiredPaneHeaderHeight returns the number of rows a per-content-pane header pane should occupy.
@@ -6249,56 +6273,48 @@ func (c *Coordinator) attachedClientCount() int {
 	return count
 }
 
-// RunHeaderHeightSync iterates pane-header panes across all windows and resizes
-// any whose current height differs from the target for that window's width.
-// Uses per-window width (not global profile) to avoid phone/desktop oscillation.
-func (c *Coordinator) RunHeaderHeightSync(activeClientID string) {
+// PlanHeaderHeights iterates pane-header panes across all windows and
+// returns ResizeOps for any whose current height differs from the target.
+// Uses per-window width (not global profile) to avoid phone/desktop
+// oscillation. Returns ops without executing — caller flushes via
+// flushOpsBatched (RunHeaderHeightSync wrapper) or concatenates with
+// width-sync / window-size ops for one chained tmux command (Loop.Reconcile).
+func (c *Coordinator) PlanHeaderHeights(activeClientID string) []ResizeOp {
 	logEvent("HEADER_HEIGHT_SYNC activeClient=%s", activeClientID)
 
-	// List all panes with window width so we can decide per-window
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F",
-		"#{pane_id}|||#{pane_height}|||#{pane_current_command}|||#{pane_start_command}|||#{window_width}").Output()
-	if err != nil {
-		return
+	headers := listHeaderPanes()
+	if len(headers) == 0 {
+		return nil
 	}
-
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "|||", 5)
-		if len(parts) < 5 {
-			continue
-		}
-		paneID := parts[0]
-		currentHeight, _ := strconv.Atoi(parts[1])
-		curCmd := parts[2]
-		startCmd := parts[3]
-		windowWidth, _ := strconv.Atoi(parts[4])
-
-		isWindowHeader := strings.Contains(curCmd, "window-header") || strings.Contains(startCmd, "window-header")
-		isPaneHeader := strings.Contains(curCmd, "pane-header") || strings.Contains(startCmd, "pane-header")
-		if !isWindowHeader && !isPaneHeader {
-			continue
-		}
-
+	out := make([]ResizeOp, 0, len(headers))
+	for _, h := range headers {
 		var target int
-		if isWindowHeader {
-			target = c.desiredWindowHeaderHeightForWidth(windowWidth)
+		if h.IsWindowHdr {
+			target = c.desiredWindowHeaderHeightForWidth(h.WindowWidth)
 		} else {
 			// Pane-headers are always 1 row (or 2 with CustomBorder); never 3 on phone.
 			target = c.desiredPaneHeaderHeight()
 		}
-		if currentHeight == target {
+		if h.CurrentHeight == target {
 			continue
 		}
-		logEvent("HEADER_HEIGHT_SYNC pane=%s current=%d target=%d winWidth=%d", paneID, currentHeight, target, windowWidth)
-		resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", paneID, "-y", fmt.Sprintf("%d", target)).Run()
-		resizeCancel()
+		logEvent("HEADER_HEIGHT_SYNC pane=%s current=%d target=%d winWidth=%d", h.PaneID, h.CurrentHeight, target, h.WindowWidth)
+		out = append(out, ResizeOp{
+			Kind:    OpResizePaneY,
+			Target:  h.PaneID,
+			Y:       target,
+			Reason:  "header_height_sync",
+			Subject: h.PaneID,
+		})
 	}
+	return out
+}
+
+// RunHeaderHeightSync is the standalone-caller wrapper around
+// PlanHeaderHeights. It flushes the planned ops through flushOpsBatched so
+// the per-header resize-pane calls land as a single chained tmux command.
+func (c *Coordinator) RunHeaderHeightSync(activeClientID string) {
+	flushOpsBatched(c.PlanHeaderHeights(activeClientID), "header_height_sync")
 }
 
 // RunZoomSync is a no-op placeholder. Auto-zoom was removed because tmux zoom
