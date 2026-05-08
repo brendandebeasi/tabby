@@ -275,20 +275,68 @@ func doOnPaneResize(args []string) {
 	}
 	hookPane := args[0]
 	out, err := exec.Command("tmux", "display", "-p", "-t", hookPane,
-		"#{pane_current_command}|#{pane_start_command}").Output()
+		"#{pane_current_command}|#{pane_start_command}|#{pane_width}").Output()
 	if err != nil {
 		return
 	}
-	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 2)
-	cur := parts[0]
-	start := ""
-	if len(parts) == 2 {
-		start = parts[1]
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 3)
+	if len(parts) < 2 {
+		return
 	}
+	cur := parts[0]
+	start := parts[1]
 	if !isSidebarStartOrCurrent(cur, start) {
 		return
 	}
+
+	// Synchronous min-width enforcement: when the user drags the sidebar
+	// border below the usable threshold, tmux applies that width AS THE USER
+	// IS DRAGGING and the renderer paints at it before the daemon's
+	// reconcile pass can correct the size. The result is a visible frame at
+	// the too-small width followed by a snap-back to the global target — the
+	// user reports this as flicker. Running the corrective resize directly
+	// from the hook (before signalling the daemon) collapses the snap-back
+	// to a sub-frame transition.
+	//
+	// We snap to the configured global target so the user's drag-down
+	// behaves like "drop, snap to default" rather than landing somewhere
+	// arbitrary. The full reconcile still runs after this returns, which
+	// will propagate the (already-correct) width to other windows.
+	if len(parts) >= 3 {
+		if curW, err := strconv.Atoi(strings.TrimSpace(parts[2])); err == nil {
+			snapMin := readIntTmuxOption("@tabby_sidebar_min_width", 10)
+			if curW < snapMin {
+				target := readIntTmuxOption("@tabby_sidebar_width", 0)
+				if target <= 0 {
+					target = readIntTmuxOption("@tabby_sidebar_width_desktop", 25)
+				}
+				if target < snapMin {
+					target = snapMin
+				}
+				exec.Command("tmux",
+					"set-option", "-g", "@tabby_spawning", "1", ";",
+					"resize-pane", "-t", hookPane, "-x", strconv.Itoa(target), ";",
+					"set-option", "-g", "@tabby_spawning", "0",
+				).Run()
+			}
+		}
+	}
+
 	signalDaemon("USR1")
+}
+
+// readIntTmuxOption returns the int value of a tmux option, or fallback
+// when the option is missing or unparsable.
+func readIntTmuxOption(name string, fallback int) int {
+	out, err := exec.Command("tmux", "show-option", "-gqv", name).Output()
+	if err != nil {
+		return fallback
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return fallback
+	}
+	return v
 }
 
 // isSidebarStartOrCurrent is the hook-package copy of the daemon's
