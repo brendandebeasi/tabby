@@ -6056,6 +6056,17 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 			effectiveActive = w
 		}
 		if effectiveActive >= 10 && c.globalWidth != 0 && effectiveActive != c.globalWidth && syncSettings[activeWindowID] {
+			// Don't adopt a measured width that's just the active-client cap.
+			// When the active physical client is narrow (phone/touch),
+			// capTargetToActiveClient clamps every sidebar's target to
+			// (clientWidth - minContentPaneCols). Any window whose sidebar is
+			// sitting AT that cap is not a user drag — it's the clamp doing
+			// its job. Adopting here would flip globalWidth down to the cap
+			// and propagate the clamp to every window (including wider ones
+			// that don't need it). That presents as "sidebars look different
+			// between windows" the moment a narrow client connects.
+			capped := c.capTargetToActiveClient(c.globalWidth)
+			atCap := effectiveActive == capped && capped < c.globalWidth
 			if justBecameActive {
 				// First sync tick after a window switch. The discrepancy is a
 				// stale width about to be synced TO this window, not a drag
@@ -6063,6 +6074,8 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				// new active's stored/cached size and ping-pong all sidebars
 				// on every window switch.
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=just_became_active active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
+			} else if atCap {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_active_client_cap active=%s measured=%d global=%d cap=%d", activeWindowID, effectiveActive, c.globalWidth, capped)
 			} else {
 				coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global",
 					activeWindowID, c.globalWidth, effectiveActive)
