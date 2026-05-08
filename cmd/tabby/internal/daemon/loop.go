@@ -84,7 +84,6 @@ func (e TmuxHookEvent) kind() string { return "hook:" + e.Kind }
 type LoopTickDeps struct {
 	RunLoopTask         func(task string, timeout time.Duration, fn func()) bool
 	RunLoopTaskNonFatal func(task string, timeout time.Duration, fn func())
-	UpdateActiveWindow  func()
 
 	// Off-loop ticker dependencies (idle / socket-check). These were locals
 	// in the idle-monitor goroutine before the migration. SigCh is the
@@ -134,26 +133,26 @@ type Loop struct {
 	navSettleUntil        time.Time
 	navSettledWindow      string
 
-	// Tick-handler state. These were locals in the surrounding Daemon
-	// closure pre-migration. activeWindowID and lastWindowsHash are still
-	// mutated by the refreshCh consumer in main.go's `Run` (a separate
-	// goroutine from the loop), which mirrors them back via SetActiveWindowID
-	// / SetLastWindowsHash. The mirror exists because there is one off-loop
-	// writer (the spawn/cleanup pipeline). Step 5 chose Option B (keep the
-	// mirror, rename the mutex to make the cross-goroutine intent explicit)
-	// rather than Option A (migrate the refreshCh consumer onto the loop) —
-	// the latter is a much larger diff that would not fit safely in this
-	// step. The remaining fields are touched only from loop-goroutine
-	// handlers and need no synchronization.
-	sharedStateMu   sync.RWMutex
-	activeWindowID  string
-	lastWindowsHash string
-	lastGitState    string
-	lastAutoTheme   string
-	lastClientGeom  string
-	lastResizeKey   string
-	lastWindowCheck string
-	lastSlowFrame   int
+	// Tick-handler and refresh-handler state. activeWindowID and
+	// lastWindowsHash are still mirrored under sharedStateMu while the
+	// refreshCh consumer in main.go remains an off-loop writer; the mutex
+	// goes away with the upcoming signal_refresh migration onto the loop.
+	// The remaining fields are touched only from loop-goroutine handlers
+	// and need no synchronization.
+	sharedStateMu      sync.RWMutex
+	activeWindowID     string
+	lastWindowsHash    string
+	lastGitState       string
+	lastAutoTheme      string
+	lastClientGeom     string
+	lastResizeKey      string
+	lastWindowCheck    string
+	lastSlowFrame      int
+	lastWindowCount    int       // count of coordinator windows last seen by signal_refresh
+	lastFullRefresh    time.Time // last time signal_refresh ran the heavy spawn/cleanup path
+	lastReadyWindowID  string    // last new-window-ready windowID observed (for tmux-active suppression)
+	lastReadyClearedAt time.Time // when the new-window ready state was last cleared
+	lastPaneLayoutOps  time.Time // debounce for the spawn/cleanup heavy path
 
 	// Off-loop ticker state.
 	idleStart time.Time
@@ -423,6 +422,160 @@ func (l *Loop) handleRendererInput(e RendererInputEvent) {
 		go l.server.BroadcastRender()
 	}
 	logEvent("INPUT_DONE client=%s", clientID)
+}
+
+// Cooldowns and grace periods used by the refresh-signal pipeline. Promoted
+// from local vars in the refresh-loop closure so the methods migrated onto
+// Loop (updateActiveWindow, doPaneLayoutOps) can reference them by name.
+const (
+	loopNewWindowReadyHold    = 900 * time.Millisecond
+	loopNewWindowReadyTimeout = 3 * time.Second
+	loopPostReadyStabilize    = 2500 * time.Millisecond
+	loopPaneLayoutCooldown    = 150 * time.Millisecond
+	loopFullRefreshCooldown   = 100 * time.Millisecond
+)
+
+// coordinatorActiveWindowID returns the windowID the coordinator currently
+// considers active, or empty when no window is marked active.
+func (l *Loop) coordinatorActiveWindowID() string {
+	for _, w := range l.coord.GetWindows() {
+		if w.Active {
+			return w.ID
+		}
+	}
+	return ""
+}
+
+// updateActiveWindow synchronizes l.activeWindowID with tmux's active-window
+// observation, applying the new-window-ready / explicit-nav-settle
+// suppression rules. Was a local closure in the refresh-loop goroutine
+// (main.go); promoting it onto Loop is the first step of the
+// signal_refresh migration. Call sites continue to use it from the
+// refresh-loop closure for now; the next commit moves the entire refresh
+// body onto the loop and this becomes a pure loop-goroutine method.
+func (l *Loop) updateActiveWindow() {
+	status := l.coord.NewWindowStatus()
+	coordActive := l.coordinatorActiveWindowID()
+	logEvent("READY_STATE_TRACE phase=update_active_start state=%s ready=%s age_ms=%d daemon_active=%s coordinator_active=%s", status.State, status.WindowID, time.Since(status.Created).Milliseconds(), l.activeWindowID, coordActive)
+	if status.State == "inFlight" {
+		logEvent("UPDATE_ACTIVE_WINDOW_WAIT reason=new_window_inflight daemon_active=%s coordinator_active=%s", l.activeWindowID, coordActive)
+		return
+	}
+	if status.State == "ready" {
+		if status.WindowID != "" {
+			l.lastReadyWindowID = status.WindowID
+		}
+		ageMs := time.Since(status.Created).Milliseconds()
+		if time.Since(status.Created) > loopNewWindowReadyTimeout {
+			logEvent("NEW_WINDOW_READY_TIMEOUT_CLEAR window=%s age_ms=%d", status.WindowID, ageMs)
+			l.coord.ClearNewWindowStatus()
+			if status.WindowID != "" {
+				l.lastReadyWindowID = status.WindowID
+			}
+			l.lastReadyClearedAt = time.Now()
+		} else {
+			hasWindow := false
+			for _, w := range l.coord.GetWindows() {
+				if w.ID == status.WindowID {
+					hasWindow = true
+					break
+				}
+			}
+			if hasWindow && status.WindowID != "" && l.activeWindowID != status.WindowID {
+				logEvent("WINDOW_STATE_DRIFT source=new_window_ready tmux_active=unknown daemon_active=%s coordinator_active=%s ready_window=%s", l.activeWindowID, coordActive, status.WindowID)
+			}
+			logEvent("READY_STATE_TRACE phase=update_active_ready_observe state=%s ready=%s age_ms=%d daemon_active=%s coordinator_active=%s hasWindow=%v", status.State, status.WindowID, ageMs, l.activeWindowID, coordActive, hasWindow)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	args := []string{"display-message"}
+	if _, _, tty, _, ok := activeClientGeometry(); ok && strings.TrimSpace(tty) != "" {
+		args = append(args, "-c", strings.TrimSpace(tty))
+	}
+	args = append(args, "-p", "#{window_id}")
+	if out, err := exec.CommandContext(ctx, "tmux", args...).Output(); err == nil {
+		newID := strings.TrimSpace(string(out))
+		if newID != "" {
+			logEvent("UPDATE_ACTIVE_WINDOW_TMUX_QUERY daemon_old=%s tmux_new=%s coordinator_active=%s", l.activeWindowID, newID, coordActive)
+		}
+		logEvent("READY_STATE_TRACE phase=update_active_tmux_query state=%s ready=%s daemon_active=%s tmux_active=%s coordinator_active=%s", status.State, status.WindowID, l.activeWindowID, newID, coordActive)
+		if newID != "" {
+			if newID != l.activeWindowID || newID != coordActive {
+				logEvent("WINDOW_STATE_DRIFT source=tmux_query tmux_active=%s daemon_active=%s coordinator_active=%s", newID, l.activeWindowID, coordActive)
+			}
+			if newID != l.activeWindowID {
+				if !l.lastReadyClearedAt.IsZero() && l.lastReadyWindowID != "" {
+					sinceClear := time.Since(l.lastReadyClearedAt)
+					if sinceClear <= loopPostReadyStabilize && l.activeWindowID == l.lastReadyWindowID && newID != l.lastReadyWindowID {
+						logEvent("UPDATE_ACTIVE_WINDOW_TMUX_SUPPRESS old=%s new=%s last_ready=%s since_clear_ms=%d", l.activeWindowID, newID, l.lastReadyWindowID, sinceClear.Milliseconds())
+						return
+					}
+				}
+				navAt, navWindow, settleUntil, settledWindow := l.NavSettleState()
+				if !settleUntil.IsZero() && time.Now().Before(settleUntil) && settledWindow != "" {
+					if newID != settledWindow {
+						logEvent("UPDATE_ACTIVE_WINDOW_TMUX_SUPPRESS_NAV old=%s new=%s settled=%s remaining_ms=%d marked_window=%s", l.activeWindowID, newID, settledWindow, time.Until(settleUntil).Milliseconds(), navWindow)
+						return
+					}
+					logEvent("UPDATE_ACTIVE_WINDOW_TMUX_NAV_CONFIRMED old=%s new=%s settled=%s age_ms=%d", l.activeWindowID, newID, settledWindow, time.Since(navAt).Milliseconds())
+				}
+				logEvent("UPDATE_ACTIVE_WINDOW_TMUX_OBSERVE old=%s new=%s coordinator_active=%s", l.activeWindowID, newID, coordActive)
+			}
+			l.SetActiveWindowID(newID)
+		}
+	} else {
+		logEvent("UPDATE_ACTIVE_WINDOW_TMUX_ERR err=%v", err)
+	}
+}
+
+// doPaneLayoutOps runs the spawn/cleanup heavy path inside @tabby_spawning,
+// gated by loopPaneLayoutCooldown to prevent feedback loops where the tmux
+// commands it issues fire pane-focus-in hooks → USR1 → another refresh
+// cycle → re-entry. Was a local closure in the refresh-loop goroutine.
+func (l *Loop) doPaneLayoutOps() {
+	now := time.Now()
+	status := l.coord.NewWindowStatus()
+	logEvent("READY_STATE_TRACE phase=pane_layout_start state=%s ready=%s age_ms=%d active=%s", status.State, status.WindowID, time.Since(status.Created).Milliseconds(), l.activeWindowID)
+	if status.State == "inFlight" {
+		logEvent("PANE_LAYOUT_SKIP reason=new_window_inflight")
+		return
+	}
+	if status.State == "ready" {
+		age := time.Since(status.Created)
+		if age > loopNewWindowReadyTimeout {
+			logEvent("PANE_LAYOUT_READY_TIMEOUT_CLEAR window=%s age_ms=%d", status.WindowID, age.Milliseconds())
+			l.coord.ClearNewWindowStatus()
+			status = l.coord.NewWindowStatus()
+		} else if age > loopNewWindowReadyHold {
+			logEvent("PANE_LAYOUT_SKIP reason=new_window_ready window=%s age_ms=%d", status.WindowID, age.Milliseconds())
+			return
+		}
+	}
+	if now.Sub(l.lastPaneLayoutOps) < loopPaneLayoutCooldown {
+		logEvent("PANE_LAYOUT_SKIP cooldown_remaining=%dms", (loopPaneLayoutCooldown - now.Sub(l.lastPaneLayoutOps)).Milliseconds())
+		return
+	}
+	l.lastPaneLayoutOps = now
+	logEvent("PANE_LAYOUT_START activeProfile=%s sidebarHidden=%v newWindowState=%s",
+		l.coord.ActiveClientProfile(), l.coord.sidebarHidden,
+		status.State)
+	customBorder := l.coord.GetConfig().PaneHeader.CustomBorder
+	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
+	windows := l.coord.GetWindows()
+	spawnWindowHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredWindowHeaderHeight(), windows, l.coord)
+	spawnPaneHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredPaneHeaderHeight(), windows)
+	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
+	startOSCPipes(windows)
+	cleanupOrphanedHeaders(customBorder, l.coord, l.activeWindowID)
+	// NOTE: updateHeaderBorderStyles is NOT called here to avoid border
+	// flickering. It's only called when windows hash changes (on refresh
+	// + hash change) which is when groups/colors change.
+	//
+	// The legacy "drain refreshCh after spawn ops" loop is gone: once the
+	// refresh body itself runs on the loop, flags.usr1 already provides
+	// at-most-one-pending coalescing for the follow-up signal that our
+	// tmux commands trigger.
 }
 
 // handleWindowCheckTick is the migrated body of the windowCheckTicker case in

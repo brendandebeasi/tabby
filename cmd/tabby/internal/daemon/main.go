@@ -2510,108 +2510,20 @@ func Run(args []string) int {
 		// goroutine's refreshCh / updateActiveWindow path, so they remain
 		// locals here; we mirror them onto the Loop after each write so
 		// tick handlers (which run on the loop goroutine) can observe the
-		// latest values without racing. Step 3 moves the refresh handler
-		// onto the loop and these locals collapse.
+		// latest values without racing. The next commit moves the refresh
+		// handler onto the loop and these locals collapse.
 		loop.SetLastAutoTheme(coordinator.ActiveThemeName())
 
-		lastWindowsHash := ""        // mirrored to loop via loop.SetLastWindowsHash
-		activeWindowID := ""         // mirrored to loop via loop.SetActiveWindowID
-
-		lastWindowCount := 0 // Track window count for close detection
-
-		newWindowReadyHold := 900 * time.Millisecond
-		newWindowReadyTimeout := 3 * time.Second
-		postReadyStabilize := 2500 * time.Millisecond
-		lastReadyWindowID := ""
-		var lastReadyClearedAt time.Time
-
-		coordinatorActiveWindowID := func() string {
-			for _, w := range coordinator.GetWindows() {
-				if w.Active {
-					return w.ID
-				}
-			}
-			return ""
-		}
-
-		updateActiveWindow := func() {
-			status := coordinator.NewWindowStatus()
-			coordActive := coordinatorActiveWindowID()
-			logEvent("READY_STATE_TRACE phase=update_active_start state=%s ready=%s age_ms=%d daemon_active=%s coordinator_active=%s", status.State, status.WindowID, time.Since(status.Created).Milliseconds(), activeWindowID, coordActive)
-			if status.State == "inFlight" {
-				logEvent("UPDATE_ACTIVE_WINDOW_WAIT reason=new_window_inflight daemon_active=%s coordinator_active=%s", activeWindowID, coordActive)
-				return
-			}
-			if status.State == "ready" {
-				if status.WindowID != "" {
-					lastReadyWindowID = status.WindowID
-				}
-				ageMs := time.Since(status.Created).Milliseconds()
-				if time.Since(status.Created) > newWindowReadyTimeout {
-					logEvent("NEW_WINDOW_READY_TIMEOUT_CLEAR window=%s age_ms=%d", status.WindowID, ageMs)
-					coordinator.ClearNewWindowStatus()
-					if status.WindowID != "" {
-						lastReadyWindowID = status.WindowID
-					}
-					lastReadyClearedAt = time.Now()
-				} else {
-					hasWindow := false
-					for _, w := range coordinator.GetWindows() {
-						if w.ID == status.WindowID {
-							hasWindow = true
-							break
-						}
-					}
-					if hasWindow && status.WindowID != "" && activeWindowID != status.WindowID {
-						logEvent("WINDOW_STATE_DRIFT source=new_window_ready tmux_active=unknown daemon_active=%s coordinator_active=%s ready_window=%s", activeWindowID, coordActive, status.WindowID)
-					}
-					logEvent("READY_STATE_TRACE phase=update_active_ready_observe state=%s ready=%s age_ms=%d daemon_active=%s coordinator_active=%s hasWindow=%v", status.State, status.WindowID, ageMs, activeWindowID, coordActive, hasWindow)
-				}
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			args := []string{"display-message"}
-			if _, _, tty, _, ok := activeClientGeometry(); ok && strings.TrimSpace(tty) != "" {
-				args = append(args, "-c", strings.TrimSpace(tty))
-			}
-			args = append(args, "-p", "#{window_id}")
-			if out, err := exec.CommandContext(ctx, "tmux", args...).Output(); err == nil {
-				newID := strings.TrimSpace(string(out))
-				if newID != "" {
-					logEvent("UPDATE_ACTIVE_WINDOW_TMUX_QUERY daemon_old=%s tmux_new=%s coordinator_active=%s", activeWindowID, newID, coordActive)
-				}
-				logEvent("READY_STATE_TRACE phase=update_active_tmux_query state=%s ready=%s daemon_active=%s tmux_active=%s coordinator_active=%s", status.State, status.WindowID, activeWindowID, newID, coordActive)
-				if newID != "" {
-					if newID != activeWindowID || newID != coordActive {
-						logEvent("WINDOW_STATE_DRIFT source=tmux_query tmux_active=%s daemon_active=%s coordinator_active=%s", newID, activeWindowID, coordActive)
-					}
-					if newID != activeWindowID {
-						if !lastReadyClearedAt.IsZero() && lastReadyWindowID != "" {
-							sinceClear := time.Since(lastReadyClearedAt)
-							if sinceClear <= postReadyStabilize && activeWindowID == lastReadyWindowID && newID != lastReadyWindowID {
-								logEvent("UPDATE_ACTIVE_WINDOW_TMUX_SUPPRESS old=%s new=%s last_ready=%s since_clear_ms=%d", activeWindowID, newID, lastReadyWindowID, sinceClear.Milliseconds())
-								return
-							}
-						}
-						navAt, navWindow, settleUntil, settledWindow := loop.NavSettleState()
-						if !settleUntil.IsZero() && time.Now().Before(settleUntil) && settledWindow != "" {
-							if newID != settledWindow {
-								logEvent("UPDATE_ACTIVE_WINDOW_TMUX_SUPPRESS_NAV old=%s new=%s settled=%s remaining_ms=%d marked_window=%s", activeWindowID, newID, settledWindow, time.Until(settleUntil).Milliseconds(), navWindow)
-								return
-							}
-							logEvent("UPDATE_ACTIVE_WINDOW_TMUX_NAV_CONFIRMED old=%s new=%s settled=%s age_ms=%d", activeWindowID, newID, settledWindow, time.Since(navAt).Milliseconds())
-						}
-						logEvent("UPDATE_ACTIVE_WINDOW_TMUX_OBSERVE old=%s new=%s coordinator_active=%s", activeWindowID, newID, coordActive)
-					}
-					activeWindowID = newID
-					loop.SetActiveWindowID(newID)
-				}
-			} else {
-				logEvent("UPDATE_ACTIVE_WINDOW_TMUX_ERR err=%v", err)
-			}
-		}
-		updateActiveWindow() // Initial fetch
-		lastWindowCount = len(coordinator.GetWindows())
+		// updateActiveWindow / doPaneLayoutOps now live as Loop methods —
+		// see loop.go. The closures here are gone; the refresh-loop
+		// goroutine just calls loop.updateActiveWindow() and
+		// loop.doPaneLayoutOps(). Once Commit B moves the refresh body
+		// onto the loop itself, the residual `activeWindowID` /
+		// `lastWindowsHash` / `lastWindowCount` locals here disappear.
+		loop.updateActiveWindow() // Initial fetch
+		activeWindowID := loop.ActiveWindowID()
+		lastWindowsHash := ""
+		lastWindowCount := len(coordinator.GetWindows())
 
 		// Initial call to set sidebar pane backgrounds (before any events)
 		go func() {
@@ -2619,12 +2531,10 @@ func Run(args []string) int {
 			updateHeaderBorderStyles(coordinator)
 		}()
 
-		// Debounce pane layout operations (spawn/cleanup headers) to prevent
-		// feedback loops: these ops trigger pane-focus-in hooks which send USR1
-		// back to us, causing re-entry. 50ms cooldown is sufficient to break cycle
-		// while keeping UI responsive.
-		var lastPaneLayoutOps time.Time
-		paneLayoutCooldown := 150 * time.Millisecond
+		// Pane-layout debounce now lives on Loop (l.lastPaneLayoutOps) and
+		// uses loopPaneLayoutCooldown (loop.go). Refresh body still runs
+		// here off-loop, but the doPaneLayoutOps method it calls owns the
+		// cooldown state.
 
 		// Restore saved layouts once at startup, before the main event loop.
 		// Must not run inside doPaneLayoutOps: spawnWindowHeaders sets @tabby_spawning=1
@@ -2650,61 +2560,10 @@ func Run(args []string) int {
 			}
 		}
 
-		doPaneLayoutOps := func() {
-			now := time.Now()
-			status := coordinator.NewWindowStatus()
-			logEvent("READY_STATE_TRACE phase=pane_layout_start state=%s ready=%s age_ms=%d active=%s", status.State, status.WindowID, time.Since(status.Created).Milliseconds(), activeWindowID)
-			if status.State == "inFlight" {
-				logEvent("PANE_LAYOUT_SKIP reason=new_window_inflight")
-				return
-			}
-			if status.State == "ready" {
-				age := time.Since(status.Created)
-				if age > newWindowReadyTimeout {
-					logEvent("PANE_LAYOUT_READY_TIMEOUT_CLEAR window=%s age_ms=%d", status.WindowID, age.Milliseconds())
-					coordinator.ClearNewWindowStatus()
-					status = coordinator.NewWindowStatus()
-				} else if age > newWindowReadyHold {
-					logEvent("PANE_LAYOUT_SKIP reason=new_window_ready window=%s age_ms=%d", status.WindowID, age.Milliseconds())
-					return
-				}
-			}
-			if now.Sub(lastPaneLayoutOps) < paneLayoutCooldown {
-				logEvent("PANE_LAYOUT_SKIP cooldown_remaining=%dms", (paneLayoutCooldown - now.Sub(lastPaneLayoutOps)).Milliseconds())
-				return
-			}
-			lastPaneLayoutOps = now
-			logEvent("PANE_LAYOUT_START activeProfile=%s sidebarHidden=%v newWindowState=%s",
-				coordinator.ActiveClientProfile(), coordinator.sidebarHidden,
-				status.State)
-			customBorder := coordinator.GetConfig().PaneHeader.CustomBorder
-			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
-			windows := coordinator.GetWindows()
-			spawnWindowHeaders(server, *sessionID, customBorder, coordinator.desiredWindowHeaderHeight(), windows, coordinator)
-			spawnPaneHeaders(server, *sessionID, customBorder, coordinator.desiredPaneHeaderHeight(), windows)
-			exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
-			startOSCPipes(windows)
-			cleanupOrphanedHeaders(customBorder, coordinator, activeWindowID)
-			// NOTE: updateHeaderBorderStyles is NOT called here to avoid
-			// border flickering. It's only called when windows hash changes
-			// (on refreshCh + hash change) which is when groups/colors change.
-			// Drain any USR1 signals our tmux commands just triggered
-			// (split-window/kill-pane/resize-pane fire pane-focus-in hooks)
-			for {
-				select {
-				case <-refreshCh:
-				default:
-					return
-				}
-			}
-		}
-
-		// Debounce signal_refresh: if we just finished a full refresh cycle,
-		// skip the heavy spawn/cleanup work and only do the fast path
-		// (RefreshWindows + BroadcastRender). This prevents feedback loops
-		// where spawn/cleanup tmux ops trigger hooks that send more USR1 signals.
+		// doPaneLayoutOps now lives as a Loop method (loop.go). The
+		// spawn/cleanup heavy path is gated by loopPaneLayoutCooldown and
+		// loopFullRefreshCooldown — both promoted to package-level consts.
 		var lastFullRefresh time.Time
-		fullRefreshCooldown := 100 * time.Millisecond
 
 		// Wire ticker dependencies onto the loop and start ticker goroutines
 		// (Step 2 of the daemon refactor). The migrated handler bodies live
@@ -2713,7 +2572,6 @@ func Run(args []string) int {
 		loop.SetTickDeps(LoopTickDeps{
 			RunLoopTask:         runLoopTask,
 			RunLoopTaskNonFatal: runLoopTaskNonFatal,
-			UpdateActiveWindow:  updateActiveWindow,
 			SessionID:           *sessionID,
 			MyPid:               os.Getpid(),
 			SocketPath:          server.GetSocketPath(),
@@ -2740,7 +2598,8 @@ func Run(args []string) int {
 					logEvent("SIGNAL_REFRESH session=%s", *sessionID)
 
 					prevActive := activeWindowID
-					updateActiveWindow()
+					loop.updateActiveWindow()
+					activeWindowID = loop.ActiveWindowID()
 					windowChanged := activeWindowID != prevActive
 					// Sync client sizes first so width sync sees real tmux dimensions
 					// for both active and inactive windows after a client resize.
@@ -2773,7 +2632,8 @@ func Run(args []string) int {
 						if !activeStillExists {
 							logEvent("WINDOW_CLOSE_RESTORE_TRIGGER active=%s prev_count=%d count=%d", activeWindowID, lastWindowCount, currentWindowCount)
 							coordinator.SelectPreviousWindow()
-							updateActiveWindow() // Re-fetch after selecting
+							loop.updateActiveWindow() // Re-fetch after selecting
+							activeWindowID = loop.ActiveWindowID()
 						} else {
 							logEvent("WINDOW_CLOSE_RESTORE_SKIP reason=active_exists active=%s prev_count=%d count=%d", activeWindowID, lastWindowCount, currentWindowCount)
 						}
@@ -2795,7 +2655,7 @@ func Run(args []string) int {
 					// → doPaneLayoutOps again. With debounce, rapid signals only do
 					// the fast path (Reconcile + final broadcast).
 					structureChanged := false
-					if time.Since(lastFullRefresh) >= fullRefreshCooldown {
+					if time.Since(lastFullRefresh) >= loopFullRefreshCooldown {
 						windows := coordinator.GetWindows()
 						spawnedRenderer := spawnRenderersForNewWindows(server, *sessionID, windows, coordinator)
 						t2 := time.Now()
@@ -2807,7 +2667,7 @@ func Run(args []string) int {
 						cleanupSidebarsForClosedWindows(server, windows)
 						t4 := time.Now()
 
-						doPaneLayoutOps()
+						loop.doPaneLayoutOps()
 						t5 := time.Now()
 
 						_ = spawnedRenderer
