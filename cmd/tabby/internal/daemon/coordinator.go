@@ -6292,8 +6292,15 @@ func (c *Coordinator) attachedClientCount() int {
 // oscillation. Returns ops without executing — caller flushes via
 // flushOpsBatched (RunHeaderHeightSync wrapper) or concatenates with
 // width-sync / window-size ops for one chained tmux command (Loop.Reconcile).
-func (c *Coordinator) PlanHeaderHeights(activeClientID string) []ResizeOp {
-	logEvent("HEADER_HEIGHT_SYNC activeClient=%s", activeClientID)
+//
+// lockedWindowWidth, when > 0, overrides the per-window width returned by
+// tmux for window-header height computation. Used by Reconcile when it is
+// also planning a resize-window-to-active-client lock in the same batch:
+// without the override, listHeaderPanes() reads the pre-flush window
+// widths and plans 0 header ops on a wide→narrow client switch, leaving
+// the touch tab bar at 1 row when it should be 3.
+func (c *Coordinator) PlanHeaderHeights(activeClientID string, lockedWindowWidth int) []ResizeOp {
+	logEvent("HEADER_HEIGHT_SYNC activeClient=%s lockedWidth=%d", activeClientID, lockedWindowWidth)
 
 	headers := listHeaderPanes()
 	if len(headers) == 0 {
@@ -6303,7 +6310,11 @@ func (c *Coordinator) PlanHeaderHeights(activeClientID string) []ResizeOp {
 	for _, h := range headers {
 		var target int
 		if h.IsWindowHdr {
-			target = c.desiredWindowHeaderHeightForWidth(h.WindowWidth)
+			effectiveWidth := h.WindowWidth
+			if lockedWindowWidth > 0 {
+				effectiveWidth = lockedWindowWidth
+			}
+			target = c.desiredWindowHeaderHeightForWidth(effectiveWidth)
 		} else {
 			// Pane-headers are always 1 row (or 2 with CustomBorder); never 3 on phone.
 			target = c.desiredPaneHeaderHeight()
@@ -6311,7 +6322,7 @@ func (c *Coordinator) PlanHeaderHeights(activeClientID string) []ResizeOp {
 		if h.CurrentHeight == target {
 			continue
 		}
-		logEvent("HEADER_HEIGHT_SYNC pane=%s current=%d target=%d winWidth=%d", h.PaneID, h.CurrentHeight, target, h.WindowWidth)
+		logEvent("HEADER_HEIGHT_SYNC pane=%s current=%d target=%d winWidth=%d locked=%d", h.PaneID, h.CurrentHeight, target, h.WindowWidth, lockedWindowWidth)
 		out = append(out, ResizeOp{
 			Kind:    OpResizePaneY,
 			Target:  h.PaneID,
@@ -6327,7 +6338,7 @@ func (c *Coordinator) PlanHeaderHeights(activeClientID string) []ResizeOp {
 // PlanHeaderHeights. It flushes the planned ops through flushOpsBatched so
 // the per-header resize-pane calls land as a single chained tmux command.
 func (c *Coordinator) RunHeaderHeightSync(activeClientID string) {
-	flushOpsBatched(c.PlanHeaderHeights(activeClientID), "header_height_sync")
+	flushOpsBatched(c.PlanHeaderHeights(activeClientID, 0), "header_height_sync")
 }
 
 // RunZoomSync is a no-op placeholder. Auto-zoom was removed because tmux zoom

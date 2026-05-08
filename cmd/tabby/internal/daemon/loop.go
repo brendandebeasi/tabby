@@ -664,20 +664,27 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 	var ops []ResizeOp
 	var windowOps int
 
+	lockedWidth := 0
 	if opts.LockWindowsToActive != nil {
 		ac := opts.LockWindowsToActive
 		if ac.Width > 0 && ac.Height > 0 {
 			windowOpsList := planAllWindowsToClient(ac.Width, ac.Height, "reconcile:"+opts.Reason)
 			windowOps = len(windowOpsList)
 			ops = append(ops, windowOpsList...)
+			lockedWidth = ac.Width
 		}
 	}
 
-	logEvent("RECONCILE_START reason=%s active=%s force=%v lock_windows=%v",
-		opts.Reason, activeWin, opts.ForceWidthSync, opts.LockWindowsToActive != nil)
+	logEvent("RECONCILE_START reason=%s active=%s force=%v lock_windows=%v locked_width=%d",
+		opts.Reason, activeWin, opts.ForceWidthSync, opts.LockWindowsToActive != nil, lockedWidth)
 
 	widthOps := l.coord.PlanWidthSync(activeWin, opts.ForceWidthSync)
-	headerOps := l.coord.PlanHeaderHeights(activeWin)
+	// Header heights need the POST-lock window width: this same batch will
+	// resize every window to lockedWidth before the resize-pane ops fire,
+	// so window-headers must target desiredHeight(lockedWidth), not
+	// desiredHeight(current_tmux_width). Pass lockedWidth through so the
+	// touch tab bar follows a desktop→phone switch in the same frame.
+	headerOps := l.coord.PlanHeaderHeights(activeWin, lockedWidth)
 	ops = append(ops, widthOps...)
 	ops = append(ops, headerOps...)
 
