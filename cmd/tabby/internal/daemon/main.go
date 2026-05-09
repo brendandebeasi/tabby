@@ -2337,7 +2337,16 @@ func Run(args []string) int {
 		for sig := range sigUSRCh {
 			switch sig {
 			case syscall.SIGUSR1:
-				loop.submitCoalesced(&loop.flags.usr1, SignalEvent{Sig: syscall.SIGUSR1})
+				// SIGUSR1 is the refresh signal — send RefreshSignalEvent
+				// through the same flags.usr1 path SubmitRefresh uses, so
+				// SIGUSR1 from ensure_sidebar.sh / signal-daemon.sh shares
+				// the at-most-one-pending coalescing with hooks and
+				// renderer-input-needsRefresh paths. (Phase 5 removed the
+				// SignalEvent case from handleSignal for SIGUSR1; submitting
+				// SignalEvent here would be ignored AND would leave
+				// flags.usr1 latched, silently dropping every subsequent
+				// SubmitRefresh.)
+				loop.SubmitRefresh()
 			case syscall.SIGUSR2:
 				loop.submitCoalesced(&loop.flags.usr2, SignalEvent{Sig: syscall.SIGUSR2})
 			}
