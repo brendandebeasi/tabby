@@ -17,6 +17,7 @@ type ResizeOp struct {
 	Target  string // pane id (%n) or window id (@n)
 	X       int    // cols (Kind=Window or Kind=PaneX)
 	Y       int    // rows (Kind=Window or Kind=PaneY)
+	Layout  string // tmux layout string (Kind=SelectLayout)
 	Reason  string // diagnostic — included in RECONCILE_OP log lines
 	Subject string // optional client/window id for logging
 }
@@ -27,6 +28,7 @@ const (
 	OpResizeWindow ResizeOpKind = iota // resize-window -x X -y Y -t @id
 	OpResizePaneX                      // resize-pane   -x X -t %id
 	OpResizePaneY                      // resize-pane   -y Y -t %id
+	OpSelectLayout                     // select-layout -t @id "<layout-string>"
 )
 
 // flushOpsBatched executes ops as a single chained tmux command bracketed by
@@ -74,6 +76,8 @@ func flushOpsBatched(ops []ResizeOp, reason string) {
 				args = append(args, "resize-pane", "-t", op.Target, "-x", fmtInt(op.X))
 			case OpResizePaneY:
 				args = append(args, "resize-pane", "-t", op.Target, "-y", fmtInt(op.Y))
+			case OpSelectLayout:
+				args = append(args, "select-layout", "-t", op.Target, op.Layout)
 			}
 			logEvent("RECONCILE_OP reason=%s kind=%d target=%s x=%d y=%d subject=%s op_reason=%s",
 				reason, op.Kind, op.Target, op.X, op.Y, op.Subject, op.Reason)
@@ -219,6 +223,100 @@ func listHeaderPanes() []headerPaneInfo {
 		})
 	}
 	return result
+}
+
+// windowLayoutSnapshot is a single (windowID, width, layout) row returned by
+// snapshotWindowLayouts. Captured before a window-resize batch so multi-pane
+// layouts can be restored proportionally when the same width becomes active
+// again.
+type windowLayoutSnapshot struct {
+	WindowID string
+	Width    int
+	Layout   string
+	Panes    int
+}
+
+// snapshotWindowLayouts queries tmux once for every window's current layout
+// string + width + pane count. Single subprocess, no writes. Used by the
+// reconcile planner to populate the per-(windowID, width) layout cache before
+// emitting OpResizeWindow ops that would otherwise let tmux scale splits
+// greedily.
+func snapshotWindowLayouts() []windowLayoutSnapshot {
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F",
+		"#{window_id}|||#{window_width}|||#{window_panes}|||#{window_layout}").Output()
+	if err != nil {
+		return nil
+	}
+	var result []windowLayoutSnapshot
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|||", 4)
+		if len(parts) != 4 {
+			continue
+		}
+		w, err := atoiSafe(parts[1])
+		if err != nil || w <= 0 {
+			continue
+		}
+		panes, _ := atoiSafe(parts[2])
+		layout := strings.TrimSpace(parts[3])
+		if layout == "" {
+			continue
+		}
+		result = append(result, windowLayoutSnapshot{
+			WindowID: strings.TrimSpace(parts[0]),
+			Width:    w,
+			Panes:    panes,
+			Layout:   layout,
+		})
+	}
+	return result
+}
+
+// SaveWindowLayout caches a tmux layout string under (windowID, width). Called
+// before each lock-windows-to-active reconcile so the prior client's split
+// proportions can be replayed when that client regains focus.
+func (c *Coordinator) SaveWindowLayout(windowID string, width int, layout string) {
+	if windowID == "" || width <= 0 || layout == "" {
+		return
+	}
+	c.windowLayoutsMu.Lock()
+	defer c.windowLayoutsMu.Unlock()
+	m, ok := c.windowLayouts[windowID]
+	if !ok {
+		m = make(map[int]string)
+		c.windowLayouts[windowID] = m
+	}
+	m[width] = layout
+}
+
+// GetWindowLayout returns the saved layout string for (windowID, width), or
+// "" if none is cached.
+func (c *Coordinator) GetWindowLayout(windowID string, width int) string {
+	if windowID == "" || width <= 0 {
+		return ""
+	}
+	c.windowLayoutsMu.Lock()
+	defer c.windowLayoutsMu.Unlock()
+	if m, ok := c.windowLayouts[windowID]; ok {
+		return m[width]
+	}
+	return ""
+}
+
+// ForgetWindowLayouts drops cached layouts for the given windowID (e.g. when
+// the window is closed). No-op if windowID is empty or unknown.
+func (c *Coordinator) ForgetWindowLayouts(windowID string) {
+	if windowID == "" {
+		return
+	}
+	c.windowLayoutsMu.Lock()
+	defer c.windowLayoutsMu.Unlock()
+	delete(c.windowLayouts, windowID)
 }
 
 func atoiSafe(s string) (int, error) {

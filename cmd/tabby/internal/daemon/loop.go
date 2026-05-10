@@ -663,15 +663,65 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 
 	var ops []ResizeOp
 	var windowOps int
+	var layoutOps int
 
 	lockedWidth := 0
 	if opts.LockWindowsToActive != nil {
 		ac := opts.LockWindowsToActive
 		if ac.Width > 0 && ac.Height > 0 {
+			lockedWidth = ac.Width
+
+			// Snapshot every window's current layout under its current width
+			// BEFORE we plan the resize. tmux scales splits greedily on
+			// resize-window, so the only way to preserve user-visible
+			// proportions across active-client switches is to remember the
+			// pre-resize layout per (windowID, width) bucket and replay it
+			// via select-layout when that width comes back.
+			//
+			// Single tmux read; cache writes happen in-process. Layouts for
+			// single-pane windows are skipped (nothing to preserve).
+			snaps := snapshotWindowLayouts()
+			for _, s := range snaps {
+				if s.Panes <= 1 {
+					continue
+				}
+				if s.Width == lockedWidth {
+					// Don't overwrite the saved layout for the target width
+					// with the about-to-be-stale current layout — the
+					// snapshot for the target width should reflect what the
+					// user last left at that width, not what tmux just
+					// scaled to during a transient mid-batch state.
+					continue
+				}
+				l.coord.SaveWindowLayout(s.WindowID, s.Width, s.Layout)
+			}
+
 			windowOpsList := planAllWindowsToClient(ac.Width, ac.Height, "reconcile:"+opts.Reason)
 			windowOps = len(windowOpsList)
-			ops = append(ops, windowOpsList...)
-			lockedWidth = ac.Width
+
+			// Interleave: each OpResizeWindow is followed immediately by an
+			// OpSelectLayout for that window if we have a cached layout at
+			// the target width. The single chained tmux command then runs
+			// `resize-window @1 ; select-layout @1 "..." ; resize-window @2 ; ...`
+			// — one invocation, one SIGWINCH cascade, proportional restore.
+			for _, op := range windowOpsList {
+				ops = append(ops, op)
+				if op.Kind != OpResizeWindow {
+					continue
+				}
+				cached := l.coord.GetWindowLayout(op.Target, lockedWidth)
+				if cached == "" {
+					continue
+				}
+				ops = append(ops, ResizeOp{
+					Kind:    OpSelectLayout,
+					Target:  op.Target,
+					Layout:  cached,
+					Reason:  "restore_layout_at_width:" + opts.Reason,
+					Subject: op.Target,
+				})
+				layoutOps++
+			}
 		}
 	}
 
@@ -703,8 +753,8 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 		l.server.BroadcastRender()
 	}
 
-	logEvent("RECONCILE_END reason=%s window_ops=%d width_ops=%d header_ops=%d total=%d skip_broadcast=%v",
-		opts.Reason, windowOps, len(widthOps), len(headerOps), len(ops), opts.SkipBroadcast)
+	logEvent("RECONCILE_END reason=%s window_ops=%d layout_ops=%d width_ops=%d header_ops=%d total=%d skip_broadcast=%v",
+		opts.Reason, windowOps, layoutOps, len(widthOps), len(headerOps), len(ops), opts.SkipBroadcast)
 
 	return ReconcileResult{
 		WindowOps: windowOps,
@@ -908,6 +958,12 @@ func (l *Loop) SubmitRefresh() {
 // RunLoopTask for the existing 20s timeout protection.
 func (l *Loop) handleRefreshSignal() {
 	l.flags.usr1.Store(false)
+	if l.deps.RunLoopTask == nil {
+		// USR1 from a tmux hook can land before SetTickDeps wires l.deps.
+		// Re-arm the flag so the next dispatch retries once deps are ready.
+		l.flags.usr1.Store(true)
+		return
+	}
 	l.deps.RunLoopTask("signal_refresh", 20*time.Second, func() {
 		start := time.Now()
 		logEvent("SIGNAL_REFRESH session=%s", l.deps.SessionID)

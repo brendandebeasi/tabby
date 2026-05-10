@@ -311,7 +311,7 @@ func fallbackWindowHeaderAction(windowID string, mouseX int) string {
 		mouseX = width - 1
 	}
 
-	const buttonCount = 5
+	const buttonCount = 6
 	gapW := 1
 	cellW := (width - gapW*(buttonCount-1)) / buttonCount
 	if cellW < 3 {
@@ -329,11 +329,18 @@ func fallbackWindowHeaderAction(windowID string, mouseX int) string {
 			used = width
 		}
 	}
+	leftover := width - used
+	if leftover < 0 {
+		leftover = 0
+	}
+	midGapW := gapW + leftover
 
 	p1 := cellW
 	h0 := p1 + gapW
 	h1 := h0 + cellW
-	nw0 := h1 + gapW
+	cy0 := h1 + gapW
+	cy1 := cy0 + cellW
+	nw0 := cy1 + midGapW
 	nw1 := nw0 + cellW
 	cl0 := nw1 + gapW
 	cl1 := cl0 + cellW
@@ -345,6 +352,8 @@ func fallbackWindowHeaderAction(windowID string, mouseX int) string {
 		return "window_header:prev_window"
 	case mouseX >= h0 && mouseX < h1:
 		return "window_header:hamburger"
+	case mouseX >= cy0 && mouseX < cy1:
+		return "window_header:cycle_pane"
 	case mouseX >= nw0 && mouseX < nw1:
 		return "window_header:new_window"
 	case mouseX >= cl0 && mouseX < cl1:
@@ -619,6 +628,13 @@ type Coordinator struct {
 	// Auto-zoom ownership: tracks which windows were zoomed by phone profile.
 	// (Map currently unreferenced; mutex dropped in Step 5.)
 	windowZoomOwner map[string]string // windowID -> "phone" | ""
+
+	// Per-(windowID, width) tmux layout snapshot. Captured before locking
+	// every window to a new active-client width; replayed via select-layout
+	// when that width becomes active again so multi-pane splits restore to
+	// the user's prior proportions instead of being scaled greedily by tmux.
+	windowLayouts   map[string]map[int]string
+	windowLayoutsMu sync.Mutex
 
 	// Sidebar visibility state (true while the sidebar pane is stashed in a
 	// holding window via break-pane; false when it is live in its parent window).
@@ -1243,6 +1259,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		hookPaneBusyIdleAt: make(map[string]int64),
 		clientProfile:      make(map[string]string),
 		windowZoomOwner:    make(map[string]string),
+		windowLayouts:      make(map[string]map[int]string),
 		lastWidth:          25, // Default width for pet physics
 		pet: petState{
 			Pos:       pos2D{X: 10, Y: 0},
@@ -7331,27 +7348,30 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	totalLines := 1
 	_ = foundWindow // used by phone layout below
 	if width < 100 {
-		// Touch layout: 3 rows, 5 fat-tappable buttons spread across the full width.
+		// Touch layout: 3 rows, 6 fat-tappable buttons spread across the full width.
 		// No title text — the pane-header strips below already show pane titles.
-		// Each button occupies width/5 cols with the glyph centered. Rows 0/1/2
+		// Each button occupies width/6 cols with the glyph centered. Rows 0/1/2
 		// all map to the same click regions for fat touch targets.
-		// Buttons (left→right): prev window, hamburger, new window, close, next window.
+		// Buttons (left→right): prev window, hamburger, cycle pane, new window, close, next window.
 		regions = regions[:0]
 
-		const buttonCount = 5
+		const buttonCount = 6
 
 		// Function-coded colors. Nav buttons are neutral blue, hamburger is gray
-		// (neutral/menu), new window is green (constructive), close is red (destructive).
+		// (neutral/menu), new window is green (constructive), close is red (destructive),
+		// cycle-pane is amber (within-window navigation, distinct from window-nav blue).
 		fgColor := lipgloss.Color("230") // off-white
 		pressFg := lipgloss.Color("16")
 		pressBg := lipgloss.Color("255")
 		navBg := lipgloss.Color("24")    // blue
 		menuBg := lipgloss.Color("240")  // gray
+		cycleBg := lipgloss.Color("130") // amber
 		newBg := lipgloss.Color("28")    // green
 		closeBg := lipgloss.Color("124") // red
 
 		prevStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(navBg)
 		hamStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(menuBg)
+		cycleStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(cycleBg)
 		newStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(newBg)
 		closeStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(closeBg)
 		nextStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(navBg)
@@ -7363,6 +7383,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 		hamburger := "\u2261"  // ≡
 		prevGlyph := "\u25b2"  // ▲ (up — prev window in the stack)
+		cycleGlyph := "⛶" // toggle zoom on the active content pane
 		newGlyph := "+"        // new window
 		closeGlyph := "\u2715" // ✕
 		nextGlyph := "\u25bc"  // ▼ (down — next window in the stack)
@@ -7393,6 +7414,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		pressedAction := c.activeWindowHeaderPress(windowID)
 		isPrevPressed := pressedAction == "window_header:prev_window"
 		isHamPressed := pressedAction == "window_header:hamburger"
+		isCyclePressed := pressedAction == "window_header:cycle_pane"
 		isNewPressed := pressedAction == "window_header:new_window"
 		isClosePressed := pressedAction == "window_header:close_window"
 		isNextPressed := pressedAction == "window_header:next_window"
@@ -7421,26 +7443,26 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 
 		gapStr := fillStyle.Render(strings.Repeat(" ", gapW))
+		// Distribute any leftover columns into the gap between the 3 left and 3
+		// right buttons, so the bar stays edge-balanced when width%6 != 0.
+		midGapW := gapW + leftover
+		midGapStr := fillStyle.Render(strings.Repeat(" ", midGapW))
 
 		middleBare := renderCell(prevGlyph, prevStyle, isPrevPressed) + gapStr +
 			renderCell(hamburger, hamStyle, isHamPressed) + gapStr +
+			renderCell(cycleGlyph, cycleStyle, isCyclePressed) + midGapStr +
 			renderCell(newGlyph, newStyle, isNewPressed) + gapStr +
 			renderCell(closeGlyph, closeStyle, isClosePressed) + gapStr +
 			renderCell(nextGlyph, nextStyle, isNextPressed)
-		if leftover > 0 {
-			middleBare += fillStyle.Render(strings.Repeat(" ", leftover))
-		}
 
 		// Empty cells use the same pressed/unpressed style so the full 3-row block
 		// highlights as one button while pressed.
 		blankRow := renderEmpty(prevStyle, isPrevPressed) + gapStr +
 			renderEmpty(hamStyle, isHamPressed) + gapStr +
+			renderEmpty(cycleStyle, isCyclePressed) + midGapStr +
 			renderEmpty(newStyle, isNewPressed) + gapStr +
 			renderEmpty(closeStyle, isClosePressed) + gapStr +
 			renderEmpty(nextStyle, isNextPressed)
-		if leftover > 0 {
-			blankRow += fillStyle.Render(strings.Repeat(" ", leftover))
-		}
 		emptyRow := blankRow
 
 		// Click regions: gap cols between buttons are intentionally non-clickable.
@@ -7448,7 +7470,9 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		p1 := cellW
 		h0 := p1 + gapW
 		h1 := h0 + cellW
-		nw0 := h1 + gapW
+		cy0 := h1 + gapW
+		cy1 := cy0 + cellW
+		nw0 := cy1 + midGapW
 		nw1 := nw0 + cellW
 		cl0 := nw1 + gapW
 		cl1 := cl0 + cellW
@@ -7466,6 +7490,11 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		})
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 2,
+			StartCol: cy0, EndCol: cy1,
+			Action: "window_header:cycle_pane", Target: windowID,
+		})
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: 2,
 			StartCol: nw0, EndCol: nw1,
 			Action: "window_header:new_window", Target: windowID,
 		})
@@ -7479,13 +7508,6 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 			StartCol: n0, EndCol: n1,
 			Action: "window_header:next_window", Target: windowID,
 		})
-		if leftover > 0 {
-			regions = append(regions, daemon.ClickableRegion{
-				StartLine: 0, EndLine: 2,
-				StartCol: n1, EndCol: width,
-				Action: "window_header:menu", Target: windowID,
-			})
-		}
 
 		content = emptyRow + "\n" + middleBare + "\n" + emptyRow
 		totalLines = 3
@@ -12406,6 +12428,56 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		focusContentPaneInActiveWindow()
 		return false
+
+	case "window_header:cycle_pane":
+		// Toggle tmux zoom on the active content pane in this window. The bar's
+		// own pane (window-header) and other system panes (sidebar, pane-header)
+		// are excluded from selection — if for some reason a system pane is the
+		// active one, fall back to the first non-system pane in pane order.
+		windowID := strings.TrimPrefix(clientID, "window-header:")
+		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, windowID)
+		c.recordWindowHeaderPress(windowID, "window_header:cycle_pane")
+
+		listTarget := windowID
+		if listTarget == "" {
+			listTarget = input.ResolvedTarget
+		}
+		if listTarget == "" {
+			listTarget = "."
+		}
+
+		out, err := exec.Command("tmux", "list-panes", "-t", listTarget, "-F",
+			"#{pane_id}|||#{pane_active}|||#{pane_current_command}|||#{pane_start_command}").Output()
+		if err != nil {
+			return false
+		}
+		var activeContentID, firstContentID string
+		for _, raw := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			parts := strings.SplitN(raw, "|||", 4)
+			if len(parts) < 4 {
+				continue
+			}
+			pid := parts[0]
+			isActive := strings.TrimSpace(parts[1]) == "1"
+			if paneIsSystemPane(parts[2], parts[3]) {
+				continue
+			}
+			if firstContentID == "" {
+				firstContentID = pid
+			}
+			if isActive {
+				activeContentID = pid
+			}
+		}
+		target := activeContentID
+		if target == "" {
+			target = firstContentID
+		}
+		if target == "" {
+			return false
+		}
+		exec.Command("tmux", "resize-pane", "-Z", "-t", target).Run()
+		return true
 
 	case "window_header:prev_window":
 		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, strings.TrimPrefix(clientID, "window-header:"))
