@@ -1512,6 +1512,24 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 		return
 	}
 
+	// Sidebar stash windows hold break-pane'd sidebar panes while the sidebar
+	// is hidden. They have no window-header and no content pane by design,
+	// so every check below would false-positive on them and trigger a
+	// request_refresh feedback loop. Build a skip-set of their window IDs
+	// once and exclude them from byWindow.
+	stashWindowIDs := map[string]bool{}
+	if winOut, werr := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}|||#{window_name}").Output(); werr == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(winOut)), "\n") {
+			parts := strings.SplitN(strings.TrimSpace(line), "|||", 2)
+			if len(parts) < 2 {
+				continue
+			}
+			if strings.HasPrefix(parts[1], sidebarStashWindowPrefix) {
+				stashWindowIDs[parts[0]] = true
+			}
+		}
+	}
+
 	byWindow := map[string]*windowPanels{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		line = strings.TrimSpace(line)
@@ -1520,6 +1538,9 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 		}
 		parts := strings.SplitN(line, "|||", 8)
 		if len(parts) < 8 {
+			continue
+		}
+		if stashWindowIDs[parts[1]] {
 			continue
 		}
 		w, _ := strconv.Atoi(parts[4])
