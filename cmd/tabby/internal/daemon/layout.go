@@ -319,6 +319,21 @@ func (c *Coordinator) ForgetWindowLayouts(windowID string) {
 	delete(c.windowLayouts, windowID)
 }
 
+// ForgetAllWindowLayouts drops every cached layout. Use after a structural
+// change that invalidates pane counts across all windows — e.g. sidebar
+// hide/restore (break-pane / join-pane changes pane count in every window),
+// after which any cached "saved layout at width W" is for the wrong pane
+// topology and replaying it via select-layout would visibly snap the user
+// to a stale geometry.
+func (c *Coordinator) ForgetAllWindowLayouts() {
+	c.windowLayoutsMu.Lock()
+	defer c.windowLayoutsMu.Unlock()
+	if len(c.windowLayouts) == 0 {
+		return
+	}
+	c.windowLayouts = make(map[string]map[int]string)
+}
+
 func atoiSafe(s string) (int, error) {
 	n := 0
 	neg := false

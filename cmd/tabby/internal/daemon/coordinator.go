@@ -5264,7 +5264,7 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 		c.sidebarHidden = true
 		if !sidebarIsStashed() {
 			go func() {
-				hideSidebarPanes()
+				c.hideSidebarPanes()
 				coordinatorDebugLog.Printf("profile transition desktop->phone: auto-stashed sidebars")
 			}()
 		} else {
@@ -5322,7 +5322,12 @@ func originalWindowIDFromStash(stashName string) string {
 // restoreSidebarPanes reattaches it later via join-pane. The sidebar's current
 // width is saved on the stash window via @tabby_stashed_width so restore can
 // bring it back at the same size the user had before hiding.
-func hideSidebarPanes() {
+func (c *Coordinator) hideSidebarPanes() {
+	// Pane count in every window is about to change (sidebar pane is
+	// break-pane'd out). Any cached layouts for these windows are now for a
+	// stale topology and would snap geometry back to a 2-pane layout when
+	// replayed by Loop.Reconcile's OpSelectLayout.
+	c.ForgetAllWindowLayouts()
 	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
 		"#{pane_id}|#{window_id}|#{pane_current_command}|#{pane_start_command}|#{pane_width}").Output()
 	if err != nil {
@@ -5386,6 +5391,12 @@ func hideSidebarPanes() {
 // restoreSidebarPanes reverses hideSidebarPanes: for each stash window, join
 // its lone pane back into the original window on the left edge.
 func (c *Coordinator) restoreSidebarPanes() {
+	// Pane count in every restored window is about to change (sidebar pane is
+	// join-pane'd back in). Drop cached layouts — same reasoning as
+	// hideSidebarPanes; otherwise the next Reconcile's OpSelectLayout snaps
+	// the user back to a 1-pane layout and the sidebar appears to flap open
+	// then closed before the saved-layout cycle catches up to reality.
+	c.ForgetAllWindowLayouts()
 	out, err := exec.Command("tmux", "list-windows", "-a", "-F",
 		"#{window_id}|#{window_name}").Output()
 	if err != nil {
@@ -12352,7 +12363,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			coordinatorDebugLog.Printf("toggle_collapse_sidebar: restored stashed sidebars")
 		} else {
 			c.sidebarHidden = true
-			hideSidebarPanes()
+			c.hideSidebarPanes()
 			coordinatorDebugLog.Printf("toggle_collapse_sidebar: stashed sidebars")
 		}
 		focusContentPaneInActiveWindow()
@@ -12423,7 +12434,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			coordinatorDebugLog.Printf("hamburger show: restored stashed sidebars")
 		} else {
 			c.sidebarHidden = true
-			hideSidebarPanes()
+			c.hideSidebarPanes()
 			coordinatorDebugLog.Printf("hamburger hide: stashed sidebars")
 		}
 		focusContentPaneInActiveWindow()
