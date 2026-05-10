@@ -960,8 +960,12 @@ func (l *Loop) handleRefreshSignal() {
 	l.flags.usr1.Store(false)
 	if l.deps.RunLoopTask == nil {
 		// USR1 from a tmux hook can land before SetTickDeps wires l.deps.
-		// Re-arm the flag so the next dispatch retries once deps are ready.
-		l.flags.usr1.Store(true)
+		// Re-submit shortly — by then deps should be ready. Re-storing the
+		// flag in place would wedge the pipeline: every future SubmitRefresh
+		// CAS(false,true) would fail and silently drop, so handleRefreshSignal
+		// would never run again and doPaneLayoutOps (the only place that
+		// spawns window-headers) would never fire.
+		time.AfterFunc(50*time.Millisecond, l.SubmitRefresh)
 		return
 	}
 	l.deps.RunLoopTask("signal_refresh", 20*time.Second, func() {
