@@ -680,6 +680,13 @@ type Coordinator struct {
 	// the header topology follows the active client's form factor.
 	OnRefreshLayout func()
 
+	// Callback to synchronously kill the phone-only window-header (fat-touch
+	// button bar) panes. Fired on the phone->desktop transition so the bar
+	// disappears in the same tick the sidebar is restored, instead of waiting
+	// on the debounced doPaneLayoutOps path that loopFullRefreshCooldown can
+	// skip.
+	OnKillPhoneWindowHeaders func()
+
 	// Context menu state (for in-renderer menus). pendingMenus,
 	// lastWindowSelect/lastWindowByClient, and lastPaneMenuOpen are loop-only
 	// dedup state — written and read exclusively from HandleInput on the
@@ -1227,11 +1234,11 @@ func NewCoordinator(sessionID string) *Coordinator {
 		theme = &t
 	}
 
-	baseIndex := 0
+	baseIndex := 1
 	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_base_index").Output(); err == nil {
 		val := strings.TrimSpace(string(out))
-		if val == "1" || strings.EqualFold(val, "true") {
-			baseIndex = 1
+		if val == "0" || strings.EqualFold(val, "false") {
+			baseIndex = 0
 		}
 	}
 
@@ -5196,44 +5203,60 @@ func (c *Coordinator) SetActiveClientWidth(w int) {
 	ac.Profile = c.computeProfile(w)
 	c.activeClient.Store(&ac)
 
-	prevProfile := c.computeProfile(prev)
-	newProfile := c.computeProfile(w)
-	// On initial boot (prev == 0), always fire the profile action so
+	c.maybeScheduleProfileTransition(prev, w)
+}
+
+// maybeScheduleProfileTransition compares the profile implied by prevWidth and
+// newWidth, and if they differ (or prevWidth is 0, meaning initial boot),
+// schedules a debounced PROFILE_TRANSITION_FIRE on the shared timer. Shared
+// by SetActiveClientWidth (the resize hook path) and SetActiveClient (the
+// geometry-tick elector path) so both routes through which the active client
+// can change observe phone⇄desktop flips and run executeProfileTransition.
+//
+// Without this shared call site, the geometry-tick path (the only one that
+// fires on tmux client-attached, e.g. on reattach) would silently flip the
+// stored profile and skip executeProfileTransition's stashed-sidebar restore.
+func (c *Coordinator) maybeScheduleProfileTransition(prevWidth, newWidth int) {
+	prevProfile := c.computeProfile(prevWidth)
+	newProfile := c.computeProfile(newWidth)
+	// On initial boot (prevWidth == 0), always fire the profile action so
 	// phone clients get their sidebar auto-stashed even though computeProfile(0)
 	// and computeProfile(<100) are both "phone".
-	if prevProfile != newProfile || prev == 0 {
-		status := c.NewWindowStatus()
-		if status.State != "none" {
-			logEvent("PROFILE_TRANSITION_SUPPRESSED prev=%s new=%s target=%s state=%s",
-				prevProfile, newProfile, status.WindowID, status.State)
+	if prevProfile == newProfile && prevWidth != 0 {
+		return
+	}
+
+	status := c.NewWindowStatus()
+	if status.State != "none" {
+		logEvent("PROFILE_TRANSITION_SUPPRESSED prev=%s new=%s target=%s state=%s",
+			prevProfile, newProfile, status.WindowID, status.State)
+		return
+	}
+
+	profileTransitionMu.Lock()
+	if profileTransitionTimer != nil {
+		profileTransitionTimer.Stop()
+	}
+	pendingProfile = newProfile
+	logEvent("PROFILE_TRANSITION_SCHEDULED prev=%s new=%s delay=%dms",
+		prevProfile, newProfile, profileTransitionDelay.Milliseconds())
+	profileTransitionTimer = time.AfterFunc(profileTransitionDelay, func() {
+		profileTransitionMu.Lock()
+		target := pendingProfile
+		pendingProfile = ""
+		profileTransitionTimer = nil
+		profileTransitionMu.Unlock()
+
+		currentProfile := c.ActiveClientProfile()
+		if target != currentProfile {
+			logEvent("PROFILE_TRANSITION_STALE scheduled=%s current=%s action=skip", target, currentProfile)
 			return
 		}
 
-		profileTransitionMu.Lock()
-		if profileTransitionTimer != nil {
-			profileTransitionTimer.Stop()
-		}
-		pendingProfile = newProfile
-		logEvent("PROFILE_TRANSITION_SCHEDULED prev=%s new=%s delay=%dms",
-			prevProfile, newProfile, profileTransitionDelay.Milliseconds())
-		profileTransitionTimer = time.AfterFunc(profileTransitionDelay, func() {
-			profileTransitionMu.Lock()
-			target := pendingProfile
-			pendingProfile = ""
-			profileTransitionTimer = nil
-			profileTransitionMu.Unlock()
-
-			currentProfile := c.ActiveClientProfile()
-			if target != currentProfile {
-				logEvent("PROFILE_TRANSITION_STALE scheduled=%s current=%s action=skip", target, currentProfile)
-				return
-			}
-
-			logEvent("PROFILE_TRANSITION_FIRE target=%s", target)
-			c.executeProfileTransition(target)
-		})
-		profileTransitionMu.Unlock()
-	}
+		logEvent("PROFILE_TRANSITION_FIRE target=%s", target)
+		c.executeProfileTransition(target)
+	})
+	profileTransitionMu.Unlock()
 }
 
 func (c *Coordinator) executeProfileTransition(newProfile string) {
@@ -5241,18 +5264,29 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 		go c.OnRefreshLayout()
 	}
 
-	if newProfile == "desktop" && sidebarIsStashed() {
+	if newProfile == "desktop" {
 		narrow := hasNarrowClient()
-		logEvent("PROFILE_TRANSITION_DESKTOP_STASHED new=%s hasNarrow=%v sidebarHidden=%v",
-			newProfile, narrow, c.sidebarHidden)
+		stashed := sidebarIsStashed()
+		logEvent("PROFILE_TRANSITION_DESKTOP new=%s hasNarrow=%v stashed=%v sidebarHidden=%v",
+			newProfile, narrow, stashed, c.sidebarHidden)
 		if narrow {
-			logEvent("PROFILE_TRANSITION_SKIP_RESTORE reason=phone_client_still_attached")
+			logEvent("PROFILE_TRANSITION_SKIP_DESKTOP reason=phone_client_still_attached")
 		} else {
-			c.sidebarHidden = false
-			go func() {
-				c.restoreSidebarPanes()
-				coordinatorDebugLog.Printf("profile transition phone->desktop: auto-restored stashed sidebars")
-			}()
+			// Kill the phone window-header (button bar) immediately, in the same
+			// tick as the sidebar restore. spawnWindowHeaders would eventually do
+			// this on its own, but only after loopFullRefreshCooldown elapses —
+			// leaving the bar visible alongside a restored sidebar in the
+			// interim.
+			if c.OnKillPhoneWindowHeaders != nil {
+				go c.OnKillPhoneWindowHeaders()
+			}
+			if stashed {
+				c.sidebarHidden = false
+				go func() {
+					c.restoreSidebarPanes()
+					coordinatorDebugLog.Printf("profile transition phone->desktop: auto-restored stashed sidebars")
+				}()
+			}
 		}
 	}
 	if newProfile == "phone" {
@@ -5430,6 +5464,14 @@ func (c *Coordinator) restoreSidebarPanes() {
 			if w, convErr := strconv.Atoi(strings.TrimSpace(string(widthOut))); convErr == nil && w > 0 {
 				width = w
 			}
+		}
+		// Clamp to the destination window's profile-appropriate max. The stashed
+		// width reflects whatever profile was active at hide time; restoring on
+		// a smaller profile (e.g. stashed on desktop at 35 cols, restored on
+		// phone) would otherwise produce a sidebar that swallows the screen.
+		if bounded := c.boundedSidebarWidthForWindow(origWinID, width, 0); bounded > 0 && bounded != width {
+			coordinatorDebugLog.Printf("restoreSidebarPanes: clamped width for %s: %d -> %d", origWinID, width, bounded)
+			width = bounded
 		}
 		// Get the sidebar pane inside the stash window.
 		pout, err := exec.Command("tmux", "list-panes", "-t", stashWinID, "-F", "#{pane_id}").Output()
@@ -6589,14 +6631,6 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 	if keyboardThreshold == 0 {
 		keyboardThreshold = 38
 	}
-	if height > 0 && height <= keyboardThreshold {
-		maxWidth := widthMobileKeyboard
-		if maxWidth < 10 {
-			maxWidth = 10
-		}
-		return maxWidth, true
-	}
-
 	maxByFraction := windowWidth * maxPercent / 100
 	if maxByFraction < 15 {
 		maxByFraction = 15
@@ -6605,6 +6639,24 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 	maxByContent := windowWidth - minContentCols
 	if maxByContent < 15 {
 		maxByContent = 15
+	}
+
+	if height > 0 && height <= keyboardThreshold {
+		// Keyboard mode: enforce the same fraction/content floors as the
+		// non-keyboard mobile branch. Without these, a corrupt user
+		// preference (e.g. @tabby_sidebar_width_mobile_keyboard=75 on a
+		// 75-col phone) would propagate verbatim, defeating every clamp.
+		maxWidth := widthMobileKeyboard
+		if maxByFraction < maxWidth {
+			maxWidth = maxByFraction
+		}
+		if maxByContent < maxWidth {
+			maxWidth = maxByContent
+		}
+		if maxWidth < 10 {
+			maxWidth = 10
+		}
+		return maxWidth, true
 	}
 
 	maxReasonable := maxByFraction
@@ -6654,7 +6706,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	headerContent, headerRegions := c.generateSidebarHeader(width, clientID)
 	headerLines := strings.Count(headerContent, "\n")
 
-	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(width, false)
+	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(width, false, false)
 	topWidgetLines := strings.Count(topWidgets, "\n")
 	bottomWidgetLines := strings.Count(bottomWidgets, "\n")
 
@@ -6666,9 +6718,24 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		maxMainLines = 0
 	}
 
-	// Auto-hide pet when viewport is too small to show all tabs
+	// Tight-viewport escalation: drop the pet's debug bar before dropping the
+	// pet entirely. Debug bar costs 3 lines (divider + 2 status lines), so
+	// suppressing it often keeps Whiskers visible when tabs are otherwise
+	// just barely overflowing.
+	if maxMainLines < mainContentLines && c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.DebugBar {
+		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(width, false, true)
+		topWidgetLines = strings.Count(topWidgets, "\n")
+		bottomWidgetLines = strings.Count(bottomWidgets, "\n")
+		maxMainLines = height - headerLines - topWidgetLines - bottomWidgetLines
+		if maxMainLines < 0 {
+			maxMainLines = 0
+		}
+	}
+
+	// Auto-hide pet when viewport is too small to show all tabs even after
+	// dropping the debug bar.
 	if maxMainLines < mainContentLines && c.config.Widgets.Pet.Enabled {
-		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(width, true)
+		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(width, true, false)
 		topWidgetLines = strings.Count(topWidgets, "\n")
 		bottomWidgetLines = strings.Count(bottomWidgets, "\n")
 		maxMainLines = height - headerLines - topWidgetLines - bottomWidgetLines
@@ -8831,7 +8898,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 
 			// Build tab content - use visual position for display (stable sequential
 			// numbering that matches sidebar order regardless of tmux renumbering)
-			// Display is 0-indexed to match tmux window indices
+			// Display is 1-indexed by default (configurable via @tabby_base_index)
 			displayName := win.Name
 			if isRawWindowID(displayName) {
 				displayName = "~" // automatic-rename hasn't fired yet
@@ -9762,7 +9829,7 @@ type widgetEntry struct {
 
 // collectWidgetEntries gathers all enabled widgets and action buttons into
 // a sorted slice of widgetEntry, ready for zone-based rendering.
-func (c *Coordinator) collectWidgetEntries(width int, skipPet bool) []widgetEntry {
+func (c *Coordinator) collectWidgetEntries(width int, skipPet, skipDebugBar bool) []widgetEntry {
 	var entries []widgetEntry
 
 	// Clock widget
@@ -9789,7 +9856,7 @@ func (c *Coordinator) collectWidgetEntries(width int, skipPet bool) []widgetEntr
 			name:     "pet",
 			zone:     pos,
 			priority: c.config.Widgets.Pet.Priority,
-			content:  c.renderPetWidget(width),
+			content:  c.renderPetWidget(width, skipDebugBar),
 		})
 	}
 
@@ -9932,8 +9999,8 @@ func (c *Coordinator) renderWidgetZone(entries []widgetEntry, width int) (string
 // generateWidgetZones renders all widgets into top and bottom zones,
 // plus resize buttons that always appear at the very bottom.
 // Returns: topContent, topRegions, bottomContent, bottomRegions
-func (c *Coordinator) generateWidgetZones(width int, skipPet bool) (string, []daemon.ClickableRegion, string, []daemon.ClickableRegion) {
-	entries := c.collectWidgetEntries(width, skipPet)
+func (c *Coordinator) generateWidgetZones(width int, skipPet, skipDebugBar bool) (string, []daemon.ClickableRegion, string, []daemon.ClickableRegion) {
+	entries := c.collectWidgetEntries(width, skipPet, skipDebugBar)
 
 	// Split into top and bottom zones
 	var topEntries, bottomEntries []widgetEntry
@@ -10585,11 +10652,17 @@ func buildAirRow(sprites map[int]string, safePlayWidth int) string {
 //   - Play area (3 lines: high air, low air, ground)
 //   - Divider
 //   - Stats: hunger | happiness | life
-func (c *Coordinator) renderPetWidget(width int) string {
+func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	petCfg := c.config.Widgets.Pet
 	if !petCfg.Enabled {
 		return ""
 	}
+
+	// Reset debug-line markers; only set inside the conditional below. Without
+	// this reset they'd retain stale values across renders that suppress the
+	// debug bar, causing click misrouting.
+	c.petLayout.DebugLine1 = 0
+	c.petLayout.DebugLine2 = 0
 
 	style := petCfg.Style
 	if style == "" {
@@ -11061,8 +11134,8 @@ func (c *Coordinator) renderPetWidget(width int) string {
 	result.WriteString(statusStyle.Render(statusLine) + "\n")
 	currentLine++
 
-	// Debug bar (if enabled)
-	if petCfg.DebugBar {
+	// Debug bar (if enabled and not suppressed by tight-viewport escalation)
+	if petCfg.DebugBar && !skipDebugBar {
 		result.WriteString(renderDivider())
 		currentLine++
 		debugLines := c.renderDebugBar(safePlayWidth)
@@ -11559,12 +11632,20 @@ func (c *Coordinator) ActiveClientProfile() string {
 // Height, Profile) so RenderPayload.ActiveClient can be populated without
 // every render site touching the elector. Call from the geometry tick
 // whenever the election result changes.
+//
+// Routes through maybeScheduleProfileTransition so a width that crosses the
+// phone/desktop boundary triggers the same debounced PROFILE_TRANSITION_FIRE
+// as SetActiveClientWidth. This is what restores a stashed sidebar after a
+// tmux reattach (client-attached only nudges a refresh; the actual profile
+// flip is observed here in the geometry tick).
 func (c *Coordinator) SetActiveClient(ac daemon.ActiveClient) {
+	prevWidth := int(c.activeClientWidth.Load())
 	// Store a copy so callers can't mutate our state through the original.
 	stored := ac
 	c.activeClient.Store(&stored)
 	if ac.Width > 0 {
 		c.activeClientWidth.Store(int64(ac.Width))
+		c.maybeScheduleProfileTransition(prevWidth, ac.Width)
 	}
 }
 
@@ -12426,8 +12507,14 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Hamburger tapped on window header -> hide/show the inline sidebar by
 		// break-pane'ing it out to a stash window (keeping the renderer process
 		// alive), and join-pane'ing it back on the next tap.
-		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, strings.TrimPrefix(clientID, "window-header:"))
-		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:hamburger")
+		sourceWindowID := strings.TrimPrefix(clientID, "window-header:")
+		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, sourceWindowID)
+		c.recordWindowHeaderPress(sourceWindowID, "window_header:hamburger")
+		// Capture the user's actual tmux client (the one whose tap we're
+		// servicing) BEFORE we run hide/restore so we can anchor it back to
+		// the source window afterward. activeClientGeometry resolves via the
+		// ClientElector that was just pinned by the input handler.
+		_, _, userTTY, _, _ := activeClientGeometry()
 		if sidebarIsStashed() {
 			c.sidebarHidden = false
 			c.restoreSidebarPanes()
@@ -12437,7 +12524,20 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.hideSidebarPanes()
 			coordinatorDebugLog.Printf("hamburger hide: stashed sidebars")
 		}
-		focusContentPaneInActiveWindow()
+		// Re-anchor the user's specific tmux client to the window they tapped
+		// from. join-pane/break-pane use -d so they shouldn't change focus,
+		// but on a phone where each swipe window has its own tmux client,
+		// any post-restore refocus that targets the "default client" can
+		// land on the wrong one. switch-client -c <tty> -t @<window> is
+		// addressed at the exact user-facing client and avoids that
+		// ambiguity entirely.
+		if userTTY != "" && sourceWindowID != "" {
+			if err := exec.Command("tmux", "switch-client", "-c", userTTY, "-t", sourceWindowID).Run(); err != nil {
+				logEvent("HAMBURGER_REANCHOR_ERR tty=%s window=%s err=%v", userTTY, sourceWindowID, err)
+			} else {
+				logEvent("HAMBURGER_REANCHOR tty=%s window=%s", userTTY, sourceWindowID)
+			}
+		}
 		return false
 
 	case "window_header:cycle_pane":
@@ -13192,8 +13292,10 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 		return true
 	}
 
-	// Check if click is on debug bar lines (if debug bar is enabled)
-	if c.config.Widgets.Pet.DebugBar {
+	// Check if click is on debug bar lines. Gate on whether the debug bar
+	// was actually rendered (DebugLine1>0) rather than config, since the
+	// tight-viewport escalation can suppress it even when configured on.
+	if c.config.Widgets.Pet.DebugBar && layout.DebugLine1 > 0 {
 		if clickY == layout.DebugLine1 || clickY == layout.DebugLine2 {
 			coordinatorDebugLog.Printf("  -> Debug bar line clicked (line=%d, X=%d)", clickY, clickX)
 			return c.handleDebugBarClick(clientID, clickX, clickY)

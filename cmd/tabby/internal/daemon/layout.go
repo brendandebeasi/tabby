@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -277,11 +279,115 @@ func snapshotWindowLayouts() []windowLayoutSnapshot {
 	return result
 }
 
+// layoutOuterRe captures the outer "checksum,WxH,X,Y" prefix of a tmux layout
+// string. The 5 hex digits + comma is the format; rest is the tree.
+var layoutOuterRe = regexp.MustCompile(`^[0-9a-f]+,(\d+)x(\d+),\d+,\d+`)
+
+// layoutLeafRe matches every "WxH,X,Y,paneID" leaf in a tmux layout tree.
+// Non-leaf nodes have `[` or `{` after the position instead of `,paneID`.
+var layoutLeafRe = regexp.MustCompile(`(\d+)x(\d+),(\d+),(\d+),(\d+)`)
+
+// tmuxLayoutChecksum returns the 4-hex-digit checksum tmux prepends to layout
+// strings. Mirrors layout-custom.c:layout_checksum in tmux: rotate the
+// running 16-bit value right by 1 (LSB→MSB), then add each byte. Tmux
+// rejects select-layout with a mismatched checksum, so we must compute it
+// to apply a custom-built layout.
+func tmuxLayoutChecksum(s string) string {
+	var csum uint16
+	for i := 0; i < len(s); i++ {
+		csum = (csum >> 1) | ((csum & 1) << 15)
+		csum += uint16(s[i])
+	}
+	return fmt.Sprintf("%04x", csum)
+}
+
+// buildSidebarPlusFooterLayout constructs the canonical tmux layout string
+// for a tabby window with sidebar, content (pane-header + body), and a
+// full-width footer bar at the bottom. Returns "" if any dimension is
+// non-positive or won't fit.
+//
+// Pane numbers are the integer suffix of a tmux pane id (e.g. %1635 → 1635).
+//
+// Reference structure (from a healthy production layout):
+//
+//	[<top WxTopH 0,0 {sidebar SBxTopH 0,0 P1, content CWxTopH SX,0
+//	     [pane-hdr CWx1 SX,0 P2, body CWxBodyH SX,2 P3]}>,
+//	 <bar Wx BarH 0,BarY P4>]
+func buildSidebarPlusFooterLayout(windowW, windowH, sidebarW, barH int,
+	sidebarPaneNum, paneHdrNum, bodyPaneNum, barPaneNum int) string {
+	if windowW <= 0 || windowH <= 0 || sidebarW <= 0 || barH <= 0 {
+		return ""
+	}
+	topH := windowH - barH - 1 // -1 for divider between top section and bar
+	if topH <= 2 {             // need at least 1 row for pane-header + 1 for body
+		return ""
+	}
+	contentW := windowW - sidebarW - 1 // -1 for vertical divider after sidebar
+	if contentW <= 0 {
+		return ""
+	}
+	contentX := sidebarW + 1
+	bodyH := topH - 2 // -1 for pane-header, -1 for divider below it
+	if bodyH <= 0 {
+		return ""
+	}
+	barY := windowH - barH
+
+	body := fmt.Sprintf(
+		"%dx%d,0,0[%dx%d,0,0{%dx%d,0,0,%d,%dx%d,%d,0[%dx%d,%d,0,%d,%dx%d,%d,2,%d]},%dx%d,0,%d,%d]",
+		windowW, windowH,
+		windowW, topH,
+		sidebarW, topH, sidebarPaneNum,
+		contentW, topH, contentX,
+		contentW, 1, contentX, paneHdrNum,
+		contentW, bodyH, contentX, bodyPaneNum,
+		windowW, barH, barY, barPaneNum,
+	)
+	return tmuxLayoutChecksum(body) + "," + body
+}
+
+// looksMalformedLayout returns true when a tmux layout string contains a
+// footer-shaped leaf pane (≤4 rows tall, sitting on the window's bottom edge)
+// that's narrower than the window width. In tabby that pane is the
+// window-header button bar, which must always span the full window width;
+// when it gets nested inside a (sidebar | content) split it's only as wide
+// as the content side, rendering as a "squished" bar with the sidebar to its
+// left. Refusing to cache or replay such a layout prevents the corruption
+// from sticking across active-client switches.
+func looksMalformedLayout(layout string) bool {
+	om := layoutOuterRe.FindStringSubmatch(layout)
+	if om == nil {
+		return false
+	}
+	outerW, err := strconv.Atoi(om[1])
+	if err != nil || outerW <= 0 {
+		return false
+	}
+	outerH, err := strconv.Atoi(om[2])
+	if err != nil || outerH <= 0 {
+		return false
+	}
+	for _, m := range layoutLeafRe.FindAllStringSubmatch(layout, -1) {
+		w, _ := strconv.Atoi(m[1])
+		h, _ := strconv.Atoi(m[2])
+		y, _ := strconv.Atoi(m[4])
+		// Footer signature: short pane sitting on the bottom edge of the window.
+		if h > 0 && h <= 4 && y+h == outerH && w > 0 && w < outerW {
+			return true
+		}
+	}
+	return false
+}
+
 // SaveWindowLayout caches a tmux layout string under (windowID, width). Called
 // before each lock-windows-to-active reconcile so the prior client's split
 // proportions can be replayed when that client regains focus.
 func (c *Coordinator) SaveWindowLayout(windowID string, width int, layout string) {
 	if windowID == "" || width <= 0 || layout == "" {
+		return
+	}
+	if looksMalformedLayout(layout) {
+		logEvent("LAYOUT_CACHE_REJECTED windowID=%s width=%d reason=footer_squish layout=%s", windowID, width, layout)
 		return
 	}
 	c.windowLayoutsMu.Lock()
@@ -302,10 +408,23 @@ func (c *Coordinator) GetWindowLayout(windowID string, width int) string {
 	}
 	c.windowLayoutsMu.Lock()
 	defer c.windowLayoutsMu.Unlock()
-	if m, ok := c.windowLayouts[windowID]; ok {
-		return m[width]
+	m, ok := c.windowLayouts[windowID]
+	if !ok {
+		return ""
 	}
-	return ""
+	layout := m[width]
+	if layout == "" {
+		return ""
+	}
+	// Re-validate on read so any pre-existing bad entry (cached before this
+	// validator existed, or persisted before a daemon restart) gets
+	// dropped instead of replayed forever via select-layout.
+	if looksMalformedLayout(layout) {
+		logEvent("LAYOUT_CACHE_DROPPED_ON_READ windowID=%s width=%d reason=footer_squish", windowID, width)
+		delete(m, width)
+		return ""
+	}
+	return layout
 }
 
 // ForgetWindowLayouts drops cached layouts for the given windowID (e.g. when

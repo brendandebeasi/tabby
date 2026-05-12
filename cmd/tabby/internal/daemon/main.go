@@ -319,9 +319,19 @@ func layoutStatePath() string {
 func saveLayoutsToDisk(windows []tmux.Window) {
 	layouts := make(map[string]string)
 	for _, win := range windows {
-		if win.Layout != "" {
-			layouts[win.ID] = win.Layout
+		if win.Layout == "" {
+			continue
 		}
+		// Skip persisting structurally malformed layouts (e.g. footer button
+		// bar nested inside a sidebar split). Otherwise the bad layout
+		// survives daemon restarts and gets re-pushed into tmux as the
+		// @tabby_layout_<wid> option, which preserve-pane-ratios then
+		// replays.
+		if looksMalformedLayout(win.Layout) {
+			logEvent("LAYOUT_DISK_SKIPPED windowID=%s reason=footer_squish layout=%s", win.ID, win.Layout)
+			continue
+		}
+		layouts[win.ID] = win.Layout
 	}
 	if len(layouts) == 0 {
 		return
@@ -801,6 +811,33 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 	}
 }
 
+// killPhoneWindowHeaders removes every window-header pane in the session.
+// The window-header is the phone-only fat-touch button bar (hamburger / prev /
+// close / next); it must vanish the moment the active client flips to a desktop
+// profile so the sidebar can claim the row back without overlap. Safe to call
+// when no headers exist — the list-panes scan no-ops in that case.
+func killPhoneWindowHeaders() {
+	headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
+		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|||", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		if strings.Contains(parts[1], "window-header") || strings.Contains(parts[2], "window-header") {
+			markSkipPreserveForWindow(parts[0])
+			exec.Command("tmux", "kill-pane", "-t", parts[0]).Run()
+			logEvent("WINDOW_HEADER_KILL_DESKTOP pane=%s", parts[0])
+		}
+	}
+}
+
 // spawnWindowHeaders spawns exactly ONE window-header pane per window, positioned
 // at the top and spanning the window's full content width. The header tracks the
 // window's active pane internally and renders a single 1-row (desktop) or 3-row
@@ -824,23 +861,7 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 	// buttons that replace the sidebar interaction on narrow clients. On desktop,
 	// kill any that are around and skip spawning new ones.
 	if coordinator != nil && coordinator.ActiveClientProfile() != "phone" {
-		if headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
-			"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
-			for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
-				if line == "" {
-					continue
-				}
-				parts := strings.SplitN(line, "|||", 3)
-				if len(parts) < 3 {
-					continue
-				}
-				if strings.Contains(parts[1], "window-header") || strings.Contains(parts[2], "window-header") {
-					markSkipPreserveForWindow(parts[0])
-					exec.Command("tmux", "kill-pane", "-t", parts[0]).Run()
-					logEvent("WINDOW_HEADER_KILL_DESKTOP pane=%s", parts[0])
-				}
-			}
-		}
+		killPhoneWindowHeaders()
 		return
 	}
 
@@ -1790,6 +1811,74 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	if needLayoutRefresh && panelAuditApplyFixes && coordinator.OnRefreshLayout != nil {
 		coordinator.OnRefreshLayout()
 	}
+
+	// --- Check: footer button bar is full-width ------------------------------
+	// When the window-header bar lands inside the (sidebar | content) split
+	// instead of below it, it renders as a "squished" bar with the sidebar to
+	// its left. Reconstruct the correct layout and apply it via select-layout.
+	// Triggered when split-window -f fails to escape a nested split; happens
+	// after sidebar hide/restore + header respawn cycles.
+	for winID, win := range byWindow {
+		if len(win.windowHeaders) != 1 || len(win.sidebars) != 1 ||
+			len(win.contentPanes) != 1 || len(win.paneHeaders) != 1 {
+			continue
+		}
+		bar := win.windowHeaders[0]
+		if win.windowHeight <= 0 {
+			continue
+		}
+		// Window width: take the widest pane in the window — anything that
+		// spans the bottom edge full-width sets the lower bound; the actual
+		// window width is at least that.
+		windowW := 0
+		for _, p := range win.sidebars {
+			if p.width > windowW {
+				windowW = p.width
+			}
+		}
+		for _, p := range win.contentPanes {
+			c := p.width
+			// Add sidebar width + 1 divider for content panes.
+			c += win.sidebars[0].width + 1
+			if c > windowW {
+				windowW = c
+			}
+		}
+		if windowW <= 0 {
+			continue
+		}
+		// Bar is fine when it spans the full window width.
+		if bar.width >= windowW-1 {
+			continue
+		}
+		sb := win.sidebars[0]
+		ph := win.paneHeaders[0]
+		body := win.contentPanes[0]
+		sbNum, err1 := strconv.Atoi(strings.TrimPrefix(sb.paneID, "%"))
+		phNum, err2 := strconv.Atoi(strings.TrimPrefix(ph.paneID, "%"))
+		bodyNum, err3 := strconv.Atoi(strings.TrimPrefix(body.paneID, "%"))
+		barNum, err4 := strconv.Atoi(strings.TrimPrefix(bar.paneID, "%"))
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+			continue
+		}
+		newLayout := buildSidebarPlusFooterLayout(
+			windowW, win.windowHeight, sb.width, bar.height,
+			sbNum, phNum, bodyNum, barNum,
+		)
+		if newLayout == "" {
+			logEvent("AUDIT_FOOTER_SQUISH window=%s bar_pane=%s bar_w=%d window_w=%d action=skip_build_failed",
+				winID, bar.paneID, bar.width, windowW)
+			continue
+		}
+		logEvent("AUDIT_FOOTER_SQUISH window=%s bar_pane=%s bar_w=%d window_w=%d action=%s layout=%s",
+			winID, bar.paneID, bar.width, windowW, fixOrLog("select_layout"), newLayout)
+		if !panelAuditApplyFixes {
+			continue
+		}
+		if rerr := exec.Command("tmux", "select-layout", "-t", winID, newLayout).Run(); rerr != nil {
+			logEvent("AUDIT_FOOTER_REPAIR_ERR window=%s err=%v", winID, rerr)
+		}
+	}
 }
 
 // fixOrLog returns the fix action name when fixes are enabled, otherwise
@@ -2338,6 +2427,7 @@ func Run(args []string) int {
 		// of profile transitions collapses to one signal_refresh body run.
 		loop.SubmitRefresh()
 	}
+	coordinator.OnKillPhoneWindowHeaders = killPhoneWindowHeaders
 
 	// Register SIGUSR1/SIGUSR2 handlers BEFORE server.Start() creates the
 	// socket. ensure_sidebar.sh sends USR1 the moment it detects the socket,

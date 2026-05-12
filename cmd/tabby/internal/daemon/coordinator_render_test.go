@@ -255,7 +255,7 @@ func TestRenderSessionWidget(t *testing.T) {
 func TestRenderPetWidget_Disabled(t *testing.T) {
 	c := newRenderCoordinator(t)
 	c.config.Widgets.Pet.Enabled = false
-	result := c.renderPetWidget(30)
+	result := c.renderPetWidget(30, false)
 	assert.Empty(t, result)
 }
 
@@ -263,7 +263,7 @@ func TestRenderPetWidget_Enabled(t *testing.T) {
 	c := newRenderCoordinator(t)
 	c.config.Widgets.Pet.Enabled = true
 	c.lastWidth = 30
-	result := c.renderPetWidget(30)
+	result := c.renderPetWidget(30, false)
 	_ = result
 }
 
@@ -287,7 +287,7 @@ func TestRenderWidgetZone_WithEntry(t *testing.T) {
 
 func TestGenerateWidgetZones_NoWidgets(t *testing.T) {
 	c := newRenderCoordinator(t)
-	top, topR, bottom, bottomR := c.generateWidgetZones(30, false)
+	top, topR, bottom, bottomR := c.generateWidgetZones(30, false, false)
 	assert.Empty(t, top)
 	assert.Empty(t, topR)
 	assert.NotEmpty(t, bottom)
@@ -414,7 +414,7 @@ func TestRenderGitWidget_DirtyRepo(t *testing.T) {
 func TestCollectWidgetEntries_WithClockEnabled(t *testing.T) {
 	c := newRenderCoordinator(t)
 	c.config.Widgets.Clock.Enabled = true
-	entries := c.collectWidgetEntries(30, false)
+	entries := c.collectWidgetEntries(30, false, false)
 	found := false
 	for _, e := range entries {
 		if e.name == "clock" {
@@ -428,7 +428,7 @@ func TestCollectWidgetEntries_WithClockEnabled(t *testing.T) {
 func TestCollectWidgetEntries_WithSessionEnabled(t *testing.T) {
 	c := newRenderCoordinator(t)
 	c.config.Widgets.Session.Enabled = true
-	entries := c.collectWidgetEntries(30, false)
+	entries := c.collectWidgetEntries(30, false, false)
 	found := false
 	for _, e := range entries {
 		if e.name == "session" {
