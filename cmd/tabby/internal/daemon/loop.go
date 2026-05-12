@@ -592,8 +592,6 @@ func (l *Loop) handleWindowCheckTick() {
 		spawnRenderersForNewWindows(l.server, l.deps.SessionID, windows, l.coord)
 		cleanupOrphanedSidebars(windows, l.coord)
 		cleanupOrphanWindowsByTmux(l.deps.SessionID, l.coord)
-		// Persist current layouts to disk for restart recovery
-		saveLayoutsToDisk(windows)
 		// Width sync as fallback for missed events, only when active context changed
 		activeTTY := ""
 		activeW := 0

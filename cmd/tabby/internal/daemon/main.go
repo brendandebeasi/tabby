@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -23,7 +22,6 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
-	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -307,57 +305,6 @@ func markSkipPreserveForWindow(paneID string) {
 		return
 	}
 	exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_skip_preserve_%s", windowID), "1").Run()
-}
-
-// layoutStatePath returns the path to the persistent layout state file.
-func layoutStatePath() string {
-	return paths.StatePath("pane_layouts.json")
-}
-
-// saveLayoutsToDisk persists all current window layouts to disk.
-// Called periodically to survive daemon restarts.
-func saveLayoutsToDisk(windows []tmux.Window) {
-	layouts := make(map[string]string)
-	for _, win := range windows {
-		if win.Layout == "" {
-			continue
-		}
-		// Skip persisting structurally malformed layouts (e.g. footer button
-		// bar nested inside a sidebar split). Otherwise the bad layout
-		// survives daemon restarts and gets re-pushed into tmux as the
-		// @tabby_layout_<wid> option, which preserve-pane-ratios then
-		// replays.
-		if looksMalformedLayout(win.Layout) {
-			logEvent("LAYOUT_DISK_SKIPPED windowID=%s reason=footer_squish layout=%s", win.ID, win.Layout)
-			continue
-		}
-		layouts[win.ID] = win.Layout
-	}
-	if len(layouts) == 0 {
-		return
-	}
-	data, err := json.Marshal(layouts)
-	if err != nil {
-		return
-	}
-	paths.EnsureStateDir()
-	os.WriteFile(layoutStatePath(), data, 0644)
-}
-
-// restoreLayoutsFromDisk loads saved layouts and sets them as tmux options
-// so that tabby-hook preserve-pane-ratios can use them after header spawning.
-func restoreLayoutsFromDisk() {
-	data, err := os.ReadFile(layoutStatePath())
-	if err != nil {
-		return
-	}
-	var layouts map[string]string
-	if err := json.Unmarshal(data, &layouts); err != nil {
-		return
-	}
-	for windowID, layout := range layouts {
-		exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_layout_%s", windowID), layout).Run()
-	}
 }
 
 // computeResponsiveSidebarWidth applies responsive breakpoint logic given all parameters.
@@ -2640,12 +2587,11 @@ func Run(args []string) int {
 		// here off-loop, but the doPaneLayoutOps method it calls owns the
 		// cooldown state.
 
-		// Restore saved layouts once at startup, before the main event loop.
-		// Must not run inside doPaneLayoutOps: spawnWindowHeaders sets @tabby_spawning=1
-		// which blocks layout updates to @tabby_layout_<windowID>,
-		// so any stale layout written after the split would persist and be applied
-		// by tabby-hook preserve-pane-ratios, corrupting the live pane geometry.
-		restoreLayoutsFromDisk()
+		// @tabby_layout_<wid> is sourced from tmux options (set by the
+		// coordinator's SaveWindowLayouts on every refresh) and survives daemon
+		// restart as long as the tmux server stays up. No disk restore needed —
+		// across a tmux-server restart, pane IDs change and any cached layout
+		// would refer to dead panes.
 
 		// Eager initial spawn: don't wait for the 3s windowCheckTicker.
 		// The coordinator already has windows from NewCoordinator, so spawn

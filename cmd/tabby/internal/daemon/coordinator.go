@@ -2134,6 +2134,15 @@ func (c *Coordinator) SaveWindowLayouts() {
 	c.stateMu.RUnlock()
 
 	for _, w := range windows {
+		// Defense-in-depth: don't push a structurally malformed layout into
+		// @tabby_layout_<wid>. preserve-pane-ratios reads that option and
+		// replays it via select-layout on after-kill-pane, and a footer-squish
+		// layout (window-header bar nested inside the sidebar split) would
+		// propagate the corruption into the live window.
+		if looksMalformedLayout(w.layout) {
+			logEvent("LAYOUT_OPTION_SKIPPED windowID=%s reason=footer_squish layout=%s", w.id, w.layout)
+			continue
+		}
 		exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_layout_%s", w.id), w.layout).Run()
 	}
 }

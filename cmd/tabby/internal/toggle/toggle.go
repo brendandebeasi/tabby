@@ -148,14 +148,21 @@ func enable(sessionID, exe, pidFile, sockPath, watchdogPidFile, stateFile string
 	os.WriteFile(stateFile, []byte("enabled"), 0644)
 	run("tmux", "set-option", "@tabby_sidebar", "enabled")
 
-	// Snapshot pane layouts before system panes are spawned
 	windowIDs := listWindowIDs()
-	for _, wid := range windowIDs {
-		saved := tmuxGetValue("show-option", "-gqv", "@tabby_layout_"+wid)
-		if saved != "" {
-			run("tmux", "set-option", "-g", "@tabby_restore_layout_"+wid, saved)
-		}
-	}
+
+	// We intentionally do NOT snapshot @tabby_layout_<wid> here for later
+	// replay. The daemon writes that option from full window layouts that
+	// include the sidebar + pane-header leaves; replaying it via
+	// `tmux select-layout` after killAuxPanes + new-daemon respawn is unsafe
+	// because tmux assigns the new pane set to the saved leaf positions by
+	// order, so the content pane lands where the 162x1 pane-header used to
+	// be ("1-row content pane" squish). The new daemon's normal aux-pane
+	// spawn produces a sane sidebar+content layout, and content-pane ratios
+	// inside multi-pane splits are preserved via preserve-pane-ratios on
+	// future after-kill-pane events (sourced from @tabby_layout_<wid> which
+	// the daemon's SaveWindowLayouts refreshes continuously — the tmux
+	// option survives daemon restart on its own as long as the tmux server
+	// stays up).
 
 	// Clean up existing aux panes
 	gracefulKillAuxPanes()
@@ -243,15 +250,10 @@ func enable(sessionID, exe, pidFile, sockPath, watchdogPidFile, stateFile string
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Restore content pane layouts
-	for _, wid := range windowIDs {
-		restoreLayout := tmuxGetValue("show-option", "-gqv", "@tabby_restore_layout_"+wid)
-		if restoreLayout != "" {
-			run("tmux", "select-layout", "-t", wid, restoreLayout)
-			run("tmux", "set-option", "-g", "@tabby_layout_"+wid, restoreLayout)
-			run("tmux", "set-option", "-gu", "@tabby_restore_layout_"+wid)
-		}
-	}
+	// No select-layout replay here — see comment at the top of enable() for
+	// why. preserve-pane-ratios will pick up @tabby_layout_<wid> on future
+	// after-kill-pane events from whatever the new daemon's SaveWindowLayouts
+	// writes once it's running.
 
 	// Restore focus
 	if curWindow != "" {
