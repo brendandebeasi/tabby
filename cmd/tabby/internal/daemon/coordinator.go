@@ -169,6 +169,22 @@ func tmuxGlobalOption(name string) string {
 	return val
 }
 
+// setTmuxGlobalOption writes a global tmux option AND refreshes the
+// tmuxGlobalOption cache so a follow-up read in the same reconcile cycle
+// observes the just-written value. Without the cache update, the 30s TTL
+// causes drag adoption to snap back: persistSidebarWidthProfile writes
+// @tabby_sidebar_width_<profile>=<dragged>, sidebarReasonableMaxForWindow
+// reads the stale cached value, computes target=<old>, and the same width
+// sync that just adopted reverts the sidebar in the same batched tmux
+// command.
+func setTmuxGlobalOption(name, value string) error {
+	err := tmuxRun("set-option", "-gq", name, value)
+	if err == nil {
+		tmuxOptionCache.Store(name, tmuxOptionCacheEntry{value: value, at: time.Now()})
+	}
+	return err
+}
+
 // ttyWidthCacheEntry tracks a recent #{client_width} observation for a
 // single TTY. The geometry tick refreshes width state at ~250ms cadence,
 // so a 500ms TTL on this cache means we serve the nav-suppression check
@@ -6461,7 +6477,7 @@ func (c *Coordinator) persistSidebarWidthProfile(windowID string, width int) {
 	} else if windowWidth <= tabletMax {
 		opt = "@tabby_sidebar_width_tablet"
 	}
-	tmuxRun("set-option", "-gq", opt, fmt.Sprintf("%d", width))
+	setTmuxGlobalOption(opt, fmt.Sprintf("%d", width))
 }
 
 func (c *Coordinator) isLikelyAutoConstrainedSidebarWidth(windowID string, currentWidth int) bool {
