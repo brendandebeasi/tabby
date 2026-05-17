@@ -555,10 +555,26 @@ func (l *Loop) doPaneLayoutOps() {
 		l.coord.ActiveClientProfile(), l.coord.sidebarHidden,
 		status.State)
 	customBorder := l.coord.GetConfig().PaneHeader.CustomBorder
+	preActive := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
 	windows := l.coord.GetWindows()
 	spawnWindowHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredWindowHeaderHeight(), windows, l.coord)
 	spawnPaneHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredPaneHeaderHeight(), windows)
+	// Profile transitions (desktop ↔ phone) issue kill-pane + split-window
+	// across multiple windows during this bracket. Even with `split-window -d`
+	// the kill-pane sequence can silently flip the session's current-window
+	// to a sibling (same class of bug documented at coordinator.go:5535 for
+	// join-pane). Tmux does NOT emit `after-select-window` for the silent
+	// flip, so the next refresh-tick reads tmux's current window and adopts
+	// the wrong active. Detect by comparing pre/post and undo before lifting
+	// the spawning bracket.
+	if preActive != "" {
+		postActive := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+		if postActive != "" && postActive != preActive {
+			logEvent("PANE_LAYOUT_RESTORE_ACTIVE pre=%s post=%s", preActive, postActive)
+			_ = exec.Command("tmux", "select-window", "-t", preActive).Run()
+		}
+	}
 	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
 	startOSCPipes(windows)
 	cleanupOrphanedHeaders(customBorder, l.coord, l.activeWindowID)
