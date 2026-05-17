@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -585,13 +584,17 @@ func ensureSidebar(sessionID, windowID string) {
 			os.Remove(pidFile)
 
 			exe, _ := os.Executable()
-			watchdogBin := filepath.Join(filepath.Dir(exe), "tabby-watchdog")
-			watchdogArgs := []string{"-session", sessionID}
+			// The watchdog is the `watchdog` subcommand of the consolidated
+			// tabby binary — there is no separate `tabby-watchdog` executable.
+			// Why: the prior `filepath.Join(filepath.Dir(exe), "tabby-watchdog")`
+			// pointed at a non-existent file, cmd.Start() silently failed, and
+			// the daemon never auto-restarted from this hook path.
+			watchdogArgs := []string{"watchdog", "-session", sessionID}
 			if os.Getenv("TABBY_DEBUG") == "1" {
 				watchdogArgs = append(watchdogArgs, "-debug")
 			}
 
-			cmd := exec.Command(watchdogBin, watchdogArgs...)
+			cmd := exec.Command(exe, watchdogArgs...)
 			cmd.Start()
 		}
 

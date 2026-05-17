@@ -419,6 +419,19 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 					continue
 				}
 				if !dead && isSystem {
+					// Reject renderers from a different session — they're orphans
+					// from a previous daemon (different session ID) still talking
+					// to a dead socket. Killing the pane lets a fresh renderer
+					// bound to the current session spawn on the next tick.
+					// Why: without this check, SPAWN_CHECK loops forever with
+					// skip_has_pane while the user's sidebar stays frozen.
+					if startCmd != "" && !strings.Contains(startCmd, "-session '"+sessionID+"'") &&
+						!strings.Contains(startCmd, "-session "+sessionID+" ") &&
+						!strings.HasSuffix(startCmd, "-session "+sessionID) {
+						logEvent("CLEANUP_STALE_RENDERER window=%s pane=%s session_mismatch start_cmd=%s", windowID, paneID, startCmd)
+						exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+						continue
+					}
 					hasRenderer = true
 					break
 				}
