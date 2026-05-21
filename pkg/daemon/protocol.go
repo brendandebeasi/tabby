@@ -28,6 +28,14 @@ const (
 	// pre-Step-4 hook subcommands. Step 4 of the daemon refactor; see
 	// /Users/b/.claude/plans/nifty-jingling-tulip.md.
 	MsgHook MessageType = "hook"
+	// MsgPetQA is the request-response envelope used by the `tabby pet`
+	// CLI to read or mutate the cat's Q&A state owned by the daemon. The
+	// CLI dials the socket, sends one MsgPetQA request, reads one MsgPetQA
+	// response on the same connection, then disconnects. The handler is
+	// synchronous (no subscribe required) — see PetQARequest /
+	// PetQAResponse below. Phase 1 of the Q&A loop; see
+	// /Users/b/.claude/plans/wiggly-discovering-starlight.md.
+	MsgPetQA MessageType = "pet_qa"
 )
 
 // TargetKind identifies what KIND of renderer a message is for or from.
@@ -302,6 +310,110 @@ type PetState struct {
 	PosX              int       `json:"pos_x"`
 	YarnPosX          int       `json:"yarn_pos_x"`
 	PoopPositions     []int     `json:"poop_positions"`
+
+	// Q&A personality-building loop. All omitempty so old pet.json files
+	// without these keys still deserialize cleanly into a zero-valued
+	// feature state.
+	PendingQuestion   *PendingQuestion   `json:"pending_question,omitempty"`
+	AnsweredQuestions []AnsweredQuestion `json:"answered_questions,omitempty"`
+	Traits            []PersonalityTrait `json:"traits,omitempty"`
+	QuestionCooldown  time.Time          `json:"question_cooldown,omitzero"`
+	LastQuestionShown time.Time          `json:"last_question_shown,omitzero"`
+	// QAOptedOut is set when the user answers "No thanks" to the initial
+	// consent question. Suppresses all future Q&A activity at runtime
+	// without requiring a config.yaml edit.
+	QAOptedOut bool `json:"qa_opted_out,omitempty"`
+	// QAFreeTextOptedOut is set when the user picks "Multi-choice only".
+	// pickQuestion filters out free-text bank entries while this is true.
+	QAFreeTextOptedOut bool `json:"qa_free_text_opted_out,omitempty"`
+}
+
+// PendingQuestion is the question the cat is currently waiting on a
+// response for. At most one is pending at a time per pet.
+type PendingQuestion struct {
+	ID      string    `json:"id"`             // stable seed-bank ID (e.g. "morning_or_night")
+	Text    string    `json:"text"`           // rendered question text
+	Kind    string    `json:"kind"`           // "choice" | "free_text"
+	Choices []string  `json:"choices,omitempty"`
+	Expires time.Time `json:"expires"`        // after this point pickQuestion may rotate it out
+	Source  string    `json:"source,omitempty"` // "bank" (Phase 1) or "llm" (Phase 3)
+}
+
+// AnsweredQuestion is one Q&A history entry. The slice on PetState is
+// capped at 50 entries (oldest dropped); older entries are distilled
+// into traits before being discarded.
+type AnsweredQuestion struct {
+	ID        string    `json:"id"`
+	Text      string    `json:"text"`
+	Answer    string    `json:"answer"`
+	Kind      string    `json:"kind"`
+	Timestamp time.Time `json:"timestamp"`
+	// Distilled marks free-text answers that have already been processed
+	// by the Phase-3 LLM distillation pass (see DistillTraitsLLM in
+	// cmd/tabby/internal/daemon/pet_qa.go). Choice answers are distilled
+	// synchronously by the rule-based DistillTrait and don't use this
+	// flag. omitempty keeps old pet.json files round-tripping cleanly.
+	Distilled bool `json:"distilled,omitempty"`
+}
+
+// PersonalityTrait is a distilled, prompt-ready fact about the user or
+// the cat's chosen character. Capped at 20 per pet; oldest/lowest
+// confidence dropped first.
+type PersonalityTrait struct {
+	Text       string    `json:"text"`           // e.g. "user is a night owl"
+	Source     string    `json:"source"`         // question ID that produced it
+	Confidence float64   `json:"confidence"`     // 0..1
+	AddedAt    time.Time `json:"added_at"`
+}
+
+// PetQAOp is the operation discriminator carried in a PetQARequest. Kept
+// as a tagged string so the wire format stays human-readable in socket
+// logs and new ops don't require renumbering anything.
+type PetQAOp string
+
+const (
+	PetQAOpGetPending PetQAOp = "get_pending"
+	PetQAOpAnswer     PetQAOp = "answer"
+	PetQAOpListTraits PetQAOp = "list_traits"
+	PetQAOpForget     PetQAOp = "forget"
+)
+
+// PetQARequest is the CLI->daemon request envelope for the Q&A loop.
+// Only one field is meaningful per Op:
+//
+//   - get_pending : no other fields used.
+//   - answer      : Answer carries the user's response. The daemon
+//                   rejects non-empty answers that don't match a choice
+//                   for choice-kind questions.
+//   - list_traits : no other fields used.
+//   - forget      : ID is the AnsweredQuestion ID to remove (along
+//                   with any traits derived from it).
+type PetQARequest struct {
+	Op     PetQAOp `json:"op"`
+	Answer string  `json:"answer,omitempty"`
+	ID     string  `json:"id,omitempty"`
+}
+
+// PetQAResponse is the daemon->CLI reply. OK indicates whether the
+// requested op completed; Error carries a human-readable reason when OK
+// is false. Other fields are populated per-op:
+//
+//   - get_pending : Pending set if there is one; nil otherwise.
+//   - answer      : NewTrait set if the answer produced a fresh trait
+//                   (consent answers and choices with no TraitFor entry
+//                   leave it nil).
+//   - list_traits : Traits populated (possibly empty slice).
+//                   RecentAnswers populated so the CLI can show
+//                   "source: <id>" links to recent Q&A history.
+//   - forget      : Removed indicates whether the ID matched anything.
+type PetQAResponse struct {
+	OK            bool               `json:"ok"`
+	Error         string             `json:"error,omitempty"`
+	Pending       *PendingQuestion   `json:"pending,omitempty"`
+	NewTrait      *PersonalityTrait  `json:"new_trait,omitempty"`
+	Traits        []PersonalityTrait `json:"traits,omitempty"`
+	RecentAnswers []AnsweredQuestion `json:"recent_answers,omitempty"`
+	Removed       bool               `json:"removed,omitempty"`
 }
 
 // MenuItemPayload represents a single menu item sent to a renderer

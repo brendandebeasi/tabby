@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -104,6 +106,12 @@ func initLLM(provider, model, apiKey string) error {
 
 	// Load existing thoughts from disk
 	loadThoughtBuffer()
+
+	// Phase-3: stash the same provider/model/apiKey for the dedicated
+	// question-generation client (built lazily on first use only when the
+	// LLMQuestions config flag is flipped on). See llm_questions.go for
+	// the full pattern.
+	initLLMQuestions(provider, model, apiKey)
 
 	return nil
 }
@@ -446,7 +454,223 @@ func buildPetContext(pet *petState) string {
 		parts = append(parts, fmt.Sprintf("Currently: %s", pet.State))
 	}
 
+	// Personality section — facts the cat has learned about the human from
+	// the Q&A loop. Appended after pet-state context so the LLM treats it
+	// as flavour about the human, not instructions about the cat. Omitted
+	// entirely when there's no Q&A data yet.
+	// Defense-in-depth: if the user opted out (answered "No thanks" to
+	// the consent question), suppress the personality section entirely
+	// so any traits already on disk are not sent to the LLM. PickQuestion
+	// already prevents new traits from being created while opted out;
+	// this guards the trait-leak path for users who opted out after
+	// answering some questions, or who hand-edited pet.json.
+	if !pet.QAOptedOut {
+		if section := petPersonalitySection(pet); section != "" {
+			parts = append(parts, section)
+		}
+	}
+
 	return strings.Join(parts, "\n")
+}
+
+// petPersonalitySection renders the "what you know about your human" block
+// that gets folded into the thought-generation prompt. Reads
+// pet.Traits and pet.AnsweredQuestions via reflection so this file stays
+// independent of the petState struct shape (logic-author owns those
+// fields). Returns "" when both lists are empty so buildPetContext can
+// skip emitting an empty header.
+//
+// Caps (must match plan):
+//   - Top 10 traits, ordered by confidence desc then AddedAt desc.
+//   - 3 most recent AnsweredQuestions, consent question (ID=="consent")
+//     filtered out entirely.
+//   - Free-text answers truncated to 120 chars with a "…" suffix when cut.
+func petPersonalitySection(pet *petState) string {
+	if pet == nil {
+		return ""
+	}
+
+	traits := readTraits(pet)
+	recent := readRecentAnswers(pet)
+	if len(traits) == 0 && len(recent) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	if len(traits) > 0 {
+		b.WriteString("What you know about your human:")
+		for _, t := range traits {
+			b.WriteString("\n- ")
+			b.WriteString(strings.TrimSpace(t.text))
+		}
+	}
+	if len(recent) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("Recent things they told you:")
+		for _, a := range recent {
+			b.WriteString(fmt.Sprintf("\n- %q → %q", strings.TrimSpace(a.text), truncateAnswer(a.answer, 120)))
+		}
+	}
+	return b.String()
+}
+
+// petTraitView is the reflection-extracted view of a PersonalityTrait.
+// Mirrors the fields buildPetContext needs without forcing this file to
+// import the protocol type.
+type petTraitView struct {
+	text       string
+	confidence float64
+	addedAt    time.Time
+}
+
+// petAnswerView is the reflection-extracted view of an AnsweredQuestion.
+type petAnswerView struct {
+	id        string
+	text      string
+	answer    string
+	timestamp time.Time
+}
+
+// readTraits pulls the top-10 traits off pet.Traits via reflection,
+// sorted by confidence desc then AddedAt desc. Returns nil if the field
+// is absent (logic-author hasn't landed it yet) or empty.
+func readTraits(pet *petState) []petTraitView {
+	field := reflect.ValueOf(pet).Elem().FieldByName("Traits")
+	if !field.IsValid() || field.Kind() != reflect.Slice {
+		return nil
+	}
+
+	views := make([]petTraitView, 0, field.Len())
+	for i := 0; i < field.Len(); i++ {
+		item := field.Index(i)
+		if item.Kind() == reflect.Ptr {
+			if item.IsNil() {
+				continue
+			}
+			item = item.Elem()
+		}
+		if item.Kind() != reflect.Struct {
+			continue
+		}
+		text := stringField(item, "Text")
+		if text == "" {
+			continue
+		}
+		views = append(views, petTraitView{
+			text:       text,
+			confidence: floatField(item, "Confidence"),
+			addedAt:    timeField(item, "AddedAt"),
+		})
+	}
+
+	sort.SliceStable(views, func(i, j int) bool {
+		if views[i].confidence != views[j].confidence {
+			return views[i].confidence > views[j].confidence
+		}
+		return views[i].addedAt.After(views[j].addedAt)
+	})
+
+	if len(views) > 10 {
+		views = views[:10]
+	}
+	return views
+}
+
+// readRecentAnswers pulls the 3 most recent answers off
+// pet.AnsweredQuestions via reflection, skipping the consent question
+// entirely. Returns nil if the field is absent or empty.
+func readRecentAnswers(pet *petState) []petAnswerView {
+	field := reflect.ValueOf(pet).Elem().FieldByName("AnsweredQuestions")
+	if !field.IsValid() || field.Kind() != reflect.Slice {
+		return nil
+	}
+
+	views := make([]petAnswerView, 0, field.Len())
+	for i := 0; i < field.Len(); i++ {
+		item := field.Index(i)
+		if item.Kind() == reflect.Ptr {
+			if item.IsNil() {
+				continue
+			}
+			item = item.Elem()
+		}
+		if item.Kind() != reflect.Struct {
+			continue
+		}
+		id := stringField(item, "ID")
+		if id == "consent" {
+			continue
+		}
+		views = append(views, petAnswerView{
+			id:        id,
+			text:      stringField(item, "Text"),
+			answer:    stringField(item, "Answer"),
+			timestamp: timeField(item, "Timestamp"),
+		})
+	}
+
+	sort.SliceStable(views, func(i, j int) bool {
+		return views[i].timestamp.After(views[j].timestamp)
+	})
+
+	if len(views) > 3 {
+		views = views[:3]
+	}
+	return views
+}
+
+// stringField extracts a string field from a reflect.Value struct, or
+// returns "" when absent / wrong kind. Defensive: lets logic-author
+// rename fields without breaking this file.
+func stringField(v reflect.Value, name string) string {
+	f := v.FieldByName(name)
+	if !f.IsValid() || f.Kind() != reflect.String {
+		return ""
+	}
+	return f.String()
+}
+
+// floatField extracts a float64 field, or returns 0.
+func floatField(v reflect.Value, name string) float64 {
+	f := v.FieldByName(name)
+	if !f.IsValid() {
+		return 0
+	}
+	switch f.Kind() {
+	case reflect.Float32, reflect.Float64:
+		return f.Float()
+	default:
+		return 0
+	}
+}
+
+// timeField extracts a time.Time field, or returns the zero time.
+func timeField(v reflect.Value, name string) time.Time {
+	f := v.FieldByName(name)
+	if !f.IsValid() {
+		return time.Time{}
+	}
+	if t, ok := f.Interface().(time.Time); ok {
+		return t
+	}
+	return time.Time{}
+}
+
+// truncateAnswer caps a free-text answer to n characters, appending an
+// ellipsis when truncated. Operates on runes so multi-byte characters
+// don't get sliced mid-codepoint.
+func truncateAnswer(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if n <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "…"
 }
 
 // formatDuration formats a duration in a human-readable way

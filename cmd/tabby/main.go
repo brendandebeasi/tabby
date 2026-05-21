@@ -27,6 +27,7 @@ import (
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/managegroup"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/newwindow"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/panepicker"
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/pet"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/renderdispatch"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/setup"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/toggle"
@@ -50,7 +51,8 @@ var subcommands = []subcommand{
 	{"manage-group", "edit window-group entries in the tabby config file", managegroup.Run},
 	{"new-window", "create a new tmux window with sidebar", newwindow.Run},
 	{"pane-picker", "interactive pane picker TUI", panepicker.Run},
-	{"render", "spawn a renderer: sidebar | window-header | pane-header | sidebar-popup", renderdispatch.Run},
+	{"pet", "interact with the cat: ask, traits, forget", pet.Run},
+	{"render", "spawn a renderer: sidebar | window-header | pane-header | sidebar-popup | pet-qa-popup", renderdispatch.Run},
 	{"setup", "interactive configuration wizard", setup.Run},
 	{"toggle", "enable or disable the tabby sidebar for this session", toggle.Run},
 	{"watchdog", "supervise the tabby daemon, restarting on crash", watchdog.Run},

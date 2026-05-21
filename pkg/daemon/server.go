@@ -76,6 +76,14 @@ type Server struct {
 	// See /Users/b/.claude/plans/nifty-jingling-tulip.md Step 4.
 	OnHook func(p *HookPayload)
 
+	// Callback for `tabby pet` CLI Q&A requests. Invoked synchronously
+	// from handleClient on the un-subscribed connection; the response is
+	// written back on the same connection. Returning nil is treated as
+	// "no handler wired" and the server sends a generic error response so
+	// the CLI doesn't hang on Scan(). Phase 1 of the Q&A loop; see
+	// /Users/b/.claude/plans/wiggly-discovering-starlight.md.
+	OnPetQA func(req *PetQARequest) *PetQAResponse
+
 	// Debug logging callback (set by daemon for diagnostics)
 	DebugLog func(format string, args ...interface{})
 }
@@ -461,6 +469,52 @@ func (s *Server) handleClient(conn net.Conn) {
 					s.OnHook(&hp)
 				}()
 			}
+
+		case MsgPetQA:
+			// MsgPetQA carries a `tabby pet` CLI request. The CLI dials
+			// the socket, sends one request, reads one response, and
+			// disconnects — it does not subscribe, so clientID may be "".
+			// The response is written back on the same conn. A nil
+			// callback or panicking handler is reported as a generic
+			// error so the CLI sees a definite reply rather than hanging
+			// on Scan().
+			var req PetQARequest
+			if msg.Payload != nil {
+				payloadBytes, err := json.Marshal(msg.Payload)
+				if err != nil {
+					if s.DebugLog != nil {
+						s.DebugLog("SOCKET_PETQA_DROP reason=payload_marshal remote=%s err=%v", remoteAddr, err)
+					}
+					s.sendMessage(conn, Message{Type: MsgPetQA, Payload: &PetQAResponse{OK: false, Error: "invalid request payload"}})
+					continue
+				}
+				if err := json.Unmarshal(payloadBytes, &req); err != nil {
+					if s.DebugLog != nil {
+						s.DebugLog("SOCKET_PETQA_DROP reason=payload_unmarshal remote=%s bytes=%d err=%v", remoteAddr, len(payloadBytes), err)
+					}
+					s.sendMessage(conn, Message{Type: MsgPetQA, Payload: &PetQAResponse{OK: false, Error: "invalid request payload"}})
+					continue
+				}
+			}
+			if s.DebugLog != nil {
+				s.DebugLog("SOCKET_PETQA op=%s id=%s remote=%s", req.Op, req.ID, remoteAddr)
+			}
+			var resp *PetQAResponse
+			if s.OnPetQA != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Fprintf(os.Stderr, "PANIC in OnPetQA (op=%s): %v\n", req.Op, r)
+							resp = &PetQAResponse{OK: false, Error: "internal error"}
+						}
+					}()
+					resp = s.OnPetQA(&req)
+				}()
+			}
+			if resp == nil {
+				resp = &PetQAResponse{OK: false, Error: "pet Q&A not available"}
+			}
+			s.sendMessage(conn, Message{Type: MsgPetQA, Payload: resp})
 		}
 	}
 

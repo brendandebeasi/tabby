@@ -191,6 +191,8 @@ type PetWidget struct {
 	ThoughtRefreshHours int    `yaml:"thought_refresh_hours"` // Hours between LLM thought generation (default: 12)
 	// Custom icons (override style preset)
 	Icons PetIcons `yaml:"icons"` // Custom icons for each element
+	// Q&A personality-building loop config (see PetWidgetQA below)
+	QA PetWidgetQA `yaml:"qa"`
 	// Styling (same as other widgets)
 	Fg            string `yaml:"fg"`             // Text color
 	Bg            string `yaml:"bg"`             // Background color
@@ -202,6 +204,24 @@ type PetWidget struct {
 	PaddingBot    int    `yaml:"padding_bottom"` // Blank lines below content
 	MarginTop     int    `yaml:"margin_top"`     // Lines above top divider
 	MarginBot     int    `yaml:"margin_bottom"`  // Lines below bottom divider
+}
+
+// PetWidgetQA configures the cat's Q&A personality-building loop. The
+// feature defaults to enabled with conservative cadence; the first
+// question is a consent prompt that lets the user opt out at runtime
+// (stored in PetState) without editing this config.
+//
+// Booleans are inverted (Disabled, FreeTextDisabled) so the YAML
+// zero-value means "feature on" — there's no way to distinguish "field
+// absent" from "field set to false" in YAML, and we want "on" to be the
+// default when the block is missing entirely.
+type PetWidgetQA struct {
+	Disabled             bool `yaml:"disabled"`                // Set true to disable the feature outright (default: false, i.e. enabled)
+	CooldownHours        int  `yaml:"cooldown_hours"`          // Min gap between pending questions (default: 24)
+	ExpireHours          int  `yaml:"expire_hours"`            // How long a pending question stays before rotating (default: 48)
+	TeaserEveryNThoughts int  `yaml:"teaser_every_n_thoughts"` // Show teaser thought every N rotations (default: 3)
+	FreeTextDisabled     bool `yaml:"free_text_disabled"`      // Set true to suppress free-text questions (default: false)
+	LLMQuestions         bool `yaml:"llm_questions"`           // Phase 3: enable LLM-generated questions (default: false)
 }
 
 // PetIcons allows customizing individual icons in the pet widget

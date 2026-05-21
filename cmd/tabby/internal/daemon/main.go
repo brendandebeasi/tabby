@@ -2362,6 +2362,15 @@ func Run(args []string) int {
 		loop.Submit(TmuxHookEvent{Kind: p.Kind, Args: p.Args})
 	}
 
+	// OnPetQA: `tabby pet` CLI requests are synchronous (one request, one
+	// response, then disconnect) and the handler reads/mutates the
+	// coordinator's pet state directly under stateMu — no need to round-
+	// trip through the event loop. Phase 1 of the Q&A loop; see
+	// /Users/b/.claude/plans/wiggly-discovering-starlight.md.
+	server.OnPetQA = func(req *daemon.PetQARequest) *daemon.PetQAResponse {
+		return coordinator.HandlePetQA(req)
+	}
+
 	// Set up menu send callback for in-renderer context menus
 	coordinator.OnSendMenu = func(clientID string, menu *daemon.MenuPayload) {
 		server.SendMenuToClient(clientID, menu)

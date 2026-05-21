@@ -454,6 +454,20 @@ func applyIconStyleDefaults(cfg *Config) {
 	if cfg.Widgets.Pet.Style == "" {
 		cfg.Widgets.Pet.Style = style
 	}
+	// Q&A defaults: feature-on with conservative cadence. Users who pull
+	// the update see the consent question on first cooldown elapse without
+	// editing config.yaml; the consent flow itself routes opt-outs through
+	// runtime PetState (QAOptedOut / QAFreeTextOptedOut) so a default of
+	// Enabled=true is safe.
+	if cfg.Widgets.Pet.QA.CooldownHours == 0 {
+		cfg.Widgets.Pet.QA.CooldownHours = 24
+	}
+	if cfg.Widgets.Pet.QA.ExpireHours == 0 {
+		cfg.Widgets.Pet.QA.ExpireHours = 48
+	}
+	if cfg.Widgets.Pet.QA.TeaserEveryNThoughts == 0 {
+		cfg.Widgets.Pet.QA.TeaserEveryNThoughts = 3
+	}
 	if cfg.Widgets.Stats.Style == "" {
 		cfg.Widgets.Stats.Style = style
 	}

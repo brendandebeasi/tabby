@@ -969,6 +969,19 @@ type petState struct {
 	Adventure adventureState
 	// Debug state
 	DebugThoughtIdx int // Index into debugThoughtCategories for debug bar
+	// Q&A personality-building loop. Mirrors the wire-format
+	// daemon.PetState fields (same JSON tags) so a pet.json written by
+	// either type deserialises into the other. All omitempty so old pet.json
+	// files load with zero-valued feature state. See pet_qa.go for the
+	// logic that mutates these and pkg/daemon/protocol.go for the wire
+	// counterpart used by CLI<->daemon IPC.
+	PendingQuestion    *daemon.PendingQuestion   `json:"pending_question,omitempty"`
+	AnsweredQuestions  []daemon.AnsweredQuestion `json:"answered_questions,omitempty"`
+	Traits             []daemon.PersonalityTrait `json:"traits,omitempty"`
+	QuestionCooldown   time.Time                 `json:"question_cooldown,omitzero"`
+	LastQuestionShown  time.Time                 `json:"last_question_shown,omitzero"`
+	QAOptedOut         bool                      `json:"qa_opted_out,omitempty"`
+	QAFreeTextOptedOut bool                      `json:"qa_free_text_opted_out,omitempty"`
 }
 
 type pos2D struct {
@@ -1140,15 +1153,16 @@ var adventureThoughts = map[string]map[string][]string{
 // Line numbers are relative to the widget output start (0-indexed), except ContentStartLine
 // which is the absolute content line where the pet widget begins.
 type petWidgetLayout struct {
-	ContentStartLine int // Absolute content line where pet widget starts (set in RenderForClient)
-	FeedLine         int // "Feed" button line (relative to widget start)
-	HighAirLine      int // High air (Y=2) line - click drops yarn
-	LowAirLine       int // Low air (Y=1) line - click drops yarn
-	GroundLine       int // Ground (Y=0) line - click on cat pets, click on poop cleans, else drops yarn
-	PlayWidth        int // Width of play area (safePlayWidth) - clicks beyond this are ignored
-	WidgetHeight     int // Total widget height in lines
-	DebugLine1       int // Y position of debug line 1 (mode triggers)
-	DebugLine2       int // Y position of debug line 2 (thought controls)
+	ContentStartLine   int // Absolute content line where pet widget starts (set in RenderForClient)
+	FeedLine           int // "Feed" button line (relative to widget start)
+	HighAirLine        int // High air (Y=2) line - click drops yarn
+	LowAirLine         int // Low air (Y=1) line - click drops yarn
+	GroundLine         int // Ground (Y=0) line - click on cat pets, click on poop cleans, else drops yarn
+	PlayWidth          int // Width of play area (safePlayWidth) - clicks beyond this are ignored
+	WidgetHeight       int // Total widget height in lines
+	DebugLine1         int // Y position of debug line 1 (mode triggers)
+	DebugLine2         int // Y position of debug line 2 (thought controls)
+	QuestionPromptLine int // Row index of the Q&A teaser bubble line when shown (-1 when not pending)
 }
 
 // debugThoughtCategories lists all thought categories for debug bar cycling
@@ -4527,6 +4541,50 @@ func (c *Coordinator) UpdatePetState() bool {
 			c.pet.ThoughtScroll = 0
 		}
 	}
+
+	// === Q&A LOOP ===
+	//
+	// Drive the cat's "pending question" lifecycle from the existing tick
+	// rather than spawning a new goroutine. Three things happen here:
+	//
+	//  1. Expire a stale pending question. If the user never clicked the
+	//     teaser within the configured expiry window, drop it so the next
+	//     pick picks something fresh. We do NOT roll the cooldown forward
+	//     here — letting PickQuestion run on the same tick gives the user
+	//     a new question immediately if the cooldown has also elapsed.
+	//  2. Pick a new question when none is pending and the cooldown is up.
+	//     Skip when the pet is in a "bad headspace" — dead, starving,
+	//     adventuring — so the cat doesn't pester the user mid-crisis.
+	//     PickQuestion further enforces opt-out and per-config gates.
+	//  3. The teaser substitution itself lives in renderPetWidget; this
+	//     block only mutates state, not visuals.
+	//
+	// Adventure mode already returned early above, but we re-check Active
+	// defensively in case future changes reorder these blocks. We also
+	// gate on IsDead and State so the cat stays quiet when starving.
+	// Clear any pending question when QA is disabled in config — without
+	// this the teaser keeps appearing until Expires elapses, even though
+	// PickQuestion will refuse to surface a new one. Also clear when the
+	// user has opted out at runtime, for the same reason.
+	if c.pet.PendingQuestion != nil && (c.config.Widgets.Pet.QA.Disabled || c.pet.QAOptedOut) {
+		c.pet.PendingQuestion = nil
+	}
+	if c.pet.PendingQuestion != nil && !c.pet.PendingQuestion.Expires.IsZero() && now.After(c.pet.PendingQuestion.Expires) {
+		c.pet.PendingQuestion = nil
+	}
+	if c.pet.PendingQuestion == nil && !c.pet.IsDead && !c.pet.Adventure.Active &&
+		c.pet.State != "dead" && c.pet.State != "starving" {
+		wire := snapshotPetQAForWire(&c.pet)
+		if picked := PickQuestion(&wire, c.config.Widgets.Pet.QA, now); picked != nil {
+			wire.PendingQuestion = picked
+			applyPetQAFromWire(&c.pet, &wire)
+		}
+	}
+	// Phase-3 LLM distillation. Snapshot Q&A state and let the helper
+	// decide if a pass should fire; the apply callback below re-takes
+	// c.stateMu in its own critical section once the LLM call returns.
+	snap := snapshotPetQAForWire(&c.pet)
+	RunLLMDistillationBackground(&snap, c.config.Widgets.Pet.QA, c.config.Widgets.Pet.Name, now, c.applyLLMDistillation)
 
 	petSnap := c.pet
 	// Return true if any visual state changed
@@ -10688,6 +10746,9 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	// debug bar, causing click misrouting.
 	c.petLayout.DebugLine1 = 0
 	c.petLayout.DebugLine2 = 0
+	// Reset Q&A teaser row; only set when the teaser substitution actually
+	// fires below. -1 means "no question line on this render".
+	c.petLayout.QuestionPromptLine = -1
 
 	style := petCfg.Style
 	if style == "" {
@@ -10877,45 +10938,78 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	if maxThoughtWidth < 5 {
 		maxThoughtWidth = 5
 	}
-	thoughtWidth := uniseg.StringWidth(thought)
-	displayThought := thought
-	if thoughtWidth > maxThoughtWidth {
-		scrollText := thought + "   " + thought
-		scrollRunes := []rune(scrollText)
-		startIdx := c.pet.ThoughtScroll % len(scrollRunes)
-		visible := ""
-		visWidth := 0
-		for i := startIdx; i < len(scrollRunes) && visWidth < maxThoughtWidth; i++ {
-			r := scrollRunes[i]
-			rw := runewidth.RuneWidth(r)
-			if visWidth+rw > maxThoughtWidth {
-				break // Don't add partial wide char
+
+	// Decide whether to substitute the teaser thought for the Q&A consent
+	// click region this frame. The teaser is non-scrolling so the click row
+	// stays stable across renders, and it never appears when QA is opted
+	// out (defensive double-gate; PickQuestion already filters this case).
+	teaserActive := false
+	if c.pet.PendingQuestion != nil && !c.pet.QAOptedOut {
+		n := c.config.Widgets.Pet.QA.TeaserEveryNThoughts
+		if n > 0 {
+			// Cadence: split AnimFrame into ~5s blocks (~50 frames at 10fps).
+			// In a window of N blocks, the first block shows the teaser,
+			// the remaining N-1 blocks show the normal thought. Independent
+			// of thoughtSpeed/LLM tick so the teaser appears predictably
+			// even when LLM thoughts are off.
+			const teaserBlockFrames = 50
+			block := c.pet.AnimFrame / teaserBlockFrames
+			if mod := block % n; mod == 0 {
+				teaserActive = true
 			}
-			visible += string(r)
-			visWidth += rw
 		}
-		displayThought = visible
-	}
-	// Add "asking" request bubbles when needs are critical
-	var requestBubble string
-	if c.pet.IsDead {
-		requestBubble = "💀"
-	} else if len(c.pet.PoopPositions) > 0 {
-		requestBubble = "🧹?" // Asking for cleanup
-	} else if c.pet.Hunger < 20 {
-		requestBubble = "🍖?" // Asking for food (urgent)
-	} else if c.pet.Happiness < 20 {
-		requestBubble = "🧶?" // Asking for play (urgent)
-	} else if c.pet.Hunger < 40 {
-		requestBubble = "🍖" // Would like food
-	} else if c.pet.Happiness < 40 {
-		requestBubble = "🧶" // Would like play
 	}
 
-	thoughtLine := sprites.Thought + " " + displayThought
-	if requestBubble != "" {
-		// Show request bubble at the end of thought line
-		thoughtLine = requestBubble + " " + thoughtLine
+	var thoughtLine string
+	if teaserActive {
+		// Non-scrolling teaser: emit a stable click region tagged for the
+		// click handler to recognise. handlePetWidgetClick prefers row index
+		// over zone marker for the pet widget so we set QuestionPromptLine
+		// on the layout struct as the source of truth.
+		teaserText := sprites.Thought + " 🤔 mind if I ask? (click)"
+		thoughtLine = zone.Mark("pet:question_prompt", teaserText)
+		c.petLayout.QuestionPromptLine = currentLine
+	} else {
+		thoughtWidth := uniseg.StringWidth(thought)
+		displayThought := thought
+		if thoughtWidth > maxThoughtWidth {
+			scrollText := thought + "   " + thought
+			scrollRunes := []rune(scrollText)
+			startIdx := c.pet.ThoughtScroll % len(scrollRunes)
+			visible := ""
+			visWidth := 0
+			for i := startIdx; i < len(scrollRunes) && visWidth < maxThoughtWidth; i++ {
+				r := scrollRunes[i]
+				rw := runewidth.RuneWidth(r)
+				if visWidth+rw > maxThoughtWidth {
+					break // Don't add partial wide char
+				}
+				visible += string(r)
+				visWidth += rw
+			}
+			displayThought = visible
+		}
+		// Add "asking" request bubbles when needs are critical
+		var requestBubble string
+		if c.pet.IsDead {
+			requestBubble = "💀"
+		} else if len(c.pet.PoopPositions) > 0 {
+			requestBubble = "🧹?" // Asking for cleanup
+		} else if c.pet.Hunger < 20 {
+			requestBubble = "🍖?" // Asking for food (urgent)
+		} else if c.pet.Happiness < 20 {
+			requestBubble = "🧶?" // Asking for play (urgent)
+		} else if c.pet.Hunger < 40 {
+			requestBubble = "🍖" // Would like food
+		} else if c.pet.Happiness < 40 {
+			requestBubble = "🧶" // Would like play
+		}
+
+		thoughtLine = sprites.Thought + " " + displayThought
+		if requestBubble != "" {
+			// Show request bubble at the end of thought line
+			thoughtLine = requestBubble + " " + thoughtLine
+		}
 	}
 	result.WriteString(thoughtStyle.Render(thoughtLine) + "\n")
 	currentLine++
@@ -13304,6 +13398,16 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 		return false
 	}
 
+	// Q&A teaser takes priority over the underlying thought-bubble line it
+	// temporarily replaced. Without this branch first, the click would fall
+	// through to whichever line the teaser overlapped (usually the row that
+	// would otherwise be a normal thought) and dispatch to the wrong action.
+	if c.pet.PendingQuestion != nil && layout.QuestionPromptLine >= 0 && clickY == layout.QuestionPromptLine {
+		coordinatorDebugLog.Printf("  -> Q&A teaser clicked, launching popup")
+		c.launchQuestionPopup(clientID)
+		return true
+	}
+
 	// Check if click is on Feed line
 	if clickY == layout.FeedLine {
 		coordinatorDebugLog.Printf("  -> Feed line clicked, dropping food")
@@ -13353,6 +13457,43 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 
 	coordinatorDebugLog.Printf("  -> Click not on pet widget interactive lines")
 	return false
+}
+
+// launchQuestionPopup spawns the pet Q&A popup via `tmux display-popup`,
+// mirroring the pane_header:groups pattern at coordinator.go:12725. The
+// popup binary (cmd/tabby/internal/petqapopup, dispatched via
+// `tabby render pet-qa-popup`) reads the pending question from the daemon
+// socket, renders a TUI, and posts the answer back. We don't block on the
+// command — `tmux display-popup -E` keeps the popup attached to the user's
+// session and exits when they answer or hit Esc.
+//
+// We use rendererExecPrefix directly (rather than getPopupBin, which is
+// hard-wired to the `sidebar-popup` subcommand) so the same tabby binary
+// dispatches to the pet-qa-popup render path. The argv[0] override
+// (`tabby-pet-qa-popup`) keeps tmux's #{pane_current_command} distinct
+// from the sidebar popup for any future heuristic that wants to tell them
+// apart.
+//
+// clientID is unused for now (the popup binds via session ID); kept in the
+// signature for symmetry with other widget click handlers and so we can
+// pass per-client context (e.g. window/pane scoping) later without
+// reshaping the call site.
+func (c *Coordinator) launchQuestionPopup(clientID string) {
+	_ = clientID
+	sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+	sessID := strings.TrimSpace(string(sessIDOut))
+	if sessID == "" {
+		// Fall back to the coordinator's own session id when the live tmux
+		// query fails (e.g. during tests or if tmux isn't responsive).
+		sessID = c.sessionID
+	}
+	popupBin := rendererExecPrefix("tabby-pet-qa-popup", "pet-qa-popup")
+	if popupBin == "" || sessID == "" {
+		coordinatorDebugLog.Printf("  -> launchQuestionPopup: missing popupBin=%q or sessID=%q", popupBin, sessID)
+		return
+	}
+	go exec.Command("tmux", "display-popup", "-E", "-w", "60%", "-h", "30%",
+		"--", popupBin, "--session", sessID).Run()
 }
 
 // getSprites returns the pet sprites based on current style and config overrides
