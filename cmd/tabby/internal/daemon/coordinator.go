@@ -11962,6 +11962,20 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			clientID, windowID, input.SourcePaneID, paneWidth, input.MouseX, input.MouseY,
 			input.ResolvedAction, deltaClickMs, sinceNewWindowMs, recentNewWindow)
 		c.lastWindowHeaderClickAt = now
+
+		// Drop window-header presses with an empty button. The renderer only
+		// produces these for non-Left/Right/Middle mouse events (typically
+		// MouseButtonNone from tmux's post-select-pane event replay into a
+		// freshly-focused pane). They arrive in bursts of 3-6 at the SAME
+		// coordinate within a few ms and, when the click lands on the "+"
+		// region, cascade through WINDOW_HEADER_ACTION_REMAP to spawn a tower
+		// of windows from one tap. Kept here as belt-and-suspenders alongside
+		// the renderer-side filter (windowheader.go MouseActionPress branch)
+		// so older renderers still attached to this daemon also get protected.
+		if input.Button == "" {
+			logEvent("WINDOW_HEADER_CLICK_DROPPED_EMPTY_BUTTON client=%s x=%d y=%d resolved=%q", clientID, input.MouseX, input.MouseY, input.ResolvedAction)
+			return false
+		}
 	}
 
 	if input.ResolvedAction == "" && strings.HasPrefix(clientID, "window-header:") && strings.EqualFold(strings.TrimSpace(input.Action), "press") {

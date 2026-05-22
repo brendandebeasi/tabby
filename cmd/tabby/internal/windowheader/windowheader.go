@@ -372,6 +372,22 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Only act on press for an explicit Right button (long-press simulation
+		// path or real right-click). Anything else — MouseButtonNone, wheel
+		// events, motion-style presses — gets dropped. Without this guard,
+		// freshly-spawned window-header panes receive buffered/release mouse
+		// events from tmux after select-pane, Bubble Tea surfaces them as
+		// MouseActionPress with Button=MouseButtonNone, and processMouseClick
+		// forwards them to the daemon with btn="". For a tap on the "+" button
+		// the daemon's WINDOW_HEADER_ACTION_REMAP then chains new_window across
+		// each duplicate, spawning a tower of windows from one tap.
+		if button != tea.MouseButtonRight {
+			m.longPressActive = false
+			m.skipNextRelease = false
+			m.mouseDownTime = time.Time{}
+			return m, nil
+		}
+
 		m.skipNextRelease = true
 		m.longPressActive = false
 		m.mouseDownTime = time.Time{}

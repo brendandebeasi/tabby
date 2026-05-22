@@ -365,6 +365,19 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Same guard as windowheader.go: only forward press for an explicit
+		// Right button (long-press simulation or real right-click). Buffered/
+		// replayed mouse events delivered to a freshly-focused pane arrive as
+		// MouseActionPress with Button=MouseButtonNone — without this filter
+		// they fire synthetic clicks at the original tap coordinates and
+		// duplicate-dispatch through handleSemanticAction.
+		if button != tea.MouseButtonRight {
+			m.longPressActive = false
+			m.skipNextRelease = false
+			m.mouseDownTime = time.Time{}
+			return m, nil
+		}
+
 		m.skipNextRelease = true
 		m.longPressActive = false
 		m.mouseDownTime = time.Time{}
