@@ -89,6 +89,7 @@ func runAsk(args []string) int {
 	fs := flag.NewFlagSet("tabby pet ask", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	answer := fs.String("answer", "", "submit an answer to the pending question (case-sensitive for choice kind)")
+	quiet := fs.Bool("quiet", false, "suppress success stdout (errors still go to stderr); used by the sidebar Q&A menu so tmux run-shell never has output to spill into the focused pane")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -130,9 +131,11 @@ func runAsk(args []string) int {
 		fmt.Fprintln(os.Stderr, "tabby pet ask:", resp.Error)
 		return 1
 	}
-	fmt.Println("thanks — the cat heard you.")
-	if resp.NewTrait != nil {
-		fmt.Printf("  learned: %s\n", resp.NewTrait.Text)
+	if !*quiet {
+		fmt.Println("thanks — the cat heard you.")
+		if resp.NewTrait != nil {
+			fmt.Printf("  learned: %s\n", resp.NewTrait.Text)
+		}
 	}
 	return 0
 }

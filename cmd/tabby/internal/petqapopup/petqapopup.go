@@ -307,34 +307,51 @@ func (m model) handleFreeTextKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // Styles. Kept package-level so View doesn't reallocate per frame; lipgloss
 // styles are immutable values, copy is cheap, but no need to recompute.
+// cardBg is the dark surface the popup paints itself on. The whole palette
+// (near-white question text, light-slate choices, dark text on a purple
+// selection chip) assumes a dark card; without an explicit background the
+// near-white text washes out on light terminal themes. lipgloss resets
+// attributes per styled segment, so the background has to live on every
+// text style, not just the frame, or the gaps between segments fall back
+// to the terminal's own (possibly light) background.
+const cardBg = lipgloss.Color("#1e293b")
+
 var (
 	frameStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#a78bfa")).
+			Background(cardBg).
 			Padding(0, 1)
 	questionStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#f8fafc"))
+			Foreground(lipgloss.Color("#f8fafc")).
+			Background(cardBg)
 	choiceStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#cbd5e1"))
+			Foreground(lipgloss.Color("#cbd5e1")).
+			Background(cardBg)
 	selectedChoiceStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("#0f172a")).
 				Background(lipgloss.Color("#a78bfa"))
 	hintStyle = lipgloss.NewStyle().
 			Faint(true).
-			Foreground(lipgloss.Color("#94a3b8"))
+			Foreground(lipgloss.Color("#94a3b8")).
+			Background(cardBg)
 	inputStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#f8fafc"))
+			Foreground(lipgloss.Color("#f8fafc")).
+			Background(cardBg)
 	successStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#34d399"))
+			Foreground(lipgloss.Color("#34d399")).
+			Background(cardBg)
 	traitStyle = lipgloss.NewStyle().
 			Italic(true).
-			Foreground(lipgloss.Color("#fbbf24"))
+			Foreground(lipgloss.Color("#fbbf24")).
+			Background(cardBg)
 	errorStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#ef4444"))
+			Foreground(lipgloss.Color("#ef4444")).
+			Background(cardBg)
 )
 
 func (m model) View() string {
@@ -403,8 +420,7 @@ func (m model) renderPrompt() string {
 				visible = string(runes[start:])
 			}
 		}
-		b.WriteString("  ")
-		b.WriteString(inputStyle.Render(visible))
+		b.WriteString(inputStyle.Render("  " + visible))
 		b.WriteString("\n\n")
 		b.WriteString(hintStyle.Render("  type your answer · Enter to send · Esc to cancel"))
 	}

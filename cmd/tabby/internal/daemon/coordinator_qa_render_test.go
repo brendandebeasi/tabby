@@ -31,6 +31,7 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -40,10 +41,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// teaserSubstring is the literal text emitted by renderPetWidget when the
-// teaser substitution fires. Kept here so the assertion is searchable and
-// not duplicated across each test case.
-const teaserSubstring = "mind if I ask?"
+// teaserSubstring is a fragment present in every non-fallback teaser
+// variant ("🤔 mind if I ask? (click)", "🤔 ask me? (click)",
+// "🤔 ask? click", "🤔 ask?"). The render width these tests use puts the
+// rendered line on one of the larger variants, so checking for "🤔 ask"
+// reliably distinguishes the teaser from the normal thought line without
+// the test having to know which width-conditional variant was picked.
+const teaserSubstring = "🤔 ask"
 
 // teaserBlockFrames mirrors the unexported constant in coordinator.go.
 // Each "block" is this many AnimFrame ticks; the teaser fires when the
@@ -512,4 +516,204 @@ func TestPhase2_DefaultQAConfig_NotZero(t *testing.T) {
 	var _ config.PetWidgetQA = qa // assert type for readability
 	assert.Greater(t, qa.TeaserEveryNThoughts, 0,
 		"defaultQAConfig().TeaserEveryNThoughts must be > 0 — a 0 here silences the teaser")
+}
+
+// ─── Debug bar [q?] row + Q&A menu builder ─────────────────────────────────
+
+// TestRenderDebugBar_ThreeLinesWithQuestionButton confirms the debug bar
+// now renders 3 lines and the third contains the [q?] button. Catches the
+// regression where the [q?] click target disappears (either because line 3
+// stops rendering or because the literal "[q?]" token gets renamed).
+func TestRenderDebugBar_ThreeLinesWithQuestionButton(t *testing.T) {
+	c := newPetRenderCoordinator(t)
+	lines := c.renderDebugBar(40)
+	assert.Len(t, lines, 3, "debug bar must render 3 lines so the [q?] click handler has a row to map to DebugLine3")
+	assert.Contains(t, lines[2], "[q?]",
+		"line 3 must contain the [q?] token; the click handler greps for this literal")
+}
+
+// TestRenderPetWidget_DebugBar_LayoutAssignsDebugLine3 walks the full
+// render path with debug_bar enabled and verifies the layout records a
+// non-zero DebugLine3. handleDebugBarClick's dispatch gate uses
+// (layout.DebugLine1 > 0 && clickY == layout.DebugLine3) — if DebugLine3
+// reverts to 0 the [q?] click silently no-ops.
+func TestRenderPetWidget_DebugBar_LayoutAssignsDebugLine3(t *testing.T) {
+	c := newPetRenderCoordinator(t)
+	c.config.Widgets.Pet.DebugBar = true
+
+	_ = c.renderPetWidget(40, false)
+
+	assert.Greater(t, c.petLayout.DebugLine1, 0, "DebugLine1 should be set when debug_bar is enabled")
+	assert.Greater(t, c.petLayout.DebugLine2, c.petLayout.DebugLine1, "DebugLine2 must follow DebugLine1")
+	assert.Greater(t, c.petLayout.DebugLine3, c.petLayout.DebugLine2, "DebugLine3 must follow DebugLine2")
+}
+
+// TestBuildQuestionMenuArgs_ChoiceQuestion pins the shape of the
+// display-menu argv: title flag, position flags, Cancel row, separator,
+// then one row per choice with sequential 1..9 hotkeys and a
+// `run-shell -b "<exe> pet ask --quiet --answer '<choice>'"` command. The
+// --quiet flag is load-bearing: tmux's run-shell dumps any stdout into
+// the focused pane / view-mode buffer, which previously blanked the user's
+// active shell with "[0]" until they pressed Esc.
+func TestBuildQuestionMenuArgs_ChoiceQuestion(t *testing.T) {
+	pending := &daemon.PendingQuestion{
+		ID:      "editor_loyalty",
+		Text:    "Which editor have you spent the most hours in this year?",
+		Kind:    "choice",
+		Choices: []string{"Neovim/Vim", "VS Code", "JetBrains", "Emacs", "Something else"},
+	}
+	args := buildQuestionMenuArgs(pending, "/usr/local/bin/tabby")
+
+	// Header: display-menu -T <title> -x C -y C
+	assert.Equal(t, "display-menu", args[0])
+	assert.Equal(t, "-T", args[1])
+	assert.Equal(t, pending.Text, args[2])
+	assert.Equal(t, "-x", args[3])
+	assert.Equal(t, "C", args[4])
+	assert.Equal(t, "-y", args[5])
+	assert.Equal(t, "C", args[6])
+
+	// Cancel row + separator
+	assert.Equal(t, "Cancel", args[7])
+	assert.Equal(t, "q", args[8])
+	assert.Equal(t, "", args[9])
+	assert.Equal(t, "", args[10], "separator name must be empty")
+	assert.Equal(t, "", args[11], "separator key must be empty")
+	assert.Equal(t, "", args[12], "separator command must be empty")
+
+	// Choice rows: (name, key, command) per choice
+	choiceArgs := args[13:]
+	assert.Len(t, choiceArgs, len(pending.Choices)*3,
+		"each choice should contribute 3 args (name, key, command)")
+
+	for i, choice := range pending.Choices {
+		base := i * 3
+		assert.Equal(t, choice, choiceArgs[base], "choice %d name", i)
+		assert.Equal(t, fmt.Sprintf("%d", i+1), choiceArgs[base+1], "choice %d hotkey", i)
+		// Command must include --quiet (silences confirmation stdout) and
+		// the choice text inside single quotes.
+		cmd := choiceArgs[base+2]
+		assert.Contains(t, cmd, "run-shell -b", "command must use run-shell -b for background execution")
+		assert.Contains(t, cmd, "--quiet", "command MUST pass --quiet so success stdout doesn't bleed into the focused pane")
+		assert.Contains(t, cmd, "2>/dev/null", "command MUST redirect stderr — error messages still pop tmux's view-mode buffer otherwise")
+		assert.Contains(t, cmd, "/usr/local/bin/tabby pet ask")
+		assert.Contains(t, cmd, "--answer '"+choice+"'")
+	}
+}
+
+// TestBuildQuestionMenuArgs_EscapesSingleQuotes guards against shell
+// injection / parse failure when a choice contains a single quote (e.g.
+// "don't know" or an LLM-generated choice with an apostrophe). The
+// embedded choice text is wrapped in single quotes, so a literal ' must
+// be escaped via the '\'' close-reopen trick.
+func TestBuildQuestionMenuArgs_EscapesSingleQuotes(t *testing.T) {
+	pending := &daemon.PendingQuestion{
+		ID:      "test",
+		Text:    "question?",
+		Kind:    "choice",
+		Choices: []string{"don't know", "I'm sure"},
+	}
+	args := buildQuestionMenuArgs(pending, "tabby")
+
+	// Find the command args (third positional in each (name,key,cmd) trio
+	// after the 13-arg header).
+	for i, choice := range pending.Choices {
+		cmd := args[13+i*3+2]
+		// The choice should be wrapped in single quotes with '\'' for
+		// the embedded apostrophe — never a bare apostrophe inside the
+		// quoted region (which would terminate the quoting and break /bin/sh
+		// parsing).
+		want := strings.ReplaceAll(choice, "'", `'\''`)
+		assert.Contains(t, cmd, "--answer '"+want+"'",
+			"choice %q must be single-quote-escaped in the run-shell command", choice)
+	}
+}
+
+// TestBuildQuestionMenuArgs_TitleTruncation pins the long-title trimming
+// behaviour. display-menu titles render in tmux's status-line font and
+// wrap awkwardly past ~60 chars, so the builder truncates to 57 chars
+// plus "..." (60 total).
+func TestBuildQuestionMenuArgs_TitleTruncation(t *testing.T) {
+	longText := strings.Repeat("x", 100)
+	pending := &daemon.PendingQuestion{
+		ID:      "test",
+		Text:    longText,
+		Kind:    "choice",
+		Choices: []string{"a", "b"},
+	}
+	args := buildQuestionMenuArgs(pending, "tabby")
+	title := args[2]
+	assert.Equal(t, 60, len(title), "long titles should be truncated to 60 chars")
+	assert.True(t, strings.HasSuffix(title, "..."), "truncated titles should end with ellipsis")
+}
+
+// TestBuildQuestionMenuArgs_HotkeysCapAtNine confirms the 10th and later
+// choices get an empty key (still clickable, just no number shortcut)
+// rather than a two-digit hotkey that tmux can't bind cleanly.
+func TestBuildQuestionMenuArgs_HotkeysCapAtNine(t *testing.T) {
+	choices := make([]string, 12)
+	for i := range choices {
+		choices[i] = fmt.Sprintf("choice%d", i)
+	}
+	pending := &daemon.PendingQuestion{
+		ID:      "test",
+		Text:    "question?",
+		Kind:    "choice",
+		Choices: choices,
+	}
+	args := buildQuestionMenuArgs(pending, "tabby")
+
+	// Choices 0-8 get keys "1".."9"; choices 9-11 get empty keys.
+	for i := 0; i < 9; i++ {
+		assert.Equal(t, fmt.Sprintf("%d", i+1), args[13+i*3+1],
+			"choice %d should get hotkey %d", i, i+1)
+	}
+	for i := 9; i < 12; i++ {
+		assert.Equal(t, "", args[13+i*3+1],
+			"choice %d should have an empty hotkey (no double-digit binding)", i)
+	}
+}
+
+// ─── forceQuestionTeaser ───────────────────────────────────────────────────
+
+// TestForceQuestionTeaser_ZeroesAnimFrame_AndSetsPending pins the
+// [q?] debug-button behaviour: clears any cooldown, populates
+// PendingQuestion via PickQuestion if absent, and resets AnimFrame so the
+// teaser cadence (block = AnimFrame/50, fires when block % N == 0) lands
+// on the on-block immediately rather than mid-cycle.
+func TestForceQuestionTeaser_ZeroesAnimFrame_AndSetsPending(t *testing.T) {
+	c := newPetRenderCoordinator(t)
+	// Past consent so PickQuestion picks from the seed bank rather than
+	// returning the consent question.
+	c.pet.AnsweredQuestions = []daemon.AnsweredQuestion{
+		{ID: "consent", Answer: "Yes, ask away", Timestamp: petTimeNow.Add(-time.Hour)},
+	}
+	c.pet.AnimFrame = 9999
+	c.pet.QuestionCooldown = petTimeNow.Add(48 * time.Hour) // would normally block PickQuestion
+	c.pet.PendingQuestion = nil
+
+	c.forceQuestionTeaser()
+
+	assert.Equal(t, 0, c.pet.AnimFrame,
+		"AnimFrame must be reset to 0 so block 0 % N == 0 → teaser fires immediately")
+	assert.True(t, c.pet.QuestionCooldown.IsZero(),
+		"QuestionCooldown must be cleared so PickQuestion isn't gated by a stale cooldown")
+	assert.NotNil(t, c.pet.PendingQuestion,
+		"PendingQuestion must be populated when PickQuestion can produce one")
+}
+
+// TestForceQuestionTeaser_PreservesExistingPending confirms the helper
+// doesn't replace a PendingQuestion that's already set — the user might
+// be mid-answer and we just want to nudge the teaser back on screen.
+func TestForceQuestionTeaser_PreservesExistingPending(t *testing.T) {
+	c := newPetRenderCoordinator(t)
+	existing := pendingChoice(petTimeNow)
+	c.pet.PendingQuestion = existing
+	c.pet.AnimFrame = 500
+
+	c.forceQuestionTeaser()
+
+	assert.Equal(t, 0, c.pet.AnimFrame, "AnimFrame still gets zeroed")
+	assert.Same(t, existing, c.pet.PendingQuestion,
+		"PendingQuestion must not be replaced when one is already pending")
 }

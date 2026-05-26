@@ -186,6 +186,47 @@ func TestApplyDefaults_SidebarColors(t *testing.T) {
 	assert.Len(t, cfg.Sidebar.Colors.ActiveIndicatorFrames, 6)
 }
 
+// TestApplyDefaults_PetQA pins the Q&A cadence defaults to applyDefaults
+// proper (not applyIconStyleDefaults). The defaults used to live inside
+// applyIconStyleDefaults, which early-returns when sidebar.icon_style is
+// unset — so a user with no icon_style ended up with TeaserEveryNThoughts=0
+// (silently disabling the cat's consent prompt), CooldownHours=0 (no
+// rate-limit on re-asking), and ExpireHours=0 (questions never aged out).
+// This test loads an EMPTY config — no icon_style block — and asserts the
+// QA defaults take effect, so the misplacement can't sneak back.
+func TestApplyDefaults_PetQA(t *testing.T) {
+	cfg := loadEmpty(t)
+
+	assert.Equal(t, 3, cfg.Widgets.Pet.QA.TeaserEveryNThoughts,
+		"TeaserEveryNThoughts must default to 3 even with no icon_style — otherwise the teaser never renders")
+	assert.Equal(t, 24, cfg.Widgets.Pet.QA.CooldownHours,
+		"CooldownHours must default to 24 even with no icon_style")
+	assert.Equal(t, 48, cfg.Widgets.Pet.QA.ExpireHours,
+		"ExpireHours must default to 48 even with no icon_style")
+}
+
+// TestApplyDefaults_PetQAUserOverridesPreserved confirms an explicit
+// non-zero user value isn't clobbered by the default — the standard "only
+// set when zero" pattern. (A user value of 0 still gets overridden to the
+// default; this matches the rest of applyDefaults and the existing
+// behaviour in TestApplyDefaults_UserValuesNotOverwritten.)
+func TestApplyDefaults_PetQAUserOverridesPreserved(t *testing.T) {
+	cfg, err := loadYAML(t, `
+widgets:
+  pet:
+    qa:
+      teaser_every_n_thoughts: 5
+      cooldown_hours: 12
+      expire_hours: 72
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assert.Equal(t, 5, cfg.Widgets.Pet.QA.TeaserEveryNThoughts)
+	assert.Equal(t, 12, cfg.Widgets.Pet.QA.CooldownHours)
+	assert.Equal(t, 72, cfg.Widgets.Pet.QA.ExpireHours)
+}
+
 func TestApplyDefaults_UserValuesNotOverwritten(t *testing.T) {
 	cfg, err := loadYAML(t, `
 indicators:

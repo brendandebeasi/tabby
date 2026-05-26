@@ -388,6 +388,24 @@ func applyDefaults(cfg *Config) {
 		cfg.Sidebar.Colors.TreeContinue = "│"
 	}
 
+	// Q&A defaults: feature-on with conservative cadence. Users who pull
+	// the update see the consent question on first cooldown elapse without
+	// editing config.yaml; the consent flow itself routes opt-outs through
+	// runtime PetState (QAOptedOut / QAFreeTextOptedOut) so a default of
+	// Enabled=true is safe. Lives here in applyDefaults — not in
+	// applyIconStyleDefaults — because the cadence has nothing to do with
+	// the user's icon style preset, and the early-return in
+	// applyIconStyleDefaults (when icon_style is unset) would otherwise
+	// leave TeaserEveryNThoughts at 0 and silently disable the teaser.
+	if cfg.Widgets.Pet.QA.CooldownHours == 0 {
+		cfg.Widgets.Pet.QA.CooldownHours = 24
+	}
+	if cfg.Widgets.Pet.QA.ExpireHours == 0 {
+		cfg.Widgets.Pet.QA.ExpireHours = 48
+	}
+	if cfg.Widgets.Pet.QA.TeaserEveryNThoughts == 0 {
+		cfg.Widgets.Pet.QA.TeaserEveryNThoughts = 3
+	}
 }
 
 // applyIconStyleDefaults applies icon preset values based on IconStyle setting.
@@ -453,20 +471,6 @@ func applyIconStyleDefaults(cfg *Config) {
 	// Apply to widget styles if not already set
 	if cfg.Widgets.Pet.Style == "" {
 		cfg.Widgets.Pet.Style = style
-	}
-	// Q&A defaults: feature-on with conservative cadence. Users who pull
-	// the update see the consent question on first cooldown elapse without
-	// editing config.yaml; the consent flow itself routes opt-outs through
-	// runtime PetState (QAOptedOut / QAFreeTextOptedOut) so a default of
-	// Enabled=true is safe.
-	if cfg.Widgets.Pet.QA.CooldownHours == 0 {
-		cfg.Widgets.Pet.QA.CooldownHours = 24
-	}
-	if cfg.Widgets.Pet.QA.ExpireHours == 0 {
-		cfg.Widgets.Pet.QA.ExpireHours = 48
-	}
-	if cfg.Widgets.Pet.QA.TeaserEveryNThoughts == 0 {
-		cfg.Widgets.Pet.QA.TeaserEveryNThoughts = 3
 	}
 	if cfg.Widgets.Stats.Style == "" {
 		cfg.Widgets.Stats.Style = style

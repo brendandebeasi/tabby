@@ -1162,6 +1162,7 @@ type petWidgetLayout struct {
 	WidgetHeight       int // Total widget height in lines
 	DebugLine1         int // Y position of debug line 1 (mode triggers)
 	DebugLine2         int // Y position of debug line 2 (thought controls)
+	DebugLine3         int // Y position of debug line 3 (popup / overflow triggers)
 	QuestionPromptLine int // Row index of the Q&A teaser bubble line when shown (-1 when not pending)
 }
 
@@ -10042,10 +10043,16 @@ func (c *Coordinator) renderWidgetZone(entries []widgetEntry, width int) (string
 	// Scan for zone markers (BubbleZone)
 	scannedContent := zone.Scan(rawContent)
 
-	// Extract zone bounds for all known clickable areas
+	// Extract zone bounds for all known clickable areas.
+	// Pet zones must match the zone.Mark calls in renderPetWidget /
+	// renderAdventurePlayArea. Dropped entries (drop_yarn, clean_poop,
+	// pet_pet) were never marked; pet widget click handling now relies
+	// on handlePetWidgetClick's custom hit-testing rather than these
+	// regions, but the air/ground/feed entries are kept so the renderer
+	// can still route obvious clicks via ResolvedAction.
 	knownZones := []string{
 		// Pet zones
-		"pet:drop_food", "pet:drop_yarn", "pet:clean_poop", "pet:pet_pet", "pet:ground",
+		"pet:drop_food", "pet:air_high", "pet:air_low", "pet:ground",
 		// Button zones
 		"sidebar:new_tab", "sidebar:new_group", "sidebar:close_tab",
 		// Sidebar zones
@@ -10746,6 +10753,7 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	// debug bar, causing click misrouting.
 	c.petLayout.DebugLine1 = 0
 	c.petLayout.DebugLine2 = 0
+	c.petLayout.DebugLine3 = 0
 	// Reset Q&A teaser row; only set when the teaser substitution actually
 	// fires below. -1 means "no question line on this render".
 	c.petLayout.QuestionPromptLine = -1
@@ -10966,7 +10974,30 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 		// click handler to recognise. handlePetWidgetClick prefers row index
 		// over zone marker for the pet widget so we set QuestionPromptLine
 		// on the layout struct as the source of truth.
-		teaserText := sprites.Thought + " 🤔 mind if I ask? (click)"
+		//
+		// Width-conditional: the full teaser is 25 cells which overflows
+		// the mobile profile's ~10-col thought area, leaving the user
+		// staring at "🤔 mind if" with no obvious affordance. Pick the
+		// widest variant whose FULL rendered width (sprite + space + body)
+		// fits in maxThoughtWidth, so the sidebar's overflow truncator
+		// doesn't clip the trailing BubbleZone marker and silently break
+		// the click target.
+		prefixWidth := uniseg.StringWidth(sprites.Thought) + 1 // sprite + " "
+		budget := maxThoughtWidth - prefixWidth
+		var teaserBody string
+		switch {
+		case budget >= 25: // "🤔 mind if I ask? (click)"
+			teaserBody = "🤔 mind if I ask? (click)"
+		case budget >= 19: // "🤔 ask me? (click)"
+			teaserBody = "🤔 ask me? (click)"
+		case budget >= 13: // "🤔 ask? click"
+			teaserBody = "🤔 ask? click"
+		case budget >= 7: // "🤔 ask?"
+			teaserBody = "🤔 ask?"
+		default:
+			teaserBody = "🤔?"
+		}
+		teaserText := sprites.Thought + " " + teaserBody
 		thoughtLine = zone.Mark("pet:question_prompt", teaserText)
 		c.petLayout.QuestionPromptLine = currentLine
 	} else {
@@ -11260,10 +11291,13 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 		debugLines := c.renderDebugBar(safePlayWidth)
 		for i, line := range debugLines {
 			result.WriteString(line + "\n")
-			if i == 0 {
+			switch i {
+			case 0:
 				c.petLayout.DebugLine1 = currentLine
-			} else if i == 1 {
+			case 1:
 				c.petLayout.DebugLine2 = currentLine
+			case 2:
+				c.petLayout.DebugLine3 = currentLine
 			}
 			currentLine++
 		}
@@ -11272,10 +11306,10 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	// Store total widget height for click detection
 	c.petLayout.WidgetHeight = currentLine
 
-	coordinatorDebugLog.Printf("Pet layout updated: Feed=%d, HighAir=%d, LowAir=%d, Ground=%d, PlayWidth=%d, Height=%d, Debug1=%d, Debug2=%d",
+	coordinatorDebugLog.Printf("Pet layout updated: Feed=%d, HighAir=%d, LowAir=%d, Ground=%d, PlayWidth=%d, Height=%d, Debug1=%d, Debug2=%d, Debug3=%d",
 		c.petLayout.FeedLine, c.petLayout.HighAirLine, c.petLayout.LowAirLine,
 		c.petLayout.GroundLine, c.petLayout.PlayWidth, c.petLayout.WidgetHeight,
-		c.petLayout.DebugLine1, c.petLayout.DebugLine2)
+		c.petLayout.DebugLine1, c.petLayout.DebugLine2, c.petLayout.DebugLine3)
 
 	// Pet touch buttons removed - using touch input on pet area instead
 	// Feed button at top of widget remains for touch access
@@ -11283,9 +11317,11 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	return result.String()
 }
 
-// renderDebugBar renders the 2-line debug bar for pet widget testing
+// renderDebugBar renders the 3-line debug bar for pet widget testing
 // Line 1: DBG <state> H:<hunger> F:<food> [adv][slp][die][poo][mse][yrn]
 // Line 2: trg:<category> [<<][>>] [H+][H-][F+][F-]
+// Line 3: [q?]  (popup / overflow triggers — kept on its own row so line 1
+//                doesn't get crowded out at narrow sidebar widths)
 func (c *Coordinator) renderDebugBar(width int) []string {
 	// Line 1: Status + Mode Triggers
 	state := c.pet.State
@@ -11327,7 +11363,12 @@ func (c *Coordinator) renderDebugBar(width int) []string {
 		line2 = fmt.Sprintf("%s [<<][>>] [H+][F+]", category)
 	}
 
-	return []string{line1, line2}
+	// Line 3: popup / overflow triggers. Currently just [q?] (launches the
+	// pet Q&A popup) — kept on its own row so future debug buttons can pile
+	// on here without re-flowing line 1.
+	line3 := "[q?]"
+
+	return []string{line1, line2, line3}
 }
 
 // handleDebugBarClick handles clicks on the debug bar
@@ -11345,11 +11386,12 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 		safeWidth = 5
 	}
 	lines := c.renderDebugBar(safeWidth)
-	if len(lines) < 2 {
+	if len(lines) < 3 {
 		return false
 	}
 	line1 := lines[0]
 	line2 := lines[1]
+	line3 := lines[2]
 
 	findTokenBounds := func(line, token string) (int, int, bool) {
 		idx := strings.Index(line, token)
@@ -11554,7 +11596,58 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 		return false
 	}
 
+	if clickY == layout.DebugLine3 {
+		if clickedToken(line3, "[q?]") {
+			coordinatorDebugLog.Printf("Debug bar: [q?] clicked, opening Q&A menu overlay")
+			// Ensure a question is set, then open the menu directly so the
+			// debug button is a one-click path (the teaser-armed UX is still
+			// available the normal way for users without the debug bar).
+			c.forceQuestionTeaser()
+			c.launchQuestionMenu(clientID, menuPosition{X: clickX, Y: clickY})
+			return true
+		}
+		return false
+	}
+
 	return false
+}
+
+// forceQuestionTeaser is the [q?] debug-button action: ensure a PendingQuestion
+// is set on the pet and reset the teaser cadence so the consent bubble
+// ("🤔 mind if I ask? (click)") appears on the very next render rather than
+// waiting for the natural cadence window. Clicking the teaser then opens the
+// popup, matching the organic flow.
+//
+// Bypasses the cooldown that PickQuestion normally enforces — this is a debug
+// affordance, the whole point is that it fires now.
+func (c *Coordinator) forceQuestionTeaser() {
+	now := time.Now()
+	c.stateMu.Lock()
+	// Drop the cooldown so PickQuestion can produce a fresh question even
+	// if one was just answered. We don't touch QAOptedOut / QA.Disabled —
+	// those represent a user/config decision and the popup binary handles
+	// the empty case gracefully if PickQuestion still returns nil.
+	c.pet.QuestionCooldown = time.Time{}
+	if c.pet.PendingQuestion == nil {
+		wire := snapshotPetQAForWire(&c.pet)
+		if picked := PickQuestion(&wire, c.config.Widgets.Pet.QA, now); picked != nil {
+			wire.PendingQuestion = picked
+			applyPetQAFromWire(&c.pet, &wire)
+		}
+	}
+	// Reset AnimFrame so the teaser cadence (block = AnimFrame/50, fires
+	// when block % TeaserEveryNThoughts == 0) lands on the teaser block
+	// immediately rather than potentially mid-cycle.
+	c.pet.AnimFrame = 0
+	petSnap := c.pet
+	pending := c.pet.PendingQuestion
+	c.stateMu.Unlock()
+	if pending == nil {
+		coordinatorDebugLog.Printf("forceQuestionTeaser: no question available (QA disabled, opted out, or pool exhausted)")
+		return
+	}
+	savePetStateData(petSnap)
+	coordinatorDebugLog.Printf("forceQuestionTeaser: teaser armed (question id=%q)", pending.ID)
 }
 
 // renderSmallButton renders a single-line flat button with background color.
@@ -11987,16 +12080,14 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 	}
 
-	if input.ResolvedAction == "" {
-		// No action resolved - stay in sidebar (don't steal focus)
-		coordinatorDebugLog.Printf("  -> No action resolved, staying in sidebar")
-		return false
-	}
-
-	// Custom pet widget click detection (bypasses BubbleZone)
-	// Uses tracked line positions from renderPetWidget for precise hit testing
-	// Only run for actual mouse clicks (Button is set), not programmatic actions
-	// sent via socket (e.g. toggle_collapse_sidebar from keybinding scripts)
+	// Custom pet widget click detection (bypasses BubbleZone).
+	// MUST run before the ResolvedAction=="" early-return below: the
+	// debug bar buttons ([adv][slp][die][poo][mse][yrn]) and the
+	// high/low air rows are rendered without forwarded zone regions,
+	// so their clicks arrive with ResolvedAction empty.
+	// handlePetWidgetClick does its own hit-testing against petLayout
+	// and returns false when the click misses the widget, so it's safe
+	// to invoke unconditionally for real mouse clicks.
 	if c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.Pin && input.Button != "" {
 		if handled := c.handlePetWidgetClick(clientID, input); handled {
 			return false // Pet actions don't need window refresh
@@ -12786,8 +12877,14 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		sessID := strings.TrimSpace(string(sessIDOut))
 		popupBin := getPopupBin()
 		if popupBin != "" && sessID != "" {
+			// display-popup's shell-command must be a single argv string;
+			// passing popupBin/--session/sessID separately makes tmux 3.x
+			// exec popupBin as a literal program name → popup flashes open
+			// then closes. See launchQuestionPopup for the same fix.
+			escSess := strings.ReplaceAll(sessID, "'", `'\''`)
+			popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
 			go exec.Command("tmux", "display-popup", "-E", "-w", "100%", "-h", "100%",
-				"--", popupBin, "--session", sessID).Run()
+				"--", popupCmd).Run()
 		}
 		return false
 
@@ -13383,13 +13480,6 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 // This bypasses BubbleZone and uses tracked line positions for precise hit testing
 // Returns true if the click was handled, false otherwise
 func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputPayload) bool {
-	// Debounce rapid clicks (200ms) to prevent render floods
-	now := time.Now()
-	if now.Sub(c.lastPetClick) < 200*time.Millisecond {
-		return true // Absorb the click without processing
-	}
-	c.lastPetClick = now
-
 	// Get client-specific width for accurate click detection
 	clientWidth := c.getClientWidth(clientID)
 
@@ -13406,19 +13496,28 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 	coordinatorDebugLog.Printf("  Layout: ContentStart=%d Feed=%d HighAir=%d LowAir=%d Ground=%d PlayWidth=%d",
 		layout.ContentStartLine, layout.FeedLine, layout.HighAirLine, layout.LowAirLine, layout.GroundLine, layout.PlayWidth)
 
-	// Check if click is within the pet widget at all
+	// Check if click is within the pet widget at all. Run this BEFORE the
+	// debounce so non-pet sidebar clicks aren't absorbed for 200ms after a
+	// pet click.
 	if clickY < 0 || clickY >= layout.WidgetHeight {
 		coordinatorDebugLog.Printf("  -> Click outside pet widget bounds (clickY=%d, widgetHeight=%d)", clickY, layout.WidgetHeight)
 		return false
 	}
+
+	// Debounce rapid clicks (200ms) to prevent render floods
+	now := time.Now()
+	if now.Sub(c.lastPetClick) < 200*time.Millisecond {
+		return true // Absorb the click without processing
+	}
+	c.lastPetClick = now
 
 	// Q&A teaser takes priority over the underlying thought-bubble line it
 	// temporarily replaced. Without this branch first, the click would fall
 	// through to whichever line the teaser overlapped (usually the row that
 	// would otherwise be a normal thought) and dispatch to the wrong action.
 	if c.pet.PendingQuestion != nil && layout.QuestionPromptLine >= 0 && clickY == layout.QuestionPromptLine {
-		coordinatorDebugLog.Printf("  -> Q&A teaser clicked, launching popup")
-		c.launchQuestionPopup(clientID)
+		coordinatorDebugLog.Printf("  -> Q&A teaser clicked, launching menu overlay")
+		c.launchQuestionMenu(clientID, menuPosition{PaneID: input.PaneID, X: input.MouseX, Y: input.MouseY})
 		return true
 	}
 
@@ -13439,7 +13538,7 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 	// was actually rendered (DebugLine1>0) rather than config, since the
 	// tight-viewport escalation can suppress it even when configured on.
 	if c.config.Widgets.Pet.DebugBar && layout.DebugLine1 > 0 {
-		if clickY == layout.DebugLine1 || clickY == layout.DebugLine2 {
+		if clickY == layout.DebugLine1 || clickY == layout.DebugLine2 || clickY == layout.DebugLine3 {
 			coordinatorDebugLog.Printf("  -> Debug bar line clicked (line=%d, X=%d)", clickY, clickX)
 			return c.handleDebugBarClick(clientID, clickX, clickY)
 		}
@@ -13471,6 +13570,83 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 
 	coordinatorDebugLog.Printf("  -> Click not on pet widget interactive lines")
 	return false
+}
+
+// launchQuestionMenu shows the pending question as a menu overlay. Each
+// choice becomes a tappable entry that shells out to
+// `tabby pet ask --answer "..."`, which posts the pick back to the daemon
+// socket — same path the popup binary uses, just driven by a native menu
+// instead of a full TUI pane.
+//
+// Routing goes through executeOrSendMenu, NOT a raw `tmux display-menu`:
+// the pet widget lives in the sidebar, and sidebar clients render their own
+// overlay menu (via OnSendMenu) that cooperates with the sidebar's mouse
+// tracking. A bare `tmux display-menu` opened over a sidebar pane that still
+// owns SGR mouse tracking gets dismissed by the very next mouse event, so
+// the menu flashed open and closed instantly. executeOrSendMenu falls back
+// to `tmux display-menu` only for header clients (where the overlay can't
+// fit), which is the one place the raw command is safe.
+//
+// Falls back to launchQuestionPopup for free-text questions (a menu can't
+// capture arbitrary text input) and when there is no pending question or no
+// choices to show.
+func (c *Coordinator) launchQuestionMenu(clientID string, pos menuPosition) {
+	c.stateMu.RLock()
+	pending := c.pet.PendingQuestion
+	c.stateMu.RUnlock()
+	if pending == nil || pending.Kind != "choice" || len(pending.Choices) == 0 {
+		c.launchQuestionPopup(clientID)
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		coordinatorDebugLog.Printf("launchQuestionMenu: no os.Executable; falling back to popup")
+		c.launchQuestionPopup(clientID)
+		return
+	}
+	args := buildQuestionMenuArgs(pending, exe)
+	c.executeOrSendMenu(clientID, args, pos)
+}
+
+// buildQuestionMenuArgs constructs the argv (after the "tmux" program
+// name) for the `tmux display-menu` invocation used by launchQuestionMenu.
+// Extracted from launchQuestionMenu so the menu layout — title trimming,
+// hotkey assignment, single-quote escaping, /dev/null redirect that
+// prevents tmux from popping a view-mode buffer for the answer-cli's
+// stdout — can be unit-tested without spawning tmux.
+func buildQuestionMenuArgs(pending *daemon.PendingQuestion, exe string) []string {
+	// Truncate the title; display-menu titles render in tmux's status-line
+	// font and very long ones wrap weirdly.
+	title := pending.Text
+	if len(title) > 60 {
+		title = title[:57] + "..."
+	}
+	args := []string{
+		"display-menu",
+		"-T", title,
+		"-x", "C", "-y", "C",
+		"Cancel", "q", "",
+		"", "", "",
+	}
+	// Hotkeys 1-9 for the first nine choices; anything beyond gets no
+	// keybind (tmux still lets the user click). The shell command embeds
+	// the choice in single quotes — escape any literal single quotes by
+	// the standard '\'' trick so a choice like "don't know" round-trips.
+	for i, choice := range pending.Choices {
+		var key string
+		if i < 9 {
+			key = fmt.Sprintf("%d", i+1)
+		}
+		escaped := strings.ReplaceAll(choice, "'", `'\''`)
+		// --quiet silences the success print on stdout; the trailing
+		// 2>/dev/null swallows errors too (e.g. "no pending question"
+		// if the user double-picks before the daemon clears state).
+		// Either source landing in tmux's run-shell capture pops a
+		// view-mode buffer / spills into the focused pane.
+		cmd := fmt.Sprintf("run-shell -b \"%s pet ask --quiet --answer '%s' 2>/dev/null\"", exe, escaped)
+		args = append(args, choice, key, cmd)
+	}
+	return args
 }
 
 // launchQuestionPopup spawns the pet Q&A popup via `tmux display-popup`,
@@ -13506,8 +13682,18 @@ func (c *Coordinator) launchQuestionPopup(clientID string) {
 		coordinatorDebugLog.Printf("  -> launchQuestionPopup: missing popupBin=%q or sessID=%q", popupBin, sessID)
 		return
 	}
+	// display-popup's shell-command MUST be a single argument. Passing the
+	// command and its flags as separate argv entries (e.g. popupBin,
+	// "--session", sessID) makes tmux 3.x exec the first arg directly as a
+	// program name — `exec -a … render pet-qa-popup` is not a real binary,
+	// so the popup opens with nothing to run and closes instantly (the
+	// "flash open then disappear" bug). Fold everything into one string and
+	// single-quote the session id (escaping embedded quotes) so a session
+	// name with shell-special chars round-trips.
+	escSess := strings.ReplaceAll(sessID, "'", `'\''`)
+	popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
 	go exec.Command("tmux", "display-popup", "-E", "-w", "60%", "-h", "30%",
-		"--", popupBin, "--session", sessID).Run()
+		"--", popupCmd).Run()
 }
 
 // getSprites returns the pet sprites based on current style and config overrides
