@@ -42,6 +42,18 @@ func Run(args []string) int {
 	panes := listPanes()
 	content := filterContent(panes)
 
+	// In the dashboard window (cmd+opt+~), cycle tiles but do NOT dim the others —
+	// dimming the grid fights the at-a-glance view. Mirrors the [/] behavior.
+	// Also skip signalDaemon: it triggers a full refresh+broadcast that makes
+	// the sidebar renderer redraw on every cycle (visible as an up/down flicker)
+	// even though the sidebar content doesn't change with pane focus.
+	if inDashboardWindow() {
+		if !dimOnly && !ensureContent && len(content) >= 2 {
+			cyclePane(content)
+		}
+		return 0
+	}
+
 	switch {
 	case ensureContent:
 		if len(content) >= 1 && activeIsUtility(panes) {
@@ -54,6 +66,16 @@ func Run(args []string) int {
 	applyDim()
 	signalDaemon()
 	return 0
+}
+
+// inDashboardWindow reports whether the current window is the tabby dashboard
+// (window-option @tabby_dashboard=1).
+func inDashboardWindow() bool {
+	out, err := exec.Command("tmux", "show-options", "-wqv", "@tabby_dashboard").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "1"
 }
 
 func activeIsUtility(panes []paneInfo) bool {

@@ -46,6 +46,12 @@ func Run(allArgs []string) int {
 	case "preserve-pane-ratios":
 		doPreservePaneRatios(args)
 		return 0
+	case "dash-border-click":
+		doDashBorderClick(args)
+		return 0
+	case "dash-menu", "pane-menu":
+		doDashMenu(args)
+		return 0
 	case "focus-pane":
 		doFocusPane(args)
 		return 0
@@ -663,6 +669,131 @@ func doHookAfterResizePane(args []string) {
 func doHookClientAttached(args []string) {
 	_ = args
 	_ = sendHook("client-attached", nil)
+}
+
+// doDashBorderClick handles a click on a dashboard tile's top border. It maps
+// the click column (mouse_x - pane_left) to one of four buttons:
+//
+//	cols 0-2  → ✕  close       (kill-pane)
+//	cols 3-5  → ⛶  zoom        (resize-pane -Z, toggles)
+//	cols 6-8  → ┃  vsplit      (split-window -h, creates vertical divider)
+//	cols 9-11 → ━  hsplit      (split-window -v, creates horizontal divider)
+//
+// No-op outside the dashboard window. Args: <pane_id> <mouse_x> <pane_left>.
+func doDashBorderClick(args []string) {
+	logf := func(format string, a ...any) {
+		f, err := os.OpenFile("/tmp/tabby-border.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		fmt.Fprintf(f, "[%s] "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, a...)...)
+	}
+	logf("dash-border-click called args=%q", args)
+	if len(args) < 5 {
+		logf("  abort: need 5 args (pane mx my pleft ptop), got %d", len(args))
+		return
+	}
+	paneID := args[0]
+	mx, err1 := strconv.Atoi(args[1])
+	my, err2 := strconv.Atoi(args[2])
+	pleft, err3 := strconv.Atoi(args[3])
+	ptop, err4 := strconv.Atoi(args[4])
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		logf("  abort: parse error mx=%v my=%v pleft=%v ptop=%v", err1, err2, err3, err4)
+		return
+	}
+	out, _ := exec.Command("tmux", "show-options", "-wqv", "-t", paneID, "@tabby_dashboard").Output()
+	dashFlag := strings.TrimSpace(string(out))
+	// pane-border-status=top renders one row ABOVE pane_top, so the button row
+	// is my == ptop-1 (not ptop). Also accept ptop for forgiveness in case the
+	// tmux version differs.
+	btnRow := ptop - 1
+	logf("  pane=%s mx=%d my=%d pleft=%d ptop=%d btnRow=%d dash=%q", paneID, mx, my, pleft, ptop, btnRow, dashFlag)
+	if dashFlag != "1" || (my != btnRow && my != ptop) {
+		err := exec.Command("tmux", "select-pane", "-t", paneID).Run()
+		logf("  pass-through: select-pane err=%v (dash=%q on-btn-row=%v)", err, dashFlag, my == btnRow || my == ptop)
+		return
+	}
+	col := mx - pleft
+	var cmdArgs []string
+	var btn string
+	switch {
+	case col >= 0 && col <= 2:
+		btn = "close"
+		cmdArgs = []string{"kill-pane", "-t", paneID}
+	case col >= 3 && col <= 5:
+		btn = "zoom"
+		cmdArgs = []string{"resize-pane", "-Z", "-t", paneID}
+	case col >= 6 && col <= 8:
+		btn = "vsplit"
+		cmdArgs = []string{"split-window", "-h", "-t", paneID}
+	case col >= 9 && col <= 11:
+		btn = "hsplit"
+		cmdArgs = []string{"split-window", "-v", "-t", paneID}
+	default:
+		logf("  no hit: col=%d outside button zone (0-11)", col)
+		return
+	}
+	err := exec.Command("tmux", cmdArgs...).Run()
+	logf("  hit=%s col=%d cmd=tmux %v err=%v", btn, col, cmdArgs, err)
+}
+
+// doDashMenu shows a tmux popup menu for a dashboard tile. Bound to
+// MouseDown3Pane (right-click / two-finger tap) and M-, in tabby.tmux. The
+// target pane's border is highlighted while the menu is open so the user can
+// see which tile the menu's actions apply to. Pass-through (no-op) if the
+// pane is not inside a dashboard window.
+func doDashMenu(args []string) {
+	if len(args) < 1 {
+		return
+	}
+	paneID := args[0]
+	// Highlight ONLY the target pane's border by making it active and
+	// temporarily switching the window-level pane-active-border-style to amber.
+	// pane-border-style isn't really pane-scoped in tmux (the -p flag falls
+	// through to window scope), so per-pane overrides recolour every pane.
+	// active-vs-inactive gives us a true single-pane highlight.
+	_ = exec.Command("tmux", "select-pane", "-t", paneID).Run()
+	prevStyle, _ := exec.Command("tmux", "show-window-options", "-vt", paneID, "pane-active-border-style").Output()
+	prev := strings.TrimSpace(string(prevStyle))
+	if prev == "" {
+		// Empty means the window has no per-window override. Restore to empty
+		// (unset) by clearing the option so the global default reasserts.
+		prev = ""
+	}
+	_ = exec.Command("tmux", "set-window-option", "-t", paneID, "pane-active-border-style", "fg=#1a1a1a,bg=#fcd34d,bold").Run()
+	defer func() {
+		if prev == "" {
+			_ = exec.Command("tmux", "set-window-option", "-u", "-t", paneID, "pane-active-border-style").Run()
+		} else {
+			_ = exec.Command("tmux", "set-window-option", "-t", paneID, "pane-active-border-style", prev).Run()
+		}
+	}()
+	// Window count drives the conditional items (swap up/down only useful when
+	// multiple panes exist; break-pane likewise).
+	panesOut, _ := exec.Command("tmux", "list-panes", "-t", paneID, "-F", "x").Output()
+	multi := strings.Count(string(panesOut), "x") > 1
+	menu := []string{
+		"-T", " Pane actions ",
+		"-t", paneID,
+		"-x", "C", "-y", "C",
+		"Close pane", "c", "kill-pane -t " + paneID,
+		"Toggle zoom", "z", "resize-pane -Z -t " + paneID,
+		"Vertical split", "v", "split-window -h -t " + paneID,
+		"Horizontal split", "s", "split-window -v -t " + paneID,
+	}
+	if multi {
+		menu = append(menu,
+			"", "", "",
+			"Break to new window", "b", "break-pane -t "+paneID,
+			"Swap up", "u", "swap-pane -U -t "+paneID,
+			"Swap down", "d", "swap-pane -D -t "+paneID,
+			"Mark / unmark", "m", "select-pane -m -t "+paneID,
+		)
+	}
+	menu = append(menu, "", "", "", "Cancel", "q", "")
+	_ = exec.Command("tmux", append([]string{"display-menu"}, menu...)...).Run()
 }
 
 // sendHook dials the daemon socket and sends a MsgHook envelope. Mirrors

@@ -394,6 +394,13 @@ func (l *Loop) handleRendererInput(e RendererInputEvent) {
 	}
 	needsRefresh := l.coord.HandleInput(clientID, input)
 	logEvent("INPUT_HANDLED client=%s needsRefresh=%v", clientID, needsRefresh)
+	// dashboardSkipBroadcast is set by handlers whose work doesn't affect what
+	// renderers display (e.g. in-dashboard pane cycling). Skip the redraw so the
+	// sidebar doesn't judder on every cmd+]/cmd+[/cmd+~.
+	if l.coord.dashboardSkipBroadcast.CompareAndSwap(true, false) {
+		logEvent("INPUT_SKIP_BROADCAST client=%s", clientID)
+		return
+	}
 	if needsRefresh {
 		// Immediate optimistic render: HandleInput already updated the
 		// coordinator state (e.g. SetActiveWindowOptimistic for select_window)
@@ -554,12 +561,35 @@ func (l *Loop) doPaneLayoutOps() {
 	logEvent("PANE_LAYOUT_START activeProfile=%s sidebarHidden=%v newWindowState=%s",
 		l.coord.ActiveClientProfile(), l.coord.sidebarHidden,
 		status.State)
-	customBorder := l.coord.GetConfig().PaneHeader.CustomBorder
+	cfg := l.coord.GetConfig()
+	customBorder := cfg.PaneHeader.CustomBorder
+	nativeBorders := cfg.PaneHeader.Native != nil && *cfg.PaneHeader.Native
+	if nativeBorders {
+		// Force the global aux-pane gate off so cleanupOrphanedHeaders (below)
+		// tears down any aux header panes left over from before native mode was
+		// turned on. The actual spawn call is also gated separately so this is
+		// belt + suspenders.
+		_ = exec.Command("tmux", "set-option", "-g", "@tabby_pane_headers", "off").Run()
+	}
 	preActive := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
 	windows := l.coord.GetWindows()
 	spawnWindowHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredWindowHeaderHeight(), windows, l.coord)
-	spawnPaneHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredPaneHeaderHeight(), windows)
+	if !nativeBorders {
+		spawnPaneHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredPaneHeaderHeight(), windows)
+	}
+	// Re-assert native pane-border labels on the dashboard window (the chrome
+	// passes above reset pane-border-status/style each cycle). No-op when inactive.
+	l.coord.applyDashboardBorders()
+	if nativeBorders {
+		dashWin := dashboardActiveWindowID(l.coord.dashboardSession())
+		for _, w := range windows {
+			if w.ID == dashWin {
+				continue
+			}
+			l.coord.applyNativeBorders(w.ID, w.Group)
+		}
+	}
 	// Profile transitions (desktop ↔ phone) issue kill-pane + split-window
 	// across multiple windows during this bracket. Even with `split-window -d`
 	// the kill-pane sequence can silently flip the session's current-window

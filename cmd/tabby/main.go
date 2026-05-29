@@ -22,6 +22,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/cyclepane"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/daemon"
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashboard"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dev"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/hook"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/managegroup"
@@ -46,6 +47,7 @@ type subcommand struct {
 var subcommands = []subcommand{
 	{"cycle-pane", "cycle the active content pane and dim inactive panes", cyclepane.Run},
 	{"daemon", "run the tabby daemon (socket server + coordinator)", daemon.Run},
+	{"dashboard", "toggle the all-panes dashboard (gather panes into a tiled grid)", dashboard.Run},
 	{"dev", "developer commands: reload, status", dev.Run},
 	{"hook", "tmux hook dispatcher (split-pane, kill-pane, resize, etc.)", hook.Run},
 	{"manage-group", "edit window-group entries in the tabby config file", managegroup.Run},

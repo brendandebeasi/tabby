@@ -377,7 +377,11 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		if windowID == "" {
 			continue
 		}
-
+		// The dashboard view is the bare tiled grid — no sidebar. Skip entirely.
+		if win.ID == dashboardActiveWindowID(sessionID) {
+			logEvent("SPAWN_CHECK window=%s result=skip_dashboard", windowID)
+			continue
+		}
 		// Skip if already has a renderer
 		if connectedClients[windowID] {
 			logEvent("SPAWN_CHECK window=%s result=skip_has_client", windowID)
@@ -865,8 +869,14 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 	// For each window without a header, spawn one above the topmost content pane
 	spawned := false
 	spawnedInWindow := make(map[string]bool)
+	// The dashboard window is a tiled grid with a sidebar; a window-header pane
+	// at the top would become an awkward tile and jumble the grid. Skip it.
+	dashWin := dashboardActiveWindowID(sessionID)
 	for _, win := range windows {
 		if win.ID == "" {
+			continue
+		}
+		if dashWin != "" && win.ID == dashWin {
 			continue
 		}
 		if windowsWithHeader[win.ID] {
@@ -1020,7 +1030,15 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 	}
 	var contentPanes []paneEntry
 
+	// The dashboard window labels its tiled panes via native pane-border-status
+	// (set in enterDashboard), not overlay header panes — those add extra panes
+	// and resize-handle rows that jumble the grid. Skip it here.
+	dashWin := dashboardActiveWindowID(sessionID)
+
 	for _, win := range windows {
+		if dashWin != "" && win.ID == dashWin {
+			continue
+		}
 		for _, p := range win.Panes {
 			isSystem := strings.Contains(p.Command, "sidebar") || strings.Contains(p.Command, "renderer") ||
 				strings.Contains(p.Command, "pane-header") || strings.Contains(p.Command, "window-header") ||

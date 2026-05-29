@@ -726,6 +726,17 @@ type Coordinator struct {
 	lastNewWindowAt         time.Time
 	lastNewWindowID         string
 
+	// Dashboard mode state. Loop-only (written/read from handleSemanticAction on
+	// the loop goroutine), so no mutex needed. See dashboard.go.
+	dashboardWindowID   string                        // window_id of the live "Dashboard" window, "" when inactive
+	dashboardOrigins    map[string]dashWindowSnapshot // origin window_id -> snapshot for recreation
+	dashboardOrder      []string                      // origin window ids, original index order
+	dashboardReturnPane string                        // pane_id to refocus on exit
+	// Set true by an action handler when its work doesn't change anything the
+	// renderers display (e.g. an in-dashboard pane cycle) — handleRendererInput
+	// then skips SendRenderToClient + BroadcastRender to avoid the redraw flicker.
+	dashboardSkipBroadcast atomic.Bool
+
 	// Background theme detector (deprecated, kept for fallback)
 	bgDetector *colors.BackgroundDetector
 
@@ -1920,6 +1931,11 @@ func (c *Coordinator) applyBorderDim(opacity float64) {
 	if c.borderStylingBlocked() {
 		return
 	}
+	// Native borders own pane-border-style window-level; the global dim setter
+	// would just be overridden, but skipping spares the tmux round-trip.
+	if c.config.PaneHeader.Native != nil && *c.config.PaneHeader.Native {
+		return
+	}
 	out, err := exec.Command("tmux", "show-options", "-gqv", "pane-active-border-style").Output()
 	if err != nil {
 		return
@@ -2046,6 +2062,11 @@ func (c *Coordinator) HandleWindowSelect(activeWindowID string) {
 	if cfg == nil || !cfg.PaneHeader.BorderFromTab {
 		return
 	}
+	// Native border mode owns active-border-style per-window; skip the global
+	// override here so it doesn't fight applyNativeBorders.
+	if cfg.PaneHeader.Native != nil && *cfg.PaneHeader.Native {
+		return
+	}
 
 	// Find active window's tab bg color from grouped state
 	c.stateMu.RLock()
@@ -2121,6 +2142,10 @@ func (c *Coordinator) SelectWindow(targetWindowID, reason, source string) error 
 		return fmt.Errorf("select window: target window ID is required")
 	}
 
+	// If the dashboard is active and the user is navigating to (or clicking) a
+	// different window, restore the gathered panes first so they land in a real
+	// window rather than an empty husk. Selecting the dashboard window itself is
+	// a no-op here. See dashboard.go.
 	if err := c.BeginTransition(targetWindowID, reason, source); err != nil {
 		return fmt.Errorf("select window: %w", err)
 	}
@@ -3239,6 +3264,17 @@ func (c *Coordinator) computeVisualPositions() {
 			n++
 		}
 	}
+	// While the dashboard is active the sidebar renders the remembered origin
+	// windows (synthetic ids not in c.grouped); give them sidebar numbers too so
+	// they show "1. 2. 3." not "0.". Real-window logic (syncWindowIndices) only
+	// looks up live window ids, so these extra entries are inert there.
+	if c.dashboardWindowID != "" {
+		dn := c.baseIndex
+		for _, id := range c.dashboardOrder {
+			pos[id] = dn
+			dn++
+		}
+	}
 	c.windowVisualPos = pos
 }
 
@@ -3522,7 +3558,11 @@ func (c *Coordinator) applyThemeToTmux() {
 		activeBg = borderBg // fallback to inactive bg
 	}
 
-	if !c.borderStylingBlocked() {
+	// Native border mode owns pane-border-* options per-window via
+	// applyNativeBorders. Skip the global setters below so a stale global
+	// (esp. fg==bg hide) can't fight with the per-window visible style.
+	nativeBorders := c.config.PaneHeader.Native != nil && *c.config.PaneHeader.Native
+	if !c.borderStylingBlocked() && !nativeBorders {
 		// Apply inactive border style
 		if inactiveStyle := buildBorderStyle(borderFg, borderBg); inactiveStyle != "" {
 			exec.Command("tmux", "set-option", "-g", "pane-border-style", inactiveStyle).Run()
@@ -3620,8 +3660,11 @@ func (c *Coordinator) ApplyThemeToPane(paneID string) {
 // Called under stateMu; returns the args without executing (caller runs tmux outside the lock).
 func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 	grouped := c.grouped
-	autoBorder := c.config.PaneHeader.AutoBorder
-	borderFromTab := c.config.PaneHeader.BorderFromTab
+	nativeBorders := c.config.PaneHeader.Native != nil && *c.config.PaneHeader.Native
+	// Native mode owns per-window border styling via applyNativeBorders. Skip
+	// the autoBorder/borderFromTab paths below so they can't fight it.
+	autoBorder := c.config.PaneHeader.AutoBorder && !nativeBorders
+	borderFromTab := c.config.PaneHeader.BorderFromTab && !nativeBorders
 	borderBg := c.config.PaneHeader.BorderBg
 	activeBorderFg := c.config.PaneHeader.ActiveBorderFg
 	activeBorderBg := c.config.PaneHeader.ActiveBorderBg
@@ -3636,10 +3679,17 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 	if promptFallbackIcon == "" {
 		promptFallbackIcon = "•"
 	}
+	// The dashboard window manages its own native pane borders/labels
+	// (applyDashboardBorders); exclude it so this per-refresh restyle can't
+	// overwrite the tile label colors.
+	dashWin := dashboardActiveWindowID(c.dashboardSession())
 	var args []string
 	for _, group := range grouped {
 		baseBg := group.Theme.Bg
 		for _, win := range group.Windows {
+			if dashWin != "" && win.ID == dashWin {
+				continue
+			}
 			tabBg := baseBg
 			if win.CustomColor != "" {
 				tabBg = win.CustomColor
@@ -5374,6 +5424,17 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 		}
 	}
 	if newProfile == "phone" {
+		// The gathered dashboard grid is unusable on a phone screen — auto-exit
+		// it so the user lands back in their normal windows. Run synchronously
+		// (this is the profile-transition timer goroutine, not the main loop) so
+		// origin windows are restored before the phone sidebar-stash below acts
+		// on them. iPads classify as "desktop" (wider than the phone threshold),
+		// so this only triggers for true phone-width clients.
+		if dashboardActiveWindowID(c.dashboardSession()) != "" {
+			c.exitDashboard()
+			coordinatorDebugLog.Printf("profile transition -> phone: auto-exited dashboard")
+		}
+
 		// Always mark sidebarHidden=true when entering phone profile, even if
 		// sidebars are already physically stashed (e.g. daemon restart with
 		// existing stash windows). Without this, sidebarHidden stays false and
@@ -6004,6 +6065,12 @@ func (c *Coordinator) activeWindowHeaderPress(windowID string) string {
 // to match the terminal background so borders disappear visually; on desktop
 // the override is removed. Tracks last-applied state to avoid spamming tmux.
 func (c *Coordinator) syncMobileBorders() {
+	if c.config.PaneHeader.Native != nil && *c.config.PaneHeader.Native {
+		// Native border-status mode owns pane-border styling globally via
+		// applyNativeBorders. Skip the mobile-hide override entirely —
+		// otherwise it stomps the visible label colours every loop tick.
+		return
+	}
 	acw := int(c.activeClientWidth.Load())
 
 	wantHidden := acw > 0 && acw < 100
@@ -6014,6 +6081,11 @@ func (c *Coordinator) syncMobileBorders() {
 	c.mobileBorderHidden = wantHidden
 	c.mobileBorderInit = true
 
+	// The dashboard window draws NATIVE pane borders (with label text), so it is
+	// exempt from this border-hiding/restoring in BOTH branches — otherwise its
+	// labels render in fg=bg (invisible) or its visible style gets unset, which
+	// also caused flicker. See applyDashboardBorders.
+	dashWin := dashboardActiveWindowID(c.dashboardSession())
 	if wantHidden {
 		bg := "default"
 		if c.theme != nil && c.theme.TerminalBg != "" {
@@ -6028,16 +6100,18 @@ func (c *Coordinator) syncMobileBorders() {
 		// (e.g. fg=#98babe) can't keep drawing visible borders.
 		if out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}").Output(); err == nil {
 			for _, wid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-				if wid == "" {
+				if wid == "" || wid == dashWin {
 					continue
 				}
 				exec.Command("tmux", "set-window-option", "-t", wid, "pane-border-style", style).Run()
 				exec.Command("tmux", "set-window-option", "-t", wid, "pane-active-border-style", style).Run()
 			}
 		}
-		if out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}").Output(); err == nil {
-			for _, pid := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-				if pid == "" {
+		if out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}|#{window_id}").Output(); err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				parts := strings.SplitN(line, "|", 2)
+				pid := parts[0]
+				if pid == "" || (len(parts) == 2 && parts[1] == dashWin) {
 					continue
 				}
 				exec.Command("tmux", "set-option", "-p", "-t", pid, "pane-border-style", style).Run()
@@ -6045,6 +6119,10 @@ func (c *Coordinator) syncMobileBorders() {
 		}
 		logEvent("MOBILE_BORDERS hidden acw=%d style=%s", acw, style)
 	} else {
+		// Restore branch UNSETS the hidden style — apply to all windows. The
+		// dashboard owns its border styling via pane-local sets in
+		// applyDashboardBorders (highest-precedence), so window-level unsets
+		// here don't affect it visually.
 		exec.Command("tmux", "set-option", "-gu", "pane-border-style").Run()
 		exec.Command("tmux", "set-option", "-gu", "pane-active-border-style").Run()
 		if out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}").Output(); err == nil {
@@ -8574,6 +8652,48 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 	return s.String(), regions
 }
 
+// dashboardRenderGroups returns the grouped window list the sidebar should
+// display. While the dashboard is active the real origin windows are gone
+// (gathered into the dashboard window), so we render synthetic groups built
+// from the remembered snapshot — this keeps the sidebar list stable instead of
+// collapsing to a single "Dashboard" entry. Otherwise it returns c.grouped.
+func (c *Coordinator) dashboardRenderGroups() []grouping.GroupedWindows {
+	if c.dashboardWindowID == "" {
+		return c.grouped
+	}
+	synth := make([]tmux.Window, 0, len(c.dashboardOrder))
+	for _, id := range c.dashboardOrder {
+		snap := c.dashboardOrigins[id]
+		synth = append(synth, tmux.Window{ID: id, Name: snap.Name, Group: snap.Group, Index: snap.Index})
+	}
+	return grouping.GroupWindowsWithOptions(synth, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
+}
+
+// appendDashboardRow renders the persistent, clickable "0. Dashboard" entry at
+// the top of the sidebar (above the first group) and registers its click region
+// (action dashboard_toggle). It is highlighted while the dashboard is active.
+func (c *Coordinator) appendDashboardRow(s *strings.Builder, regions *[]daemon.ClickableRegion, currentLine *int, width int, inactiveFg, activeIndicator string) {
+	active := c.dashboardWindowID != ""
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Bold(true)
+	label := " 0. Dashboard"
+	if active {
+		label = " 0. Dashboard " + activeIndicator
+	}
+	if bg := c.GetTerminalBg(); bg != "" {
+		style = style.Background(lipgloss.Color(bg))
+	}
+	s.WriteString(style.Render(label) + "\n")
+	*regions = append(*regions, daemon.ClickableRegion{
+		StartLine: *currentLine,
+		EndLine:   *currentLine,
+		StartCol:  0,
+		EndCol:    width - 1,
+		Action:    "dashboard_toggle",
+		Target:    "",
+	})
+	*currentLine++
+}
+
 // generateMainContent creates the main scrollable area with window list
 // clientID is the window ID that this content is being rendered for
 func (c *Coordinator) generateMainContent(clientID string, width, height int) (string, []daemon.ClickableRegion) {
@@ -8648,9 +8768,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		return c.generatePrefixModeContent(clientID, width, height, treeBranchChar, treeBranchLastChar, treeContinueChar, treeConnectorChar, expandedIcon, collapsedIcon, treeStyle, disclosureColor, activeIndicator, activeIndFgConfig, activeIndBgConfig)
 	}
 
-	// Iterate over grouped windows
-	numGroups := len(c.grouped)
-	for gi, group := range c.grouped {
+	// Persistent "0. Dashboard" entry above the first group.
+	c.appendDashboardRow(&s, &regions, &currentLine, width, inactiveFg, activeIndicator)
+
+	// Iterate over grouped windows (synthetic remembered list while gathered).
+	grouped := c.dashboardRenderGroups()
+	numGroups := len(grouped)
+	for gi, group := range grouped {
 		isLastGroup := gi == numGroups-1
 		theme := group.Theme
 
@@ -12135,6 +12259,17 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	switch input.ResolvedAction {
 	case "select_window":
+		// While the dashboard is active the sidebar lists the remembered origin
+		// windows (which no longer exist). Clicking one restores everything,
+		// then focuses that window (now recreated with a fresh id).
+		if c.dashboardWindowID != "" {
+			if _, ok := c.dashboardOrigins[input.ResolvedTarget]; ok {
+				c.exitDashboardAndSelect(input.ResolvedTarget)
+			} else {
+				c.exitDashboard()
+			}
+			return true
+		}
 		rawTarget := input.ResolvedTarget
 		targetWindow := input.ResolvedTarget
 		if win := findWindowByTarget(c.windows, input.ResolvedTarget); win != nil {
@@ -12479,6 +12614,15 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if input.ResolvedAction == "next_window" {
 			delta = +1
 		}
+		// In the dashboard, [/] cycles focus between the grid tiles. Do NOT call
+		// focusContentPaneInActiveWindow here — it would re-select a default pane
+		// and undo the cycle. dashboardNavStep does its own select-pane. Return
+		// FALSE (not true) so we don't trigger SubmitRefresh+BroadcastRender —
+		// the sidebar's content doesn't change for an in-dashboard pane cycle,
+		// and the broadcast was causing the renderer to repaint (visible judder).
+		if c.dashboardNavStep(delta) {
+			return false
+		}
 		sourceWindowID := navSourceWindowFromTarget(input.ResolvedTarget)
 		// logNavKeyTrigger does 2 tmux fork/execs for diagnostics
 		// (display-message + list-clients). Off the hot path.
@@ -12673,6 +12817,20 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		focusContentPaneInActiveWindow()
 		return false
+
+	case "dashboard_toggle":
+		// Gather every content pane into one tiled dashboard window, or restore
+		// them to their origin windows if already gathered. See dashboard.go.
+		sess := c.dashboardSession()
+		if active := dashboardActiveWindowID(sess); active != "" {
+			c.dashboardWindowID = active
+			c.exitDashboard()
+			coordinatorDebugLog.Printf("dashboard_toggle: exited dashboard")
+		} else {
+			c.enterDashboard()
+			coordinatorDebugLog.Printf("dashboard_toggle: entered dashboard")
+		}
+		return true
 
 	case "sidebar_settings":
 		// Show sidebar settings context menu
@@ -13604,30 +13762,44 @@ func (c *Coordinator) launchQuestionMenu(clientID string, pos menuPosition) {
 		c.launchQuestionPopup(clientID)
 		return
 	}
-	args := buildQuestionMenuArgs(pending, exe)
+	args := buildQuestionMenuArgs(pending, exe, c.getClientWidth(clientID))
 	c.executeOrSendMenu(clientID, args, pos)
 }
 
 // buildQuestionMenuArgs constructs the argv (after the "tmux" program
 // name) for the `tmux display-menu` invocation used by launchQuestionMenu.
-// Extracted from launchQuestionMenu so the menu layout — title trimming,
+// Extracted from launchQuestionMenu so the menu layout — question wrapping,
 // hotkey assignment, single-quote escaping, /dev/null redirect that
 // prevents tmux from popping a view-mode buffer for the answer-cli's
 // stdout — can be unit-tested without spawning tmux.
-func buildQuestionMenuArgs(pending *daemon.PendingQuestion, exe string) []string {
-	// Truncate the title; display-menu titles render in tmux's status-line
-	// font and very long ones wrap weirdly.
-	title := pending.Text
-	if len(title) > 60 {
-		title = title[:57] + "..."
+//
+// width is the client's render width: the question is wrapped into the menu
+// BODY (as non-selectable header rows) rather than crammed into the -T title,
+// because the overlay renderer hard-truncates the title to the top border and
+// a real question is unreadable there. We wrap here, in the daemon, because it
+// knows the client width; emitting one header row per wrapped line keeps the
+// overlay's one-row-per-item hit-testing valid.
+func buildQuestionMenuArgs(pending *daemon.PendingQuestion, exe string, width int) []string {
+	// Overlay content area is "│ " + text + " │", i.e. width-4. Floor it so a
+	// pathologically narrow sidebar still wraps to something legible rather
+	// than one-rune-per-line.
+	innerWidth := width - 4
+	if innerWidth < 12 {
+		innerWidth = 12
 	}
 	args := []string{
 		"display-menu",
-		"-T", title,
+		"-T", "the cat asks",
 		"-x", "C", "-y", "C",
-		"Cancel", "q", "",
-		"", "", "",
 	}
+	// Question rows. The "-" prefix marks each as a header for both tmux
+	// display-menu and parseTmuxMenuArgs, so they render dimmed/bold and are
+	// skipped by keyboard/mouse navigation (the highlight lands on the first
+	// choice). One row per wrapped line preserves the overlay's row→index map.
+	for _, line := range wrapToWidth(pending.Text, innerWidth) {
+		args = append(args, "-"+line, "", "")
+	}
+	args = append(args, "", "", "") // separator between question and choices
 	// Hotkeys 1-9 for the first nine choices; anything beyond gets no
 	// keybind (tmux still lets the user click). The shell command embeds
 	// the choice in single quotes — escape any literal single quotes by
@@ -13646,7 +13818,64 @@ func buildQuestionMenuArgs(pending *daemon.PendingQuestion, exe string) []string
 		cmd := fmt.Sprintf("run-shell -b \"%s pet ask --quiet --answer '%s' 2>/dev/null\"", exe, escaped)
 		args = append(args, choice, key, cmd)
 	}
+	args = append(args, "", "", "")       // separator before Cancel
+	args = append(args, "Cancel", "q", "") // Cancel sits below the choices
 	return args
+}
+
+// wrapToWidth word-wraps s into lines no wider than width display cells,
+// breaking on whitespace and hard-splitting any single word that exceeds
+// width. Always returns at least one (possibly empty) line so callers can
+// render unconditionally. Width is measured with uniseg so wide glyphs and
+// emoji in question text don't overflow the menu frame.
+func wrapToWidth(s string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	var lines []string
+	var cur strings.Builder
+	curW := 0
+	flush := func() {
+		lines = append(lines, cur.String())
+		cur.Reset()
+		curW = 0
+	}
+	for _, word := range strings.Fields(s) {
+		ww := uniseg.StringWidth(word)
+		if ww > width {
+			// Word can't fit on a line alone: hard-split it by rune.
+			if curW > 0 {
+				flush()
+			}
+			for _, r := range word {
+				rw := uniseg.StringWidth(string(r))
+				if curW+rw > width {
+					flush()
+				}
+				cur.WriteRune(r)
+				curW += rw
+			}
+			continue
+		}
+		sep := 0
+		if curW > 0 {
+			sep = 1 // a space separates this word from the previous one
+		}
+		if curW+sep+ww > width {
+			flush()
+			sep = 0
+		}
+		if sep == 1 {
+			cur.WriteByte(' ')
+			curW++
+		}
+		cur.WriteString(word)
+		curW += ww
+	}
+	if cur.Len() > 0 || len(lines) == 0 {
+		flush()
+	}
+	return lines
 }
 
 // launchQuestionPopup spawns the pet Q&A popup via `tmux display-popup`,

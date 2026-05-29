@@ -562,43 +562,64 @@ func TestBuildQuestionMenuArgs_ChoiceQuestion(t *testing.T) {
 		Kind:    "choice",
 		Choices: []string{"Neovim/Vim", "VS Code", "JetBrains", "Emacs", "Something else"},
 	}
-	args := buildQuestionMenuArgs(pending, "/usr/local/bin/tabby")
+	// Wide width so the question fits on a single header row.
+	args := buildQuestionMenuArgs(pending, "/usr/local/bin/tabby", 200)
 
-	// Header: display-menu -T <title> -x C -y C
+	// Header: display-menu -T <title> -x C -y C. The title is now a short
+	// static label; the question lives in the body (see below).
 	assert.Equal(t, "display-menu", args[0])
 	assert.Equal(t, "-T", args[1])
-	assert.Equal(t, pending.Text, args[2])
+	assert.Equal(t, "the cat asks", args[2])
 	assert.Equal(t, "-x", args[3])
 	assert.Equal(t, "C", args[4])
 	assert.Equal(t, "-y", args[5])
 	assert.Equal(t, "C", args[6])
 
-	// Cancel row + separator
-	assert.Equal(t, "Cancel", args[7])
-	assert.Equal(t, "q", args[8])
-	assert.Equal(t, "", args[9])
+	// Question row: a dash-prefixed (header/non-selectable) row carrying the
+	// wrapped question, then a separator before the choices.
+	assert.Equal(t, "-"+pending.Text, args[7], "question should be a dash-prefixed header row")
+	assert.Equal(t, "", args[8], "question header key must be empty")
+	assert.Equal(t, "", args[9], "question header command must be empty")
 	assert.Equal(t, "", args[10], "separator name must be empty")
 	assert.Equal(t, "", args[11], "separator key must be empty")
 	assert.Equal(t, "", args[12], "separator command must be empty")
 
-	// Choice rows: (name, key, command) per choice
-	choiceArgs := args[13:]
-	assert.Len(t, choiceArgs, len(pending.Choices)*3,
-		"each choice should contribute 3 args (name, key, command)")
-
+	// Choice rows follow the question separator.
+	choices := extractMenuChoices(args)
+	assert.Len(t, choices, len(pending.Choices), "every choice should yield one selectable row")
 	for i, choice := range pending.Choices {
-		base := i * 3
-		assert.Equal(t, choice, choiceArgs[base], "choice %d name", i)
-		assert.Equal(t, fmt.Sprintf("%d", i+1), choiceArgs[base+1], "choice %d hotkey", i)
-		// Command must include --quiet (silences confirmation stdout) and
-		// the choice text inside single quotes.
-		cmd := choiceArgs[base+2]
+		assert.Equal(t, choice, choices[i].name, "choice %d name", i)
+		assert.Equal(t, fmt.Sprintf("%d", i+1), choices[i].key, "choice %d hotkey", i)
+		cmd := choices[i].cmd
 		assert.Contains(t, cmd, "run-shell -b", "command must use run-shell -b for background execution")
 		assert.Contains(t, cmd, "--quiet", "command MUST pass --quiet so success stdout doesn't bleed into the focused pane")
 		assert.Contains(t, cmd, "2>/dev/null", "command MUST redirect stderr — error messages still pop tmux's view-mode buffer otherwise")
 		assert.Contains(t, cmd, "/usr/local/bin/tabby pet ask")
 		assert.Contains(t, cmd, "--answer '"+choice+"'")
 	}
+
+	// Cancel sits last, below the choices.
+	assert.Equal(t, "Cancel", args[len(args)-3])
+	assert.Equal(t, "q", args[len(args)-2])
+	assert.Equal(t, "", args[len(args)-1])
+}
+
+// menuChoice is a parsed selectable choice row from buildQuestionMenuArgs.
+type menuChoice struct{ name, key, cmd string }
+
+// extractMenuChoices pulls the selectable choice rows out of a
+// buildQuestionMenuArgs result by finding the (name,key,cmd) triples whose
+// command actually invokes `pet ask` — robust to however many header rows the
+// wrapped question produced.
+func extractMenuChoices(args []string) []menuChoice {
+	var out []menuChoice
+	for i := 0; i+2 < len(args); i++ {
+		if strings.Contains(args[i+2], "pet ask --quiet") {
+			out = append(out, menuChoice{name: args[i], key: args[i+1], cmd: args[i+2]})
+			i += 2
+		}
+	}
+	return out
 }
 
 // TestBuildQuestionMenuArgs_EscapesSingleQuotes guards against shell
@@ -613,12 +634,10 @@ func TestBuildQuestionMenuArgs_EscapesSingleQuotes(t *testing.T) {
 		Kind:    "choice",
 		Choices: []string{"don't know", "I'm sure"},
 	}
-	args := buildQuestionMenuArgs(pending, "tabby")
+	args := buildQuestionMenuArgs(pending, "tabby", 200)
 
-	// Find the command args (third positional in each (name,key,cmd) trio
-	// after the 13-arg header).
 	for i, choice := range pending.Choices {
-		cmd := args[13+i*3+2]
+		cmd := extractMenuChoices(args)[i].cmd
 		// The choice should be wrapped in single quotes with '\'' for
 		// the embedded apostrophe — never a bare apostrophe inside the
 		// quoted region (which would terminate the quoting and break /bin/sh
@@ -629,22 +648,41 @@ func TestBuildQuestionMenuArgs_EscapesSingleQuotes(t *testing.T) {
 	}
 }
 
-// TestBuildQuestionMenuArgs_TitleTruncation pins the long-title trimming
-// behaviour. display-menu titles render in tmux's status-line font and
-// wrap awkwardly past ~60 chars, so the builder truncates to 57 chars
-// plus "..." (60 total).
-func TestBuildQuestionMenuArgs_TitleTruncation(t *testing.T) {
-	longText := strings.Repeat("x", 100)
+// TestBuildQuestionMenuArgs_QuestionWraps pins the body-wrapping behaviour: a
+// long question is split across multiple dash-prefixed header rows (sized to
+// the client width) instead of being crammed into the -T title, and the rows
+// concatenate back to the original text so nothing is dropped.
+func TestBuildQuestionMenuArgs_QuestionWraps(t *testing.T) {
+	question := "Which editor have you spent the most hours in this year, and why that one?"
 	pending := &daemon.PendingQuestion{
 		ID:      "test",
-		Text:    longText,
+		Text:    question,
 		Kind:    "choice",
 		Choices: []string{"a", "b"},
 	}
-	args := buildQuestionMenuArgs(pending, "tabby")
-	title := args[2]
-	assert.Equal(t, 60, len(title), "long titles should be truncated to 60 chars")
-	assert.True(t, strings.HasSuffix(title, "..."), "truncated titles should end with ellipsis")
+	// Narrow sidebar → the question must wrap onto several rows.
+	args := buildQuestionMenuArgs(pending, "tabby", 30)
+
+	assert.Equal(t, "the cat asks", args[2], "title is a static label, not the question")
+
+	// Collect the leading dash-prefixed header rows (the wrapped question),
+	// strip the "-" marker, and rejoin — should reconstruct the question.
+	var headerLines []string
+	for i := 7; i+2 < len(args); i += 3 {
+		name := args[i]
+		if name == "" { // separator marks the end of the question block
+			break
+		}
+		assert.True(t, strings.HasPrefix(name, "-"), "question rows must be dash-prefixed headers")
+		assert.Equal(t, "", args[i+1], "question header key must be empty")
+		assert.Equal(t, "", args[i+2], "question header command must be empty")
+		headerLines = append(headerLines, strings.TrimPrefix(name, "-"))
+	}
+	assert.Greater(t, len(headerLines), 1, "a long question should wrap onto multiple rows at width 30")
+	assert.Equal(t, question, strings.Join(headerLines, " "), "wrapped rows must reconstruct the question")
+	for _, line := range headerLines {
+		assert.LessOrEqual(t, len(line), 26, "each wrapped line must fit the inner width (30-4)")
+	}
 }
 
 // TestBuildQuestionMenuArgs_HotkeysCapAtNine confirms the 10th and later
@@ -661,15 +699,15 @@ func TestBuildQuestionMenuArgs_HotkeysCapAtNine(t *testing.T) {
 		Kind:    "choice",
 		Choices: choices,
 	}
-	args := buildQuestionMenuArgs(pending, "tabby")
+	parsed := extractMenuChoices(buildQuestionMenuArgs(pending, "tabby", 200))
 
 	// Choices 0-8 get keys "1".."9"; choices 9-11 get empty keys.
 	for i := 0; i < 9; i++ {
-		assert.Equal(t, fmt.Sprintf("%d", i+1), args[13+i*3+1],
+		assert.Equal(t, fmt.Sprintf("%d", i+1), parsed[i].key,
 			"choice %d should get hotkey %d", i, i+1)
 	}
 	for i := 9; i < 12; i++ {
-		assert.Equal(t, "", args[13+i*3+1],
+		assert.Equal(t, "", parsed[i].key,
 			"choice %d should have an empty hotkey (no double-digit binding)", i)
 	}
 }

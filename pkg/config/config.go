@@ -309,6 +309,13 @@ type PaneHeader struct {
 	ResizeVerticalShrinkIcon   string `yaml:"resize_vertical_shrink_icon"`
 	ResizeSeparator            string `yaml:"resize_separator"`
 	TerminalBg                 string `yaml:"terminal_bg"` // Terminal background color for hiding borders (default: #000000)
+	// Native: when true (default), tabby uses tmux's built-in pane-border-status
+	// row for per-pane chrome (command/folder/group color) instead of spawning a
+	// Bubbletea aux pane above each content pane. Loses in-header clickable
+	// buttons and dim animations; gains a simpler architecture and the
+	// prefix+, popup menu for pane actions. Set to false to restore the legacy
+	// aux-pane chrome.
+	Native *bool `yaml:"native"`
 }
 
 type SidebarHeader struct {

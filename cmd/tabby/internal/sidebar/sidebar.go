@@ -1127,7 +1127,15 @@ func (m rendererModel) renderMenuLines() []string {
 		if item.Header {
 			trimmed := strings.TrimLeft(label, " ")
 			indent := len(label) - len(trimmed)
-			label = strings.Repeat(" ", indent) + "> " + strings.TrimSpace(trimmed)
+			if indent > 0 {
+				// Indented headers are submenu group labels — keep the "> "
+				// bullet so they read as section dividers.
+				label = strings.Repeat(" ", indent) + "> " + strings.TrimSpace(trimmed)
+			} else {
+				// Top-level headers (e.g. a wrapped Q&A question) render as
+				// plain bold body text; a bullet on every wrapped line is noise.
+				label = strings.TrimSpace(trimmed)
+			}
 		}
 
 		// Build inner text content (plain, no ANSI)

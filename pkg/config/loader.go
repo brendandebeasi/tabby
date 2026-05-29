@@ -253,6 +253,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.PaneHeader.DimOpacity == 0 {
 		cfg.PaneHeader.DimOpacity = 0.7
 	}
+	if cfg.PaneHeader.Native == nil {
+		// Default to native tmux border-status chrome. Users can opt back into
+		// the legacy Bubbletea aux-pane chrome by setting native: false.
+		v := true
+		cfg.PaneHeader.Native = &v
+	}
 
 	// Busy detection defaults
 	if cfg.BusyDetection.IdleTimeout == 0 {

@@ -328,8 +328,13 @@ KILL_PANE_SCRIPT="$CURRENT_DIR/bin/tabby hook kill-pane"
 
 # Pane border mouse: left-click+drag resizes panes, right-click shows context menu
 # IMPORTANT: MouseDown1Border must stay bound for MouseDrag1Border (resize) to work
-tmux bind-key -T root MouseDown1Border select-pane -t =
 tmux bind-key -T root MouseDrag1Border resize-pane -M
+
+# Pane click: focus the clicked pane. We override the tmux default because the
+# default's `paste-buffer -p` fallback pastes stale buffer contents on every
+# click outside of copy/mouse-app modes — which can include error strings or
+# other unintended text.
+tmux bind-key -T root MouseDown1Pane "select-pane -t = ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M' ''"
 tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M \
     "Split Vertical" "|" "split-window -h -c '#{pane_current_path}'" \
     "Split Horizontal" "-" "split-window -v -c '#{pane_current_path}'" \
@@ -465,13 +470,23 @@ tmux set-hook -g after-new-window "run-shell -b '$SIGNAL_CMD; tmux refresh-clien
 tmux set-hook -g after-resize-pane "run-shell -b '$HOOK_BIN on-pane-resize \"#{hook_pane}\"'"
 tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $CYCLE_PANE_BIN --ensure-content'"
 
-# Lock window name on manual rename via prefix+, keybinding
-# NOTE: We intentionally do NOT use after-rename-window hook because the daemon's
-# own rename-window calls would trigger it, locking the daemon out of future updates.
-# Instead, we set @tabby_name_locked directly in each user-facing rename path.
-tmux bind-key , command-prompt -I "#W" "rename-window '%%' ; set-window-option @tabby_name_locked 1"
+# prefix+, opens the per-pane actions menu (close, zoom, splits, break-pane,
+# swap, mark). Works in any window — the menu picks items based on whether the
+# pane has siblings.
+tmux bind-key , run-shell -b "$CURRENT_DIR/bin/tabby hook pane-menu '#{pane_id}'"
 
-tmux set-hook -g after-select-pane "run-shell -b '$SIGNAL_CMD'"
+# Rename-window moved from prefix+, to prefix+r (overriding tmux's default
+# force-redraw on r). NOTE: We intentionally do NOT use after-rename-window
+# hook because the daemon's own rename-window calls would trigger it, locking
+# the daemon out of future updates. We set @tabby_name_locked directly in each
+# user-facing rename path instead.
+tmux bind-key r command-prompt -I "#W" "rename-window '%%' ; set-window-option @tabby_name_locked 1"
+
+# Skip the daemon refresh when the active window is the dashboard. Pane-switches
+# inside the tiled dashboard grid don't change anything the sidebar depends on,
+# but the resulting BroadcastRender makes the sidebar renderer redraw — visible
+# as an up/down flicker on every [/]/swap. Other windows still refresh normally.
+tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' '' 'run-shell -b \"$SIGNAL_CMD\"'"
 # after-split-window: daemon handles window name preservation (PreserveWindowNames)
 tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_CMD'"
 
@@ -592,6 +607,14 @@ if [ -n "$SWAP_PANE_BINDING" ] && [ -x "$TABBY_CYCLE_BIN" ]; then
     SWAP_KEY=$(normalize_global_key "$SWAP_PANE_BINDING")
     [ -n "$SWAP_KEY" ] && tmux bind-key -n "$SWAP_KEY" run-shell "$CYCLE_PANE_BIN"
 fi
+# Bind both cmd+` (M-`) AND cmd+~ (M-~, shifted) to cycle-pane unconditionally.
+# The config-driven swap_pane block above sometimes fails to register M-` (the
+# backtick can flow oddly through the script). Especially useful for cycling
+# tiles in the dashboard.
+if [ -x "$TABBY_CYCLE_BIN" ]; then
+    tmux bind-key -n "M-\`" run-shell "$CYCLE_PANE_BIN"
+    tmux bind-key -n "M-~"  run-shell "$CYCLE_PANE_BIN"
+fi
 # Also override prefix+o to use the smart cycle binary
 if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key o run-shell "$CYCLE_PANE_BIN"
@@ -627,8 +650,12 @@ tmux bind-key k confirm-before -p 'Close window? (y/n)' "run-shell '$KILL_WINDOW
 #   prefix + , = rename window (enhanced with name locking)
 #   prefix + q = display panes (tmux default)
 
+# prefix + 0 toggles the all-panes dashboard (gather every pane into a tiled
+# grid, or restore). Replaces the default "select window 0" on this key;
+# windows 1-9 and the header tabs still reach every window.
+tmux bind-key 0 run-shell -b "$CURRENT_DIR/bin/tabby dashboard"
+
 # Direct window access with prefix + number (match tmux window indexes)
-tmux bind-key 0 select-window -t :0
 tmux bind-key 1 select-window -t :1
 tmux bind-key 2 select-window -t :2
 tmux bind-key 3 select-window -t :3
@@ -646,7 +673,7 @@ tmux bind-key -n M-n run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux bind-key -n M-N run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux unbind-key -n M-x 2>/dev/null || true
 tmux bind-key -n M-q display-panes
-tmux bind-key -n M-0 select-window -t :0
+tmux bind-key -n M-0 run-shell -b "$CURRENT_DIR/bin/tabby dashboard"
 tmux bind-key -n M-1 select-window -t :1
 tmux bind-key -n M-2 select-window -t :2
 tmux bind-key -n M-3 select-window -t :3
