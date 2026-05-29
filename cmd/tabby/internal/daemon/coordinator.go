@@ -744,6 +744,19 @@ type Coordinator struct {
 	// split / kill / resize-pane, so most refreshes are pure cache hits.
 	layoutCacheMu sync.Mutex
 	layoutCache   map[string]string
+	// statusExclusivityDecision caches the last "status on/off" value
+	// EnforceStatusExclusivity applied. The tmux global option only changes
+	// when the sidebar is toggled or tabby is disabled, so the steady-state
+	// refresh path can skip the set-option round trip.
+	statusExclusivityMu       sync.Mutex
+	statusExclusivityDecision string
+	// loadConfig cache: skips re-reading + re-parsing config.yaml when the
+	// file's mtime hasn't moved. Steady-state RefreshWindows hits this every
+	// refresh; the user only edits the file occasionally.
+	configCacheMu    sync.Mutex
+	configCacheMtime time.Time
+	configCachePath  string
+	configCacheCfg   *config.Config
 	// Set true by an action handler when its work doesn't change anything the
 	// renderers display (e.g. an in-dashboard pane cycle) — handleRendererInput
 	// then skips SendRenderToClient + BroadcastRender to avoid the redraw flicker.
@@ -2030,14 +2043,33 @@ func (c *Coordinator) EnforceStatusExclusivity(sessionID string) {
 		}
 	}
 
+	// Cache the last applied "status on/off" decision per mode. Skip the
+	// tmux set-option round trip when we'd be reapplying the same value —
+	// this option only flips on user action (toggle sidebar / disable
+	// tabby), so steady-state refreshes hit the cache and save 5–10ms.
+	c.statusExclusivityMu.Lock()
+	prevDecision := c.statusExclusivityDecision
 	switch mode {
 	case "disabled":
+		if prevDecision == "status_on" {
+			c.statusExclusivityMu.Unlock()
+			return
+		}
+		c.statusExclusivityDecision = "status_on"
+		c.statusExclusivityMu.Unlock()
 		exec.Command("tmux", "set-option", "-g", "status", "on").Run()
 		return
 	case "enabled":
+		if prevDecision == "status_off" {
+			c.statusExclusivityMu.Unlock()
+			return
+		}
+		c.statusExclusivityDecision = "status_off"
+		c.statusExclusivityMu.Unlock()
 		exec.Command("tmux", "set-option", "-g", "status", "off").Run()
 		return
 	}
+	c.statusExclusivityMu.Unlock()
 
 	// No explicit mode — check if tabby panes exist
 	hasTabbyPanes := false
@@ -2707,6 +2739,41 @@ func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
 	}
 }
 
+// loadConfigCached returns the parsed config, using a mtime-keyed cache so
+// the steady-state RefreshWindows path skips the file read + YAML parse when
+// the user hasn't touched the config file. Returns nil only when the file
+// can't be read AND there's no prior cached copy.
+func (c *Coordinator) loadConfigCached() *config.Config {
+	path := config.DefaultConfigPath()
+	info, statErr := os.Stat(path)
+	c.configCacheMu.Lock()
+	if statErr == nil && c.configCacheCfg != nil &&
+		c.configCachePath == path &&
+		c.configCacheMtime.Equal(info.ModTime()) {
+		cfg := c.configCacheCfg
+		c.configCacheMu.Unlock()
+		return cfg
+	}
+	c.configCacheMu.Unlock()
+	newCfg, err := config.LoadConfig(path)
+	if err != nil {
+		// Fall back to the prior cached value if available; otherwise nil
+		// (matches the old `newCfg, _ := config.LoadConfig(...)` semantics).
+		c.configCacheMu.Lock()
+		prev := c.configCacheCfg
+		c.configCacheMu.Unlock()
+		return prev
+	}
+	c.configCacheMu.Lock()
+	c.configCacheCfg = newCfg
+	c.configCachePath = path
+	if statErr == nil {
+		c.configCacheMtime = info.ModTime()
+	}
+	c.configCacheMu.Unlock()
+	return newCfg
+}
+
 // RefreshWindows fetches current window/pane state from tmux
 func (c *Coordinator) RefreshWindows() {
 	// Do all external I/O (tmux, config, ps) BEFORE acquiring stateMu.
@@ -2715,7 +2782,7 @@ func (c *Coordinator) RefreshWindows() {
 	// blocking subsequent tasks that need stateMu.RLock() (e.g. handleWidthSync
 	// via BroadcastRender), causing LOOP_STALL and daemon termination.
 
-	newCfg, _ := config.LoadConfig(config.DefaultConfigPath())
+	newCfg := c.loadConfigCached()
 
 	windows, err := tmux.ListWindowsWithPanes()
 	if err != nil {
