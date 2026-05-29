@@ -335,6 +335,29 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		logEvent("SPAWN_SKIP script_lock_active")
 		return false
 	}
+	// Cheap stable-state probe: when every non-dashboard window already has a
+	// connected renderer client we can short-circuit before the (~30ms) tmux
+	// prep block below. Steady-state refreshes (no new/closed windows) hit
+	// this branch and avoid four tmux execs.
+	connectedClients := make(map[string]bool)
+	for _, clientID := range server.GetAllClientIDs() {
+		connectedClients[clientID] = true
+	}
+	dashWin := dashboardActiveWindowID(sessionID)
+	allCovered := true
+	for _, win := range windows {
+		if win.ID == "" || win.ID == dashWin {
+			continue
+		}
+		if !connectedClients[win.ID] {
+			allCovered = false
+			break
+		}
+	}
+	if allCovered {
+		logEvent("SPAWN_SKIP reason=all_windows_covered")
+		return false
+	}
 	// Collect windows whose sidebar is currently stashed (break-pane'd out).
 	// Those sidebars are alive in holding windows — don't re-spawn.
 	stashedWindows := make(map[string]bool)
@@ -363,12 +386,8 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 	activeWindowOut, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
 	activeWindow := strings.TrimSpace(string(activeWindowOut))
 
-	// Get connected clients (each identified by their window ID)
-	connectedClients := make(map[string]bool)
-	for _, clientID := range server.GetAllClientIDs() {
-		connectedClients[clientID] = true
-	}
-
+	// connectedClients was already computed above as part of the stable-state
+	// probe; reuse it here.
 	debugLog.Printf("spawnRenderers: active=%s clients=%v", activeWindow, connectedClients)
 
 	// Check each window

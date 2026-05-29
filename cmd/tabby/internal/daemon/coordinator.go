@@ -757,6 +757,11 @@ type Coordinator struct {
 	configCacheMtime time.Time
 	configCachePath  string
 	configCacheCfg   *config.Config
+	// cwdMappingCache stores the last applied (cwd | color | icon) signature
+	// per window for applyCWDColorIconMappings, so the per-window tmux
+	// set-option calls are skipped when the cwd hasn't moved.
+	cwdMappingMu    sync.Mutex
+	cwdMappingCache map[string]string
 	// Set true by an action handler when its work doesn't change anything the
 	// renderers display (e.g. an in-dashboard pane cycle) — handleRendererInput
 	// then skips SendRenderToClient + BroadcastRender to avoid the redraw flicker.
@@ -2716,6 +2721,11 @@ func (c *Coordinator) setWindowIcon(windowIndex int, icon string) {
 }
 
 func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
+	c.cwdMappingMu.Lock()
+	if c.cwdMappingCache == nil {
+		c.cwdMappingCache = make(map[string]string)
+	}
+	c.cwdMappingMu.Unlock()
 	for i := range windows {
 		cwd := firstPaneCWD(windows[i])
 		if cwd == "" {
@@ -2724,6 +2734,26 @@ func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
 
 		mapping, ok := c.getCWDColorMapping(cwd)
 		if !ok {
+			continue
+		}
+
+		// Cache by (windowID, cwd, mapping-fingerprint). When the windowID's
+		// cwd + mapping match the last applied state, skip the per-window
+		// tmux calls below — they're idempotent but each costs ~5–10ms.
+		sig := cwd + "|" + mapping.Color + "|" + mapping.Icon
+		c.cwdMappingMu.Lock()
+		prev := c.cwdMappingCache[windows[i].ID]
+		c.cwdMappingMu.Unlock()
+		if prev == sig {
+			// Still mirror the cached mapping onto the in-memory window so
+			// downstream renderers see the resolved color/icon even on cache
+			// hits (mirrors what the tmux set-option did originally).
+			if windows[i].CustomColor == "" && strings.TrimSpace(mapping.Color) != "" {
+				windows[i].CustomColor = mapping.Color
+			}
+			if strings.TrimSpace(windows[i].Icon) == "" && strings.TrimSpace(mapping.Icon) != "" {
+				windows[i].Icon = mapping.Icon
+			}
 			continue
 		}
 
@@ -2736,6 +2766,10 @@ func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
 			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_icon", mapping.Icon).Run()
 			windows[i].Icon = mapping.Icon
 		}
+
+		c.cwdMappingMu.Lock()
+		c.cwdMappingCache[windows[i].ID] = sig
+		c.cwdMappingMu.Unlock()
 	}
 }
 
