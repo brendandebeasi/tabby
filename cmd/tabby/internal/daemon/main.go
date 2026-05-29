@@ -967,6 +967,48 @@ func paneTargetFromStartCmd(startCmd string) string {
 	return ""
 }
 
+// killLeftoverPaneHeaders sweeps every pane in the server and kills the
+// per-content-pane "pane-header" aux panes (Bubbletea renderer). Used in
+// native-borders mode so old aux chrome from before the flag-flip is torn
+// down without disabling the @tabby_pane_headers tmux option (which also
+// gates the phone-mode window-header / bottom navigation bar).
+//
+// Detection looks at both pane_current_command and pane_start_command — the
+// renderer process registers as "pane-header" but pane_current_command can
+// also show "tabby" after the consolidated subcommand entrypoint takes over.
+func killLeftoverPaneHeaders() {
+	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
+		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|||", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		id, cur := parts[0], parts[1]
+		start := ""
+		if len(parts) == 3 {
+			start = parts[2]
+		}
+		isPaneHeader := strings.Contains(strings.ToLower(cur), "pane-header")
+		if !isPaneHeader && strings.Contains(strings.ToLower(start), "render pane-header") {
+			isPaneHeader = true
+		}
+		if !isPaneHeader && paneTargetFromStartCmd(start) != "" {
+			isPaneHeader = true
+		}
+		if !isPaneHeader {
+			continue
+		}
+		_ = exec.Command("tmux", "kill-pane", "-t", id).Run()
+	}
+}
+
 // spawnPaneHeaders spawns a header pane above each content pane in all windows.
 // Each content pane gets its own 1-row title strip. The phone button bar lives
 // on window-header; pane-headers are always 1 row on both desktop and phone.
