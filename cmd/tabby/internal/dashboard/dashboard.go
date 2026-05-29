@@ -32,7 +32,21 @@ func Run(args []string) int {
 	}
 
 	sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	// Retry briefly so a transient daemon-down (e.g. during a watchdog
+	// respawn triggered by an earlier dashboard command, or by a build sync)
+	// doesn't surface as a "returned 1" in tmux's run-shell output. Each dial
+	// gets its own 500ms timeout, plus we sleep 200ms between attempts — so
+	// the worst case is ~2.8s before giving up. Matches the user-visible
+	// expectation: pressing prefix+0 either works or stays silent.
+	var conn net.Conn
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		conn, err = net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dashboard: daemon not running (socket %s): %v\n", sockPath, err)
 		return 1

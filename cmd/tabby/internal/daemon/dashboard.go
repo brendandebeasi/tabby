@@ -20,6 +20,37 @@ import (
 	"strings"
 )
 
+// paneBorderFormat returns the tmux pane-border-format string used by BOTH
+// applyDashboardBorders and applyNativeBorders so the label is identical
+// across views.
+//
+// Layout per pane:
+//   - Chrome panes (sidebar / window-header / pane-header): blank, colour-
+//     neutral strip via #[align=centre,fg=default,bg=default] so the row
+//     blends with the terminal default bg (no visible divider above them).
+//     Matched on both #{pane_current_command} (legacy) and #{pane_start_command}
+//     (consolidated tabby subcommand reports "tabby" as current command).
+//   - Content panes: " <window_name> | <pane_title> ", with command + folder
+//     as fallback when pane_title is empty or equals #{host_short} (the
+//     daemon machine's hostname — a non-informative default). Right-aligned
+//     "[prefix+, for actions]" hint on the right.
+//
+// `#,` is the literal escape for a comma inside #{?…} branches.
+func paneBorderFormat() string {
+	const chrome = "#[align=centre#,fg=default#,bg=default] "
+	const content = " #{window_name} #[fg=default] | #[fg=default]" +
+		"#{?#{&&:#{!=:#{pane_title},},#{!=:#{pane_title},#{host_short}}}," +
+		"#{pane_title}," +
+		"#{pane_current_command}  #{b:pane_current_path}}" +
+		"#[align=right][prefix+#, for actions] "
+	const chromeMatch = "#{||:" +
+		"#{m:*sidebar*,#{pane_current_command}}," +
+		"#{m:*header*,#{pane_current_command}}," +
+		"#{m:*sidebar*,#{pane_start_command}}," +
+		"#{m:*header*,#{pane_start_command}}}"
+	return "#{?" + chromeMatch + "," + chrome + "," + content + "}"
+}
+
 // lightenHex returns a hex colour blended `frac` of the way toward white. Used
 // by applyNativeBorders to produce a softer inactive-pane border colour from
 // the active group colour. Returns hex unchanged when it can't be parsed.
@@ -401,14 +432,10 @@ func (c *Coordinator) applyDashboardBorders() {
 		return
 	}
 	_ = tmuxRun("set-window-option", "-t", dash, "pane-border-lines", "single")
-	// Border format: 4 clickable buttons on the left (close / zoom / v-split /
-	// h-split), each 3 cols wide (icon centred), then a separator, then the
-	// Border label shows command + folder on the left, menu shortcut hint on the
-	// right. Tile actions come from a popup menu opened with prefix+, — tmux
-	// 3.5a doesn't deliver mouse events to the pane-border-status row, so
-	// on-border buttons aren't reachable.
-	_ = tmuxRun("set-window-option", "-t", dash, "pane-border-format",
-		" #{pane_current_command}  #{b:pane_current_path}#[align=right][prefix+, for actions] ")
+	// Shared format with applyNativeBorders (non-dashboard windows) so the
+	// border label is identical across views: chrome panes blank, content
+	// panes show window-name | pane-title (or command + folder fallback).
+	_ = tmuxRun("set-window-option", "-t", dash, "pane-border-format", paneBorderFormat())
 	// Match the regular tabby pane-header colors: dark-blue bg (Default group's
 	// tab color, or pane_header.active_bg fallback) + white text.
 	activeFg := c.config.PaneHeader.ActiveFg
@@ -506,15 +533,7 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	// entrypoint pane_current_command reports "tabby" for every renderer, so
 	// we also check pane_start_command (which still carries the "render
 	// sidebar" / "render window-header" exec).
-	// Content label: window name on the left, then pane_title (apps set this
-	// via OSC — ssh puts "user@host", a claude session puts the session
-	// title, etc.). If pane_title is empty or equal to the default (the
-	// window's host short name), fall back to "<command> <folder>" so the
-	// strip is still informative.
-	contentLabel := " #{window_name} #[fg=default] | #[fg=default]#{?#{&&:#{!=:#{pane_title},},#{!=:#{pane_title},#{host_short}}},#{pane_title},#{pane_current_command}  #{b:pane_current_path}}#[align=right][prefix+#, for actions] "
-	chromeLabel := "#[align=centre#,fg=default#,bg=default] "
-	_ = tmuxRun("set-window-option", "-t", winID, "pane-border-format",
-		"#{?#{||:#{m:*sidebar*,#{pane_current_command}},#{m:*header*,#{pane_current_command}},#{m:*sidebar*,#{pane_start_command}},#{m:*header*,#{pane_start_command}}},"+chromeLabel+","+contentLabel+"}")
+	_ = tmuxRun("set-window-option", "-t", winID, "pane-border-format", paneBorderFormat())
 	activeFg := c.config.PaneHeader.ActiveFg
 	if activeFg == "" {
 		activeFg = "#ffffff"
