@@ -1241,6 +1241,12 @@ func (l *Loop) handleTmuxHook(e TmuxHookEvent) {
 		// event is just a refresh poke so spawn/cleanup observes the new
 		// client immediately.
 		l.SubmitRefresh()
+		// Phone-class client (< 100 cols) attaching while the gathered
+		// dashboard grid is open: auto-exit so the phone user lands back in
+		// their normal windows. The existing profile-transition path only
+		// fires when the phone client becomes the active one — if a desktop
+		// stays active, the phone would see the dashboard until then.
+		l.coord.maybeExitDashboardForPhone()
 	default:
 		logEvent("HOOK_UNKNOWN_KIND kind=%s", e.Kind)
 	}

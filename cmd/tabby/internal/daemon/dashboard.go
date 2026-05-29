@@ -495,8 +495,14 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	// the window, including aux panes. We render an EMPTY format on aux panes
 	// via a conditional so they show a blank strip rather than the label.
 	_ = tmuxRun("set-window-option", "-t", winID, "pane-border-status", "top")
+	// Chrome panes (sidebar / window-header / pane-header) skip the label AND
+	// override the strip to the terminal default bg so the 1-row divider
+	// visually disappears above them. After the consolidated tabby subcommand
+	// entrypoint pane_current_command reports "tabby" for every renderer, so
+	// we also check pane_start_command (which still carries the "render
+	// sidebar" / "render window-header" exec).
 	_ = tmuxRun("set-window-option", "-t", winID, "pane-border-format",
-		"#{?#{||:#{m:*sidebar*,#{pane_current_command}},#{m:*header*,#{pane_current_command}}},, #{pane_current_command}  #{b:pane_current_path}#[align=right][prefix+, for actions] }")
+		"#{?#{||:#{m:*sidebar*,#{pane_current_command}},#{m:*header*,#{pane_current_command}},#{m:*sidebar*,#{pane_start_command}},#{m:*header*,#{pane_start_command}}},#[align=centre#,fg=default#,bg=default] , #{pane_current_command}  #{b:pane_current_path}#[align=right][prefix+, for actions] }")
 	activeFg := c.config.PaneHeader.ActiveFg
 	if activeFg == "" {
 		activeFg = "#ffffff"
@@ -564,6 +570,42 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 		}
 		_ = tmuxRun("set-option", "-p", "-t", id, "pane-border-style", tileStyle)
 	}
+}
+
+// maybeExitDashboardForPhone exits the gathered dashboard grid if (a) a
+// dashboard is currently active and (b) at least one attached tmux client is
+// phone-class (width < 100). Called on tmux client-attached so phone users
+// land back in their normal windows the moment they connect, even when a
+// desktop client stays the "active" one (which keeps the profile-transition
+// path from firing).
+func (c *Coordinator) maybeExitDashboardForPhone() {
+	if c.dashboardWindowID == "" {
+		return
+	}
+	out, err := tmuxOutputCtx("list-clients", "-F", "#{client_width}")
+	if err != nil {
+		return
+	}
+	hasPhone := false
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		w, err := strconv.Atoi(line)
+		if err != nil {
+			continue
+		}
+		if w > 0 && w < 100 {
+			hasPhone = true
+			break
+		}
+	}
+	if !hasPhone {
+		return
+	}
+	c.exitDashboard()
+	coordinatorDebugLog.Printf("phone client attached: auto-exited dashboard")
 }
 
 // dashboardSession resolves the session id this coordinator manages.
