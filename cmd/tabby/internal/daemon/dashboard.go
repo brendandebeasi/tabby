@@ -38,8 +38,19 @@ import (
 // `#,` is the literal escape for a comma inside #{?…} branches.
 func paneBorderFormat() string {
 	const chrome = "#[align=centre#,fg=default#,bg=default] "
-	const content = " #{window_name} #[fg=default] | #[fg=default]" +
-		"#{?#{&&:#{!=:#{pane_title},},#{!=:#{pane_title},#{host_short}}}," +
+	// Use pane_title only when it isn't trivially bash's default OSC string
+	// (which contains the host short name — e.g. "b@bdm1: ~" for any home-dir
+	// shell). When the title contains host_short, fall back to command + folder
+	// so the strip stays informative across a gathered dashboard of bash panes.
+	// The "tab name" portion prefers the origin window name (set per-pane on
+	// dashboard gather as @tabby_dash_origin_name) so dashboard tiles read with
+	// their origin name instead of "Dashboard" on every tile. When the option
+	// is unset (non-dashboard windows, or pre-existing dashboards from before
+	// this tag landed) it falls back to the live #{window_name}.
+	const content = " #{?#{!=:#{@tabby_dash_origin_name},},#{@tabby_dash_origin_name},#{window_name}} #[fg=default] | #[fg=default]" +
+		"#{?#{&&:#{!=:#{pane_title},}," +
+		"#{&&:#{!=:#{pane_title},#{host_short}}," +
+		"#{!=:#{m:*#{host_short}*,#{pane_title}},1}}}," +
 		"#{pane_title}," +
 		"#{pane_current_command}  #{b:pane_current_path}}" +
 		"#[align=right][prefix+#, for actions] "
@@ -191,12 +202,19 @@ func (c *Coordinator) enterDashboard() {
 		return
 	}
 
-	// Move each content pane into the dashboard window, tagging its origin.
+	// Move each content pane into the dashboard window, tagging its origin
+	// window id AND its origin window name. The name lets the border-format
+	// helper render `<origin_window_name> | <pane_title>` per tile instead of
+	// the dashboard window's own name on every tile.
+	//
 	// Re-tile after every join: joining repeatedly into one target halves its
 	// size each time, so without a reflow the Nth join eventually fails for lack
 	// of space.
 	for _, p := range content {
 		_ = tmuxRun("set-option", "-p", "-t", p.pane, "@tabby_dash_origin", p.win)
+		if s, ok := snaps[p.win]; ok && s.Name != "" {
+			_ = tmuxRun("set-option", "-p", "-t", p.pane, "@tabby_dash_origin_name", s.Name)
+		}
 		if err := tmuxRun("join-pane", "-d", "-h", "-s", p.pane, "-t", placeholder); err != nil {
 			_ = tmuxRun("join-pane", "-d", "-s", p.pane, "-t", placeholder)
 		}
@@ -318,6 +336,7 @@ func (c *Coordinator) exitDashboard() map[string]string {
 		ph := firstToken(tmuxOutputTrimmed("list-panes", "-t", newWin, "-F", "#{pane_id}"), "%")
 		for _, p := range groups[origin] {
 			_ = tmuxRun("set-option", "-p", "-t", p, "-u", "@tabby_dash_origin")
+			_ = tmuxRun("set-option", "-p", "-t", p, "-u", "@tabby_dash_origin_name")
 			if err := tmuxRun("join-pane", "-d", "-h", "-s", p, "-t", ph); err != nil {
 				_ = tmuxRun("join-pane", "-d", "-s", p, "-t", ph)
 			}
