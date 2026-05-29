@@ -553,13 +553,27 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 			if len(parts) < 4 {
 				continue
 			}
+			paneID := parts[0]
 			dead := parts[1] == "1"
 			cmd := parts[2]
 			startCmd := parts[3]
 
-			if strings.Contains(cmd, "sidebar") || strings.Contains(startCmd, "sidebar") ||
-				strings.Contains(cmd, "renderer") || strings.Contains(startCmd, "renderer") {
+			isSidebar := strings.Contains(cmd, "sidebar") || strings.Contains(startCmd, "sidebar") ||
+				strings.Contains(cmd, "renderer") || strings.Contains(startCmd, "renderer")
+			if isSidebar {
 				hasSidebar = true
+				// Detect a stale `-window <wid>` arg that no longer matches the
+				// pane's containing window — symptom of a sidebar that survived
+				// a window-recreate cycle (dashboard exit, husk restore, etc.)
+				// while the daemon spawned the renderer for the OLD id. The
+				// renderer subscribes as that old client and the sidebar shows
+				// no active indicator for any row. Kill it so the next refresh
+				// respawns with the correct `-window` arg.
+				if target := windowTargetFromStartCmd(startCmd); target != "" && target != windowID {
+					logEvent("CLEANUP_STALE_SIDEBAR pane=%s window=%s start_target=%s", paneID, windowID, target)
+					_ = exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+					continue
+				}
 			}
 			if dead {
 				continue
