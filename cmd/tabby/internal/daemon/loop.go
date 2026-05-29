@@ -158,6 +158,11 @@ type Loop struct {
 	lastReadyWindowID  string    // last new-window-ready windowID observed (for tmux-active suppression)
 	lastReadyClearedAt time.Time // when the new-window ready state was last cleared
 	lastPaneLayoutOps  time.Time // debounce for the spawn/cleanup heavy path
+	// housekeepingMu serializes the async housekeeping pass kicked off by
+	// signal_refresh. Held for the duration of one heavy run; TryLock is used
+	// at submit time so a rapid burst of signals skips when a prior pass is
+	// still in flight (the in-flight pass will see fresh tmux state).
+	housekeepingMu sync.Mutex
 
 	// Off-loop ticker state.
 	idleStart time.Time
@@ -1077,67 +1082,95 @@ func (l *Loop) handleRefreshSignal() {
 		// loop: doPaneLayoutOps triggers tmux hooks → USR1 → signal_refresh
 		// → doPaneLayoutOps again. With debounce, rapid signals only do
 		// the fast path (Reconcile + final broadcast).
-		structureChanged := false
-		if time.Since(l.lastFullRefresh) >= loopFullRefreshCooldown {
-			windows := l.coord.GetWindows()
-			spawnedRenderer := spawnRenderersForNewWindows(l.server, l.deps.SessionID, windows, l.coord)
-			t2 := time.Now()
+		// Broadcast NOW with the fresh active flag so every sidebar repaints
+		// with the new highlight before the heavy housekeeping kicks in.
+		go l.server.BroadcastRender()
 
-			cleanupOrphanedSidebars(windows, l.coord)
-			cleanupOrphanWindowsByTmux(l.deps.SessionID, l.coord)
-			t3 := time.Now()
-
-			cleanupSidebarsForClosedWindows(l.server, windows)
-			t4 := time.Now()
-
-			l.doPaneLayoutOps()
-			t5 := time.Now()
-
-			_ = spawnedRenderer
-
-			// Apply new window group + preserve grouped window names
-			// (replaces apply_new_window_group.sh + preserve_window_name.sh)
-			l.coord.ApplyNewWindowGroup()
-			l.coord.PreserveWindowNames()
-
-			currentHash := l.coord.GetWindowsHash()
-			if currentHash != l.lastWindowsHash {
-				updateHeaderBorderStyles(l.coord)
-			}
-			structureChanged = spawnedRenderer || currentHash != l.lastWindowsHash
-			l.lastWindowsHash = currentHash
-			l.lastFullRefresh = time.Now()
-
-			logEvent("PERF_REFRESH refresh_ms=%d spawn_ms=%d cleanup1_ms=%d cleanup2_ms=%d layout_ms=%d total_ms=%d",
-				t1.Sub(start).Milliseconds(), t2.Sub(t1).Milliseconds(),
-				t3.Sub(t2).Milliseconds(), t4.Sub(t3).Milliseconds(),
-				t5.Sub(t4).Milliseconds(), t5.Sub(start).Milliseconds())
+		// Heavy housekeeping (spawn / cleanup / layout / reconcile) runs
+		// async so the loop goroutine returns and the next queued input
+		// (e.g. another tab nav) can dispatch immediately. Without this,
+		// rapid cmd+option+[/] presses queue behind the ~300ms heavy body
+		// and the user perceives every switch as laggy.
+		//
+		// TryLock(): if a previous housekeeping pass is still in flight
+		// (e.g. user mashing keys), skip — the in-flight pass will pick up
+		// the latest tmux state when it gets there.
+		if l.housekeepingMu.TryLock() {
+			snapActiveWindow := l.activeWindowID
+			snapSizesChanged := sizesChanged
+			snapWindowChanged := windowChanged
+			go func() {
+				defer l.housekeepingMu.Unlock()
+				l.runHousekeeping(start, t1, snapActiveWindow, snapSizesChanged, snapWindowChanged)
+			}()
 		} else {
-			logEvent("PERF_REFRESH_FAST refresh_ms=%d", t1.Sub(start).Milliseconds())
+			logEvent("PERF_REFRESH_SKIP_HOUSEKEEPING reason=in_flight")
 		}
+	})
+}
 
-		// Single coalesced reconcile: width-sync + header-height-sync
-		// + (if structure changed) lock-windows-to-active. All ops land
-		// as one chained tmux command, then exactly one trailing
-		// BroadcastRender.
-		var lockTo *daemon.ActiveClient
-		if structureChanged {
-			if w, h, tty, _, ok := activeClientGeometry(); ok {
-				lockTo = &daemon.ActiveClient{TTY: tty, Width: w, Height: h}
-			}
+// runHousekeeping is the heavy spawn / cleanup / layout / reconcile pass that
+// used to run synchronously inside signal_refresh's loop-task body. It now
+// runs in a goroutine kicked off by handleRefreshSignal so the loop goroutine
+// is free to process the next input (e.g. another tab nav) immediately. The
+// caller holds l.housekeepingMu via TryLock, which serializes successive
+// passes — rapid-fire signals coalesce into "the in-flight pass + at most one
+// more" rather than queueing arbitrarily.
+func (l *Loop) runHousekeeping(start, t1 time.Time, activeWindowID string, sizesChanged, windowChanged bool) {
+	structureChanged := false
+	if time.Since(l.lastFullRefresh) >= loopFullRefreshCooldown {
+		windows := l.coord.GetWindows()
+		spawnedRenderer := spawnRenderersForNewWindows(l.server, l.deps.SessionID, windows, l.coord)
+		t2 := time.Now()
+
+		cleanupOrphanedSidebars(windows, l.coord)
+		cleanupOrphanWindowsByTmux(l.deps.SessionID, l.coord)
+		t3 := time.Now()
+
+		cleanupSidebarsForClosedWindows(l.server, windows)
+		t4 := time.Now()
+
+		l.doPaneLayoutOps()
+		t5 := time.Now()
+
+		_ = spawnedRenderer
+
+		l.coord.ApplyNewWindowGroup()
+		l.coord.PreserveWindowNames()
+
+		currentHash := l.coord.GetWindowsHash()
+		if currentHash != l.lastWindowsHash {
+			updateHeaderBorderStyles(l.coord)
 		}
-		reason := "signal_refresh"
-		if structureChanged {
-			reason = "signal_refresh.structure"
+		structureChanged = spawnedRenderer || currentHash != l.lastWindowsHash
+		l.lastWindowsHash = currentHash
+		l.lastFullRefresh = time.Now()
+
+		logEvent("PERF_REFRESH refresh_ms=%d spawn_ms=%d cleanup1_ms=%d cleanup2_ms=%d layout_ms=%d total_ms=%d",
+			t1.Sub(start).Milliseconds(), t2.Sub(t1).Milliseconds(),
+			t3.Sub(t2).Milliseconds(), t4.Sub(t3).Milliseconds(),
+			t5.Sub(t4).Milliseconds(), t5.Sub(start).Milliseconds())
+	} else {
+		logEvent("PERF_REFRESH_FAST refresh_ms=%d", t1.Sub(start).Milliseconds())
+	}
+
+	var lockTo *daemon.ActiveClient
+	if structureChanged {
+		if w, h, tty, _, ok := activeClientGeometry(); ok {
+			lockTo = &daemon.ActiveClient{TTY: tty, Width: w, Height: h}
 		}
-		logEvent("WIDTH_SYNC_REQUEST trigger=%s active=%s force=%v window_changed=%v",
-			reason, l.activeWindowID, sizesChanged, windowChanged)
-		l.Reconcile(ReconcileOpts{
-			Reason:              reason,
-			ActiveWindowID:      l.activeWindowID,
-			ForceWidthSync:      sizesChanged,
-			LockWindowsToActive: lockTo,
-		})
+	}
+	reason := "signal_refresh"
+	if structureChanged {
+		reason = "signal_refresh.structure"
+	}
+	logEvent("WIDTH_SYNC_REQUEST trigger=%s active=%s force=%v window_changed=%v",
+		reason, activeWindowID, sizesChanged, windowChanged)
+	l.Reconcile(ReconcileOpts{
+		Reason:              reason,
+		ActiveWindowID:      activeWindowID,
+		ForceWidthSync:      sizesChanged,
+		LockWindowsToActive: lockTo,
 	})
 }
 
