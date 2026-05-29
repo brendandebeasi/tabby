@@ -540,26 +540,12 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	if winID == "" {
 		return
 	}
-	_ = tmuxRun("set-window-option", "-t", winID, "pane-border-lines", "single")
-	// pane-border-status is window-scope in tmux 3.5a (set-option -p falls
-	// through to window). One status row gets allocated above every pane in
-	// the window, including aux panes. We render an EMPTY format on aux panes
-	// via a conditional so they show a blank strip rather than the label.
-	_ = tmuxRun("set-window-option", "-t", winID, "pane-border-status", "top")
-	// Chrome panes (sidebar / window-header / pane-header) skip the label AND
-	// override the strip to the terminal default bg so the 1-row divider
-	// visually disappears above them. After the consolidated tabby subcommand
-	// entrypoint pane_current_command reports "tabby" for every renderer, so
-	// we also check pane_start_command (which still carries the "render
-	// sidebar" / "render window-header" exec).
-	_ = tmuxRun("set-window-option", "-t", winID, "pane-border-format", paneBorderFormat())
 	activeFg := c.config.PaneHeader.ActiveFg
 	if activeFg == "" {
 		activeFg = "#ffffff"
 	}
 	inactiveFg := c.config.PaneHeader.InactiveFg
 	if inactiveFg == "" {
-		// Dim white for "not active" cue without changing bg.
 		inactiveFg = "#bbbbbb"
 	}
 	activeBg := ""
@@ -592,34 +578,50 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 			activeBg = "#3498db"
 		}
 	}
-	_ = tmuxRun("set-window-option", "-t", winID, "pane-active-border-style",
-		"fg="+activeFg+",bg="+activeBg)
-	// Inactive border: lighten the bg ~60% toward white so unfocused panes
-	// read as clearly dim without going flat or losing the group colour. Tmux
-	// renders a brief vertical half/half stripe on edges shared with the
-	// active pane, which doubles as a focus cue.
 	inactiveBg := lightenHex(activeBg, 0.60)
-	_ = tmuxRun("set-window-option", "-t", winID, "pane-border-style",
-		"fg="+inactiveFg+",bg="+inactiveBg)
-	tileStyle := "fg=" + inactiveFg + ",bg=" + inactiveBg
-	out := tmuxOutputTrimmed("list-panes", "-t", winID, "-F",
-		"#{pane_id}\t#{pane_current_command}\t#{pane_start_command}")
-	for _, line := range dashLines(out) {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) < 2 {
-			continue
-		}
-		id, cur := parts[0], parts[1]
-		start := ""
-		if len(parts) == 3 {
-			start = parts[2]
-		}
-		isAux := isAuxiliaryPaneCommand(cur) || isSidebarPaneCommand(cur, start)
-		if isAux {
-			continue
-		}
-		_ = tmuxRun("set-option", "-p", "-t", id, "pane-border-style", tileStyle)
+
+	// Cache the per-window signature so we don't re-issue 5 set-window-option
+	// calls every refresh — these were a big chunk of the tab-switch latency
+	// (5 windows × 5 options ≈ 25 tmux execs per layout pass). The signature
+	// covers everything that actually goes into the tmux options below; if
+	// nothing changed we skip the batched set entirely.
+	sig := activeFg + "|" + inactiveFg + "|" + activeBg + "|" + inactiveBg
+	c.nativeBorderMu.Lock()
+	if c.nativeBorderSig == nil {
+		c.nativeBorderSig = make(map[string]string)
 	}
+	prev := c.nativeBorderSig[winID]
+	c.nativeBorderSig[winID] = sig
+	c.nativeBorderMu.Unlock()
+	if prev == sig {
+		return
+	}
+
+	// Batch all five window-option sets into a single tmux invocation. Tmux's
+	// command separator `;` (passed as a literal argv element) lets us send
+	// `set-window-option … ; set-window-option … ; …` in one exec — saves a
+	// handful of fork/wait round trips per window per refresh.
+	args := []string{
+		"set-window-option", "-t", winID, "pane-border-lines", "single",
+		";", "set-window-option", "-t", winID, "pane-border-status", "top",
+		";", "set-window-option", "-t", winID, "pane-border-format", paneBorderFormat(),
+		";", "set-window-option", "-t", winID, "pane-active-border-style",
+		"fg=" + activeFg + ",bg=" + activeBg,
+		";", "set-window-option", "-t", winID, "pane-border-style",
+		"fg=" + inactiveFg + ",bg=" + inactiveBg,
+	}
+	_ = tmuxRun(args...)
+}
+
+// InvalidateNativeBorderCache clears the per-window native-border signature
+// cache so the next applyNativeBorders pass re-issues the tmux set-options.
+// Called when something that *could* externally clobber the per-window
+// pane-border-* options happens (theme reload, daemon respawn, manual
+// option-unset path) so we don't sit on a stale cache.
+func (c *Coordinator) InvalidateNativeBorderCache() {
+	c.nativeBorderMu.Lock()
+	c.nativeBorderSig = nil
+	c.nativeBorderMu.Unlock()
 }
 
 // maybeExitDashboardForPhone exits the gathered dashboard grid if (a) a

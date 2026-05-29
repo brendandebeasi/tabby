@@ -732,6 +732,12 @@ type Coordinator struct {
 	dashboardOrigins    map[string]dashWindowSnapshot // origin window_id -> snapshot for recreation
 	dashboardOrder      []string                      // origin window ids, original index order
 	dashboardReturnPane string                        // pane_id to refocus on exit
+	// nativeBorderSig caches the last-applied border signature per window so
+	// applyNativeBorders can skip its 5-set-option batch when nothing changed.
+	// Cleared via InvalidateNativeBorderCache when something outside the
+	// function could clobber the per-window options.
+	nativeBorderMu  sync.Mutex
+	nativeBorderSig map[string]string
 	// Set true by an action handler when its work doesn't change anything the
 	// renderers display (e.g. an in-dashboard pane cycle) — handleRendererInput
 	// then skips SendRenderToClient + BroadcastRender to avoid the redraw flicker.
