@@ -1057,13 +1057,20 @@ func (l *Loop) handleRefreshSignal() {
 		l.lastWindowCount = currentWindowCount
 
 		// Save window layouts inline (replaces save_pane_layout.sh hook)
+		tA := time.Now()
 		l.coord.SaveWindowLayouts()
+		tB := time.Now()
 
 		// Apply pane dimming inline (replaces cycle-pane --dim-only shell call)
 		l.coord.ApplyPaneDimming(l.activeWindowID)
+		tC := time.Now()
 
 		// Enforce status bar exclusivity (replaces enforce_status_exclusivity.sh)
 		l.coord.EnforceStatusExclusivity(l.deps.SessionID)
+		tD := time.Now()
+		logEvent("PERF_PRE_SPAWN saveLayouts_ms=%d dim_ms=%d statusEx_ms=%d total_ms=%d",
+			tB.Sub(tA).Milliseconds(), tC.Sub(tB).Milliseconds(),
+			tD.Sub(tC).Milliseconds(), tD.Sub(tA).Milliseconds())
 
 		// Heavy ops (spawn/cleanup/layout) only if enough time has
 		// passed since the last full refresh. This breaks the feedback
@@ -1101,11 +1108,12 @@ func (l *Loop) handleRefreshSignal() {
 			l.lastWindowsHash = currentHash
 			l.lastFullRefresh = time.Now()
 
-			debugLog.Printf("PERF: RefreshWindows=%v Spawn=%v Cleanup1=%v Cleanup2=%v Layout=%v",
-				t1.Sub(start), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t5.Sub(t4))
+			logEvent("PERF_REFRESH refresh_ms=%d spawn_ms=%d cleanup1_ms=%d cleanup2_ms=%d layout_ms=%d total_ms=%d",
+				t1.Sub(start).Milliseconds(), t2.Sub(t1).Milliseconds(),
+				t3.Sub(t2).Milliseconds(), t4.Sub(t3).Milliseconds(),
+				t5.Sub(t4).Milliseconds(), t5.Sub(start).Milliseconds())
 		} else {
-			debugLog.Printf("PERF: RefreshWindows=%v (fast-path, heavy ops skipped)",
-				t1.Sub(start))
+			logEvent("PERF_REFRESH_FAST refresh_ms=%d", t1.Sub(start).Milliseconds())
 		}
 
 		// Single coalesced reconcile: width-sync + header-height-sync

@@ -738,6 +738,12 @@ type Coordinator struct {
 	// function could clobber the per-window options.
 	nativeBorderMu  sync.Mutex
 	nativeBorderSig map[string]string
+	// layoutCache stores the last layout string written to tmux per window
+	// (via @tabby_layout_<wid>). SaveWindowLayouts skips the tmux set-option
+	// round trip when the cached value matches — layouts change only on
+	// split / kill / resize-pane, so most refreshes are pure cache hits.
+	layoutCacheMu sync.Mutex
+	layoutCache   map[string]string
 	// Set true by an action handler when its work doesn't change anything the
 	// renderers display (e.g. an in-dashboard pane cycle) — handleRendererInput
 	// then skips SendRenderToClient + BroadcastRender to avoid the redraw flicker.
@@ -1896,35 +1902,45 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	}
 	dimBG := computeDimBG(termBG, opacity)
 
+	// Batch all per-pane set-option calls into a single tmux invocation via
+	// the `;` separator. For a 2-pane window that drops 4 tmux execs (~20ms)
+	// per tab switch down to 1. Skipped panes contribute nothing to the args.
+	var argv []string
+	addCmd := func(c ...string) {
+		if len(argv) > 0 {
+			argv = append(argv, ";")
+		}
+		argv = append(argv, c...)
+	}
 	for _, p := range panes {
 		if isDimSkipPane(p) {
 			continue
 		}
-
 		// For headers, use their content pane's active state (matched by pane_left)
 		active := p.active
 		if isDimHeaderPane(p) {
 			active = colActive[p.left]
 		}
-
 		if isDimHeaderPane(p) {
 			// Headers are rendered by the daemon — don't set window-style.
 			// The daemon reads @tabby_pane_dim from the content pane to decide colors.
 			continue
 		}
-
 		// Content pane: set window-style AND dim flag
 		if active {
-			exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
-			exec.Command("tmux", "set-option", "-p", "-t", p.id, "@tabby_pane_dim", "0").Run()
+			addCmd("set-option", "-p", "-u", "-t", p.id, "window-style")
+			addCmd("set-option", "-p", "-t", p.id, "@tabby_pane_dim", "0")
 		} else {
 			if dimBG == "" {
-				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
+				addCmd("set-option", "-p", "-u", "-t", p.id, "window-style")
 			} else {
-				exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-style", fmt.Sprintf("bg=%s", dimBG)).Run()
+				addCmd("set-option", "-p", "-t", p.id, "window-style", fmt.Sprintf("bg=%s", dimBG))
 			}
-			exec.Command("tmux", "set-option", "-p", "-t", p.id, "@tabby_pane_dim", "1").Run()
+			addCmd("set-option", "-p", "-t", p.id, "@tabby_pane_dim", "1")
 		}
+	}
+	if len(argv) > 0 {
+		exec.Command("tmux", argv...).Run()
 	}
 
 	// Dim borders: active = full color, inactive = desaturated
@@ -2195,6 +2211,14 @@ func (c *Coordinator) SaveWindowLayouts() {
 	}
 	c.stateMu.RUnlock()
 
+	// Per-window cache so repeat refreshes with unchanged layouts skip the
+	// tmux set-option round trip (~5–10ms per window). Layouts only change on
+	// split / kill / resize-pane, so most refreshes are pure cache hits.
+	c.layoutCacheMu.Lock()
+	if c.layoutCache == nil {
+		c.layoutCache = make(map[string]string)
+	}
+	c.layoutCacheMu.Unlock()
 	for _, w := range windows {
 		// Defense-in-depth: don't push a structurally malformed layout into
 		// @tabby_layout_<wid>. preserve-pane-ratios reads that option and
@@ -2205,6 +2229,14 @@ func (c *Coordinator) SaveWindowLayouts() {
 			logEvent("LAYOUT_OPTION_SKIPPED windowID=%s reason=footer_squish layout=%s", w.id, w.layout)
 			continue
 		}
+		c.layoutCacheMu.Lock()
+		cached := c.layoutCache[w.id]
+		if cached == w.layout {
+			c.layoutCacheMu.Unlock()
+			continue
+		}
+		c.layoutCache[w.id] = w.layout
+		c.layoutCacheMu.Unlock()
 		exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_layout_%s", w.id), w.layout).Run()
 	}
 }
