@@ -501,8 +501,15 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	// entrypoint pane_current_command reports "tabby" for every renderer, so
 	// we also check pane_start_command (which still carries the "render
 	// sidebar" / "render window-header" exec).
+	// Content label: window name on the left, then pane_title (apps set this
+	// via OSC — ssh puts "user@host", a claude session puts the session
+	// title, etc.). If pane_title is empty or equal to the default (the
+	// window's host short name), fall back to "<command> <folder>" so the
+	// strip is still informative.
+	contentLabel := " #{window_name} #[fg=default] | #[fg=default]#{?#{&&:#{!=:#{pane_title},},#{!=:#{pane_title},#{host_short}}},#{pane_title},#{pane_current_command}  #{b:pane_current_path}}#[align=right][prefix+#, for actions] "
+	chromeLabel := "#[align=centre#,fg=default#,bg=default] "
 	_ = tmuxRun("set-window-option", "-t", winID, "pane-border-format",
-		"#{?#{||:#{m:*sidebar*,#{pane_current_command}},#{m:*header*,#{pane_current_command}},#{m:*sidebar*,#{pane_start_command}},#{m:*header*,#{pane_start_command}}},#[align=centre#,fg=default#,bg=default] , #{pane_current_command}  #{b:pane_current_path}#[align=right][prefix+, for actions] }")
+		"#{?#{||:#{m:*sidebar*,#{pane_current_command}},#{m:*header*,#{pane_current_command}},#{m:*sidebar*,#{pane_start_command}},#{m:*header*,#{pane_start_command}}},"+chromeLabel+","+contentLabel+"}")
 	activeFg := c.config.PaneHeader.ActiveFg
 	if activeFg == "" {
 		activeFg = "#ffffff"
