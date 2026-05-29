@@ -6014,6 +6014,16 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 	switched = successes
 	logEvent("WINDOW_NAV_PERCLIENT trigger=%s delta=%d source=%s target=%s candidates=%v switched=%v",
 		trigger, delta, src, target, wins, switched)
+	if len(switched) > 0 {
+		// Flip the in-memory active flag NOW so the immediate broadcast (fired
+		// by handleRendererInput right after this function returns) renders
+		// every sidebar with the new active highlight on the same frame. Without
+		// this, BroadcastRender runs while c.windows still has the old active
+		// pane flagged, and the corrected render has to wait for the
+		// signal_refresh → updateActiveWindow round trip (~300ms) before the
+		// sidebar highlights the new tab.
+		c.SetActiveWindowOptimistic(target)
+	}
 	return len(switched) > 0
 }
 
