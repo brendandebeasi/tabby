@@ -654,6 +654,7 @@ tmux bind-key k confirm-before -p 'Close window? (y/n)' "run-shell '$KILL_WINDOW
 # grid, or restore). Replaces the default "select window 0" on this key;
 # windows 1-9 and the header tabs still reach every window.
 tmux bind-key 0 run-shell -b "$CURRENT_DIR/bin/tabby dashboard"
+tmux bind-key g run-shell -b "$CURRENT_DIR/bin/tabby dashboard"
 
 # Direct window access with prefix + number (match tmux window indexes)
 tmux bind-key 1 select-window -t :1
