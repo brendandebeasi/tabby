@@ -496,7 +496,19 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		}
 		newPaneID := strings.TrimSpace(string(paneOut))
 		if newPaneID != "" {
-			exec.Command("tmux", "set-option", "-p", "-t", newPaneID, "pane-border-status", "off").Run()
+			// In native-borders mode the aux pane gets a blank label via the
+			// pane-border-format conditional, so we don't need to disable
+			// the strip per-pane. We MUST skip this set in native mode
+			// anyway: tmux treats pane-border-status as window-scope and
+			// the `-p` flag silently falls through, so setting it "off"
+			// here would clobber the window-level "top" we configured in
+			// applyNativeBorders and the border label would vanish on
+			// every pane in the window.
+			cfg := coordinator.GetConfig()
+			nativeBorders := cfg != nil && cfg.PaneHeader.Native != nil && *cfg.PaneHeader.Native
+			if !nativeBorders {
+				exec.Command("tmux", "set-option", "-p", "-t", newPaneID, "pane-border-status", "off").Run()
+			}
 		}
 
 		spawned = true
@@ -974,8 +986,21 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 								hTarget = fmt.Sprintf("%d", globalCoordinator.desiredWindowHeaderHeight())
 							}
 							exec.Command("tmux", "resize-pane", "-t", hParts[0], "-y", hTarget).Run()
-							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
-							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
+							// Skip the per-pane pane-border-status=off in native
+							// mode — tmux treats this option as window-scope and
+							// `-p` falls through, clobbering the "top" set by
+							// applyNativeBorders. See main.go:~500 for the same
+							// fix on sidebar spawn.
+							nativeBordersHdr := false
+							if globalCoordinator != nil {
+								if cfg := globalCoordinator.GetConfig(); cfg != nil && cfg.PaneHeader.Native != nil {
+									nativeBordersHdr = *cfg.PaneHeader.Native
+								}
+							}
+							if !nativeBordersHdr {
+								exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
+								exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
+							}
 						}
 					}
 				}

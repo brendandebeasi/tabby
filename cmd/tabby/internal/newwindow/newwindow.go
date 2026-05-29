@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	tabbycfg "github.com/brendandebeasi/tabby/pkg/config"
 	tmuxpkg "github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -141,8 +142,22 @@ func Run(args []string) int {
 				if splitErr != nil {
 					debugLog(cfg, "split-window failed for %s: %v", newWindowID, splitErr)
 				} else if rendererPaneID != "" {
-					if _, err := runTmuxOutput(cfg, "set-option", "-p", "-t", rendererPaneID, "pane-border-status", "off"); err != nil {
-						debugLog(cfg, "failed to disable pane-border-status on %s: %v", rendererPaneID, err)
+					// In native-borders mode the aux pane gets a blank label via
+					// the pane-border-format conditional, so we don't need to
+					// disable the strip per-pane. We MUST skip this set in
+					// native mode anyway: tmux treats pane-border-status as
+					// window-scope and the `-p` flag silently falls through, so
+					// setting it "off" here would clobber the window-level
+					// "top" set by applyNativeBorders and the border label
+					// would vanish from every pane in the new window.
+					nativeBorders := false
+					if tcfg, err := tabbycfg.LoadConfig(tabbycfg.DefaultConfigPath()); err == nil && tcfg != nil && tcfg.PaneHeader.Native != nil {
+						nativeBorders = *tcfg.PaneHeader.Native
+					}
+					if !nativeBorders {
+						if _, err := runTmuxOutput(cfg, "set-option", "-p", "-t", rendererPaneID, "pane-border-status", "off"); err != nil {
+							debugLog(cfg, "failed to disable pane-border-status on %s: %v", rendererPaneID, err)
+						}
 					}
 				}
 			}
