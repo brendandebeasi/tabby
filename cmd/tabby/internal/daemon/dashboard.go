@@ -441,11 +441,16 @@ func (c *Coordinator) applyDashboardBorders() {
 			activeBg = "#3498db"
 		}
 	}
+	// Inactive border: lighten the bg ~60% toward white so unfocused tiles
+	// read as clearly dim, mirroring the regular-window applyNativeBorders
+	// treatment. Adjacent edges between active + inactive tiles will show a
+	// brief half/half stripe, which doubles as a focus cue.
+	inactiveBg := lightenHex(activeBg, 0.60)
 	_ = tmuxRun("set-window-option", "-t", dash, "pane-active-border-style",
 		"fg="+activeFg+",bg="+activeBg)
 	_ = tmuxRun("set-window-option", "-t", dash, "pane-border-style",
-		"fg="+inactiveFg+",bg="+activeBg)
-	tileStyle := "fg=" + inactiveFg + ",bg=" + activeBg
+		"fg="+inactiveFg+",bg="+inactiveBg)
+	tileStyle := "fg=" + inactiveFg + ",bg=" + inactiveBg
 	// Per content tile: set pane-border-status=top as a PANE-LOCAL option. Window-
 	// level didn't hold (it inherits tabby's global 'off'); pane-local is the
 	// highest-precedence scope and can't be overridden by the global. Clearing the
