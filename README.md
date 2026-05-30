@@ -647,8 +647,28 @@ The sidebar hosts pinnable widgets below the window list. Enable and configure p
 | `git` | off | Branch, dirty/clean, ahead/behind, stash count for the active pane's cwd |
 | `session` | off | Current tmux session, client, and window count |
 | `claude` | off | Claude Code usage for today / week / month / total, read from the sqlite history DB |
+| `teamclaude` | off | Per-account quota left from a [teamclaude](https://github.com/KarpelesLab/teamclaude) proxy — session (5h) and weekly (7d) bars with reset countdowns |
 
 Each widget supports `pin`, `priority` (render order), `position: top|bottom`, padding, margins, dividers, and per-field colors. See `config.yaml` for the full schema.
+
+### TeamClaude quotas
+
+[teamclaude](https://github.com/KarpelesLab/teamclaude) is a multi-account Claude proxy that rotates accounts based on quota. Its server exposes a `GET /teamclaude/status` endpoint; this widget polls it over HTTP and shows, per managed account, how much session (5h) and weekly (7d) quota each has left — as bars with the percentage and reset countdown drawn inside (e.g. `87% 4h`), color-coded by headroom (green/yellow/red).
+
+```yaml
+widgets:
+  teamclaude:
+    enabled: true
+    url: "http://your-gateway:8081"   # teamclaude proxy base URL
+    # api_key: "tc-..."               # proxy key; prefer the env var below
+    show_session: true                # 5h window
+    show_weekly: true                 # 7d window
+    update_interval: 60               # seconds between fetches
+    position: bottom
+    priority: 60
+```
+
+The proxy API key is read from `widgets.teamclaude.api_key` **or**, preferably, the `TABBY_TEAMCLAUDE_API_KEY` environment variable so the secret can stay out of `config.yaml`. (teamclaude skips auth for `localhost` connections, so no key is needed when tabby and the proxy run on the same host.) Fetches happen off the render path on the `update_interval` cadence; if the proxy is unreachable the widget shows a one-line placeholder and never blocks the sidebar.
 
 ## Command-Line Reference
 

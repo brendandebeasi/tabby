@@ -322,10 +322,11 @@ func pickIconStyle(current string) string {
 // ── Widget toggles ────────────────────────────────────────────────────────────
 
 type widgetChoice struct {
-	stats  bool
-	clock  bool
-	pet    bool
-	claude bool
+	stats      bool
+	clock      bool
+	pet        bool
+	claude     bool
+	teamclaude bool
 }
 
 func pickWidgets(cur widgetChoice) widgetChoice {
@@ -339,6 +340,7 @@ func pickWidgets(cur widgetChoice) widgetChoice {
 		{"Clock widget", "Date and time at the bottom of the sidebar", &cur.clock},
 		{"Pet mascot", "A small tamagotchi-style pet (Whiskers 🐱)", &cur.pet},
 		{"Claude usage", "Show today's Claude API cost", &cur.claude},
+		{"TeamClaude quotas", "Per-account quota left from a teamclaude proxy (set url in config)", &cur.teamclaude},
 	}
 
 	sel := 0
@@ -593,6 +595,7 @@ func applyChoices(cfg *config.Config, theme, iconStyle string, widgets widgetCho
 	cfg.Widgets.Clock.Enabled = widgets.clock
 	cfg.Widgets.Pet.Enabled = widgets.pet
 	cfg.Widgets.Claude.Enabled = widgets.claude
+	cfg.Widgets.TeamClaude.Enabled = widgets.teamclaude
 
 	// Apply sensible widget defaults if enabling for first time
 	if widgets.stats && cfg.Widgets.Stats.Style == "" {
@@ -622,6 +625,14 @@ func applyChoices(cfg *config.Config, theme, iconStyle string, widgets widgetCho
 		cfg.Widgets.Claude.ShowToday = true
 		cfg.Widgets.Claude.ShowMessages = true
 		cfg.Widgets.Claude.Position = "bottom"
+	}
+	if widgets.teamclaude {
+		cfg.Widgets.TeamClaude.ShowSession = true
+		cfg.Widgets.TeamClaude.ShowWeekly = true
+		cfg.Widgets.TeamClaude.Position = "bottom"
+		if cfg.Widgets.TeamClaude.URL == "" {
+			cfg.Widgets.TeamClaude.URL = "http://llm-gateway:8081"
+		}
 	}
 
 	// Auto-theme
@@ -671,10 +682,11 @@ func Run(args []string) int {
 		currentIconStyle = "box"
 	}
 	currentWidgets := widgetChoice{
-		stats:  cfg.Widgets.Stats.Enabled,
-		clock:  cfg.Widgets.Clock.Enabled,
-		pet:    cfg.Widgets.Pet.Enabled,
-		claude: cfg.Widgets.Claude.Enabled,
+		stats:      cfg.Widgets.Stats.Enabled,
+		clock:      cfg.Widgets.Clock.Enabled,
+		pet:        cfg.Widgets.Pet.Enabled,
+		claude:     cfg.Widgets.Claude.Enabled,
+		teamclaude: cfg.Widgets.TeamClaude.Enabled,
 	}
 	currentAutoTheme := autoThemeChoice{
 		enabled:   cfg.AutoTheme.Enabled,
