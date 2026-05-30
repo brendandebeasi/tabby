@@ -64,6 +64,8 @@ type Widgets struct {
 	Session SessionWidget `yaml:"session"`
 	Stats   StatsWidget   `yaml:"stats"`
 	Claude  ClaudeWidget  `yaml:"claude"`
+
+	TeamClaude TeamClaudeWidget `yaml:"teamclaude"`
 }
 
 // StatsWidget shows system stats (CPU, memory, battery)
@@ -115,6 +117,36 @@ type ClaudeWidget struct {
 	PaddingBot     int    `yaml:"padding_bottom"`  // Blank lines below content
 	MarginTop      int    `yaml:"margin_top"`      // Lines above top divider
 	MarginBot      int    `yaml:"margin_bottom"`   // Lines below bottom divider
+}
+
+// TeamClaudeWidget shows per-account Claude quota left, pulled from a
+// teamclaude proxy's GET /teamclaude/status endpoint over HTTP. teamclaude is a
+// multi-account Claude proxy that rotates accounts on quota; this widget
+// surfaces how much session (5h) and weekly (7d) headroom each account has.
+type TeamClaudeWidget struct {
+	Enabled bool   `yaml:"enabled"`
+	URL     string `yaml:"url"`     // proxy base URL, e.g. http://192.168.23.102:8081
+	APIKey  string `yaml:"api_key"` // proxy x-api-key; empty falls back to $TABBY_TEAMCLAUDE_API_KEY
+
+	Style           string `yaml:"style"`             // nerd | emoji | ascii | minimal
+	ShowSession     bool   `yaml:"show_session"`      // Show 5h session quota bar
+	ShowWeekly      bool   `yaml:"show_weekly"`       // Show 7d weekly quota bar
+	ShowCurrentOnly bool   `yaml:"show_current_only"` // Only the active account, not all
+	BarWidth        int    `yaml:"bar_width"`         // Width of each quota bar (default 8)
+	UpdateInterval  int    `yaml:"update_interval"`   // Seconds between fetches (default 60)
+
+	Position   string `yaml:"position"`       // top | bottom
+	Pin        bool   `yaml:"pin"`            // Pin to position
+	Priority   int    `yaml:"priority"`       // Order among widgets
+	Fg         string `yaml:"fg"`             // Account name / label color
+	Bg         string `yaml:"bg"`             // Background color
+	BarFg      string `yaml:"bar_fg"`         // Override bar color (else colored by headroom)
+	Divider    string `yaml:"divider"`        // Divider line above widget
+	DividerFg  string `yaml:"divider_fg"`     // Divider color
+	PaddingTop int    `yaml:"padding_top"`    // Blank lines above content
+	PaddingBot int    `yaml:"padding_bottom"` // Blank lines below content
+	MarginTop  int    `yaml:"margin_top"`     // Lines above top divider
+	MarginBot  int    `yaml:"margin_bottom"`  // Lines below bottom divider
 }
 
 // SessionWidget shows tmux session info

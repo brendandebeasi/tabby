@@ -10,15 +10,16 @@ import "sync/atomic"
 // the next tick to fire while the handler is mid-run is allowed to enqueue
 // (and will run after the current handler returns).
 type tickFlags struct {
-	geom      atomic.Bool
-	window    atomic.Bool
-	anim      atomic.Bool
-	refresh   atomic.Bool
-	git       atomic.Bool
-	autoTheme atomic.Bool
-	watchdog  atomic.Bool
-	idle      atomic.Bool
-	socket    atomic.Bool
+	geom       atomic.Bool
+	window     atomic.Bool
+	anim       atomic.Bool
+	refresh    atomic.Bool
+	git        atomic.Bool
+	teamClaude atomic.Bool
+	autoTheme  atomic.Bool
+	watchdog   atomic.Bool
+	idle       atomic.Bool
+	socket     atomic.Bool
 	// Signal flags — populated by the SIGUSR1/SIGUSR2 handler goroutine in
 	// main.go via submitCoalesced. A burst of refresh or resize signals
 	// collapses to one loop-side event.

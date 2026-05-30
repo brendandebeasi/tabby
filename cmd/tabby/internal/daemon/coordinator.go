@@ -33,6 +33,7 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/grouping"
 	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/perf"
+	"github.com/brendandebeasi/tabby/pkg/teamclaude"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -583,6 +584,15 @@ type Coordinator struct {
 	sessionName    string
 	sessionClients int
 	windowCount    int
+
+	// TeamClaude quota state (cached). Fetched over HTTP in a detached
+	// goroutine by RefreshTeamClaude (never on the event loop); read under
+	// stateMu by renderTeamClaudeWidget. teamClaudeFetching coalesces so only
+	// one HTTP request is ever in flight.
+	teamClaudeStatus    *teamclaude.Status
+	teamClaudeErr       error
+	teamClaudeFetchedAt time.Time
+	teamClaudeFetching  atomic.Bool
 
 	// Pet state
 	pet petState
@@ -4013,6 +4023,94 @@ func (c *Coordinator) RefreshGit() {
 	c.gitAhead = ahead
 	c.gitBehind = behind
 	c.stateMu.Unlock()
+}
+
+// teamClaudeAPIKey resolves the proxy key from config, falling back to an
+// environment variable so the secret can stay out of config.yaml.
+func (c *Coordinator) teamClaudeAPIKey() string {
+	if k := c.config.Widgets.TeamClaude.APIKey; k != "" {
+		return k
+	}
+	return os.Getenv("TABBY_TEAMCLAUDE_API_KEY")
+}
+
+// RefreshTeamClaude refreshes the cached per-account quota from the teamclaude
+// proxy. It returns IMMEDIATELY: the HTTP request runs in a detached goroutine
+// so it can never block the daemon event loop (a slow/unreachable proxy would
+// otherwise stall window switching). The fetch is throttled to the configured
+// UpdateInterval and coalesced so only one request is ever in flight. When the
+// quota state actually changes, it triggers a render via OnRefreshLayout.
+// A nil URL or disabled widget is a no-op.
+func (c *Coordinator) RefreshTeamClaude() {
+	cfg := c.config.Widgets.TeamClaude
+	if !cfg.Enabled || cfg.URL == "" {
+		return
+	}
+
+	// Throttle: skip if the last fetch is still fresh.
+	interval := time.Duration(cfg.UpdateInterval) * time.Second
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+	c.stateMu.RLock()
+	fetchedAt := c.teamClaudeFetchedAt
+	c.stateMu.RUnlock()
+	if !fetchedAt.IsZero() && time.Since(fetchedAt) < interval {
+		return
+	}
+
+	// Coalesce: at most one in-flight request.
+	if !c.teamClaudeFetching.CompareAndSwap(false, true) {
+		return
+	}
+
+	url, apiKey := cfg.URL, c.teamClaudeAPIKey()
+	prevHash := c.GetTeamClaudeStateHash()
+	go func() {
+		defer c.teamClaudeFetching.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		status, err := teamclaude.Fetch(ctx, url, apiKey)
+
+		c.stateMu.Lock()
+		c.teamClaudeFetchedAt = time.Now()
+		c.teamClaudeErr = err
+		if err == nil {
+			c.teamClaudeStatus = status
+		}
+		c.stateMu.Unlock()
+
+		// Trigger a render only when the displayed state changed.
+		if c.GetTeamClaudeStateHash() != prevHash && c.OnRefreshLayout != nil {
+			c.OnRefreshLayout()
+		}
+	}()
+}
+
+// GetTeamClaudeStateHash returns a cheap fingerprint of the cached quota state
+// so the loop can skip re-rendering when nothing changed.
+func (c *Coordinator) GetTeamClaudeStateHash() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	if c.teamClaudeStatus == nil {
+		if c.teamClaudeErr != nil {
+			return "err:" + c.teamClaudeErr.Error()
+		}
+		return "nil"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "cur=%s;", c.teamClaudeStatus.CurrentAccount)
+	for _, a := range c.teamClaudeStatus.Accounts {
+		sess, wk := -1.0, -1.0
+		if a.Remaining.Session != nil {
+			sess = *a.Remaining.Session
+		}
+		if a.Remaining.Weekly != nil {
+			wk = *a.Remaining.Weekly
+		}
+		fmt.Fprintf(&b, "%s:%.2f:%.2f:%v|", a.Name, sess, wk, a.RateLimited())
+	}
+	return b.String()
 }
 
 // RefreshSession updates session state
@@ -7772,7 +7870,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 		hamburger := "\u2261"  // ≡
 		prevGlyph := "\u25b2"  // ▲ (up — prev window in the stack)
-		cycleGlyph := "⛶" // toggle zoom on the active content pane
+		cycleGlyph := "⛶"      // toggle zoom on the active content pane
 		newGlyph := "+"        // new window
 		closeGlyph := "\u2715" // ✕
 		nextGlyph := "\u25bc"  // ▼ (down — next window in the stack)
@@ -7911,24 +8009,24 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	if c.config.PaneHeader.CustomBorder {
 		return &daemon.RenderPayload{
-			Content:       content,
-			Width:         width,
-			Height:        headerRows,
-			TotalLines:    totalLines,
-			Regions:       regions,
-			ActiveClient:  activeClient,
+			Content:      content,
+			Width:        width,
+			Height:       headerRows,
+			TotalLines:   totalLines,
+			Regions:      regions,
+			ActiveClient: activeClient,
 		}
 	}
 
 	return &daemon.RenderPayload{
-		Content:       content,
-		Width:         width,
-		Height:        headerRows,
-		TotalLines:    totalLines,
-		Regions:       regions,
-		SidebarBg:     sidebarBg,
-		TerminalBg:    terminalBg,
-		ActiveClient:  activeClient,
+		Content:      content,
+		Width:        width,
+		Height:       headerRows,
+		TotalLines:   totalLines,
+		Regions:      regions,
+		SidebarBg:    sidebarBg,
+		TerminalBg:   terminalBg,
+		ActiveClient: activeClient,
 	}
 }
 
@@ -8404,23 +8502,23 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 
 	if c.config.PaneHeader.CustomBorder {
 		return &daemon.RenderPayload{
-			Content:       line,
-			Width:         width,
-			Height:        headerRows,
-			TotalLines:    1,
-			Regions:       regions,
-			ActiveClient:  activeClient,
+			Content:      line,
+			Width:        width,
+			Height:       headerRows,
+			TotalLines:   1,
+			Regions:      regions,
+			ActiveClient: activeClient,
 		}
 	}
 	return &daemon.RenderPayload{
-		Content:       line,
-		Width:         width,
-		Height:        headerRows,
-		TotalLines:    1,
-		Regions:       regions,
-		SidebarBg:     sidebarBg,
-		TerminalBg:    terminalBg,
-		ActiveClient:  activeClient,
+		Content:      line,
+		Width:        width,
+		Height:       headerRows,
+		TotalLines:   1,
+		Regions:      regions,
+		SidebarBg:    sidebarBg,
+		TerminalBg:   terminalBg,
+		ActiveClient: activeClient,
 	}
 }
 
@@ -10259,6 +10357,20 @@ func (c *Coordinator) collectWidgetEntries(width int, skipPet, skipDebugBar bool
 		})
 	}
 
+	// TeamClaude quota widget
+	if c.config.Widgets.TeamClaude.Enabled {
+		pos := c.config.Widgets.TeamClaude.Position
+		if pos == "" {
+			pos = "bottom"
+		}
+		entries = append(entries, widgetEntry{
+			name:     "teamclaude",
+			zone:     pos,
+			priority: c.config.Widgets.TeamClaude.Priority,
+			content:  constrainWidgetWidth(c.renderTeamClaudeWidget(width), width),
+		})
+	}
+
 	// On phone, the window-header button bar already provides prev/next navigation
 	// (with matching up/down arrows), so the sidebar's dedicated nav buttons would
 	// be redundant.
@@ -10832,6 +10944,317 @@ func (c *Coordinator) getClaudeUsageStats(dbPath string) (today, week, month, to
 	}
 
 	return today, week, month, total, msgCount
+}
+
+// quotaCell is one quota window to render in a TeamClaude account row: the
+// remaining fraction (0..1, nil if unknown) and the reset time (ms epoch, 0 if
+// unknown).
+type quotaCell struct {
+	frac  *float64
+	reset int64
+}
+
+// shortResetDur formats the time until an epoch-millisecond reset as a compact
+// "Nm"/"Nh"/"Nd" string. Returns "" when the time is unknown or already past.
+func shortResetDur(resetMs int64) string {
+	if resetMs <= 0 {
+		return ""
+	}
+	d := time.Until(time.UnixMilli(resetMs))
+	if d <= 0 {
+		return ""
+	}
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// teamClaudeDisplayName returns the account's full name for display, dropping
+// only the redundant auto-generated personal-org suffix
+// "(<email>'s Organization)" (which just repeats the email). A real custom org
+// suffix like " (Gunpowder)" is preserved so duplicate emails stay
+// distinguishable. The result is NOT shortened — truncation (with an ellipsis)
+// happens later in teamClaudeTruncateName once the available width is known.
+func teamClaudeDisplayName(name string) string {
+	if i := strings.LastIndex(name, " ("); i >= 0 && strings.HasSuffix(name, ")") {
+		org := name[i+2 : len(name)-1]
+		if strings.Contains(org, "Organization") {
+			return name[:i]
+		}
+	}
+	return name
+}
+
+// teamClaudeTruncateName fits a display name into max columns, adding an "…"
+// ellipsis when it must cut. If the name carries a trailing " (org)" suffix,
+// that suffix is preserved and the head (email) is ellipsized instead, so the
+// distinguishing org isn't the thing that gets dropped.
+func teamClaudeTruncateName(name string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(name) <= max {
+		return name
+	}
+	if i := strings.LastIndex(name, " ("); i >= 0 && strings.HasSuffix(name, ")") {
+		suffix := name[i:] // " (Gunpowder)"
+		sw := runewidth.StringWidth(suffix)
+		if max-sw >= 2 { // room for at least one head char + ellipsis + suffix
+			return runewidth.Truncate(name[:i], max-sw, "…") + suffix
+		}
+	}
+	return runewidth.Truncate(name, max, "…")
+}
+
+// renderTeamClaudeWidget renders per-account Claude quota left, from the cached
+// teamclaude proxy status. Data is fetched off the render path by
+// RefreshTeamClaude; here we only read the cache.
+func (c *Coordinator) renderTeamClaudeWidget(width int) string {
+	tcCfg := c.config.Widgets.TeamClaude
+	if !tcCfg.Enabled {
+		return ""
+	}
+
+	// Read cached state directly WITHOUT taking stateMu: the render path
+	// (renderSidebar) already holds c.stateMu.RLock() across widget rendering,
+	// and RWMutex read locks are NOT recursively safe — a second RLock here
+	// deadlocks the moment a writer (the async fetch goroutine's Lock) is
+	// pending. This mirrors renderGitWidget/renderSessionWidget, which also read
+	// their cached fields under the caller's lock.
+	status := c.teamClaudeStatus
+	fetchErr := c.teamClaudeErr
+
+	var result strings.Builder
+
+	for i := 0; i < tcCfg.MarginTop; i++ {
+		result.WriteString("\n")
+	}
+
+	divider := tcCfg.Divider
+	if divider == "" {
+		divider = "-"
+	}
+	dividerFg := c.getInactiveTextColorWithFallback(tcCfg.DividerFg)
+	dividerStyle := lipgloss.NewStyle()
+	if dividerFg != "" {
+		dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
+	}
+	if dw := lipgloss.Width(divider); dw > 0 {
+		result.WriteString(dividerStyle.Render(strings.Repeat(divider, width/dw)) + "\n")
+	}
+
+	for i := 0; i < tcCfg.PaddingTop; i++ {
+		result.WriteString("\n")
+	}
+
+	labelFg := c.getInactiveTextColorWithFallback(tcCfg.Fg)
+	labelStyle := lipgloss.NewStyle()
+	if labelFg != "" {
+		labelStyle = labelStyle.Foreground(lipgloss.Color(labelFg))
+	}
+
+	// Header icon by style.
+	style := tcCfg.Style
+	if style == "" {
+		style = "nerd"
+	}
+	icon := ""
+	switch style {
+	case "nerd":
+		icon = "󱙺 " // nf-md-account_group_outline
+	case "emoji":
+		icon = "👥 "
+	case "ascii":
+		icon = "[TC] "
+	}
+
+	// Which quota windows to show. The header carries a "[S/W]" legend so the
+	// per-account rows can drop the labels and just show bars + percentages.
+	showSession := tcCfg.ShowSession
+	showWeekly := tcCfg.ShowWeekly
+	if !showSession && !showWeekly {
+		showSession, showWeekly = true, true
+	}
+	var legendParts []string
+	if showSession {
+		legendParts = append(legendParts, "S")
+	}
+	if showWeekly {
+		legendParts = append(legendParts, "W")
+	}
+	header := icon + "TeamClaude [" + strings.Join(legendParts, "/") + "]"
+	result.WriteString(labelStyle.Render(runewidth.Truncate(header, width, "")) + "\n")
+
+	switch {
+	case status == nil && fetchErr != nil:
+		result.WriteString(labelStyle.Render("  unreachable") + "\n")
+	case status == nil:
+		result.WriteString(labelStyle.Render("  …") + "\n")
+	default:
+		// Compact layout: the shown quota windows on one line under the account
+		// name, with the percentage drawn INSIDE each bar so the bars can use the
+		// full width. The filled fraction is a solid colored block (dark text);
+		// the empty track is a faint tint of the same color (saturated text), so
+		// the number stays legible on both light and dark terminals. Bars are
+		// sized to width here so the composed line never exceeds `width` and
+		// never hits constrainWidgetWidth's non-ANSI-aware truncation.
+		termBg := c.GetTerminalBg()
+		barColorFor := func(pct int) string {
+			if tcCfg.BarFg != "" {
+				return tcCfg.BarFg
+			}
+			switch {
+			case pct < 0:
+				return "#888888"
+			case pct < 30:
+				return "#ff6b6b" // red — low headroom
+			case pct < 60:
+				return "#ffd93d" // yellow
+			default:
+				return "#6bcb77" // green — plenty left
+			}
+		}
+		// inBar renders one bar of exactly bw cells with the percentage (and,
+		// when it fits, the time until that window resets) centered inside it.
+		inBar := func(f *float64, resetMs int64, bw int) string {
+			if bw < 1 {
+				return ""
+			}
+			pct := -1
+			txt := "--"
+			if f != nil {
+				pct = int(*f*100 + 0.5)
+				txt = fmt.Sprintf("%d%%", pct)
+				// Append reset countdown (e.g. "90% 2h") only if it fits.
+				if d := shortResetDur(resetMs); d != "" {
+					if full := txt + " " + d; runewidth.StringWidth(full) <= bw {
+						txt = full
+					}
+				}
+			}
+			if runewidth.StringWidth(txt) > bw {
+				txt = runewidth.Truncate(txt, bw, "")
+			}
+			// Center the text within the bar width.
+			pad := bw - runewidth.StringWidth(txt)
+			left := pad / 2
+			content := strings.Repeat(" ", left) + txt + strings.Repeat(" ", pad-left)
+			runes := []rune(content)
+
+			filled := 0
+			if pct >= 0 {
+				filled = (pct*bw + 50) / 100
+				if filled > bw {
+					filled = bw
+				}
+			}
+			barColor := barColorFor(pct)
+			filledStyle := lipgloss.NewStyle().
+				Background(lipgloss.Color(barColor)).
+				Foreground(lipgloss.Color("#1c1c1c")).Bold(true)
+			// Track (empty) portion: faint tint of the bar color as the background
+			// so the full bar extent is visible, with the normal label foreground
+			// for the digits — readable on any theme (barColor-on-track can be
+			// low contrast, e.g. yellow text on a pale-yellow track).
+			trackBg := desaturateHex(barColor, 0.28, termBg)
+			emptyStyle := lipgloss.NewStyle()
+			if labelFg != "" {
+				emptyStyle = emptyStyle.Foreground(lipgloss.Color(labelFg))
+			}
+			if trackBg != "" {
+				emptyStyle = emptyStyle.Background(lipgloss.Color(trackBg))
+			}
+			var b strings.Builder
+			if filled > 0 {
+				b.WriteString(filledStyle.Render(string(runes[:filled])))
+			}
+			if filled < len(runes) {
+				b.WriteString(emptyStyle.Render(string(runes[filled:])))
+			}
+			return b.String()
+		}
+		quotaLine := func(cells []quotaCell) string {
+			n := len(cells)
+			if n == 0 {
+				return ""
+			}
+			// Available bar columns = width - left indent(1) - right pad(1) -
+			// joins(n-1). Distribute evenly, giving the remainder to the leftmost
+			// bars. The right column is left blank so bars don't touch the edge.
+			avail := width - 2 - (n - 1)
+			if avail < n { // too narrow for bars: just show percentages
+				var b strings.Builder
+				b.WriteString(labelStyle.Render(" "))
+				for i, c := range cells {
+					if i > 0 {
+						b.WriteString(labelStyle.Render(" "))
+					}
+					if c.frac == nil {
+						b.WriteString(labelStyle.Render("--"))
+					} else {
+						b.WriteString(labelStyle.Render(fmt.Sprintf("%d%%", int(*c.frac*100+0.5))))
+					}
+				}
+				return b.String() + "\n"
+			}
+			base := avail / n
+			rem := avail % n
+			var b strings.Builder
+			b.WriteString(labelStyle.Render(" "))
+			for i, c := range cells {
+				if i > 0 {
+					b.WriteString(labelStyle.Render(" "))
+				}
+				bw := base
+				if i < rem {
+					bw++
+				}
+				b.WriteString(inBar(c.frac, c.reset, bw))
+			}
+			return b.String() + "\n"
+		}
+
+		for _, a := range status.Accounts {
+			if tcCfg.ShowCurrentOnly && a.Name != status.CurrentAccount {
+				continue
+			}
+			marker := " "
+			if a.Name == status.CurrentAccount {
+				marker = "▸"
+			}
+			if a.RateLimited() {
+				marker = "!"
+			}
+			// Truncate the plain name (reserving 1 col for the marker) before
+			// coloring, so the colored line doesn't exceed the sidebar and trigger
+			// constrainWidgetWidth's lossy truncation.
+			name := marker + teamClaudeTruncateName(teamClaudeDisplayName(a.Name), width-runewidth.StringWidth(marker))
+			result.WriteString(labelStyle.Render(name) + "\n")
+
+			var cells []quotaCell
+			if showSession {
+				cells = append(cells, quotaCell{a.Remaining.Session, a.Quota.Unified5hReset})
+			}
+			if showWeekly {
+				cells = append(cells, quotaCell{a.Remaining.Weekly, a.Quota.Unified7dReset})
+			}
+			result.WriteString(quotaLine(cells))
+		}
+	}
+
+	for i := 0; i < tcCfg.PaddingBot; i++ {
+		result.WriteString("\n")
+	}
+	for i := 0; i < tcCfg.MarginBot; i++ {
+		result.WriteString("\n")
+	}
+
+	return result.String()
 }
 
 // constrainWidgetWidth ensures all lines in widget content don't exceed maxWidth
@@ -11594,7 +12017,8 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 // Line 1: DBG <state> H:<hunger> F:<food> [adv][slp][die][poo][mse][yrn]
 // Line 2: trg:<category> [<<][>>] [H+][H-][F+][F-]
 // Line 3: [q?]  (popup / overflow triggers — kept on its own row so line 1
-//                doesn't get crowded out at narrow sidebar widths)
+//
+//	doesn't get crowded out at narrow sidebar widths)
 func (c *Coordinator) renderDebugBar(width int) []string {
 	// Line 1: Status + Mode Triggers
 	state := c.pet.State
@@ -13967,7 +14391,7 @@ func buildQuestionMenuArgs(pending *daemon.PendingQuestion, exe string, width in
 		cmd := fmt.Sprintf("run-shell -b \"%s pet ask --quiet --answer '%s' 2>/dev/null\"", exe, escaped)
 		args = append(args, choice, key, cmd)
 	}
-	args = append(args, "", "", "")       // separator before Cancel
+	args = append(args, "", "", "")        // separator before Cancel
 	args = append(args, "Cancel", "q", "") // Cancel sits below the choices
 	return args
 }

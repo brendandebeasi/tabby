@@ -412,6 +412,28 @@ func applyDefaults(cfg *Config) {
 	if cfg.Widgets.Pet.QA.TeaserEveryNThoughts == 0 {
 		cfg.Widgets.Pet.QA.TeaserEveryNThoughts = 3
 	}
+
+	// TeamClaude widget defaults (only relevant when enabled, but harmless to
+	// set unconditionally).
+	if cfg.Widgets.TeamClaude.UpdateInterval == 0 {
+		cfg.Widgets.TeamClaude.UpdateInterval = 60
+	}
+	if cfg.Widgets.TeamClaude.BarWidth == 0 {
+		cfg.Widgets.TeamClaude.BarWidth = 8
+	}
+	if cfg.Widgets.TeamClaude.Style == "" {
+		cfg.Widgets.TeamClaude.Style = "nerd"
+	}
+	if cfg.Widgets.TeamClaude.Position == "" {
+		cfg.Widgets.TeamClaude.Position = "bottom"
+	}
+	// If the user enabled the widget but selected no quota window, show both so
+	// it isn't blank (zero-value escape).
+	if cfg.Widgets.TeamClaude.Enabled &&
+		!cfg.Widgets.TeamClaude.ShowSession && !cfg.Widgets.TeamClaude.ShowWeekly {
+		cfg.Widgets.TeamClaude.ShowSession = true
+		cfg.Widgets.TeamClaude.ShowWeekly = true
+	}
 }
 
 // applyIconStyleDefaults applies icon preset values based on IconStyle setting.

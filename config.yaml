@@ -258,3 +258,30 @@ widgets:
     #   happy_icon: "😸"     # Happy stat icon
     #   sad_icon: "😿"       # Sad stat icon
     #   ground: "·"          # Ground character
+
+  # TeamClaude quotas — per-account quota left from a teamclaude proxy
+  # (https://github.com/KarpelesLab/teamclaude). Off by default. The proxy key
+  # can live here as api_key OR in the TABBY_TEAMCLAUDE_API_KEY env var (keep it
+  # out of version control). Bars show session (5h) and weekly (7d) headroom
+  # with the % and reset countdown inside, color-coded green/yellow/red.
+  teamclaude:
+    enabled: false
+    url: "http://your-gateway:8081"   # teamclaude proxy base URL
+    # api_key: ""                      # prefer $TABBY_TEAMCLAUDE_API_KEY
+    style: "nerd"                      # nerd | emoji | ascii
+    show_session: true                 # 5h window
+    show_weekly: true                  # 7d window
+    show_current_only: false           # only the active account vs all
+    bar_width: 8                       # max bar segments (auto-fit to width)
+    update_interval: 60                # seconds between fetches
+    position: bottom
+    pin: false
+    priority: 60
+    # fg: ""                           # account label color (theme default)
+    # bar_fg: ""                       # override bar color (else by headroom)
+    divider: "─"
+    divider_fg: "#444444"
+    margin_top: 0
+    margin_bottom: 0
+    padding_top: 0
+    padding_bottom: 0

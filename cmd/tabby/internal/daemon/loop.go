@@ -36,6 +36,7 @@ type WindowCheckTickEvent struct{}
 type AnimationTickEvent struct{}
 type RefreshTickEvent struct{}
 type GitTickEvent struct{}
+type TeamClaudeTickEvent struct{}
 type AutoThemeTickEvent struct{}
 type WatchdogTickEvent struct{}
 type IdleTickEvent struct{}
@@ -54,6 +55,7 @@ func (WindowCheckTickEvent) kind() string { return "tick:window_check" }
 func (AnimationTickEvent) kind() string   { return "tick:animation" }
 func (RefreshTickEvent) kind() string     { return "tick:refresh" }
 func (GitTickEvent) kind() string         { return "tick:git" }
+func (TeamClaudeTickEvent) kind() string  { return "tick:teamclaude" }
 func (AutoThemeTickEvent) kind() string   { return "tick:auto_theme" }
 func (WatchdogTickEvent) kind() string    { return "tick:watchdog" }
 func (IdleTickEvent) kind() string        { return "tick:idle" }
@@ -306,6 +308,8 @@ func (l *Loop) dispatch(ev Event) {
 		l.handleRefreshTick()
 	case GitTickEvent:
 		l.handleGitTick()
+	case TeamClaudeTickEvent:
+		l.handleTeamClaudeTick()
 	case AutoThemeTickEvent:
 		l.handleAutoThemeTick()
 	case WatchdogTickEvent:
@@ -922,6 +926,15 @@ func (l *Loop) handleGitTick() {
 			l.lastGitState = currentGitState
 		}
 	})
+}
+
+// handleTeamClaudeTick kicks off a (throttled, coalesced) teamclaude quota
+// refresh. RefreshTeamClaude returns immediately and does the HTTP fetch in a
+// detached goroutine that triggers its own render on change, so this handler
+// never blocks the event loop — no RunLoopTask wrapper needed.
+func (l *Loop) handleTeamClaudeTick() {
+	l.flags.teamClaude.Store(false)
+	l.coord.RefreshTeamClaude()
 }
 
 // handleAutoThemeTick is the migrated body of the autoThemeTicker case.
