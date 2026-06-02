@@ -73,7 +73,9 @@ func TestRenderForClient_ContentContainsWindowNames(t *testing.T) {
 	c.stateMu.Unlock()
 	payload := c.RenderForClient("test-client", 30, 24)
 	assert.NotNil(t, payload)
-	assert.Contains(t, payload.Content, "mywindow")
+	// Tab labels show the auto-derived abbreviation of the window name:
+	// "mywindow" -> "MYW".
+	assert.Contains(t, payload.Content, "MYW")
 }
 
 func TestRenderHeaderForClient_EmptyClientID(t *testing.T) {
@@ -187,7 +189,8 @@ func TestGenerateMainContent_ActiveWindowMatchesClient(t *testing.T) {
 	}}
 	c.stateMu.Unlock()
 	content, _ := c.generateMainContent("@active-win", 30, 24)
-	assert.Contains(t, content, "active-win")
+	// "active-win" abbreviates to "AW" (initials of the two segments).
+	assert.Contains(t, content, "AW")
 }
 
 func TestGenerateMainContent_WithPanes(t *testing.T) {
@@ -444,7 +447,7 @@ func TestRenderForClient_MultipleGroups(t *testing.T) {
 	c.stateMu.Lock()
 	c.windows = []tmux.Window{
 		testWindow("group1-win", true, "bash"),
-		testWindow("group2-win", false, "vim"),
+		testWindow("group2-box", false, "vim"),
 	}
 	c.grouped = []grouping.GroupedWindows{
 		{
@@ -461,6 +464,7 @@ func TestRenderForClient_MultipleGroups(t *testing.T) {
 	c.stateMu.Unlock()
 	payload := c.RenderForClient("test-client", 30, 24)
 	assert.NotNil(t, payload)
-	assert.Contains(t, payload.Content, "group1-win")
-	assert.Contains(t, payload.Content, "group2-win")
+	// Names render abbreviated: "group1-win" -> "GW", "group2-box" -> "GB".
+	assert.Contains(t, payload.Content, "GW")
+	assert.Contains(t, payload.Content, "GB")
 }

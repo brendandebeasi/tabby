@@ -39,9 +39,13 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/renderer"
 )
 
-// confirmDelay is how long the success screen sits on-screen so the user
-// can read any newly-distilled trait before the popup closes.
+// confirmDelay is how long the success screen sits on-screen when nothing new
+// was learned — just long enough to register that the answer landed.
 const confirmDelay = 600 * time.Millisecond
+
+// confirmDelayWithTrait gives the user extra time to read a newly-distilled
+// trait ("learned: …") before the popup auto-closes.
+const confirmDelayWithTrait = 3 * time.Second
 
 // dialTimeout caps how long we wait to reach the daemon socket; the daemon
 // is local, so a slow dial almost certainly means "not running".
@@ -175,7 +179,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.newTrait = msg.resp.NewTrait
 		m.phase = phaseConfirming
-		return m, tea.Tick(confirmDelay, func(time.Time) tea.Msg {
+		closeDelay := confirmDelay
+		if m.newTrait != nil && strings.TrimSpace(m.newTrait.Text) != "" {
+			closeDelay = confirmDelayWithTrait
+		}
+		return m, tea.Tick(closeDelay, func(time.Time) tea.Msg {
 			return exitTickMsg{}
 		})
 

@@ -52,9 +52,18 @@ var (
 	deadlockThreshold = 5 * time.Second // Alert if no heartbeat for this long
 )
 
+// CWDColorMapping holds the per-directory tab identity that Tabby remembers and
+// re-applies to windows whose first pane is in that exact directory. Originally
+// just color+icon; now also persists the user's locked tab name, group, and
+// pinned state so a renamed/grouped/pinned tab is restored across daemon
+// restarts, tmux-resurrect, and freshly-opened tabs in the same directory.
+// Persisted to cwd-colors.json; all fields use omitempty for back-compat.
 type CWDColorMapping struct {
-	Color string `json:"color,omitempty"`
-	Icon  string `json:"icon,omitempty"`
+	Color  string `json:"color,omitempty"`
+	Icon   string `json:"icon,omitempty"`
+	Name   string `json:"name,omitempty"`   // saved tab name (mirrors a name-locked window)
+	Group  string `json:"group,omitempty"`  // saved @tabby_group
+	Pinned bool   `json:"pinned,omitempty"` // saved @tabby_pinned
 }
 
 func init() {
@@ -599,6 +608,24 @@ type Coordinator struct {
 
 	cwdColors   map[string]CWDColorMapping
 	cwdColorsMu sync.RWMutex
+
+	// Parsed config.TabNames.Abbreviations (folder basename -> short code),
+	// cached by config pointer identity so it's rebuilt only on config reload.
+	// Guarded by its own mutex (never stateMu) so the render path can look up
+	// abbreviations while holding stateMu.RLock without risking a deadlock.
+	tabAbbrevMu  sync.Mutex
+	tabAbbrevCfg *config.Config
+	tabAbbrevMap map[string]string
+
+	// Auto tab-summary generation (ai.tab_summary.auto_generate). The LLM client
+	// is built lazily once; summaryFetching coalesces the periodic background
+	// refresh; summaryHash skips windows whose pane content hasn't changed so
+	// idle tabs don't re-call the LLM. See tab_summary.go.
+	summaryClient     promptGenerator
+	summaryClientOnce sync.Once
+	summaryFetching   atomic.Bool
+	summaryHashMu     sync.Mutex
+	summaryHash       map[string]string
 
 	// Last known width (for pet physics clamping)
 	lastWidth int
@@ -1389,7 +1416,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 
 	// Initialize LLM if thoughts are enabled
 	if cfg.Widgets.Pet.Thoughts {
-		if err := initLLM(cfg.Widgets.Pet.LLMProvider, cfg.Widgets.Pet.LLMModel, cfg.Widgets.Pet.LLMAPIKey); err != nil {
+		if err := initLLM(cfg.Widgets.Pet.LLMProvider, cfg.Widgets.Pet.LLMModel, cfg.Widgets.Pet.LLMAPIKey, cfg.Widgets.Pet.LLMBaseURL); err != nil {
 			coordinatorDebugLog.Printf("LLM init failed: %v (using default thoughts)", err)
 		} else {
 			coordinatorDebugLog.Printf("LLM initialized with provider=%s model=%s", cfg.Widgets.Pet.LLMProvider, cfg.Widgets.Pet.LLMModel)
@@ -2607,11 +2634,196 @@ func normalizeCWD(cwd string) string {
 	return filepath.Clean(cwd)
 }
 
+// firstPaneCWD returns the working directory of the window's first CONTENT pane,
+// skipping Tabby's own auxiliary panes (the per-window sidebar renderer / header).
+// Those aux panes run from $HOME, so using Panes[0] blindly would make every
+// per-directory feature (color/icon/name mappings, tab abbreviation) key off
+// $HOME instead of the project directory. Falls back to the first pane if no
+// content pane is found.
 func firstPaneCWD(win tmux.Window) string {
-	if len(win.Panes) == 0 {
-		return ""
+	for i := range win.Panes {
+		if isAuxiliaryPane(win.Panes[i]) {
+			continue
+		}
+		if cwd := normalizeCWD(win.Panes[i].CurrentPath); cwd != "" {
+			return cwd
+		}
 	}
-	return normalizeCWD(win.Panes[0].CurrentPath)
+	if len(win.Panes) > 0 {
+		return normalizeCWD(win.Panes[0].CurrentPath)
+	}
+	return ""
+}
+
+// parseAbbreviations turns config entries written "CODE>Folder" into a
+// folder-basename -> CODE lookup. Folder keys are lower-cased so matching is
+// case-insensitive (config "TBY>Tabby" matches a tabby/ or TABBY/ directory).
+// Malformed or empty entries are skipped.
+func parseAbbreviations(entries []string) map[string]string {
+	m := make(map[string]string, len(entries))
+	for _, e := range entries {
+		parts := strings.SplitN(e, ">", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		code := strings.TrimSpace(parts[0])
+		folder := strings.TrimSpace(parts[1])
+		if code == "" || folder == "" {
+			continue
+		}
+		m[strings.ToLower(folder)] = code
+	}
+	return m
+}
+
+// dirAbbreviation returns the configured short code for a directory's folder
+// name, if any. Safe to call from the render path: it reads c.config (written
+// only under stateMu, which the render path holds as RLock) and guards its
+// derived cache with tabAbbrevMu — never stateMu — so there is no lock cycle.
+func (c *Coordinator) dirAbbreviation(folder string) (string, bool) {
+	if folder == "" {
+		return "", false
+	}
+	cfg := c.config
+	if cfg == nil {
+		return "", false
+	}
+
+	c.tabAbbrevMu.Lock()
+	if c.tabAbbrevCfg != cfg {
+		c.tabAbbrevMap = parseAbbreviations(cfg.TabNames.Abbreviations)
+		c.tabAbbrevCfg = cfg
+	}
+	code, ok := c.tabAbbrevMap[strings.ToLower(folder)]
+	c.tabAbbrevMu.Unlock()
+	return code, ok
+}
+
+// composeTabBaseName builds a window's inline sidebar label: the auto-derived
+// directory code (abbreviateWindowName, overridable via config) followed by the
+// AI summary (@tabby_ai_title) when present — e.g. "TBY config reload", or just
+// "TBY" with no summary. For AI-tool windows (Claude Code) with ai_summary_only
+// set, the dir code is dropped and only the summary is shown. Home/root/raw-id
+// names fall back to the plain name. The render may word-wrap this across up to
+// MaxLines rows; it does NOT apply SSH-host or icon decoration.
+func (c *Coordinator) composeTabBaseName(win tmux.Window) string {
+	name := win.Name
+	if isRawWindowID(name) {
+		name = "~" // automatic-rename hasn't fired yet
+	}
+	summary := strings.TrimSpace(win.AITitle)
+
+	// AI-tool windows (e.g. Claude Code): optionally drop the dir code so the
+	// summary alone describes what the agent is doing.
+	if summary != "" && c.config.AI.TabSummary.AISummaryOnly && isAIWindow(win) {
+		return summary
+	}
+
+	if code := c.abbreviateWindowName(name); code != "" {
+		if summary != "" {
+			return code + " " + summary
+		}
+		return code
+	}
+	if summary != "" {
+		return summary
+	}
+	return name
+}
+
+// isAIWindow reports whether any of the window's content panes runs an AI tool
+// (e.g. Claude Code, which IsAITool detects via its semver process name).
+func isAIWindow(win tmux.Window) bool {
+	for i := range win.Panes {
+		if isAuxiliaryPane(win.Panes[i]) {
+			continue
+		}
+		if tmux.IsAITool(win.Panes[i].Command) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapTabLabel word-wraps a tab's line-1 text (already including the "N. "
+// prefix and any icon) into up to maxLines display lines: the first sized to
+// line1Width, continuation lines to contWidth. Whole words are kept together;
+// an over-long word is hard-split. If content remains after maxLines, the last
+// line ends with "~". Always returns at least one line.
+func wrapTabLabel(text string, line1Width, contWidth, maxLines int) []string {
+	if maxLines < 1 {
+		maxLines = 1
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	budgetFor := func(lineIdx int) int {
+		w := contWidth
+		if lineIdx == 0 {
+			w = line1Width
+		}
+		if w < 1 {
+			w = 1
+		}
+		return w
+	}
+
+	var lines []string
+	cur := ""
+	for _, w := range words {
+		// Hard-split words longer than the current line's budget.
+		for lipgloss.Width(w) > budgetFor(len(lines)) {
+			b := budgetFor(len(lines))
+			if cur != "" {
+				lines = append(lines, cur)
+				cur = ""
+				continue
+			}
+			part := ""
+			for _, r := range w {
+				if lipgloss.Width(part+string(r)) > b {
+					break
+				}
+				part += string(r)
+			}
+			if part == "" {
+				part = string([]rune(w)[0])
+			}
+			lines = append(lines, part)
+			w = string([]rune(w)[len([]rune(part)):])
+		}
+		cand := w
+		if cur != "" {
+			cand = cur + " " + w
+		}
+		if lipgloss.Width(cand) <= budgetFor(len(lines)) {
+			cur = cand
+		} else {
+			lines = append(lines, cur)
+			cur = w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	if len(lines) <= maxLines {
+		return lines
+	}
+
+	// Overflow: keep the first maxLines lines, mark the last with "~".
+	kept := lines[:maxLines]
+	last := kept[maxLines-1]
+	b := budgetFor(maxLines - 1)
+	for lipgloss.Width(last) > b-1 {
+		r := []rune(last)
+		if len(r) == 0 {
+			break
+		}
+		last = string(r[:len(r)-1])
+	}
+	kept[maxLines-1] = last + "~"
+	return kept
 }
 
 func (c *Coordinator) getCWDColorMapping(cwd string) (CWDColorMapping, bool) {
@@ -2635,7 +2847,7 @@ func (c *Coordinator) setCWDColor(cwd, color string) {
 	c.cwdColorsMu.Lock()
 	mapping := c.cwdColors[normalized]
 	mapping.Color = strings.TrimSpace(color)
-	if mapping.Color == "" && strings.TrimSpace(mapping.Icon) == "" {
+	if cwdMappingEmpty(mapping) {
 		delete(c.cwdColors, normalized)
 	} else {
 		c.cwdColors[normalized] = mapping
@@ -2654,7 +2866,79 @@ func (c *Coordinator) setCWDIcon(cwd, icon string) {
 	c.cwdColorsMu.Lock()
 	mapping := c.cwdColors[normalized]
 	mapping.Icon = strings.TrimSpace(icon)
-	if strings.TrimSpace(mapping.Color) == "" && mapping.Icon == "" {
+	if cwdMappingEmpty(mapping) {
+		delete(c.cwdColors, normalized)
+	} else {
+		c.cwdColors[normalized] = mapping
+	}
+	c.cwdColorsMu.Unlock()
+
+	c.saveCWDColors()
+}
+
+// cwdMappingEmpty reports whether a per-dir record carries no remembered state
+// and can be dropped from the map entirely. Used by every setter so that, e.g.,
+// resetting a directory's color does not also discard a saved tab name.
+func cwdMappingEmpty(m CWDColorMapping) bool {
+	return strings.TrimSpace(m.Color) == "" &&
+		strings.TrimSpace(m.Icon) == "" &&
+		strings.TrimSpace(m.Name) == "" &&
+		strings.TrimSpace(m.Group) == "" &&
+		!m.Pinned
+}
+
+// captureCWDIdentity records a name-locked window's identity (name + group +
+// pinned) for its directory so it can be restored later. It is called every
+// refresh for each locked window, so it only writes the map + persists to disk
+// when something actually changed — steady state does no I/O. Color/Icon for the
+// directory are left untouched. A locked window always has a name; an empty name
+// is treated as "nothing to capture".
+func (c *Coordinator) captureCWDIdentity(cwd, name, group string, pinned bool) {
+	normalized := normalizeCWD(cwd)
+	if normalized == "" {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	group = strings.TrimSpace(group)
+
+	c.cwdColorsMu.Lock()
+	mapping := c.cwdColors[normalized]
+	if mapping.Name == name && mapping.Group == group && mapping.Pinned == pinned {
+		c.cwdColorsMu.Unlock()
+		return // no change — skip the disk write
+	}
+	mapping.Name = name
+	mapping.Group = group
+	mapping.Pinned = pinned
+	c.cwdColors[normalized] = mapping
+	c.cwdColorsMu.Unlock()
+
+	c.saveCWDColors()
+}
+
+// clearCWDIdentity forgets a directory's saved tab identity (name/group/pinned),
+// leaving any color/icon mapping intact. If nothing remains, the entry is
+// dropped entirely. Backs the "Unlock Name" action so unlocking a tab stops it —
+// and future tabs in the same directory — from being re-named on the next refresh.
+func (c *Coordinator) clearCWDIdentity(cwd string) {
+	normalized := normalizeCWD(cwd)
+	if normalized == "" {
+		return
+	}
+
+	c.cwdColorsMu.Lock()
+	mapping, ok := c.cwdColors[normalized]
+	if !ok || (mapping.Name == "" && mapping.Group == "" && !mapping.Pinned) {
+		c.cwdColorsMu.Unlock()
+		return // nothing to clear — skip the disk write
+	}
+	mapping.Name = ""
+	mapping.Group = ""
+	mapping.Pinned = false
+	if cwdMappingEmpty(mapping) {
 		delete(c.cwdColors, normalized)
 	} else {
 		c.cwdColors[normalized] = mapping
@@ -2783,6 +3067,57 @@ func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
 	}
 }
 
+// applyCWDIdentityMappings persists and restores per-directory tab identity
+// (name + group + pinned). Runs each refresh, right after the color/icon pass,
+// on the same windows slice (which becomes c.windows) BEFORE syncWindowNames and
+// the grouping pass — so in-memory mirroring below is honored in the same cycle.
+//
+//   - Locked window (user named it): CAPTURE its name/group/pinned for its dir.
+//   - Unlocked window whose dir has a saved name: APPLY the saved name (and
+//     re-lock it), group, and pinned, then mirror the result in memory so this
+//     refresh's name-sync and grouping see the restored values.
+//
+// Every tmux exec is guarded on a value diff, so the locked steady state and
+// already-restored windows do no work.
+func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
+	for i := range windows {
+		cwd := firstPaneCWD(windows[i])
+		if cwd == "" {
+			continue
+		}
+
+		if windows[i].NameLocked {
+			// CAPTURE: keep this dir's record in sync with the user-configured
+			// window. captureCWDIdentity no-ops (no disk write) when unchanged.
+			c.captureCWDIdentity(cwd, windows[i].Name, windows[i].Group, windows[i].Pinned)
+			continue
+		}
+
+		rec, ok := c.getCWDColorMapping(cwd)
+		if !ok || strings.TrimSpace(rec.Name) == "" {
+			continue
+		}
+
+		// APPLY: restore the saved identity onto this auto-named window.
+		if windows[i].Name != rec.Name {
+			exec.Command("tmux", "rename-window", "-t", windows[i].ID, rec.Name).Run()
+		}
+		exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_name_locked", "1").Run()
+		windows[i].Name = rec.Name
+		windows[i].NameLocked = true
+
+		if g := strings.TrimSpace(rec.Group); g != "" && windows[i].Group != g {
+			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_group", g).Run()
+			windows[i].Group = g
+		}
+
+		if rec.Pinned && !windows[i].Pinned {
+			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_pinned", "1").Run()
+			windows[i].Pinned = true
+		}
+	}
+}
+
 // loadConfigCached returns the parsed config, using a mtime-keyed cache so
 // the steady-state RefreshWindows path skips the file read + YAML parse when
 // the user hasn't touched the config file. Returns nil only when the file
@@ -2852,6 +3187,7 @@ func (c *Coordinator) RefreshWindows() {
 	}
 
 	c.applyCWDColorIconMappings(windows)
+	c.applyCWDIdentityMappings(windows)
 
 	// Pre-load process tree BEFORE acquiring stateMu. loadProcessTree runs
 	// ps -A which can be slow; running it inside the lock blocks IncrementSpinner
@@ -3256,6 +3592,18 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 				if !wasBusy {
 					coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): -> BUSY (spinner=%v titleChanged=%v)",
 						pid, idx, pane.Command, hasSpinner, hasPrev && pane.Title != prevTitle)
+				}
+			} else if hasIdle {
+				// Claude Code shows its ✳ idle icon (U+2733) when it's waiting for
+				// the user. Surface the input indicator directly — not only on a
+				// busy->idle transition — so a tab parked at ✳ (wasBusy already
+				// false) still flags "?".
+				pane.AIInput = true
+				pane.AIBusy = false
+				c.prevPaneBusy[pid] = false
+				if wasBusy {
+					coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): -> INPUT (idle icon)",
+						pid, idx, pane.Command)
 				}
 			} else if wasBusy {
 				// busy -> idle: tool waiting for user input
@@ -9284,7 +9632,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			ind := c.config.Indicators
 
 			if ind.Busy.Enabled && win.Busy {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
+				alertStyle := indicatorStyle(ind.Busy.Color, win.Minimized, bgColor, theme.Bg)
 
 				busyFrames := c.getBusyFrames()
 				alertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
@@ -9293,7 +9641,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if inputIcon == "" {
 					inputIcon = "?"
 				}
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Input.Color))
+				alertStyle := indicatorStyle(ind.Input.Color, win.Minimized, bgColor, theme.Bg)
 
 				if len(ind.Input.Frames) > 0 {
 					alertIcon = alertStyle.Render(ind.Input.Frames[c.getSlowSpinnerFrame()%len(ind.Input.Frames)])
@@ -9354,13 +9702,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			// Build tab content - use visual position for display (stable sequential
 			// numbering that matches sidebar order regardless of tmux renumbering)
 			// Display is 1-indexed by default (configurable via @tabby_base_index)
-			displayName := win.Name
-			if isRawWindowID(displayName) {
-				displayName = "~" // automatic-rename hasn't fired yet
-			}
-			if win.AITitle != "" {
-				displayName = win.AITitle
-			}
+			displayName := c.composeTabBaseName(win)
 			// SSH/mosh: tab line shows the host; the actual window name is
 			// rendered as a continuation row below. The window name may be a
 			// " | "-joined list of dir basenames (see syncWindowNames) where
@@ -9391,17 +9733,22 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			menuBtnW := 2 // " ⋮"
 			windowContentWidth := width - prefixWidth - menuBtnW
 
-			// Truncate if needed
-			contentText := baseContent
-			if lipgloss.Width(contentText) > windowContentWidth {
-				truncated := ""
-				for _, r := range contentText {
-					if lipgloss.Width(truncated+string(r)) > windowContentWidth-1 {
-						break
-					}
-					truncated += string(r)
-				}
-				contentText = truncated + "~"
+			// Word-wrap the inline label across up to MaxLines rows. line 1 = the
+			// tab line; the rest become continuation rows. A remote (SSH) window
+			// keeps its single host/dir continuation instead of wrapping.
+			contRowWidth := width - 4 // " │ " leading (3) + 1-space chip pad
+			if contRowWidth < 1 {
+				contRowWidth = 1
+			}
+			maxLines := c.config.AI.TabSummary.MaxLines
+			if maxLines < 1 || remoteContinuation != "" {
+				maxLines = 1
+			}
+			wrapped := wrapTabLabel(baseContent, windowContentWidth, contRowWidth, maxLines)
+			contentText := wrapped[0]
+			contRows := wrapped[1:]
+			if remoteContinuation != "" {
+				contRows = []string{remoteContinuation}
 			}
 
 			// Styles for window collapse icon
@@ -9497,8 +9844,11 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			// Same bgColor as the tab line so the two rows read as one tab.
 			// windowStartLine was captured before the tab render, so the click
 			// regions below cover both rows.
-			if remoteContinuation != "" {
-				c.writeRemoteNameRow(&s, remoteContinuation, width, bgColor, fgColor, treeStyle, treeContinueChar, win.Minimized, isLastInGroup)
+			for _, row := range contRows {
+				if row == "" {
+					continue
+				}
+				c.writeRemoteNameRow(&s, row, width, bgColor, fgColor, treeStyle, treeContinueChar, win.Minimized, isLastInGroup)
 				currentLine++
 			}
 
@@ -9894,7 +10244,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		ind := c.config.Indicators
 
 		if ind.Busy.Enabled && win.Busy {
-			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Busy.Color))
+			alertStyle := indicatorStyle(ind.Busy.Color, win.Minimized, bgColor, theme.Bg)
 
 			busyFrames := c.getBusyFrames()
 			alertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
@@ -9903,7 +10253,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			if inputIcon == "" {
 				inputIcon = "?"
 			}
-			alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Input.Color))
+			alertStyle := indicatorStyle(ind.Input.Color, win.Minimized, bgColor, theme.Bg)
 
 			if len(ind.Input.Frames) > 0 {
 				alertIcon = alertStyle.Render(ind.Input.Frames[c.getSlowSpinnerFrame()%len(ind.Input.Frames)])
@@ -9957,13 +10307,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 		// Build tab content with group prefix
 		// Display is 0-indexed to match tmux window indices
-		displayName := win.Name
-		if isRawWindowID(displayName) {
-			displayName = "~" // automatic-rename hasn't fired yet
-		}
-		if win.AITitle != "" {
-			displayName = win.AITitle
-		}
+		displayName := c.composeTabBaseName(win)
 		// SSH/mosh: tab line shows host; window name renders as a continuation.
 		// Drop the host segment from " | "-joined names and skip the row when
 		// it would just repeat the host.
@@ -9993,17 +10337,22 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		}
 		windowContentWidth := width - prefixWidth
 
-		// Truncate if needed
-		contentText := baseContent
-		if lipgloss.Width(contentText) > windowContentWidth {
-			truncated := ""
-			for _, r := range contentText {
-				if lipgloss.Width(truncated+string(r)) > windowContentWidth-1 {
-					break
-				}
-				truncated += string(r)
-			}
-			contentText = truncated + "~"
+		// Word-wrap the inline label across up to MaxLines rows (line 1 = tab
+		// line; remainder = continuation rows). Remote windows keep their single
+		// host/dir continuation instead of wrapping.
+		contRowWidth := width - 4
+		if contRowWidth < 1 {
+			contRowWidth = 1
+		}
+		maxLines := c.config.AI.TabSummary.MaxLines
+		if maxLines < 1 || remoteContinuation != "" {
+			maxLines = 1
+		}
+		wrapped := wrapTabLabel(baseContent, windowContentWidth, contRowWidth, maxLines)
+		contentText := wrapped[0]
+		contRows := wrapped[1:]
+		if remoteContinuation != "" {
+			contRows = []string{remoteContinuation}
 		}
 
 		// Styles for window collapse icon
@@ -10057,14 +10406,19 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			currentLine++
 		}
 
-		// SSH/mosh continuation row: "│ name" as a chip extending right.
-		if remoteContinuation != "" {
+		// Continuation rows: SSH host/dir, or the wrapped overflow of the label.
+		{
 			rowBg := bgColor
 			if rowBg == "" {
 				rowBg = theme.Bg
 			}
-			c.writeRemoteNameRow(&s, remoteContinuation, width, rowBg, fgColor, treeStyle, treeContinueChar, win.Minimized, isLastWindow)
-			currentLine++
+			for _, row := range contRows {
+				if row == "" {
+					continue
+				}
+				c.writeRemoteNameRow(&s, row, width, rowBg, fgColor, treeStyle, treeContinueChar, win.Minimized, isLastWindow)
+				currentLine++
+			}
 		}
 
 		// Record window region for click handling
@@ -12295,12 +12649,12 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 
 	if clickY == layout.DebugLine3 {
 		if clickedToken(line3, "[q?]") {
-			coordinatorDebugLog.Printf("Debug bar: [q?] clicked, opening Q&A menu overlay")
-			// Ensure a question is set, then open the menu directly so the
+			coordinatorDebugLog.Printf("Debug bar: [q?] clicked, opening Q&A popup")
+			// Ensure a question is set, then open the popup directly so the
 			// debug button is a one-click path (the teaser-armed UX is still
 			// available the normal way for users without the debug bar).
 			c.forceQuestionTeaser()
-			c.launchQuestionMenu(clientID, menuPosition{X: clickX, Y: clickY})
+			c.launchQuestionPopup(clientID)
 			return true
 		}
 		return false
@@ -14247,8 +14601,8 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 	// through to whichever line the teaser overlapped (usually the row that
 	// would otherwise be a normal thought) and dispatch to the wrong action.
 	if c.pet.PendingQuestion != nil && layout.QuestionPromptLine >= 0 && clickY == layout.QuestionPromptLine {
-		coordinatorDebugLog.Printf("  -> Q&A teaser clicked, launching menu overlay")
-		c.launchQuestionMenu(clientID, menuPosition{PaneID: input.PaneID, X: input.MouseX, Y: input.MouseY})
+		coordinatorDebugLog.Printf("  -> Q&A teaser clicked, launching popup")
+		c.launchQuestionPopup(clientID)
 		return true
 	}
 
@@ -15041,6 +15395,23 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 		return
 	}
 
+	if strings.HasPrefix(item.Command, "tabby-unlock-window-name:") {
+		parts := strings.SplitN(item.Command, ":", 2)
+		if len(parts) == 2 {
+			if windowIndex, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+				// Forget the directory's saved tab identity so neither this tab
+				// nor future tabs in the same dir get re-named on the next refresh.
+				if cwd := c.resolveWindowCWD(windowIndex); cwd != "" {
+					c.clearCWDIdentity(cwd)
+				}
+				// Then drop the per-window lock so syncWindowNames auto-renames it
+				// back to the directory basename.
+				exec.Command("tmux", "set-window-option", "-t", c.windowTargetForIndex(windowIndex), "-u", "@tabby_name_locked").Run()
+			}
+		}
+		return
+	}
+
 	// Execute the tmux command via temp file (handles complex quoting correctly)
 	executeTmuxCommand(item.Command)
 }
@@ -15181,8 +15552,10 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d @tabby_name_locked 1\"", win.Name, win.Index, win.Index)
 	args = append(args, "Rename", "r", renameCmd)
 
-	// Unlock name option - allows syncWindowNames to auto-update from pane title
-	unlockCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_name_locked", win.Index)
+	// Unlock name option - routes through the daemon so it can forget the
+	// directory's saved name/group/pinned record (not just clear the per-window
+	// lock); otherwise applyCWDIdentityMappings would re-name + re-lock it next refresh.
+	unlockCmd := fmt.Sprintf("tabby-unlock-window-name:%d", win.Index)
 	args = append(args, "Unlock Name", "u", unlockCmd)
 
 	// Separator before group/appearance section
@@ -16256,7 +16629,7 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 		return
 	}
 	avail := width - leadingW
-	chipText := "  " + name // 2 cols of bg-only padding before the name
+	chipText := " " + name // 1 col of bg-only padding before the name (tight, for narrow sidebars)
 	if lipgloss.Width(chipText) > avail {
 		truncated := ""
 		for _, r := range chipText {
@@ -16573,6 +16946,25 @@ func dimColor(hexColor string, opacity float64) string {
 	g = int(float64(g) * opacity)
 	b = int(float64(b) * opacity)
 	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+}
+
+// indicatorStyle builds the lipgloss style for a busy/input indicator glyph.
+// When the window is minimized ("muted"), the glyph is dimmed toward the row
+// background (the same 0.55 blend used for minimized tab text) and fainted, so
+// the ?/spinner reads as muted instead of standing out at full brightness.
+func indicatorStyle(color string, minimized bool, bgColor, themeBg string) lipgloss.Style {
+	s := lipgloss.NewStyle()
+	if minimized {
+		blendBg := bgColor
+		if blendBg == "" {
+			blendBg = themeBg
+		}
+		if d := blendHexToward(color, blendBg, 0.55); d != "" {
+			color = d
+		}
+		s = s.Faint(true)
+	}
+	return s.Foreground(lipgloss.Color(color))
 }
 
 // HeaderColors holds the fg/bg colors for a pane header border.

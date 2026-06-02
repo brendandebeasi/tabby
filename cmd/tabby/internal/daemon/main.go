@@ -2776,6 +2776,16 @@ func Run(args []string) int {
 		go runTicker(loopCtx, 60*time.Second, func() { loop.submitCoalesced(&loop.flags.autoTheme, AutoThemeTickEvent{}) })
 		go runTicker(loopCtx, 3*time.Second, func() { loop.submitCoalesced(&loop.flags.socket, SocketCheckTickEvent{}) })
 		go runTicker(loopCtx, 10*time.Second, func() { loop.submitCoalesced(&loop.flags.idle, IdleTickEvent{}) })
+		// Auto tab-summary cadence (ai.tab_summary.interval_seconds, default 180s).
+		// Window renames also trigger a refresh (after-rename-window hook), so this
+		// poll is only a slow safety-net for in-place work changes within a tab.
+		// The handler no-ops cheaply when auto_generate is off, so it's safe to
+		// always run the ticker.
+		tabSummaryInterval := 180 * time.Second
+		if cfg := coordinator.GetConfig(); cfg != nil && cfg.AI.TabSummary.IntervalSeconds > 0 {
+			tabSummaryInterval = time.Duration(cfg.AI.TabSummary.IntervalSeconds) * time.Second
+		}
+		go runTicker(loopCtx, tabSummaryInterval, func() { loop.submitCoalesced(&loop.flags.tabSummary, TabSummaryTickEvent{}) })
 		// Setup-only goroutine: nothing to do after wiring tickers and
 		// restoring layouts. The signal_refresh consumer that lived here
 		// in earlier revisions is now Loop.handleRefreshSignal — every

@@ -41,6 +41,7 @@ type AutoThemeTickEvent struct{}
 type WatchdogTickEvent struct{}
 type IdleTickEvent struct{}
 type SocketCheckTickEvent struct{}
+type TabSummaryTickEvent struct{}
 
 // RefreshSignalEvent carries a refresh request — historically delivered
 // over the refreshCh channel from the main goroutine. Producers are: the
@@ -60,6 +61,7 @@ func (AutoThemeTickEvent) kind() string   { return "tick:auto_theme" }
 func (WatchdogTickEvent) kind() string    { return "tick:watchdog" }
 func (IdleTickEvent) kind() string        { return "tick:idle" }
 func (SocketCheckTickEvent) kind() string { return "tick:socket_check" }
+func (TabSummaryTickEvent) kind() string  { return "tick:tab_summary" }
 func (RefreshSignalEvent) kind() string   { return "signal:refresh" }
 
 // SignalEvent carries a SIGUSR1 / SIGUSR2 delivery into the loop. Step 3 of
@@ -318,6 +320,8 @@ func (l *Loop) dispatch(ev Event) {
 		l.handleIdleTick()
 	case SocketCheckTickEvent:
 		l.handleSocketCheckTick()
+	case TabSummaryTickEvent:
+		l.handleTabSummaryTick()
 	case SignalEvent:
 		l.handleSignal(e)
 	case TmuxHookEvent:
@@ -937,6 +941,14 @@ func (l *Loop) handleTeamClaudeTick() {
 	l.coord.RefreshTeamClaude()
 }
 
+// handleTabSummaryTick triggers auto tab-summary generation. Like the TeamClaude
+// handler, RefreshTabSummaries returns immediately and does the capture + LLM
+// work in a coalesced goroutine, so the event loop never blocks.
+func (l *Loop) handleTabSummaryTick() {
+	l.flags.tabSummary.Store(false)
+	l.coord.RefreshTabSummaries()
+}
+
 // handleAutoThemeTick is the migrated body of the autoThemeTicker case.
 func (l *Loop) handleAutoThemeTick() {
 	l.flags.autoTheme.Store(false)
@@ -1284,6 +1296,12 @@ func (l *Loop) handleTmuxHook(e TmuxHookEvent) {
 		// Queue a refresh so spawn/cleanup runs. Submitting through
 		// flags.usr1 collapses bursts (e.g. cmd+] mash) to one body run.
 		l.SubmitRefresh()
+	case "after-rename-window":
+		// A real window rename (CWD/project switch or manual rename) — refresh
+		// tab summaries immediately. RefreshTabSummaries is coalesced and
+		// content-hash-skipped, so only the changed window actually calls the
+		// LLM. Event-driven complement to the slow interval poll.
+		l.coord.RefreshTabSummaries()
 	case "after-resize-pane":
 		// The hook fires for any pane resize; the `tabby hook on-pane-resize`
 		// CLI side already filters to sidebar/header panes before sending,

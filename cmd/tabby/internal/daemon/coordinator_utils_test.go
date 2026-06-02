@@ -45,6 +45,23 @@ func TestFirstPaneCWD(t *testing.T) {
 		w := tmux.Window{Panes: []tmux.Pane{{CurrentPath: "/home/user/"}}}
 		assert.Equal(t, "/home/user", firstPaneCWD(w))
 	})
+
+	t.Run("skips_auxiliary_sidebar_pane", func(t *testing.T) {
+		// Pane 0 is Tabby's per-window sidebar (runs from $HOME); the project
+		// dir lives on the content pane. Must return the content pane's cwd.
+		w := tmux.Window{Panes: []tmux.Pane{
+			{Command: "tabby", StartCommand: "exec -a sidebar-renderer /x/bin/tabby sidebar", CurrentPath: "/Users/b"},
+			{Command: "nvim", CurrentPath: "/Users/b/git/infras"},
+		}}
+		assert.Equal(t, "/Users/b/git/infras", firstPaneCWD(w))
+	})
+
+	t.Run("falls_back_when_only_aux_panes", func(t *testing.T) {
+		w := tmux.Window{Panes: []tmux.Pane{
+			{Command: "tabby", StartCommand: "exec -a sidebar-renderer x", CurrentPath: "/Users/b"},
+		}}
+		assert.Equal(t, "/Users/b", firstPaneCWD(w))
+	})
 }
 
 func TestHeaderBoolDefault(t *testing.T) {

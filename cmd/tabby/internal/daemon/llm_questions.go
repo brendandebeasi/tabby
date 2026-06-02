@@ -37,7 +37,6 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/teilomillet/gollm"
-	"github.com/teilomillet/gollm/llm"
 )
 
 // llmQuestionsClient is a dedicated gollm client for question generation.
@@ -45,7 +44,7 @@ import (
 // max_tokens budget for JSON responses doesn't bleed into thought
 // generation, and so SetOption mutations on one don't race the other.
 // Initialised lazily inside initLLMQuestions; left nil until then.
-var llmQuestionsClient llm.LLM
+var llmQuestionsClient promptGenerator
 
 // llmQuestionsClientOnce guards lazy init so concurrent triggers don't both
 // race to build the same client. sync.Once is the standard pattern for "do
@@ -62,6 +61,7 @@ var (
 	llmQuestionsProvider string
 	llmQuestionsModel    string
 	llmQuestionsAPIKey   string
+	llmQuestionsBaseURL  string // OpenAI-compatible base URL (empty for gollm providers)
 )
 
 // questionBuffer caches parsed PendingQuestion entries ready to be drawn
@@ -118,26 +118,42 @@ const questionMaxTokens = 2000
 // users who never flip on LLMQuestions don't pay the client-construction
 // cost. Returns no error because failure here would silently disable the
 // feature anyway; the trigger entry point is the visible failure boundary.
-func initLLMQuestions(provider, model, apiKey string) {
+func initLLMQuestions(provider, model, apiKey, baseURL string) {
 	questionBufferPath = paths.StatePath("question_buffer.txt")
 	llmQuestionsProvider = provider
 	llmQuestionsModel = model
 	llmQuestionsAPIKey = apiKey
+	llmQuestionsBaseURL = baseURL
 
 	loadQuestionBuffer()
 }
 
-// ensureLLMQuestionsClient builds the dedicated gollm client on first use.
-// Subsequent calls are no-ops once it's built (or once the init has errored
-// once — we don't retry, same policy as the thoughts client).
+// ensureLLMQuestionsClient builds the dedicated question-generation client on
+// first use. Subsequent calls are no-ops once it's built (or once the init has
+// errored once — we don't retry, same policy as the thoughts client).
 //
 // Returns the client (possibly nil if init failed). Callers must nil-check.
-func ensureLLMQuestionsClient() llm.LLM {
+func ensureLLMQuestionsClient() promptGenerator {
 	llmQuestionsClientOnce.Do(func() {
 		provider := llmQuestionsProvider
 		if provider == "" {
 			provider = "anthropic"
 		}
+
+		// OpenAI-compatible providers use the direct HTTP client with the same
+		// settings as the thoughts client but a higher token budget for JSON.
+		if isOpenAICompatProvider(provider) {
+			url, key, mdl, referer, ok := openAICompatSettings(provider, llmQuestionsModel, llmQuestionsAPIKey, llmQuestionsBaseURL)
+			if !ok {
+				llmQuestionsClientInitErr = fmt.Errorf("provider %s: need a base URL, API key, and model", provider)
+				return
+			}
+			client := newOpenAICompatClient(url, key, mdl, questionMaxTokens, 0.8)
+			client.referer = referer
+			llmQuestionsClient = client
+			return
+		}
+
 		model := llmQuestionsModel
 		if model == "" {
 			switch provider {

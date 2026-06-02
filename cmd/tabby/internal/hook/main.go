@@ -83,6 +83,9 @@ func Run(allArgs []string) int {
 	case "after-select-window":
 		doHookAfterSelectWindow(args)
 		return 0
+	case "after-rename-window":
+		doHookAfterRenameWindow(args)
+		return 0
 	case "after-resize-pane":
 		doHookAfterResizePane(args)
 		return 0
@@ -649,6 +652,17 @@ func doHookAfterSelectWindow(args []string) {
 		hookArgs["window"] = args[0]
 	}
 	_ = sendHook("after-select-window", hookArgs)
+}
+
+// doHookAfterRenameWindow fires when a window is renamed (CWD/project switch or
+// manual rename). The daemon re-runs tab summaries (coalesced + hash-skipped),
+// so the renamed tab's label refreshes immediately on a context switch.
+func doHookAfterRenameWindow(args []string) {
+	hookArgs := map[string]string{}
+	if len(args) >= 1 {
+		hookArgs["window"] = args[0]
+	}
+	_ = sendHook("after-rename-window", hookArgs)
 }
 
 // doHookAfterResizePane forwards a tmux after-resize-pane hook. The

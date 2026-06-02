@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -220,6 +221,201 @@ func TestSetCWDIcon_PreservesExistingColor(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "#aabbcc", m.Color)
 	assert.Equal(t, "🌟", m.Icon)
+}
+
+func TestCaptureCWDIdentity_StoresNameGroupPinned(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	c.captureCWDIdentity("/home/user/project", "  api  ", "  Work  ", true)
+	m, ok := c.getCWDColorMapping("/home/user/project")
+	assert.True(t, ok)
+	assert.Equal(t, "api", m.Name, "name should be trimmed and stored")
+	assert.Equal(t, "Work", m.Group, "group should be trimmed and stored")
+	assert.True(t, m.Pinned)
+}
+
+func TestCaptureCWDIdentity_EmptyNameIsNoOp(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	c.captureCWDIdentity("/tmp/p", "   ", "Work", true)
+	_, ok := c.getCWDColorMapping("/tmp/p")
+	assert.False(t, ok, "an empty name carries nothing to capture")
+}
+
+func TestCaptureCWDIdentity_PreservesColorIcon(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	c.setCWDColor("/tmp/x", "#aabbcc")
+	c.setCWDIcon("/tmp/x", "🌟")
+	c.captureCWDIdentity("/tmp/x", "db", "Infra", true)
+
+	m, ok := c.getCWDColorMapping("/tmp/x")
+	assert.True(t, ok)
+	assert.Equal(t, "#aabbcc", m.Color, "capture must not disturb the saved color")
+	assert.Equal(t, "🌟", m.Icon, "capture must not disturb the saved icon")
+	assert.Equal(t, "db", m.Name)
+	assert.Equal(t, "Infra", m.Group)
+	assert.True(t, m.Pinned)
+}
+
+func TestClearCWDIdentity_RemovesIdentityKeepsColorIcon(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	c.setCWDColor("/tmp/x", "#aabbcc")
+	c.captureCWDIdentity("/tmp/x", "db", "Infra", true)
+
+	c.clearCWDIdentity("/tmp/x")
+	m, ok := c.getCWDColorMapping("/tmp/x")
+	assert.True(t, ok, "color mapping should survive an identity clear")
+	assert.Equal(t, "#aabbcc", m.Color)
+	assert.Equal(t, "", m.Name)
+	assert.Equal(t, "", m.Group)
+	assert.False(t, m.Pinned)
+}
+
+func TestClearCWDIdentity_DeletesEntryWhenNothingRemains(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	c.captureCWDIdentity("/tmp/only-name", "api", "", false)
+	_, ok := c.getCWDColorMapping("/tmp/only-name")
+	assert.True(t, ok)
+
+	c.clearCWDIdentity("/tmp/only-name")
+	_, ok = c.getCWDColorMapping("/tmp/only-name")
+	assert.False(t, ok, "entry should be removed when no color/icon/identity remains")
+}
+
+func TestParseAbbreviations(t *testing.T) {
+	m := parseAbbreviations([]string{
+		"TBY>Tabby",          // folder key is lower-cased for case-insensitive match
+		"  MP > my project ", // trimmed on both sides
+		"malformed-no-arrow",
+		">missingcode",
+		"missingfolder>",
+		"", // empty
+	})
+	assert.Equal(t, "TBY", m["tabby"])
+	assert.Equal(t, "MP", m["my project"])
+	assert.Len(t, m, 2, "malformed/empty entries are skipped")
+}
+
+func TestDirAbbreviation_CaseInsensitive(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.TabNames.Abbreviations = []string{"TBY>Tabby"}
+
+	for _, folder := range []string{"tabby", "Tabby", "TABBY"} {
+		code, ok := c.dirAbbreviation(folder)
+		assert.True(t, ok, "folder %q should match", folder)
+		assert.Equal(t, "TBY", code)
+	}
+	_, ok := c.dirAbbreviation("other")
+	assert.False(t, ok)
+}
+
+func TestComposeTabBaseName(t *testing.T) {
+	c := newTestCoordinator(t)
+
+	win := func(name, aiTitle string) tmux.Window {
+		return tmux.Window{ID: "@x", Name: name, AITitle: aiTitle}
+	}
+
+	cases := []struct {
+		desc, name, aiTitle, want string
+	}{
+		// Abbreviation is derived from the window NAME (respects renames); the
+		// summary follows the code, space-separated (render may wrap it).
+		{"summary: single word name", "tabby", "refactor auth", "TBY refactor auth"},
+		{"summary: short name kept whole", "foo", "do thing", "FOO do thing"},
+		{"summary: renamed tab with space", "API Server", "deploy now", "AS deploy now"},
+		{"summary: composite multi-pane name", "api | web", "fix bug", "API | WEB fix bug"},
+		// No summary -> code alone.
+		{"no summary: single word", "tabby", "", "TBY"},
+		{"no summary: composite name", "client | server", "", "CLN | SRV"},
+		// Plain fallbacks (no code).
+		{"raw window id -> ~", "@5", "", "~"},
+		{"home name stays plain", "~", "", "~"},
+		{"home with summary -> summary only", "~", "fix it", "fix it"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			assert.Equal(t, tc.want, c.composeTabBaseName(win(tc.name, tc.aiTitle)))
+		})
+	}
+}
+
+func TestComposeTabBaseName_AISummaryOnly(t *testing.T) {
+	// A Claude Code pane (IsAITool matches its semver process name).
+	aiWin := tmux.Window{ID: "@1", Name: "tabby", AITitle: "fixing tests",
+		Panes: []tmux.Pane{{ID: "%1", Command: "2.1.159"}}}
+	plainWin := tmux.Window{ID: "@2", Name: "tabby", AITitle: "fixing tests",
+		Panes: []tmux.Pane{{ID: "%1", Command: "nvim"}}}
+
+	t.Run("ai window drops the dir code", func(t *testing.T) {
+		c := newTestCoordinator(t)
+		c.config.AI.TabSummary.AISummaryOnly = true
+		assert.Equal(t, "fixing tests", c.composeTabBaseName(aiWin))
+	})
+
+	t.Run("non-ai window keeps the code", func(t *testing.T) {
+		c := newTestCoordinator(t)
+		c.config.AI.TabSummary.AISummaryOnly = true
+		assert.Equal(t, "TBY fixing tests", c.composeTabBaseName(plainWin))
+	})
+
+	t.Run("flag off keeps the code even for ai windows", func(t *testing.T) {
+		c := newTestCoordinator(t)
+		c.config.AI.TabSummary.AISummaryOnly = false
+		assert.Equal(t, "TBY fixing tests", c.composeTabBaseName(aiWin))
+	})
+}
+
+func TestWrapTabLabel(t *testing.T) {
+	// Single line when it fits.
+	assert.Equal(t, []string{"1. TB ok"}, wrapTabLabel("1. TB ok", 20, 20, 2))
+
+	// Wraps whole words across 2 lines; overflow ("sidebar") drops with a "~".
+	got := wrapTabLabel("1. INF setting sidebar", 8, 10, 2)
+	assert.Equal(t, []string{"1. INF", "setting~"}, got)
+
+	// Exactly fits 2 lines, no truncation marker.
+	assert.Equal(t, []string{"1. INF", "setting"}, wrapTabLabel("1. INF setting", 8, 10, 2))
+
+	// Overflow past maxLines truncates the last line with "~".
+	got2 := wrapTabLabel("1. AAA bbb ccc ddd eee", 6, 6, 2)
+	assert.Len(t, got2, 2)
+	assert.Contains(t, got2[1], "~")
+
+	// maxLines=1 behaves like single-line truncation.
+	got3 := wrapTabLabel("1. INF setting sidebar", 8, 8, 1)
+	assert.Len(t, got3, 1)
+	assert.Contains(t, got3[0], "~")
+}
+
+func TestComposeTabBaseName_ConfigOverridesAutoCode(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.TabNames.Abbreviations = []string{"ZZZ>tabby"} // override the auto "TBY"
+
+	win := tmux.Window{ID: "@1", Name: "tabby", AITitle: "refactor auth"}
+	assert.Equal(t, "ZZZ refactor auth", c.composeTabBaseName(win))
+}
+
+// TestCWDColorMapping_LegacyJSONBackCompat ensures the new Name/Group/Pinned
+// fields don't break deserialization of pre-existing cwd-colors.json entries
+// that only carry color/icon.
+func TestCWDColorMapping_LegacyJSONBackCompat(t *testing.T) {
+	var m CWDColorMapping
+	err := json.Unmarshal([]byte(`{"color":"#aabbcc","icon":"🚀"}`), &m)
+	assert.NoError(t, err)
+	assert.Equal(t, "#aabbcc", m.Color)
+	assert.Equal(t, "🚀", m.Icon)
+	assert.Equal(t, "", m.Name)
+	assert.Equal(t, "", m.Group)
+	assert.False(t, m.Pinned)
 }
 
 func TestComputeVisualPositions_EmptyGrouped(t *testing.T) {

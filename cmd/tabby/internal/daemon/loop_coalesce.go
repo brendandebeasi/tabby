@@ -20,6 +20,7 @@ type tickFlags struct {
 	watchdog   atomic.Bool
 	idle       atomic.Bool
 	socket     atomic.Bool
+	tabSummary atomic.Bool
 	// Signal flags — populated by the SIGUSR1/SIGUSR2 handler goroutine in
 	// main.go via submitCoalesced. A burst of refresh or resize signals
 	// collapses to one loop-side event.

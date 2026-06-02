@@ -14,11 +14,12 @@ import (
 
 	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/teilomillet/gollm"
-	"github.com/teilomillet/gollm/llm"
 )
 
-// llmClient is the global LLM client (nil if not configured)
-var llmClient llm.LLM
+// llmClient is the global LLM client (nil if not configured). Backed by gollm
+// for anthropic/openai/ollama, or by openAICompatClient for OpenAI-compatible
+// providers (fireworks/openrouter/openai-compatible).
+var llmClient promptGenerator
 
 // thoughtBuffer stores pre-generated thoughts to reduce API calls
 var thoughtBuffer []string
@@ -30,9 +31,26 @@ var lastThoughtGeneration time.Time
 var thoughtGenerationInterval = 12 * time.Hour
 
 // initLLM initializes the LLM client based on config
-func initLLM(provider, model, apiKey string) error {
+func initLLM(provider, model, apiKey, baseURL string) error {
 	if provider == "" {
 		provider = "anthropic"
+	}
+
+	// OpenAI-compatible providers (fireworks/openrouter/openai-compatible) use a
+	// direct HTTP client instead of gollm, whose registry doesn't expose them.
+	if isOpenAICompatProvider(provider) {
+		url, key, mdl, referer, ok := openAICompatSettings(provider, model, apiKey, baseURL)
+		if !ok {
+			return fmt.Errorf("provider %s: need a base URL, API key, and model", provider)
+		}
+		client := newOpenAICompatClient(url, key, mdl, 100, 0.9)
+		client.referer = referer
+		llmClient = client
+
+		thoughtBufferPath = paths.StatePath("thought_buffer.txt")
+		loadThoughtBuffer()
+		initLLMQuestions(provider, mdl, key, url)
+		return nil
 	}
 	if model == "" {
 		// Default to cheapest option
@@ -110,8 +128,8 @@ func initLLM(provider, model, apiKey string) error {
 	// Phase-3: stash the same provider/model/apiKey for the dedicated
 	// question-generation client (built lazily on first use only when the
 	// LLMQuestions config flag is flipped on). See llm_questions.go for
-	// the full pattern.
-	initLLMQuestions(provider, model, apiKey)
+	// the full pattern. baseURL is empty for gollm-backed providers.
+	initLLMQuestions(provider, model, apiKey, "")
 
 	return nil
 }

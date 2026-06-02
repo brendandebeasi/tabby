@@ -121,6 +121,14 @@ type rendererModel struct {
 	// Debounce generation counter for WindowSizeMsg (see resizeFlushMsg).
 	resizeGen int
 
+	// forceRepaint, when set, makes the next render bypass the content dedup
+	// and issue a full Bubble Tea repaint. Set after a resize settles: mosh
+	// re-runs its terminal emulation on resize and can wipe the (static) bar
+	// *after* Bubble Tea's resize repaint lands. With no content change,
+	// neither our dedup nor Bubble Tea's frame diff would ever re-emit the bar,
+	// leaving it blank-but-clickable until the user presses a button.
+	forceRepaint bool
+
 	// Render state from daemon
 	content       string
 	regions       []daemon.ClickableRegion
@@ -250,7 +258,10 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Dedup: if the visible content and height are unchanged, update only
 		// non-visual state (regions, sequence, theme) so View returns the same
 		// string and Bubble Tea's inline renderer suppresses the redraw.
-		if msg.payload.Content == m.content && msg.payload.Height == m.headerHeight {
+		// Skip the dedup when forceRepaint is set (a resize just settled and the
+		// on-screen bar may have been wiped by mosh); the bar must be redrawn
+		// even though the content string is byte-identical.
+		if !m.forceRepaint && msg.payload.Content == m.content && msg.payload.Height == m.headerHeight {
 			m.regions = msg.payload.Regions
 			m.sequenceNum = msg.payload.SequenceNum
 			m.sidebarBg = msg.payload.SidebarBg
@@ -265,6 +276,12 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.terminalBg = msg.payload.TerminalBg
 		m.clientProfile = msg.payload.ActiveClient.Profile
 		m.headerHeight = msg.payload.Height
+		if m.forceRepaint {
+			// Clear Bubble Tea's render cache so identical content is rewritten
+			// in full, recovering from a mosh resize wipe.
+			m.forceRepaint = false
+			return m, tea.ClearScreen
+		}
 		return m, nil
 
 	case tickMsg:
@@ -326,6 +343,12 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				inputLog.Printf("WINDOW_SIZE_FLUSH width=%d height=%d client=%s gen=%d", m.width, m.height, m.clientID, msg.gen)
 			}
 			m.sendResize()
+			// The bar's content is static (6 buttons), so mosh wiping the bar
+			// region during resize would otherwise persist until the next click.
+			// Force a full repaint now, and flag the incoming daemon render so it
+			// also bypasses the dedup once the new-width layout arrives.
+			m.forceRepaint = true
+			return m, tea.ClearScreen
 		}
 		return m, nil
 
@@ -717,8 +740,12 @@ func Run(args []string) int {
 	debugLog.Printf("Starting window header renderer for session %s, window %s (header pane: %s)", *sessionID, *windowID, headerPaneID)
 	crashLog.Printf("Window header renderer started for window %s, session %s (header pane: %s)", *windowID, *sessionID, headerPaneID)
 
-	// Force TrueColor mode for accurate theme rendering
-	lipgloss.SetColorProfile(termenv.TrueColor)
+	// Auto-detect color profile so Mosh clients (which don't forward COLORTERM)
+	// get 256-color instead of TrueColor sequences that Mosh can't handle cleanly.
+	// Forcing TrueColor made the bottom bar lose its background fill in Moshi
+	// (background SGR dropped) while staying clickable. Modern terminals set
+	// COLORTERM=truecolor via SSH so they still get TrueColor.
+	lipgloss.SetColorProfile(termenv.NewOutput(os.Stdout).ColorProfile())
 
 	// Reset terminal state before starting to clean up any stale modes
 	resetTerminal := func() {

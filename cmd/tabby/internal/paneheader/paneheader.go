@@ -684,8 +684,11 @@ func Run(args []string) int {
 	debugLog.Printf("Starting pane header renderer for session %s, pane %s (header pane: %s)", *sessionID, *paneID, headerPaneID)
 	crashLog.Printf("Header renderer started for pane %s, session %s (header pane: %s)", *paneID, *sessionID, headerPaneID)
 
-	// Force TrueColor mode for accurate theme rendering
-	lipgloss.SetColorProfile(termenv.TrueColor)
+	// Auto-detect color profile so Mosh clients (which don't forward COLORTERM)
+	// get 256-color instead of TrueColor sequences that Mosh can't handle cleanly.
+	// Forcing TrueColor made header fill drop in Moshi (background SGR dropped).
+	// Modern terminals set COLORTERM=truecolor via SSH so they still get TrueColor.
+	lipgloss.SetColorProfile(termenv.NewOutput(os.Stdout).ColorProfile())
 
 	// Reset terminal state before starting to clean up any stale modes
 	resetTerminal := func() {

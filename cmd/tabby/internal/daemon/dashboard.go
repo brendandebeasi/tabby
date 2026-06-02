@@ -96,6 +96,19 @@ type dashWindowSnapshot struct {
 	Group string
 	Path  string
 	Index int
+	// Sticky @tabby_* window options that define a tab's identity/appearance and
+	// must survive the gather/restore round-trip — origin windows are killed and
+	// recreated, so anything not snapshotted here is lost (this is why the AI
+	// summary title used to vanish after a dashboard toggle). Transient state
+	// (@tabby_busy/_bell/_activity/_silence/_input) is intentionally NOT captured;
+	// the daemon recomputes it each tick.
+	AITitle    string
+	Color      string
+	Icon       string
+	Pinned     string
+	Collapsed  string
+	Minimized  string
+	NameLocked string
 }
 
 // dashboardActiveWindowID returns the window_id of the dashboard window for the
@@ -133,9 +146,11 @@ func (c *Coordinator) enterDashboard() {
 	snaps := map[string]dashWindowSnapshot{}
 	var order []string
 	winOut := tmuxOutputTrimmed("list-windows", "-t", sess, "-F",
-		"#{window_id}\t#{window_index}\t#{window_name}\t#{@tabby_group}")
+		"#{window_id}\t#{window_index}\t#{window_name}\t#{@tabby_group}"+
+			"\t#{@tabby_ai_title}\t#{@tabby_color}\t#{@tabby_icon}\t#{@tabby_pinned}"+
+			"\t#{@tabby_collapsed}\t#{@tabby_minimized}\t#{@tabby_name_locked}")
 	for _, line := range dashLines(winOut) {
-		parts := strings.SplitN(line, "\t", 4)
+		parts := strings.SplitN(line, "\t", 11)
 		if len(parts) < 3 {
 			continue
 		}
@@ -145,14 +160,28 @@ func (c *Coordinator) enterDashboard() {
 			idx = n
 		}
 		name := parts[2]
-		group := ""
-		if len(parts) == 4 {
-			group = strings.TrimSpace(parts[3])
-		}
 		if id == "" || strings.HasPrefix(name, sidebarStashWindowPrefix) {
 			continue
 		}
-		snaps[id] = dashWindowSnapshot{Name: name, Group: group, Index: idx}
+		// field returns the trimmed nth part, or "" if the format emitted fewer.
+		field := func(n int) string {
+			if n < len(parts) {
+				return strings.TrimSpace(parts[n])
+			}
+			return ""
+		}
+		snaps[id] = dashWindowSnapshot{
+			Name:       name,
+			Group:      field(3),
+			Index:      idx,
+			AITitle:    field(4),
+			Color:      field(5),
+			Icon:       field(6),
+			Pinned:     field(7),
+			Collapsed:  field(8),
+			Minimized:  field(9),
+			NameLocked: field(10),
+		}
 		order = append(order, id)
 	}
 
@@ -350,6 +379,22 @@ func (c *Coordinator) exitDashboard() map[string]string {
 		}
 		if snap.Group != "" && snap.Group != "Default" {
 			_ = tmuxRun("set-window-option", "-t", newWin, "@tabby_group", snap.Group)
+		}
+		// Restore the sticky @tabby_* options dropped when the origin window was
+		// recreated — AI summary title, manual color/icon, pin/collapse/minimize,
+		// name lock — so the tab looks identical after a dashboard round-trip.
+		for _, o := range []struct{ name, val string }{
+			{"@tabby_ai_title", snap.AITitle},
+			{"@tabby_color", snap.Color},
+			{"@tabby_icon", snap.Icon},
+			{"@tabby_pinned", snap.Pinned},
+			{"@tabby_collapsed", snap.Collapsed},
+			{"@tabby_minimized", snap.Minimized},
+			{"@tabby_name_locked", snap.NameLocked},
+		} {
+			if o.val != "" {
+				_ = tmuxRun("set-window-option", "-t", newWin, o.name, o.val)
+			}
 		}
 		_ = tmuxRun("select-layout", "-t", newWin, "tiled")
 	}
