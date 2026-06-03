@@ -1256,8 +1256,13 @@ func (l *Loop) handleIdleTick() {
 		return
 	}
 
-	// Idle timeout if no clients
-	if l.server.ClientCount() == 0 {
+	// Idle timeout only when nobody is using the session: no daemon render
+	// clients (server socket) AND no tmux clients attached. The tmux check
+	// guards against suiciding while you're still attached but the render panes
+	// are briefly disconnected (e.g. right after a daemon restart) — which would
+	// otherwise strand the session with no daemon left to drive it. tmux is only
+	// queried in the already-rare 0-render-client case (short-circuit).
+	if l.server.ClientCount() == 0 && tmuxAttachedClients(l.deps.SessionID) == 0 {
 		if l.idleStart.IsZero() {
 			l.idleStart = time.Now()
 		} else if time.Since(l.idleStart) > 30*time.Second {
@@ -1272,6 +1277,23 @@ func (l *Loop) handleIdleTick() {
 	} else {
 		l.idleStart = time.Time{}
 	}
+}
+
+// tmuxAttachedClients returns how many tmux clients are attached to the session.
+// Used as a safety guard before idle-shutdown: a daemon should never exit while
+// a real user is attached, even if the render panes are momentarily disconnected.
+func tmuxAttachedClients(sessionID string) int {
+	out, err := exec.Command("tmux", "list-clients", "-t", sessionID, "-F", "#{client_tty}").Output()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // handleTmuxHook routes a tmux-hook delivery (now arriving as a socket

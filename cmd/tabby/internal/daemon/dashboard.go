@@ -310,19 +310,23 @@ func (c *Coordinator) exitDashboard() map[string]string {
 	}
 
 	// Group the dashboard's content panes by their recorded origin window.
+	// originName is read from the @tabby_dash_origin_name pane tag (set at gather
+	// time) so exit can restore window names even if the in-memory snapshot
+	// (c.dashboardOrigins) was lost — e.g. the daemon restarted while gathered.
 	groups := map[string][]string{}
+	originName := map[string]string{}
 	var groupOrder []string
 	paneOut := tmuxOutputTrimmed("list-panes", "-t", dashID, "-F",
-		"#{pane_id}\t#{@tabby_dash_origin}\t#{pane_current_command}\t#{pane_start_command}")
+		"#{pane_id}\t#{@tabby_dash_origin}\t#{@tabby_dash_origin_name}\t#{pane_current_command}\t#{pane_start_command}")
 	for _, line := range dashLines(paneOut) {
-		parts := strings.SplitN(line, "\t", 4)
-		if len(parts) < 3 {
+		parts := strings.SplitN(line, "\t", 5)
+		if len(parts) < 4 {
 			continue
 		}
-		pane, origin, cur := parts[0], strings.TrimSpace(parts[1]), parts[2]
+		pane, origin, oname, cur := parts[0], strings.TrimSpace(parts[1]), parts[2], parts[3]
 		start := ""
-		if len(parts) == 4 {
-			start = parts[3]
+		if len(parts) == 5 {
+			start = parts[4]
 		}
 		if isAuxiliaryPaneCommand(cur) || isSidebarPaneCommand(cur, start) {
 			continue
@@ -334,6 +338,9 @@ func (c *Coordinator) exitDashboard() map[string]string {
 			groupOrder = append(groupOrder, origin)
 		}
 		groups[origin] = append(groups[origin], pane)
+		if oname != "" && originName[origin] == "" {
+			originName[origin] = oname
+		}
 	}
 
 	// Restore in original index order first, then any leftovers/orphans.
@@ -374,8 +381,14 @@ func (c *Coordinator) exitDashboard() map[string]string {
 		if ph != "" && paneCount(newWin) > 1 {
 			_ = tmuxRun("kill-pane", "-t", ph)
 		}
-		if snap.Name != "" {
-			_ = tmuxRun("rename-window", "-t", newWin, snap.Name)
+		// Prefer the in-memory snapshot name; fall back to the pane tag so a
+		// daemon that restarted while gathered still restores window names.
+		name := snap.Name
+		if name == "" {
+			name = originName[origin]
+		}
+		if name != "" {
+			_ = tmuxRun("rename-window", "-t", newWin, name)
 		}
 		if snap.Group != "" && snap.Group != "Default" {
 			_ = tmuxRun("set-window-option", "-t", newWin, "@tabby_group", snap.Group)
