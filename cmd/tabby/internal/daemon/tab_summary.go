@@ -181,6 +181,21 @@ func capturePaneText(paneID string, lines int) string {
 	return string(out)
 }
 
+// asciiOnlyRules is the shared output-language constraint appended to every
+// summary prompt. Repeated and explicit because some small models (qwen,
+// gpt-oss) still slip Chinese/Cyrillic/emoji into the label when the terminal
+// content contains non-ASCII text. We tell the model exactly what's allowed
+// AND what's banned, with concrete reject examples — empirically this lands
+// the constraint better than a single soft sentence. A defense-in-depth ASCII
+// filter in truncateSummaryWords strips anything that still slips through.
+const asciiOnlyRules = " OUTPUT LANGUAGE: ENGLISH ONLY. " +
+	"Use ONLY the 26 lowercase ASCII letters a-z and ASCII digits 0-9, separated by " +
+	"single ASCII spaces. NO Chinese characters. NO Japanese. NO Korean. NO Cyrillic. " +
+	"NO Arabic. NO accented Latin (no á é í ñ ü). NO emoji. NO punctuation. NO quotes. " +
+	"NO markdown. NO explanation. If the terminal content is in another language, " +
+	"translate the gist into English first, then label in plain ASCII. If you cannot " +
+	"produce a valid ASCII label, reply with the single word \"work\". "
+
 // workPrompt asks for just the task/component (no project name), used when a
 // project abbreviation is configured and prepended deterministically.
 func workPrompt(content string) string {
@@ -188,8 +203,8 @@ func workPrompt(content string) string {
 		"terminal output below, reply with ONLY 2-3 short lowercase words for the " +
 		"specific component or task being worked on. Do NOT mention the project, repo, " +
 		"or directory name. Abbreviate aggressively (e.g. \"paperclip resend\", " +
-		"\"deploy fix\", \"gh token\"). Reply in English only using plain ASCII letters — " +
-		"never other languages or non-ASCII characters. No punctuation, no quotes, no explanation." +
+		"\"deploy fix\", \"gh token\")." +
+		asciiOnlyRules +
 		"\n\n--- terminal output ---\n" + content
 }
 
@@ -207,21 +222,52 @@ func summaryPrompt(project, content string) string {
 		"Based on the recent terminal output below, reply with ONLY a short lowercase " +
 		"label: the project abbreviation, then the component or task, then the action. " +
 		"Up to 4 short words, abbreviated aggressively (e.g. \"sd paperclip resend\", " +
-		"\"gp paperclip\", \"infra deploy fix\"). Reply in English only using plain ASCII " +
-		"letters — never other languages or non-ASCII characters. No punctuation, no quotes, no " +
-		"explanation.\n\n--- terminal output ---\n" + content
+		"\"gp paperclip\", \"infra deploy fix\")." +
+		asciiOnlyRules +
+		"\n\n--- terminal output ---\n" + content
 }
 
 // truncateSummaryWords cleans an LLM reply into a short label: strips control
-// chars, surrounding quotes and trailing punctuation, and keeps the first n words.
+// chars, forces ASCII-only (defense-in-depth against the prompt's
+// English-only constraint occasionally being ignored — Chinese/CJK/Cyrillic
+// would otherwise reach the sidebar and render as boxes or "?"s), strips
+// surrounding quotes and trailing punctuation, and keeps the first n words.
 func truncateSummaryWords(s string, n int) string {
 	s = strings.TrimSpace(stripControl(s))
+	s = stripNonASCIIWord(s)
 	s = strings.Trim(s, "\"'`.,:;!?-")
 	fields := strings.Fields(s)
 	if n > 0 && len(fields) > n {
 		fields = fields[:n]
 	}
 	return strings.Join(fields, " ")
+}
+
+// stripNonASCIIWord drops any rune that isn't printable ASCII, lowercasing
+// uppercase Latin in the process. Multi-byte runes (CJK, accented Latin,
+// emoji) become nothing, so a label like "deploy 部署 fix" collapses to
+// "deploy fix" — preferable to letting boxes/replacement chars into the
+// sidebar. Spaces between surviving runs of letters/digits are preserved so
+// truncateSummaryWords' Fields split still works.
+func stripNonASCIIWord(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= '0' && r <= '9',
+			r == ' ', r == '-', r == '_':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		default:
+			// Drop. Multi-byte rune → 0 ASCII bytes; isolated punctuation
+			// → dropped (truncateSummaryWords' trailing Trim handled it
+			// before, but only at the edges — a CJK char mid-string would
+			// have survived without this).
+		}
+	}
+	return b.String()
 }
 
 func hashString(s string) string {

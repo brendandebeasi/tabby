@@ -603,6 +603,13 @@ type Coordinator struct {
 	teamClaudeFetchedAt time.Time
 	teamClaudeFetching  atomic.Bool
 
+	// teamClaudeModels is the cached degraded-model map from GET
+	// /teamclaude/models, fetched alongside status in the same RefreshTeamClaude
+	// goroutine. An actively-degraded model swaps the widget header icon to a
+	// warning glyph. Older servers 404 on this endpoint -> empty map (no warning).
+	teamClaudeModels    teamclaude.Models
+	teamClaudeModelsErr error
+
 	// Pet state
 	pet petState
 
@@ -4419,12 +4426,20 @@ func (c *Coordinator) RefreshTeamClaude() {
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
 		status, err := teamclaude.Fetch(ctx, url, apiKey)
+		// Degraded-model state shares the same fetch cycle. Best-effort: a
+		// models error never blocks the status update (and 404 on older
+		// servers is already mapped to an empty map by FetchModels).
+		models, modelsErr := teamclaude.FetchModels(ctx, url, apiKey)
 
 		c.stateMu.Lock()
 		c.teamClaudeFetchedAt = time.Now()
 		c.teamClaudeErr = err
 		if err == nil {
 			c.teamClaudeStatus = status
+		}
+		c.teamClaudeModelsErr = modelsErr
+		if modelsErr == nil {
+			c.teamClaudeModels = models
 		}
 		c.stateMu.Unlock()
 
@@ -4440,13 +4455,18 @@ func (c *Coordinator) RefreshTeamClaude() {
 func (c *Coordinator) GetTeamClaudeStateHash() string {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
+	// Degraded-model fingerprint: only the actively-downgraded set matters for
+	// the icon (and it must flip the hash so OnRefreshLayout fires). Computed
+	// here so it is reflected even when status hasn't loaded yet.
+	degraded := "deg=" + strings.Join(c.teamClaudeModels.ActiveDegradations(time.Now().UnixMilli()), ",") + ";"
 	if c.teamClaudeStatus == nil {
 		if c.teamClaudeErr != nil {
-			return "err:" + c.teamClaudeErr.Error()
+			return "err:" + c.teamClaudeErr.Error() + ";" + degraded
 		}
-		return "nil"
+		return "nil;" + degraded
 	}
 	var b strings.Builder
+	b.WriteString(degraded)
 	fmt.Fprintf(&b, "cur=%s;", c.teamClaudeStatus.CurrentAccount)
 	for _, a := range c.teamClaudeStatus.Accounts {
 		sess, wk := -1.0, -1.0
@@ -10794,6 +10814,8 @@ func (c *Coordinator) renderWidgetZone(entries []widgetEntry, width int) (string
 		"pet:drop_food", "pet:air_high", "pet:air_low", "pet:ground",
 		// Button zones
 		"sidebar:new_tab", "sidebar:new_group", "sidebar:close_tab",
+		// TeamClaude degraded-model warning -> opens popup
+		"teamclaude:open_degraded",
 		// Sidebar zones
 		"sidebar:shrink", "sidebar:grow",
 		"sidebar:prev_window", "sidebar:next_window",
@@ -11309,7 +11331,9 @@ type quotaCell struct {
 }
 
 // shortResetDur formats the time until an epoch-millisecond reset as a compact
-// "Nm"/"Nh"/"Nd" string. Returns "" when the time is unknown or already past.
+// string. Returns "" when the time is unknown or already past. Granularity steps
+// down as the remaining time shrinks: 1d3h for >=24h (minutes dropped), 1h30m
+// for >=1h, 45m for <1h.
 func shortResetDur(resetMs int64) string {
 	if resetMs <= 0 {
 		return ""
@@ -11322,9 +11346,36 @@ func shortResetDur(resetMs int64) string {
 	case d < time.Hour:
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
+		h := int(d / time.Hour)
+		m := int((d % time.Hour) / time.Minute)
+		if m == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh%dm", h, m)
 	default:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
+		days := int(d / (24 * time.Hour))
+		h := int((d % (24 * time.Hour)) / time.Hour)
+		if h == 0 {
+			return fmt.Sprintf("%dd", days)
+		}
+		return fmt.Sprintf("%dd%dh", days, h)
+	}
+}
+
+// formatExtraDollars renders a dollar amount compactly for the TeamClaude
+// widget's extra-usage suffix ("$rem/$lim"). Sidebar real estate is precious,
+// so we drop cents past $10 and use a "k" suffix past $1000.
+func formatExtraDollars(v float64) string {
+	if v < 0 {
+		v = 0
+	}
+	switch {
+	case v >= 1000:
+		return fmt.Sprintf("%.1fk", v/1000)
+	case v >= 10:
+		return fmt.Sprintf("%d", int(v+0.5))
+	default:
+		return fmt.Sprintf("%.2f", v)
 	}
 }
 
@@ -11382,6 +11433,8 @@ func (c *Coordinator) renderTeamClaudeWidget(width int) string {
 	// their cached fields under the caller's lock.
 	status := c.teamClaudeStatus
 	fetchErr := c.teamClaudeErr
+	degradedModels := c.teamClaudeModels.ActiveDegradations(time.Now().UnixMilli())
+	degraded := len(degradedModels) > 0
 
 	var result strings.Builder
 
@@ -11426,6 +11479,20 @@ func (c *Coordinator) renderTeamClaudeWidget(width int) string {
 	case "ascii":
 		icon = "[TC] "
 	}
+	// When a model is actively being downgraded by the proxy, swap the header
+	// icon for a warning glyph (same display width, so the ANSI-truncation trap
+	// stays irrelevant). The whole header is then rendered in a warning color and
+	// made clickable to open the degraded-models popup.
+	if degraded {
+		switch style {
+		case "emoji":
+			icon = "⚠️ "
+		case "ascii":
+			icon = "[!] "
+		default:
+			icon = " " // nf-fa-warning (U+F071)
+		}
+	}
 
 	// Which quota windows to show. The header carries a "[S/W]" legend so the
 	// per-account rows can drop the labels and just show bars + percentages.
@@ -11441,8 +11508,32 @@ func (c *Coordinator) renderTeamClaudeWidget(width int) string {
 	if showWeekly {
 		legendParts = append(legendParts, "W")
 	}
+	// Header decoration when the proxy has fallen onto a paid extra-usage tier:
+	// append "[$]" so the sidebar telegraphs "paid territory" even before the
+	// per-account row is scanned. Distinct from the degraded-model warning.
+	extraActive := status.AnyActiveExtraUsage()
 	header := icon + "TeamClaude [" + strings.Join(legendParts, "/") + "]"
-	result.WriteString(labelStyle.Render(runewidth.Truncate(header, width, "")) + "\n")
+	if extraActive {
+		header += " [$]"
+	}
+	// Truncate on the PLAIN text (markers/ANSI added afterward) so width math is
+	// correct; zone.Mark's bytes are zero-width and stripped before
+	// constrainWidgetWidth.
+	headerText := runewidth.Truncate(header, width, "")
+	headerStyle := labelStyle
+	switch {
+	case degraded:
+		headerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd93d")).Bold(true)
+	case extraActive:
+		// Amber-but-not-bold so it's clearly a "heads up" without screaming as
+		// loudly as a degraded model.
+		headerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd93d"))
+	}
+	renderedHeader := headerStyle.Render(headerText)
+	if degraded {
+		renderedHeader = zone.Mark("teamclaude:open_degraded", renderedHeader)
+	}
+	result.WriteString(renderedHeader + "\n")
 
 	switch {
 	case status == nil && fetchErr != nil:
@@ -11584,11 +11675,68 @@ func (c *Coordinator) renderTeamClaudeWidget(width int) string {
 			if a.RateLimited() {
 				marker = "!"
 			}
+			// When this account is currently being charged on its extra-usage
+			// (overage) budget, swap the marker for a "$" so the row is unmistakably
+			// in paid-territory at a glance. Rate-limited still wins.
+			if a.IsActiveExtraUsage && !a.RateLimited() {
+				marker = "$"
+			}
 			// Truncate the plain name (reserving 1 col for the marker) before
 			// coloring, so the colored line doesn't exceed the sidebar and trigger
 			// constrainWidgetWidth's lossy truncation.
-			name := marker + teamClaudeTruncateName(teamClaudeDisplayName(a.Name), width-runewidth.StringWidth(marker))
-			result.WriteString(labelStyle.Render(name) + "\n")
+			markerW := runewidth.StringWidth(marker)
+			plainName := marker + teamClaudeTruncateName(teamClaudeDisplayName(a.Name), width-markerW)
+			// Color: warning amber when this account is the live extra-usage one,
+			// so the whole row stands out. Otherwise default label color.
+			nameStyle := labelStyle
+			if a.IsActiveExtraUsage {
+				warnFg := lipgloss.Color("#ffd93d")
+				nameStyle = lipgloss.NewStyle().Foreground(warnFg).Bold(true)
+			}
+			result.WriteString(nameStyle.Render(plainName) + "\n")
+
+			// Extra-usage budget on its OWN line under the name so it stays
+			// visible even on a narrow sidebar (where a right-aligned suffix would
+			// have been the first thing to get dropped). Indented to align with
+			// where the name text starts.
+			if a.HasExtraUsageBudget() && a.IsActiveExtraUsage {
+				rem := 0.0
+				if a.ExtraUsageRemaining != nil {
+					rem = *a.ExtraUsageRemaining
+				}
+				budgetText := fmt.Sprintf("$%s/$%s", formatExtraDollars(rem), formatExtraDollars(*a.ExtraUsageLimit))
+				indent := strings.Repeat(" ", markerW)
+				// Spend indicator: black text on a cyan background so it reads as a
+				// distinct "money" chip. Low headroom escalates the BACKGROUND
+				// (cyan -> amber -> red) while keeping black text legible on all
+				// three; the active extra-usage row gets a bold cyan chip.
+				const chipFg = "#000000"
+				chipBg := "#36d6e7" // cyan — normal headroom
+				if *a.ExtraUsageLimit > 0 {
+					switch frac := rem / *a.ExtraUsageLimit; {
+					case frac < 0.15:
+						chipBg = "#ff6b6b" // red — almost spent
+					case frac < 0.40:
+						chipBg = "#ffd93d" // amber — getting low
+					}
+				}
+				bStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color(chipFg)).
+					Background(lipgloss.Color(chipBg))
+				if a.IsActiveExtraUsage {
+					bStyle = bStyle.Bold(true)
+				}
+				// Truncate to fit width (indent + text); the leading "$" makes the
+				// purpose obvious even if the trailing limit is cut.
+				avail := width - runewidth.StringWidth(indent)
+				if avail < 1 {
+					avail = 1
+				}
+				if runewidth.StringWidth(budgetText) > avail {
+					budgetText = runewidth.Truncate(budgetText, avail, "")
+				}
+				result.WriteString(labelStyle.Render(indent) + bStyle.Render(budgetText) + "\n")
+			}
 
 			var cells []quotaCell
 			if showSession {
@@ -13434,6 +13582,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		go c.saveCollapsedGroups()
 		return false // No tmux window state change
 
+	case "open_degraded":
+		// Click on the TeamClaude widget's warning icon -> open the
+		// degraded-models popup.
+		c.launchDegradedModelsPopup(clientID)
+		return true
+
 	case "button":
 		switch input.ResolvedTarget {
 		case "new_tab":
@@ -14849,6 +15003,33 @@ func (c *Coordinator) launchQuestionPopup(clientID string) {
 	escSess := strings.ReplaceAll(sessID, "'", `'\''`)
 	popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
 	go exec.Command("tmux", "display-popup", "-E", "-w", "60%", "-h", "30%",
+		"--", popupCmd).Run()
+}
+
+// launchDegradedModelsPopup spawns the TeamClaude degraded-models popup via
+// `tmux display-popup`, mirroring launchQuestionPopup. The popup binary
+// (cmd/tabby/internal/degradedmodelspopup, dispatched via
+// `tabby render degraded-models-popup`) fetches the proxy's degraded-model map
+// itself and renders a TUI with the downgraded models, their fallback targets,
+// reset countdowns, and quick links to status.anthropic.com / downdetector.
+// We don't block on it — display-popup -E keeps it attached and closes on Esc.
+func (c *Coordinator) launchDegradedModelsPopup(clientID string) {
+	_ = clientID
+	sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+	sessID := strings.TrimSpace(string(sessIDOut))
+	if sessID == "" {
+		sessID = c.sessionID
+	}
+	popupBin := rendererExecPrefix("tabby-degraded-models-popup", "degraded-models-popup")
+	if popupBin == "" || sessID == "" {
+		coordinatorDebugLog.Printf("  -> launchDegradedModelsPopup: missing popupBin=%q or sessID=%q", popupBin, sessID)
+		return
+	}
+	// display-popup's shell-command MUST be a single argument (see
+	// launchQuestionPopup for the flash-open-then-close failure mode otherwise).
+	escSess := strings.ReplaceAll(sessID, "'", `'\''`)
+	popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
+	go exec.Command("tmux", "display-popup", "-E", "-w", "60%", "-h", "40%",
 		"--", popupCmd).Run()
 }
 

@@ -176,6 +176,104 @@ cause errors.
 
 ---
 
+### Antigravity CLI (`agy`)
+
+Google's Antigravity CLI (the `agy` binary, Gemini-based, config under
+`~/.gemini/antigravity-cli/`) has no `tabby-hook`-style lifecycle hooks, but it
+has something better for our purposes: a **`statusLine` command** that the TUI
+runs **on every agent-state change**, piping a JSON payload to the script's
+stdin and rendering the script's stdout in its status bar.
+
+We exploit that invocation to mirror the agent state into the terminal **title**
+using the same glyphs Claude Code uses, so tabby's existing passive detection
+lights up the busy/input indicator -- no `tabby-hook`, no daemon changes, and it
+rides over SSH like any other title.
+
+```
+  agy agent-state change
+        │  (JSON on stdin: agent_state, model, vcs, context_window, …)
+        ▼
+  tabby-statusline.sh  ── reads agent_state
+        │                  "idle"|"" -> ✳   else -> ⠿ (braille)
+        ▼
+  OSC 0 title -> /dev/tty   (NOT stdout: agy consumes stdout)
+        ▼
+  tabby passive detection (HasSpinner / HasIdleIcon)
+        ▼
+  sidebar busy (spinner) / input (?) indicator
+```
+
+The `agent_state` mapping mirrors the `agy-hud` plugin's rule: `idle`
+(case-insensitive) means settled / your turn; any other non-empty value means
+actively working.
+
+**1. Register `agy` as an AI tool** in tabby's `config.yaml` -- its process name
+is `agy` (not a semver like Claude Code), so it isn't auto-detected:
+
+```yaml
+busy_detection:
+  ai_tools:
+    - agy
+```
+
+**2. Bridge script** at `~/.gemini/antigravity-cli/tabby-statusline.sh`
+(`chmod +x`):
+
+```bash
+#!/usr/bin/env bash
+set -u
+payload="$(cat)"
+state="" model="" branch=""
+if command -v jq >/dev/null 2>&1 && [ -n "$payload" ]; then
+  state="$(printf '%s' "$payload"  | jq -r '(.agent_state // "") | ascii_downcase | gsub("\\s";"")' 2>/dev/null)"
+  model="$(printf '%s' "$payload"  | jq -r '(.model.display_name // .model.id // "")' 2>/dev/null)"
+  branch="$(printf '%s' "$payload" | jq -r '(.vcs.branch // "")' 2>/dev/null)"
+fi
+case "$state" in
+  ""|idle) glyph="✳" ;;   # U+2733 -> tabby INPUT ("?")
+  *)       glyph="⠿" ;;   # braille U+28xx -> tabby BUSY (spinner)
+esac
+label="${model:-agy}"; [ -n "$branch" ] && label="${label}  ${branch}"
+# Write to the controlling tty, NOT stdout (agy renders stdout in its bar):
+{ printf '\033]0;%s %s\007' "$glyph" "$label" > /dev/tty; } 2>/dev/null || true
+printf '%s %s' "$glyph" "$label"
+```
+
+**3. Wire it into** `~/.gemini/antigravity-cli/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/absolute/path/to/.gemini/antigravity-cli/tabby-statusline.sh",
+    "stack_with_default": true
+  }
+}
+```
+
+`stack_with_default: true` keeps agy's native status bar and stacks our line
+above it. Restart any already-running `agy` sessions -- `settings.json` is read
+at launch.
+
+**Payload fields** (top-level): `cwd`, `conversation_id`, `model` (`id`,
+`display_name`), `workspace` (`current_dir`, `project_dir`), `version`,
+`context_window` (`used_percentage`, …), `agent_state`, `vcs` (`type`, `branch`,
+`dirty`), `sandbox`, `plan_tier`, `email`, `terminal_width`.
+
+**SSH / remote agy**: install the same bridge + `settings.json` on the remote
+host. Over SSH the local pane command is `ssh` (not `agy`), so tabby won't
+compute its own indicator -- but the remote-set title still propagates into the
+sidebar label, so the ⠿/✳ glyph shows there exactly like a remote Claude Code
+session.
+
+**Alternative (explicit hook path)**: instead of setting the title, the bridge
+can call `tabby-hook set-indicator` directly (`busy 1` when `state` is non-idle,
+`busy 0` + `input 1` when idle). That gives a true tmux-option indicator even
+over SSH, but requires `tabby-hook` on the remote PATH; the title approach does
+not.
+
+---
+
 ### OpenAI Codex CLI
 
 **Config**: `~/.codex/config.toml`
@@ -400,6 +498,7 @@ changes that aren't work-related.
 |-------------|-------------|------------|----------|-------|-------|--------------------------------|
 | Claude Code | 13          | Yes        | Yes      | Yes   | Yes   | Most comprehensive             |
 | Gemini CLI  | 11          | Yes        | Yes      | Yes   | Yes   | Must echo '{}' to stdout       |
+| Antigravity (`agy`) | statusLine | Yes | Yes  | Yes   | No    | statusLine->title bridge; add to ai_tools |
 | Codex CLI   | 1           | No*        | Yes      | Yes   | No*   | Use shell wrapper for start    |
 | Aider       | 1           | No*        | N/A      | Yes   | No*   | Use shell wrapper for start    |
 | OpenCode    | 5+          | No*        | Yes      | Yes   | Yes   | Plugin system, needs wrapper   |

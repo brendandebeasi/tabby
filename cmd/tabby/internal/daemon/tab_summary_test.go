@@ -21,6 +21,14 @@ func TestTruncateSummaryWords(t *testing.T) {
 		{"line one\nline two", 3, "line one line"},
 		{"keep all", 0, "keep all"}, // n=0 means no truncation
 		{"", 3, ""},
+		// ASCII-only filter: non-Latin scripts and emoji must be stripped so
+		// they never reach the sidebar (the small LLMs we use sometimes
+		// ignore the prompt's English-only constraint on non-English input).
+		{"deploy 部署 fix", 3, "deploy fix"},
+		{"тест работы", 3, ""},     // pure Cyrillic -> empty (caller skips)
+		{"build 🚀 done", 3, "build done"}, // emoji dropped
+		{"CAFÉ deploy", 3, "caf deploy"},   // é dropped (no transliteration), CAFE lowercased
+		{"UPPER case", 3, "upper case"},    // ASCII uppercase folded to lowercase
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, truncateSummaryWords(tc.in, tc.n), tc.in)
