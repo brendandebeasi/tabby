@@ -259,6 +259,12 @@ func projectBasename(win tmux.Window, key string) string {
 		}
 	}
 	if cwd := firstPaneCWD(win); cwd != "" {
+		if isHomeDir(cwd) {
+			// $HOME is not a project — return no basename so the summary prompt
+			// carries no project hint and the LLM produces a pure content/task
+			// label (not "b ...") for a window running in the home dir.
+			return ""
+		}
 		return filepath.Base(cwd)
 	}
 	return ""

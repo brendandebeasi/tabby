@@ -2702,6 +2702,33 @@ func normalizeCWD(cwd string) string {
 	return filepath.Clean(cwd)
 }
 
+// daemonHomeDir is the user's home directory (normalized), resolved once. A
+// window whose content pane runs directly in $HOME has no project identity:
+// keying it on $HOME would make every such window (e.g. a Claude Code session
+// started from the home dir) collide on one shared name/color/lock — the
+// "$HOME trap". Such windows are treated as keyless so they flow into the
+// per-window AI-summary path instead.
+var daemonHomeDir = func() string {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return normalizeCWD(h)
+}()
+
+// cwdIsHome reports whether cwd is the given home directory (both normalized).
+// Pure form for testability; isHomeDir wraps it with the resolved daemonHomeDir.
+func cwdIsHome(cwd, home string) bool {
+	if cwd == "" || home == "" {
+		return false
+	}
+	return normalizeCWD(cwd) == normalizeCWD(home)
+}
+
+func isHomeDir(cwd string) bool {
+	return cwdIsHome(cwd, daemonHomeDir)
+}
+
 // firstPaneCWD returns the working directory of the window's first CONTENT pane,
 // skipping Tabby's own auxiliary panes (the per-window sidebar renderer / header).
 // Those aux panes run from $HOME, so using Panes[0] blindly would make every
@@ -2811,6 +2838,13 @@ func (c *Coordinator) windowNameKey(win tmux.Window) (string, bool) {
 	}
 	cwd := firstPaneCWD(win)
 	if cwd == "" {
+		return "", false
+	}
+	if isHomeDir(cwd) {
+		// $HOME has no project identity — keyless, so this window is named
+		// per-window via the AI summary rather than sharing one $HOME name.
+		// Checked before gitToplevel so a $HOME that is itself a git repo
+		// (dotfiles) still doesn't become a shared key.
 		return "", false
 	}
 	if top := c.gitToplevel(cwd); top != "" {
