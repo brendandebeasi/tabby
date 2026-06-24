@@ -1319,11 +1319,14 @@ func (l *Loop) handleTmuxHook(e TmuxHookEvent) {
 		// flags.usr1 collapses bursts (e.g. cmd+] mash) to one body run.
 		l.SubmitRefresh()
 	case "after-rename-window":
-		// A real window rename (CWD/project switch or manual rename) — refresh
-		// tab summaries immediately. RefreshTabSummaries is coalesced and
-		// content-hash-skipped, so only the changed window actually calls the
-		// LLM. Event-driven complement to the slow interval poll.
-		l.coord.RefreshTabSummaries()
+		// A window rename (CWD/project switch, manual rename, or our OWN AI
+		// rename echoing back) — schedule a tab-summary pass. Route through the
+		// same coalescing flag as the interval tick so a burst of renames (an
+		// active tab whose title updates rapidly, or our own rename re-firing this
+		// hook) collapses to a single pass instead of hammering the loop. The
+		// per-window summaryCooldown in RefreshTabSummaries then bounds how often
+		// any one window is actually re-named, which is what breaks the storm.
+		l.submitCoalesced(&l.flags.tabSummary, TabSummaryTickEvent{})
 	case "after-resize-pane":
 		// The hook fires for any pane resize; the `tabby hook on-pane-resize`
 		// CLI side already filters to sidebar/header panes before sending,

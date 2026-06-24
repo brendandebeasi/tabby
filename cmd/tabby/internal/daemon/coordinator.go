@@ -675,6 +675,13 @@ type Coordinator struct {
 	summaryFetching   atomic.Bool
 	summaryHashMu     sync.Mutex
 	summaryHash       map[string]string
+	// summaryLastAt records when each window was last summarized (guarded by
+	// summaryHashMu). A per-window cooldown (summaryCooldown) bounds how often a
+	// window can be re-named: without it, an active tab whose pane content keeps
+	// changing re-summarizes on every trigger, and because tabby's own
+	// rename-window fires the after-rename-window hook, it self-perpetuates into
+	// a rename storm.
+	summaryLastAt map[string]time.Time
 
 	// Last known width (for pet physics clamping)
 	lastWidth int

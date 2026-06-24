@@ -22,6 +22,12 @@ import (
 	"github.com/teilomillet/gollm"
 )
 
+// summaryCooldown is the minimum time between LLM re-summarizations of the same
+// window. It bounds how fast an actively-changing tab can be renamed, which both
+// keeps names readable (no per-second flapping) and breaks the
+// rename -> after-rename-window hook -> re-summarize -> rename feedback loop.
+const summaryCooldown = 60 * time.Second
+
 // ensureSummaryClient lazily builds the summary LLM client from the
 // ai.tab_summary config. Defaults (when unset) to the self-hosted Ollama GPU
 // endpoint at ollama.vm.dbz.xyz serving qwen2.5:7b-instruct — free local
@@ -119,6 +125,26 @@ func (c *Coordinator) RefreshTabSummaries() {
 			if prev == h {
 				continue // unchanged since last tick — skip the LLM call
 			}
+
+			// Per-window cooldown: never re-summarize a window more than once per
+			// summaryCooldown, no matter how often rename/tick triggers fire. An
+			// active tab (a live Claude/log window) changes content continuously,
+			// so the hash check above never skips it; combined with the
+			// after-rename-window hook that tabby's own rename-window fires, that
+			// would self-perpetuate into a rename storm. The cooldown bounds churn
+			// and breaks the loop. Check-and-claim atomically, recording now BEFORE
+			// the LLM call so a slow/failed call also cools the window down instead
+			// of being retried on the next trigger.
+			c.summaryHashMu.Lock()
+			if last, ok := c.summaryLastAt[win.ID]; ok && time.Since(last) < summaryCooldown {
+				c.summaryHashMu.Unlock()
+				continue
+			}
+			if c.summaryLastAt == nil {
+				c.summaryLastAt = make(map[string]time.Time)
+			}
+			c.summaryLastAt[win.ID] = time.Now()
+			c.summaryHashMu.Unlock()
 
 			// Decide between two behaviors:
 			//   - NAME this project: the window resolves to a stable project key
