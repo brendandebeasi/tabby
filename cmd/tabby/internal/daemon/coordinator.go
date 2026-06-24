@@ -3161,11 +3161,14 @@ func (c *Coordinator) clearCWDIdentity(cwd string) {
 	c.saveCWDColors()
 }
 
-func (c *Coordinator) getWindowFirstPaneCWDByIndex(windowIndex int) string {
+// getWindowFirstPaneCWDByID resolves the first-pane CWD for the window with the
+// given stable tmux window ID (e.g. "@123"). Keyed on ID, not index, so it stays
+// correct even if window indices have shifted since the caller captured the ID.
+func (c *Coordinator) getWindowFirstPaneCWDByID(windowID string) string {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 	for _, win := range c.windows {
-		if win.Index == windowIndex {
+		if win.ID == windowID {
 			return firstPaneCWD(win)
 		}
 	}
@@ -3183,61 +3186,52 @@ func (c *Coordinator) getActiveWindowFirstPaneCWD() string {
 	return ""
 }
 
-func (c *Coordinator) resolveWindowCWD(windowIndex int) string {
-	cwd := c.getWindowFirstPaneCWDByIndex(windowIndex)
+func (c *Coordinator) resolveWindowCWDByID(windowID string) string {
+	cwd := c.getWindowFirstPaneCWDByID(windowID)
 	if cwd != "" {
 		return cwd
 	}
 	return c.getActiveWindowFirstPaneCWD()
 }
 
-// windowNameKeyByIndex resolves the persisted-name key (windowNameKey) for the
-// window at windowIndex, looking it up in the current window snapshot. Returns
-// false when the window isn't found or no key can be derived. Takes stateMu as
-// an RLock; do not call while already holding stateMu.
-func (c *Coordinator) windowNameKeyByIndex(windowIndex int) (string, bool) {
+// windowNameKeyByID resolves the persisted-name key (windowNameKey) for the
+// window with the given stable tmux window ID, looking it up in the current
+// window snapshot. Returns false when the window isn't found or no key can be
+// derived. Takes stateMu as an RLock; do not call while already holding stateMu.
+func (c *Coordinator) windowNameKeyByID(windowID string) (string, bool) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 	for i := range c.windows {
-		if c.windows[i].Index == windowIndex {
+		if c.windows[i].ID == windowID {
 			return c.windowNameKey(c.windows[i])
 		}
 	}
 	return "", false
 }
 
-func (c *Coordinator) windowTargetForIndex(windowIndex int) string {
-	target := fmt.Sprintf(":%d", windowIndex)
-	if c.sessionID != "" {
-		target = fmt.Sprintf("%s:%d", c.sessionID, windowIndex)
-	}
-	return target
-}
-
-func (c *Coordinator) setWindowColor(windowIndex int, color string) {
+func (c *Coordinator) setWindowColor(windowID, color string) {
 	trimmedColor := strings.TrimSpace(color)
 	if trimmedColor == "" {
 		return
 	}
 
-	windowTarget := c.windowTargetForIndex(windowIndex)
-	exec.Command("tmux", "set-window-option", "-t", windowTarget, "@tabby_color", trimmedColor).Run()
+	// tmux accepts the stable window ID ("@123") as a -t target directly.
+	exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_color", trimmedColor).Run()
 
-	if cwd := c.resolveWindowCWD(windowIndex); cwd != "" {
+	if cwd := c.resolveWindowCWDByID(windowID); cwd != "" {
 		c.setCWDColor(cwd, trimmedColor)
 	}
 }
 
-func (c *Coordinator) setWindowIcon(windowIndex int, icon string) {
+func (c *Coordinator) setWindowIcon(windowID, icon string) {
 	trimmedIcon := strings.TrimSpace(icon)
-	windowTarget := c.windowTargetForIndex(windowIndex)
 	if trimmedIcon == "" {
-		exec.Command("tmux", "set-window-option", "-t", windowTarget, "-u", "@tabby_icon").Run()
+		exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_icon").Run()
 	} else {
-		exec.Command("tmux", "set-window-option", "-t", windowTarget, "@tabby_icon", trimmedIcon).Run()
+		exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_icon", trimmedIcon).Run()
 	}
 
-	if cwd := c.resolveWindowCWD(windowIndex); cwd != "" {
+	if cwd := c.resolveWindowCWDByID(windowID); cwd != "" {
 		c.setCWDIcon(cwd, trimmedIcon)
 	}
 }
@@ -14001,11 +13995,11 @@ func (c *Coordinator) applyColorPickerSelection(scope, target, hexColor string) 
 	}
 
 	if scope == "window" {
-		windowIndex, err := strconv.Atoi(strings.TrimSpace(target))
-		if err != nil {
+		windowID := strings.TrimSpace(target)
+		if windowID == "" {
 			return false
 		}
-		c.setWindowColor(windowIndex, hexColor)
+		c.setWindowColor(windowID, hexColor)
 		return true
 	}
 
@@ -14989,47 +14983,68 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "kill_window":
-		windowIndex := input.ResolvedTarget
-		if windowIndex == "" {
+		target := strings.TrimSpace(input.ResolvedTarget)
+		if target == "" {
 			return false
 		}
-		// Validate numeric
-		for _, ch := range windowIndex {
+		// Accept the stable window ID ("@123", preferred — sent by the context
+		// menu so the right tab dies even if indices shifted) or a legacy
+		// numeric index. Validate strictly so nothing arbitrary reaches tmux.
+		isID := strings.HasPrefix(target, "@")
+		digits := target
+		if isID {
+			digits = target[1:]
+		}
+		if digits == "" {
+			return false
+		}
+		for _, ch := range digits {
 			if ch < '0' || ch > '9' {
 				return false
 			}
 		}
-		// Find target window ID by index
+		// Resolve the target window ID and its index from the live list. We key
+		// neighbor selection on the index, but identify the target by whichever
+		// form we were given.
 		listOut, _ := exec.Command("tmux", "list-windows", "-F", "#{window_index}|#{window_id}").Output()
-		var targetID, aboveID string
-		bestAboveIdx := -1
-		bestBelowIdx := 999999
-		var belowID string
+		type winRow struct {
+			idx int
+			id  string
+		}
+		var rows []winRow
+		var targetID string
+		targetIdx := -1
 		for _, line := range strings.Split(strings.TrimSpace(string(listOut)), "\n") {
 			parts := strings.SplitN(line, "|", 2)
 			if len(parts) != 2 {
 				continue
 			}
-			idx := 0
-			for _, ch := range parts[0] {
-				idx = idx*10 + int(ch-'0')
+			idx, err := strconv.Atoi(parts[0])
+			if err != nil {
+				continue
 			}
-			wIdx := 0
-			for _, ch := range windowIndex {
-				wIdx = wIdx*10 + int(ch-'0')
-			}
-			if parts[0] == windowIndex {
+			rows = append(rows, winRow{idx: idx, id: parts[1]})
+			if (isID && parts[1] == target) || (!isID && parts[0] == target) {
 				targetID = parts[1]
-			} else if idx < wIdx && idx > bestAboveIdx {
-				bestAboveIdx = idx
-				aboveID = parts[1]
-			} else if idx > wIdx && idx < bestBelowIdx {
-				bestBelowIdx = idx
-				belowID = parts[1]
+				targetIdx = idx
 			}
 		}
 		if targetID == "" {
 			return false
+		}
+		// Pick the nearest neighbor by index (above first, else below) to switch
+		// to if we're killing the active window.
+		var aboveID, belowID string
+		bestAboveIdx := -1
+		bestBelowIdx := 999999
+		for _, r := range rows {
+			if r.idx < targetIdx && r.idx > bestAboveIdx {
+				bestAboveIdx = r.idx
+				aboveID = r.id
+			} else if r.idx > targetIdx && r.idx < bestBelowIdx {
+				bestBelowIdx = r.idx
+				belowID = r.id
+			}
 		}
 		if aboveID == "" {
 			aboveID = belowID
@@ -15044,7 +15059,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			}
 		}
 		exec.Command("tmux", "set-option", "-g", "@tabby_close_select_window", "1").Run()
-		exec.Command("tmux", "set-option", "-g", "@tabby_close_select_index", windowIndex).Run()
+		exec.Command("tmux", "set-option", "-g", "@tabby_close_select_index", strconv.Itoa(targetIdx)).Run()
 		exec.Command("tmux", "kill-window", "-t", targetID).Run()
 		go func() {
 			time.Sleep(200 * time.Millisecond)
@@ -16433,9 +16448,8 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 	if strings.HasPrefix(item.Command, "tabby-set-window-color:") {
 		parts := strings.SplitN(item.Command, ":", 3)
 		if len(parts) == 3 {
-			windowIndex, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err == nil {
-				c.setWindowColor(windowIndex, parts[2])
+			if windowID := strings.TrimSpace(parts[1]); windowID != "" {
+				c.setWindowColor(windowID, parts[2])
 			}
 		}
 		return
@@ -16444,9 +16458,8 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 	if strings.HasPrefix(item.Command, "tabby-set-window-icon:") {
 		parts := strings.SplitN(item.Command, ":", 3)
 		if len(parts) == 3 {
-			windowIndex, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err == nil {
-				c.setWindowIcon(windowIndex, parts[2])
+			if windowID := strings.TrimSpace(parts[1]); windowID != "" {
+				c.setWindowIcon(windowID, parts[2])
 			}
 		}
 		return
@@ -16467,18 +16480,18 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 	if strings.HasPrefix(item.Command, "tabby-unlock-window-name:") {
 		parts := strings.SplitN(item.Command, ":", 2)
 		if len(parts) == 2 {
-			if windowIndex, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+			if windowID := strings.TrimSpace(parts[1]); windowID != "" {
 				// Forget the project's saved tab identity (keyed on the project
 				// root / ssh host) so neither this tab nor future tabs in the same
 				// project get re-named on the next refresh.
-				if key, ok := c.windowNameKeyByIndex(windowIndex); ok {
+				if key, ok := c.windowNameKeyByID(windowID); ok {
 					c.clearCWDIdentity(key)
 				}
 				// Then drop both the hard lock and the soft auto-name flag so
 				// syncWindowNames auto-renames it back to the directory basename.
-				target := c.windowTargetForIndex(windowIndex)
-				exec.Command("tmux", "set-window-option", "-t", target, "-u", "@tabby_name_locked").Run()
-				exec.Command("tmux", "set-window-option", "-t", target, "-u", "@tabby_name_auto").Run()
+				// tmux accepts the stable window ID ("@123") as a -t target.
+				exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_name_locked").Run()
+				exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_name_auto").Run()
 			}
 		}
 		return
@@ -16522,11 +16535,11 @@ func (c *Coordinator) applyMarkerSelection(scope, target, markerValue string) bo
 	value := strings.TrimSpace(markerValue)
 
 	if scope == "window" {
-		windowIndex, err := strconv.Atoi(strings.TrimSpace(target))
-		if err != nil {
+		windowID := strings.TrimSpace(target)
+		if windowID == "" {
 			return false
 		}
-		c.setWindowIcon(windowIndex, value)
+		c.setWindowIcon(windowID, value)
 		return true
 	}
 
@@ -16614,6 +16627,13 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		return
 	}
 
+	// Target every command by the STABLE window ID ("@123"), never the tmux
+	// index. The menu's commands run later (after the user picks an item and,
+	// for rename, finishes typing); by then an earlier window may have closed or
+	// opened and shifted the indices, so a baked-in ":%d" would hit the wrong
+	// tab. tmux accepts the window ID as a -t target everywhere an index works.
+	wid := win.ID
+
 	args := append([]string{
 		"display-menu",
 		"-O",
@@ -16624,13 +16644,13 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	// Also clears any soft @tabby_name_auto flag so the manual name is a clean
 	// hard lock (the LLM stops refining it; applyCWDIdentityMappings upgrades the
 	// saved record's source to "user" on the next capture).
-	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d @tabby_name_locked 1 ; set-window-option -t :%d -u @tabby_name_auto\"", win.Name, win.Index, win.Index, win.Index)
+	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t %s -- '%%%%' ; set-window-option -t %s @tabby_name_locked 1 ; set-window-option -t %s -u @tabby_name_auto\"", win.Name, wid, wid, wid)
 	args = append(args, "Rename", "r", renameCmd)
 
 	// Unlock name option - routes through the daemon so it can forget the
 	// directory's saved name/group/pinned record (not just clear the per-window
 	// lock); otherwise applyCWDIdentityMappings would re-name + re-lock it next refresh.
-	unlockCmd := fmt.Sprintf("tabby-unlock-window-name:%d", win.Index)
+	unlockCmd := fmt.Sprintf("tabby-unlock-window-name:%s", wid)
 	args = append(args, "Unlock Name", "u", unlockCmd)
 
 	// Separator before group/appearance section
@@ -16648,55 +16668,55 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		key := fmt.Sprintf("%d", keyNum)
 		keyNum++
 		if keyNum <= 10 {
-			setGroupCmd := fmt.Sprintf("set-window-option -t :%d @tabby_group '%s'", win.Index, group.Name)
+			setGroupCmd := fmt.Sprintf("set-window-option -t %s @tabby_group '%s'", wid, group.Name)
 			args = append(args, fmt.Sprintf("  %s %s", group.Theme.Icon, group.Name), key, setGroupCmd)
 		}
 	}
 
 	// Remove from group option
 	if win.Group != "" {
-		removeCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_group", win.Index)
+		removeCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_group", wid)
 		args = append(args, "  Remove from Group", "0", removeCmd)
 	}
 
 	// Set Color submenu
 	args = append(args, "-Set Tab Color", "", "")
-	colorTarget := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(win.Index)))
+	colorTarget := base64.StdEncoding.EncodeToString([]byte(wid))
 	currentColor := win.CustomColor
 	colorPickerCmd := fmt.Sprintf("tabby-color-picker:window:%s:%s", colorTarget, currentColor)
 	args = append(args, "  Custom Color...", "h", colorPickerCmd)
-	customColorCmd := fmt.Sprintf("command-prompt -p 'Hex color (#rrggbb):' \"set-window-option -t %s @tabby_color '%%%%%%%%'\"", windowTarget)
+	customColorCmd := fmt.Sprintf("command-prompt -p 'Hex color (#rrggbb):' \"set-window-option -t %s @tabby_color '%%%%%%%%'\"", wid)
 	args = append(args, "  Custom (Hex)...", "#", customColorCmd)
-	resetColorCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_color", windowTarget)
+	resetColorCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_color", wid)
 	args = append(args, "  Reset to Default", "d", resetColorCmd)
 
 	// Set Marker — opens the searchable emoji/icon picker (same as group menu)
 	if !strings.HasPrefix(clientID, "window-header:") {
-		target := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(win.Index)))
+		target := base64.StdEncoding.EncodeToString([]byte(wid))
 		searchCmd := fmt.Sprintf("tabby-marker-picker:window:%s", target)
 		args = append(args, "Set Marker", "s", searchCmd)
 		// Show remove option only if a marker is currently set
 		if win.Icon != "" {
-			resetIconCmd := fmt.Sprintf("tabby-set-window-icon:%d:", win.Index)
+			resetIconCmd := fmt.Sprintf("tabby-set-window-icon:%s:", wid)
 			args = append(args, "Remove Marker", "0", resetIconCmd)
 		}
 	}
 
 	// Pin/Unpin option - pinned windows appear at the top of sidebar
 	if win.Pinned {
-		unpinCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_pinned", win.Index)
+		unpinCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_pinned", wid)
 		args = append(args, "Unpin from Top", "p", unpinCmd)
 	} else {
-		pinCmd := fmt.Sprintf("set-window-option -t :%d @tabby_pinned 1", win.Index)
+		pinCmd := fmt.Sprintf("set-window-option -t %s @tabby_pinned 1", wid)
 		args = append(args, "Pin to Top", "p", pinCmd)
 	}
 
 	// Minimize/Unminimize — minimized windows are skipped by cmd+]/cmd+[ cycling
 	if win.Minimized {
-		unminCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_minimized", win.Index)
+		unminCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_minimized", wid)
 		args = append(args, "Unminimize", "m", unminCmd)
 	} else {
-		minCmd := fmt.Sprintf("set-window-option -t :%d @tabby_minimized 1", win.Index)
+		minCmd := fmt.Sprintf("set-window-option -t %s @tabby_minimized 1", wid)
 		args = append(args, "Minimize", "m", minCmd)
 	}
 
@@ -16713,10 +16733,10 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	}
 	if contentPaneCount > 1 {
 		if win.Collapsed {
-			expandCmd := fmt.Sprintf("set-window-option -t :%d -u @tabby_collapsed", win.Index)
+			expandCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_collapsed", wid)
 			args = append(args, "Expand Panes", "e", expandCmd)
 		} else {
-			collapseCmd := fmt.Sprintf("set-window-option -t :%d @tabby_collapsed 1", win.Index)
+			collapseCmd := fmt.Sprintf("set-window-option -t %s @tabby_collapsed 1", wid)
 			args = append(args, "Collapse Panes", "c", collapseCmd)
 		}
 	}
@@ -16744,13 +16764,13 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	if activePaneID == "" && len(win.Panes) > 0 {
 		activePaneID = win.Panes[0].ID
 	}
-	splitTarget := fmt.Sprintf(":%d", win.Index)
+	splitTarget := wid
 	if activePaneID != "" {
 		splitTarget = activePaneID
 	}
 	if !c.isVerticalStackedPane(win, activePaneID) {
-		splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", win.Index, splitTarget)
-		splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", win.Index, splitTarget)
+		splitVCmd := fmt.Sprintf("select-window -t %s ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", wid, splitTarget)
+		splitHCmd := fmt.Sprintf("select-window -t %s ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", wid, splitTarget)
 		args = append(args, "Split Vertical |", "|", splitVCmd)
 		args = append(args, "Split Horizontal -", "-", splitHCmd)
 	}
@@ -16767,7 +16787,7 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 
 	exe, _ := os.Executable()
 	hookPath := filepath.Join(filepath.Dir(exe), "tabby-hook")
-	killCmd := fmt.Sprintf("confirm-before -p 'Close window? (y/n)' \"run-shell '%s kill-window %d'\"", hookPath, win.Index)
+	killCmd := fmt.Sprintf("confirm-before -p 'Close window? (y/n)' \"run-shell '%s kill-window %s'\"", hookPath, wid)
 	args = append(args, "Kill", "k", killCmd)
 
 	c.executeOrSendMenu(clientID, args, pos)

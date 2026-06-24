@@ -33,37 +33,25 @@ func TestRecordHeartbeat(t *testing.T) {
 	assert.Greater(t, ts, int64(0))
 }
 
-func TestWindowTargetForIndex_WithSession(t *testing.T) {
-	c := newTestCoordinator(t)
-	c.sessionID = "test-session"
-	assert.Equal(t, "test-session:3", c.windowTargetForIndex(3))
-}
-
-func TestWindowTargetForIndex_WithoutSession(t *testing.T) {
-	c := newTestCoordinator(t)
-	c.sessionID = ""
-	assert.Equal(t, ":5", c.windowTargetForIndex(5))
-}
-
-func TestGetWindowFirstPaneCWDByIndex_Found(t *testing.T) {
+func TestGetWindowFirstPaneCWDByID_Found(t *testing.T) {
 	c := newTestCoordinator(t)
 	c.windows = []tmux.Window{
-		{Index: 1, Panes: []tmux.Pane{{CurrentPath: "/home/user/projects"}}},
-		{Index: 2, Panes: []tmux.Pane{{CurrentPath: "/tmp/work"}}},
+		{ID: "@1", Index: 1, Panes: []tmux.Pane{{CurrentPath: "/home/user/projects"}}},
+		{ID: "@2", Index: 2, Panes: []tmux.Pane{{CurrentPath: "/tmp/work"}}},
 	}
-	assert.Equal(t, "/home/user/projects", c.getWindowFirstPaneCWDByIndex(1))
-	assert.Equal(t, "/tmp/work", c.getWindowFirstPaneCWDByIndex(2))
+	assert.Equal(t, "/home/user/projects", c.getWindowFirstPaneCWDByID("@1"))
+	assert.Equal(t, "/tmp/work", c.getWindowFirstPaneCWDByID("@2"))
 }
 
-func TestGetWindowFirstPaneCWDByIndex_NotFound(t *testing.T) {
+func TestGetWindowFirstPaneCWDByID_NotFound(t *testing.T) {
 	c := newTestCoordinator(t)
-	c.windows = []tmux.Window{{Index: 1, Panes: []tmux.Pane{{CurrentPath: "/tmp"}}}}
-	assert.Equal(t, "", c.getWindowFirstPaneCWDByIndex(99))
+	c.windows = []tmux.Window{{ID: "@1", Index: 1, Panes: []tmux.Pane{{CurrentPath: "/tmp"}}}}
+	assert.Equal(t, "", c.getWindowFirstPaneCWDByID("@99"))
 }
 
-func TestGetWindowFirstPaneCWDByIndex_Empty(t *testing.T) {
+func TestGetWindowFirstPaneCWDByID_Empty(t *testing.T) {
 	c := newTestCoordinator(t)
-	assert.Equal(t, "", c.getWindowFirstPaneCWDByIndex(1))
+	assert.Equal(t, "", c.getWindowFirstPaneCWDByID("@1"))
 }
 
 func TestGetActiveWindowFirstPaneCWD_Found(t *testing.T) {
@@ -83,21 +71,21 @@ func TestGetActiveWindowFirstPaneCWD_NoneActive(t *testing.T) {
 	assert.Equal(t, "", c.getActiveWindowFirstPaneCWD())
 }
 
-func TestResolveWindowCWD_UsesWindowCWD(t *testing.T) {
+func TestResolveWindowCWDByID_UsesWindowCWD(t *testing.T) {
 	c := newTestCoordinator(t)
 	c.windows = []tmux.Window{
-		{Index: 1, Active: false, Panes: []tmux.Pane{{CurrentPath: "/specific"}}},
-		{Index: 2, Active: true, Panes: []tmux.Pane{{CurrentPath: "/active"}}},
+		{ID: "@1", Index: 1, Active: false, Panes: []tmux.Pane{{CurrentPath: "/specific"}}},
+		{ID: "@2", Index: 2, Active: true, Panes: []tmux.Pane{{CurrentPath: "/active"}}},
 	}
-	assert.Equal(t, "/specific", c.resolveWindowCWD(1))
+	assert.Equal(t, "/specific", c.resolveWindowCWDByID("@1"))
 }
 
-func TestResolveWindowCWD_FallsBackToActive(t *testing.T) {
+func TestResolveWindowCWDByID_FallsBackToActive(t *testing.T) {
 	c := newTestCoordinator(t)
 	c.windows = []tmux.Window{
-		{Index: 1, Active: true, Panes: []tmux.Pane{{CurrentPath: "/active"}}},
+		{ID: "@1", Index: 1, Active: true, Panes: []tmux.Pane{{CurrentPath: "/active"}}},
 	}
-	assert.Equal(t, "/active", c.resolveWindowCWD(99))
+	assert.Equal(t, "/active", c.resolveWindowCWDByID("@99"))
 }
 
 func TestShortenPath_Root(t *testing.T) {
@@ -627,14 +615,14 @@ func TestGetTerminalBg_DefaultFallback(t *testing.T) {
 
 func TestSetWindowColor_NotFound(t *testing.T) {
 	c := newTestCoordinator(t)
-	c.windows = []tmux.Window{{Index: 1, Name: "test"}}
-	c.setWindowColor(99, "#ff0000")
+	c.windows = []tmux.Window{{ID: "@1", Index: 1, Name: "test"}}
+	c.setWindowColor("@99", "#ff0000")
 }
 
 func TestSetWindowIcon_NotFound(t *testing.T) {
 	c := newTestCoordinator(t)
-	c.windows = []tmux.Window{{Index: 1, Name: "test"}}
-	c.setWindowIcon(99, "🔥")
+	c.windows = []tmux.Window{{ID: "@1", Index: 1, Name: "test"}}
+	c.setWindowIcon("@99", "🔥")
 }
 
 func TestGroupedWindowsFromWindows(t *testing.T) {

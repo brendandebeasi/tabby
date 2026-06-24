@@ -172,7 +172,7 @@ func Run(allArgs []string) int {
 
 	case "kill-window":
 		if len(args) < 1 {
-			fatal("Usage: tabby-hook kill-window <window-index>")
+			fatal("Usage: tabby-hook kill-window <window-id-or-index>")
 		}
 		target = args[0]
 
