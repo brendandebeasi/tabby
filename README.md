@@ -655,6 +655,8 @@ Each widget supports `pin`, `priority` (render order), `position: top|bottom`, p
 
 [teamclaude](https://github.com/KarpelesLab/teamclaude) is a multi-account Claude proxy that rotates accounts based on quota. Its server exposes a `GET /teamclaude/status` endpoint; this widget polls it over HTTP and shows, per managed account, how much session (5h) and weekly (7d) quota each has left — as bars with the percentage and reset countdown drawn inside (e.g. `87% 4h`), color-coded by headroom (green/yellow/red).
 
+Because the proxy load-balances sessions across accounts, more than one account can be serving traffic at the same time. Every actively-serving account is highlighted green with a live indicator — `active(N/M)` (N in-flight requests of an M concurrency cap), `active(N)` when the cap is unknown, or a bare `active` for an account used in the last 15 minutes — so you can see at a glance how many accounts are in use, not just the single primary (marked `▸`). The indicator is dropped on narrow sidebars where it wouldn't fit. (On older proxies that don't report `activeRequests`/`maxConcurrency`, the widget falls back to the last-used recency signal alone.)
+
 ```yaml
 widgets:
   teamclaude:

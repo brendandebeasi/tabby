@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Status is the top-level payload returned by GET /teamclaude/status. It maps
@@ -46,6 +47,7 @@ func (s *Status) AnyActiveExtraUsage() bool {
 type Account struct {
 	Name             string    `json:"name"`
 	Type             string    `json:"type"`    // "oauth" | "apikey"
+	Tier             string    `json:"tier"`    // subscription tier, e.g. "Max 20x", "Max 5x", "Team 5x", "Pro"; may be empty on older proxies
 	OrgName          string    `json:"orgName"` // may be empty
 	Status           string    `json:"status"`  // "active" | ...
 	Priority         int       `json:"priority"`
@@ -67,6 +69,46 @@ type Account struct {
 	ExtraUsageLimit     *float64 `json:"extraUsageLimit"`
 	ExtraUsageRemaining *float64 `json:"extraUsageRemaining"`
 	IsActiveExtraUsage  bool     `json:"isActiveExtraUsage"`
+
+	// Concurrency / live-load fields. Since the proxy load-balances each new
+	// session across accounts, several accounts serve traffic at once — these
+	// expose the live picture so the widget can light up every active account
+	// rather than only the single CurrentAccount.
+	//
+	//   ActiveRequests: in-flight requests on this account right now.
+	//   MaxConcurrency: the account's effective concurrency cap (denominator
+	//                   for an "N/M" display).
+	//
+	// Both are zero on pre-overage proxies that predate the
+	// /teamclaude/status fields (teamclaude commit 74bdcdd); callers must treat
+	// 0 as "unknown" and fall back to the lastUsed recency signal (see
+	// ActivelyUsed), so the widget degrades gracefully against older servers.
+	ActiveRequests int `json:"activeRequests"`
+	MaxConcurrency int `json:"maxConcurrency"`
+}
+
+// activeRecencyWindow mirrors the teamclaude TUI's "recently used" cutoff (15
+// minutes): an account touched within this window is still painted as active
+// even when it has no in-flight requests at the instant of polling.
+const activeRecencyWindowMs = 15 * 60 * 1000
+
+// ActivelyUsed reports whether the account is serving traffic now or did so
+// recently — i.e. it has in-flight requests, OR it was last used within the
+// 15-minute recency window the teamclaude TUI uses to paint accounts green.
+// nowMs is time.Now().UnixMilli(). On an older proxy that omits activeRequests
+// (so it reads as 0), this falls back to the lastUsed recency check alone.
+func (a Account) ActivelyUsed(nowMs int64) bool {
+	if a.ActiveRequests > 0 {
+		return true
+	}
+	if a.Usage.LastUsed == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, a.Usage.LastUsed)
+	if err != nil {
+		return false
+	}
+	return nowMs-t.UnixMilli() < activeRecencyWindowMs
 }
 
 // HasExtraUsageBudget reports whether an extra-usage dollar budget is
@@ -99,6 +141,36 @@ type Usage struct {
 // RateLimited reports whether the account is currently rate-limited.
 func (a Account) RateLimited() bool {
 	return a.RateLimitedUntil != nil && *a.RateLimitedUntil != ""
+}
+
+// IsPersonalOrg reports whether this account is the user's auto-generated
+// personal workspace rather than a real (team) organization. teamclaude/Claude
+// names the personal org "<email>'s Organization"; a real team org has a custom
+// name (e.g. "Gunpowder"). Used to decide the "PER" tier prefix when the same
+// email surfaces as both a personal and a team account.
+func (a Account) IsPersonalOrg() bool {
+	return strings.HasSuffix(strings.TrimSpace(a.OrgName), "'s Organization")
+}
+
+// ShortTier compresses the verbose tier string into the compact sidebar token:
+// "Max 20x"/"Team 20x" -> "20x", "Max 5x"/"Team 5x" -> "5x", "Pro" -> "Pro". The
+// leading plan word ("Max "/"Team ") is dropped since it doesn't fit a narrow
+// sidebar and the "Nx"/"Pro" suffix is the distinguishing part. Returns "" when
+// no tier is known (older proxy), so callers can omit the segment entirely.
+func ShortTier(tier string) string {
+	t := strings.TrimSpace(tier)
+	if t == "" {
+		return ""
+	}
+	for _, prefix := range []string{"Max ", "Team ", "Pro "} {
+		if strings.HasPrefix(t, prefix) {
+			rest := strings.TrimSpace(t[len(prefix):])
+			if rest != "" {
+				return rest
+			}
+		}
+	}
+	return t
 }
 
 // Fetch retrieves the status from a teamclaude proxy at baseURL (e.g.

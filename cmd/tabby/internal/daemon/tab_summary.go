@@ -89,8 +89,20 @@ func (c *Coordinator) RefreshTabSummaries() {
 	go func() {
 		defer c.summaryFetching.Store(false)
 
+		aiSummaryOnly := cfg.AISummaryOnly
 		changed := false
 		for _, win := range windows {
+			// A hard-locked name (explicit user rename) is authoritative — never
+			// override it. Clear any transient title a prior tick left so a stale
+			// summary doesn't linger, then move on without calling the LLM.
+			if win.NameLocked {
+				if strings.TrimSpace(win.AITitle) != "" {
+					exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_ai_title").Run()
+					changed = true
+				}
+				continue
+			}
+
 			paneID := firstContentPaneID(win)
 			if paneID == "" {
 				continue
@@ -105,15 +117,65 @@ func (c *Coordinator) RefreshTabSummaries() {
 			prev := c.summaryHash[win.ID]
 			c.summaryHashMu.Unlock()
 			if prev == h {
-				continue // unchanged since last summary — skip the LLM call
+				continue // unchanged since last tick — skip the LLM call
 			}
 
-			project := ""
-			if cwd := firstPaneCWD(win); cwd != "" {
-				project = filepath.Base(cwd)
+			// Decide between two behaviors:
+			//   - NAME this project: the window resolves to a stable project key
+			//     (local git root, or ssh://host/root) and is NOT a Claude-Code
+			//     tab in ai_summary_only mode. We infer a persisted per-project
+			//     name (soft) so new sessions in the same project reuse it.
+			//   - Transient SUMMARY (legacy @tabby_ai_title): everything else —
+			//     no usable key (e.g. an ssh tab whose remote-cwd hook hasn't
+			//     reported yet), or an ai_summary_only Claude tab that wants a
+			//     live task label rather than a static project name.
+			key, hasKey := c.windowNameKey(win)
+			nameThis := hasKey && !(aiSummaryOnly && isAIWindow(win))
+
+			if nameThis {
+				// A user-sourced name owns this project; the LLM must not touch it
+				// (applyCWDIdentityMappings restores it). Record the hash so we
+				// don't re-capture this window's content until it changes.
+				if rec, ok := c.getCWDColorMapping(key); ok && strings.TrimSpace(rec.Name) != "" && (rec.NameSource == "user" || rec.NameSource == "") {
+					c.recordSummaryHash(win.ID, h)
+					continue
+				}
+
+				project := projectBasename(win, key)
+				fixed := projAbbrev[strings.ToLower(project)]
+
+				ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+				out, err := client.Generate(ctx, gollm.NewPrompt(projectNamePrompt(project, content)))
+				cancel()
+				if err != nil {
+					continue
+				}
+				name := truncateSummaryWords(out, maxWords)
+				if fixed != "" {
+					// A configured abbreviation is authoritative for the lead token.
+					work := truncateSummaryWords(out, maxWords-1)
+					name = strings.TrimSpace(fixed + " " + work)
+				}
+				if name == "" {
+					continue
+				}
+
+				// Soft-persist (no-ops when unchanged; precedence protects any
+				// user name) and apply to this window as a soft auto-name.
+				c.captureCWDIdentity(key, name, "", false, "llm")
+				if win.Name != name {
+					exec.Command("tmux", "rename-window", "-t", win.ID, name).Run()
+				}
+				if !win.NameAuto {
+					exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_name_auto", "1").Run()
+				}
+				c.recordSummaryHash(win.ID, h)
+				changed = true
+				continue
 			}
-			// A configured project abbreviation is prepended deterministically;
-			// the LLM then only fills in the task (so its own guess can't drift).
+
+			// Transient summary (legacy @tabby_ai_title) path.
+			project := projectBasename(win, key)
 			fixed := projAbbrev[strings.ToLower(project)]
 
 			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -139,13 +201,7 @@ func (c *Coordinator) RefreshTabSummaries() {
 			}
 
 			exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_ai_title", summary).Run()
-
-			c.summaryHashMu.Lock()
-			if c.summaryHash == nil {
-				c.summaryHash = make(map[string]string)
-			}
-			c.summaryHash[win.ID] = h
-			c.summaryHashMu.Unlock()
+			c.recordSummaryHash(win.ID, h)
 			changed = true
 		}
 
@@ -153,6 +209,55 @@ func (c *Coordinator) RefreshTabSummaries() {
 			c.OnRefreshLayout()
 		}
 	}()
+}
+
+// recordSummaryHash stores the content hash for a window so an unchanged pane
+// doesn't trigger another LLM call next tick.
+func (c *Coordinator) recordSummaryHash(winID, h string) {
+	c.summaryHashMu.Lock()
+	if c.summaryHash == nil {
+		c.summaryHash = make(map[string]string)
+	}
+	c.summaryHash[winID] = h
+	c.summaryHashMu.Unlock()
+}
+
+// projectBasename returns the human-facing folder name of a window's project for
+// use as an LLM hint / abbreviation lookup. Prefers the resolved name key's
+// final path component (the project root, or the remote topmost dir for an
+// ssh:// key), falling back to the first content pane's cwd basename.
+func projectBasename(win tmux.Window, key string) string {
+	if key != "" {
+		if b := filepath.Base(key); b != "" && b != "." && b != "/" {
+			return b
+		}
+	}
+	if cwd := firstPaneCWD(win); cwd != "" {
+		return filepath.Base(cwd)
+	}
+	return ""
+}
+
+// projectNamePrompt asks the LLM for a SHORT, STABLE label identifying the
+// project itself (not the live task), so every tab/session in the same project
+// resolves to the same name. The directory name is the dominant signal; the
+// terminal content only disambiguates. Kept deliberately identity-focused (vs.
+// summaryPrompt's task focus) so the persisted soft name doesn't churn as work
+// changes.
+func projectNamePrompt(project, content string) string {
+	hint := ""
+	if p := strings.TrimSpace(project); p != "" {
+		hint = "The project directory is named \"" + p + "\". Base the label primarily " +
+			"on this name; clean it up into 2-3 readable lowercase words (e.g. " +
+			"\"studiodome-infra\"->\"studiodome infra\", \"gunpowder-msg\"->\"gunpowder msg\", " +
+			"\"tabby\"->\"tabby\"). "
+	}
+	return "You are giving a stable name to a terminal tab's PROJECT in a narrow " +
+		"sidebar. " + hint + "Reply with ONLY 2-3 short lowercase words naming the " +
+		"project or codebase — NOT the current task or command. Prefer the directory " +
+		"name; use the terminal output only to disambiguate." +
+		asciiOnlyRules +
+		"\n\n--- terminal output ---\n" + content
 }
 
 // firstContentPaneID returns the id of the window's first non-auxiliary pane

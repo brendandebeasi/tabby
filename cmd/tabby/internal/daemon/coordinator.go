@@ -64,6 +64,13 @@ type CWDColorMapping struct {
 	Name   string `json:"name,omitempty"`   // saved tab name (mirrors a name-locked window)
 	Group  string `json:"group,omitempty"`  // saved @tabby_group
 	Pinned bool   `json:"pinned,omitempty"` // saved @tabby_pinned
+	// NameSource records how Name was set: "user" (an explicit rename — hard,
+	// authoritative, frozen; the LLM never touches it) or "llm" (a soft
+	// auto-inferred per-project name — persisted and re-applied to new sessions,
+	// but the LLM may still refine it until the user hard-locks with a rename).
+	// Empty is treated as "user" for back-compat with records written before this
+	// field existed (those came from explicit renames).
+	NameSource string `json:"nameSource,omitempty"`
 }
 
 func init() {
@@ -143,6 +150,31 @@ func clientTTYForWindow(windowID string) string {
 		}
 	}
 	return bestTTY
+}
+
+// attachedClientWindows returns the set of window IDs that an attached tmux
+// client is currently looking at. A window can be its session's "active" window
+// while the session is fully detached (nobody is actually watching), so this is
+// the real "the user can see it" signal — used to acknowledge AI input
+// indicators only once they've genuinely been seen.
+func attachedClientWindows() map[string]bool {
+	set := map[string]bool{}
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|||#{window_id}").Output()
+	if err != nil {
+		return set
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.Split(strings.TrimSpace(line), "|||")
+		if len(parts) < 2 {
+			continue
+		}
+		tty := strings.TrimSpace(parts[0])
+		win := strings.TrimSpace(parts[1])
+		if tty != "" && win != "" {
+			set[win] = true
+		}
+	}
+	return set
 }
 
 // tmuxOptionCacheEntry caches a `tmux show-option -gqv` result. These
@@ -624,6 +656,16 @@ type Coordinator struct {
 	tabAbbrevCfg *config.Config
 	tabAbbrevMap map[string]string
 
+	// gitTopMu guards gitTopCache, which memoizes a local directory -> git
+	// repository toplevel (or "" when not in a repo). windowNameKey consults this
+	// to key a tab's saved name on the PROJECT ROOT rather than the exact cwd, so
+	// the name set at a repo root is reused in its subdirs. Forking `git` every
+	// refresh would be wasteful, and the toplevel of a given cwd is effectively
+	// immutable, so the cache never needs invalidation. Its own mutex (never
+	// stateMu) keeps it safe to consult from anywhere.
+	gitTopMu    sync.Mutex
+	gitTopCache map[string]string
+
 	// Auto tab-summary generation (ai.tab_summary.auto_generate). The LLM client
 	// is built lazily once; summaryFetching coalesces the periodic background
 	// refresh; summaryHash skips windows whose pane content hasn't changed so
@@ -722,6 +764,7 @@ type Coordinator struct {
 	prevPaneTitle      map[string]string // pane ID → AI pane title last cycle
 	hookPaneActive     map[string]bool   // pane ID → hooks detected (seen @tabby_busy=1)
 	hookPaneBusyIdleAt map[string]int64  // pane ID → unix timestamp when hook-busy but process looks idle
+	aiInputAck         map[string]bool   // pane ID → user has viewed this idle/input state (suppress "?" until next busy cycle)
 	aiBellUntil        map[int]int64     // window index → unix timestamp when bell expires (window-level)
 
 	// Callback to sync sidebar client widths in the server's client map.
@@ -1037,6 +1080,7 @@ type petState struct {
 	HasTarget         bool
 	ActionPending     string
 	AnimFrame         int
+	CameraX           int       // Scrolling background tracker
 	TotalPets         int
 	TotalFeedings     int
 	TotalPoopsCleaned int
@@ -1054,6 +1098,15 @@ type petState struct {
 	Adventure adventureState
 	// Debug state
 	DebugThoughtIdx int // Index into debugThoughtCategories for debug bar
+	// Dragon friend state
+	DragonPos           pos2D  `json:"dragon_pos"`
+	DragonState         string `json:"dragon_state"`
+	DragonTargetPos     pos2D  `json:"dragon_target_pos"`
+	DragonHasTarget     bool   `json:"dragon_has_target"`
+	DragonDirection     int    `json:"dragon_direction"`
+	DragonActionPending string `json:"dragon_action_pending"`
+	DragonAppearedAt    time.Time `json:"dragon_appeared_at"`
+	DragonDisappearsAt  time.Time `json:"dragon_disappears_at"`
 	// Q&A personality-building loop. Mirrors the wire-format
 	// daemon.PetState fields (same JSON tags) so a pet.json written by
 	// either type deserialises into the other. All omitempty so old pet.json
@@ -1365,6 +1418,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		bgDetector:         bgDetector,
 		theme:              theme,
 		cwdColors:          make(map[string]CWDColorMapping),
+		gitTopCache:        make(map[string]string),
 		collapsedGroups:    make(map[string]bool),
 		clientWidths:       make(map[string]int),
 		clientHeights:      make(map[string]int),
@@ -1380,6 +1434,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		aiBellUntil:        make(map[int]int64),
 		hookPaneActive:     make(map[string]bool),
 		hookPaneBusyIdleAt: make(map[string]int64),
+		aiInputAck:         make(map[string]bool),
 		clientProfile:      make(map[string]string),
 		windowZoomOwner:    make(map[string]string),
 		windowLayouts:      make(map[string]map[int]string),
@@ -1483,23 +1538,22 @@ func NewCoordinator(sessionID string) *Coordinator {
 	c.sidebarHidden = sidebarIsStashed()
 	logEvent("COORDINATOR_INIT sidebarHidden=%v (from stash windows)", c.sidebarHidden)
 
-	// Reconcile any pre-existing stash windows whose tmux indices fall below
-	// sidebarStashParkBase. They were created before the park-on-stash fix
-	// landed (or by an older daemon), and leaving them at low indices keeps
-	// the post-`+`-tap window-cycling bug present until the next sidebar
-	// toggle. Park them now so syncWindowIndices' first run is healthy.
+	// Migrate any pre-existing stash windows that an older daemon left parked
+	// in a user session into the detached limbo session, so a restart while the
+	// sidebar is hidden ends up in the new in-limbo state (and the stashes are
+	// immediately removed from native window cycling).
 	parkExistingStashWindows()
 
 	return c
 }
 
-// parkExistingStashWindows scans for stash windows whose tmux index is
-// below sidebarStashParkBase and moves them to a high index using
-// `move-window -a -t :<base>`. Idempotent — windows already >= base are
-// skipped. Safe to call any time; only runs tmux move-window for stashes
-// that need moving.
+// parkExistingStashWindows migrates any stash windows that live OUTSIDE the
+// limbo session (e.g. left in a user session by an older daemon that parked
+// stashes at high in-session indices) into the limbo session. Idempotent —
+// stashes already in limbo are skipped. Safe to call any time; only runs tmux
+// move-window for stashes that need relocating.
 func parkExistingStashWindows() {
-	out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}|#{window_index}|#{window_name}").Output()
+	out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}|#{session_name}|#{window_name}").Output()
 	if err != nil {
 		return
 	}
@@ -1510,23 +1564,23 @@ func parkExistingStashWindows() {
 			continue
 		}
 		winID := parts[0]
-		idxStr := parts[1]
+		sessName := parts[1]
 		name := parts[2]
 		if !strings.HasPrefix(name, sidebarStashWindowPrefix) {
 			continue
 		}
-		idx, convErr := strconv.Atoi(idxStr)
-		if convErr != nil || idx >= sidebarStashParkBase {
-			continue
+		if sessName == sidebarLimboSession {
+			continue // already parked in limbo
 		}
-		if err := exec.Command("tmux", "move-window", "-d", "-a", "-s", winID, "-t", fmt.Sprintf(":%d", sidebarStashParkBase)).Run(); err != nil {
-			coordinatorDebugLog.Printf("parkExistingStashWindows: move %s (idx=%d) failed: %v", winID, idx, err)
+		ensureLimboSession()
+		if err := exec.Command("tmux", "move-window", "-d", "-a", "-s", winID, "-t", fmt.Sprintf("%s:%d", sidebarLimboSession, sidebarStashParkBase)).Run(); err != nil {
+			coordinatorDebugLog.Printf("parkExistingStashWindows: migrate %s (session=%s) failed: %v", winID, sessName, err)
 			continue
 		}
 		moved++
 	}
 	if moved > 0 {
-		logEvent("STASH_RECONCILE moved=%d park_base=%d", moved, sidebarStashParkBase)
+		logEvent("STASH_MIGRATE moved=%d -> %s", moved, sidebarLimboSession)
 	}
 }
 
@@ -2662,6 +2716,116 @@ func firstPaneCWD(win tmux.Window) string {
 	return ""
 }
 
+// remoteCWDSep separates the host from the topmost dir in the @tabby_remote_cwd
+// payload the remote-cwd shell hook reports (an ASCII Unit Separator, chosen so
+// it can't collide with anything in a hostname or path).
+const remoteCWDSep = "\x1f"
+
+// firstPaneRemoteCWD returns the (host, topmost) reported by the remote-cwd hook
+// for the window's first CONTENT pane carrying a @tabby_remote_cwd value,
+// skipping Tabby's auxiliary panes. ok is false when no pane has reported one
+// yet (e.g. the hook isn't installed on the remote, or it hasn't fired since the
+// pane connected). The payload format is "host\x1ftopmost".
+func firstPaneRemoteCWD(win tmux.Window) (host, topmost string, ok bool) {
+	for i := range win.Panes {
+		if isAuxiliaryPane(win.Panes[i]) {
+			continue
+		}
+		raw := strings.TrimSpace(win.Panes[i].RemoteCWD)
+		if raw == "" {
+			continue
+		}
+		parts := strings.SplitN(raw, remoteCWDSep, 2)
+		if len(parts) != 2 {
+			continue
+		}
+		h := strings.TrimSpace(parts[0])
+		t := strings.TrimSpace(parts[1])
+		if h == "" || t == "" {
+			continue
+		}
+		return h, t, true
+	}
+	return "", "", false
+}
+
+// gitToplevel returns the git repository root containing cwd, or "" when cwd
+// isn't inside a repo. Results are memoized in gitTopCache (a cwd's toplevel is
+// effectively immutable, so no invalidation is needed) to avoid forking `git`
+// on every refresh. Safe to call from any goroutine; uses gitTopMu, never
+// stateMu.
+func (c *Coordinator) gitToplevel(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	c.gitTopMu.Lock()
+	if top, ok := c.gitTopCache[cwd]; ok {
+		c.gitTopMu.Unlock()
+		return top
+	}
+	c.gitTopMu.Unlock()
+
+	top := ""
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
+	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	cancel()
+	if err == nil {
+		top = normalizeCWD(strings.TrimSpace(string(out)))
+	}
+
+	c.gitTopMu.Lock()
+	c.gitTopCache[cwd] = top
+	c.gitTopMu.Unlock()
+	return top
+}
+
+// windowNameKey returns the canonical key under which a window's persisted tab
+// name is stored, keyed on the PROJECT ROOT (topmost dir) so a name set at a
+// repo root is reused across its subdirectories and future sessions:
+//
+//   - Remote (ssh/mosh) window whose remote-cwd hook has reported in: keyed
+//     "ssh://<host><remote-topmost>". This is distinct from any local path key,
+//     so remote and local projects never collide.
+//   - Local window: keyed on the git toplevel of the first content pane's cwd,
+//     falling back to the cwd itself when it isn't inside a repo.
+//
+// ok is false when no usable key can be derived (no content cwd yet, or a remote
+// window whose hook hasn't reported) — callers skip persisting/applying a name
+// in that case rather than keying on a misleading local ssh-launch path.
+func (c *Coordinator) windowNameKey(win tmux.Window) (string, bool) {
+	if win.RemoteHost != "" || hasRemoteContentPane(win) {
+		if host, topmost, ok := firstPaneRemoteCWD(win); ok {
+			return "ssh://" + host + topmost, true
+		}
+		// Remote window but the hook hasn't reported a cwd yet: don't fall back
+		// to the local ssh-launch path (every ssh tab launched from $HOME would
+		// collide on it). Wait until the hook reports.
+		return "", false
+	}
+	cwd := firstPaneCWD(win)
+	if cwd == "" {
+		return "", false
+	}
+	if top := c.gitToplevel(cwd); top != "" {
+		return top, true
+	}
+	return cwd, true
+}
+
+// hasRemoteContentPane reports whether any of the window's content panes is
+// running a remote connection (ssh/mosh). Mirrors firstPaneCWD's aux-pane skip.
+func hasRemoteContentPane(win tmux.Window) bool {
+	for i := range win.Panes {
+		if isAuxiliaryPane(win.Panes[i]) {
+			continue
+		}
+		if win.Panes[i].Remote {
+			return true
+		}
+	}
+	return false
+}
+
 // parseAbbreviations turns config entries written "CODE>Folder" into a
 // folder-basename -> CODE lookup. Folder keys are lower-cased so matching is
 // case-insensitive (config "TBY>Tabby" matches a tabby/ or TABBY/ directory).
@@ -2720,10 +2884,24 @@ func (c *Coordinator) composeTabBaseName(win tmux.Window) string {
 	}
 	summary := strings.TrimSpace(win.AITitle)
 
-	// AI-tool windows (e.g. Claude Code): optionally drop the dir code so the
-	// summary alone describes what the agent is doing.
+	// A hard user rename (NameLocked) is the strongest signal: show it verbatim,
+	// even for an AI window. The render path (wrapTabLabel) wraps/truncates it.
+	if win.NameLocked && name != "~" {
+		return name
+	}
+
+	// AI-tool windows (e.g. Claude Code) in ai_summary_only mode want a LIVE task
+	// summary, which beats a static per-project name — so this branch sits above
+	// the soft NameAuto check below.
 	if summary != "" && c.config.AI.TabSummary.AISummaryOnly && isAIWindow(win) {
 		return summary
+	}
+
+	// A soft restored per-project name (NameAuto — user- or LLM-sourced) is shown
+	// verbatim: no dir-code abbreviation and no AI summary. RefreshTabSummaries
+	// owns refining it in place until the user hard-locks with a rename.
+	if win.NameAuto && name != "~" {
+		return name
 	}
 
 	if code := c.abbreviateWindowName(name); code != "" {
@@ -2894,14 +3072,20 @@ func cwdMappingEmpty(m CWDColorMapping) bool {
 		!m.Pinned
 }
 
-// captureCWDIdentity records a name-locked window's identity (name + group +
-// pinned) for its directory so it can be restored later. It is called every
-// refresh for each locked window, so it only writes the map + persists to disk
-// when something actually changed — steady state does no I/O. Color/Icon for the
-// directory are left untouched. A locked window always has a name; an empty name
-// is treated as "nothing to capture".
-func (c *Coordinator) captureCWDIdentity(cwd, name, group string, pinned bool) {
-	normalized := normalizeCWD(cwd)
+// captureCWDIdentity records a window's tab identity (name + group + pinned)
+// under the given project key so it can be restored later. key is a
+// windowNameKey result (a local git-toplevel path or an "ssh://host/topmost"
+// string), NOT a raw pane cwd. source is "user" (an explicit rename — hard and
+// authoritative) or "llm" (a soft auto-inferred name). It is called every
+// refresh, so it only writes the map + persists to disk when something actually
+// changed — steady state does no I/O. Color/Icon for the key are left untouched.
+// An empty name is treated as "nothing to capture".
+//
+// Precedence: a soft "llm" capture never overwrites an existing "user" name —
+// a manual rename is authoritative and freezes the name against further LLM
+// inference. A "user" capture always wins (and upgrades the source).
+func (c *Coordinator) captureCWDIdentity(key, name, group string, pinned bool, source string) {
+	normalized := normalizeCWD(key)
 	if normalized == "" {
 		return
 	}
@@ -2909,17 +3093,38 @@ func (c *Coordinator) captureCWDIdentity(cwd, name, group string, pinned bool) {
 	if name == "" {
 		return
 	}
+	// Never persist an automatic-rename artifact (e.g. "claude", a Claude Code
+	// semver proc title, "agy"/other AI-tool command names, a bare shell, or a
+	// "~" path stub) as a tab identity. Captured once, applyCWDIdentityMappings
+	// would re-apply + hard-lock it every refresh across all future sessions,
+	// freezing the tab on the stub and suppressing the live AI summary.
+	if isGenericTabName(name) {
+		return
+	}
 	group = strings.TrimSpace(group)
+	if source == "" {
+		source = "user"
+	}
 
 	c.cwdColorsMu.Lock()
 	mapping := c.cwdColors[normalized]
-	if mapping.Name == name && mapping.Group == group && mapping.Pinned == pinned {
+	// A user name is authoritative — an llm refinement must not clobber it.
+	// (An empty stored NameSource with a non-empty Name predates this field and
+	// came from an explicit rename, so it counts as "user".)
+	if source == "llm" && strings.TrimSpace(mapping.Name) != "" &&
+		(mapping.NameSource == "user" || mapping.NameSource == "") {
+		c.cwdColorsMu.Unlock()
+		return
+	}
+	if mapping.Name == name && mapping.Group == group && mapping.Pinned == pinned &&
+		mapping.NameSource == source {
 		c.cwdColorsMu.Unlock()
 		return // no change — skip the disk write
 	}
 	mapping.Name = name
 	mapping.Group = group
 	mapping.Pinned = pinned
+	mapping.NameSource = source
 	c.cwdColors[normalized] = mapping
 	c.cwdColorsMu.Unlock()
 
@@ -2945,6 +3150,7 @@ func (c *Coordinator) clearCWDIdentity(cwd string) {
 	mapping.Name = ""
 	mapping.Group = ""
 	mapping.Pinned = false
+	mapping.NameSource = ""
 	if cwdMappingEmpty(mapping) {
 		delete(c.cwdColors, normalized)
 	} else {
@@ -2983,6 +3189,21 @@ func (c *Coordinator) resolveWindowCWD(windowIndex int) string {
 		return cwd
 	}
 	return c.getActiveWindowFirstPaneCWD()
+}
+
+// windowNameKeyByIndex resolves the persisted-name key (windowNameKey) for the
+// window at windowIndex, looking it up in the current window snapshot. Returns
+// false when the window isn't found or no key can be derived. Takes stateMu as
+// an RLock; do not call while already holding stateMu.
+func (c *Coordinator) windowNameKeyByIndex(windowIndex int) (string, bool) {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	for i := range c.windows {
+		if c.windows[i].Index == windowIndex {
+			return c.windowNameKey(c.windows[i])
+		}
+	}
+	return "", false
 }
 
 func (c *Coordinator) windowTargetForIndex(windowIndex int) string {
@@ -3074,44 +3295,73 @@ func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
 	}
 }
 
-// applyCWDIdentityMappings persists and restores per-directory tab identity
+// applyCWDIdentityMappings persists and restores per-PROJECT tab identity
 // (name + group + pinned). Runs each refresh, right after the color/icon pass,
 // on the same windows slice (which becomes c.windows) BEFORE syncWindowNames and
 // the grouping pass — so in-memory mirroring below is honored in the same cycle.
 //
-//   - Locked window (user named it): CAPTURE its name/group/pinned for its dir.
-//   - Unlocked window whose dir has a saved name: APPLY the saved name (and
-//     re-lock it), group, and pinned, then mirror the result in memory so this
-//     refresh's name-sync and grouping see the restored values.
+// The identity is keyed on windowNameKey — the project root (git toplevel) for a
+// local window, or "ssh://host/topmost" for a remote one — so a name set at a
+// repo root is reused across its subdirs, future sessions, and ssh hosts.
 //
-// Every tmux exec is guarded on a value diff, so the locked steady state and
+//   - Hard-locked window (explicit user rename): CAPTURE its name/group/pinned
+//     for its project as source "user".
+//   - Unlocked window whose project has a saved "user" name: APPLY it and
+//     hard-lock (@tabby_name_locked), restore group/pinned, mirror in memory.
+//   - Unlocked window whose project has a saved "llm" name: APPLY it as a SOFT
+//     name (@tabby_name_auto, NOT name_locked) so it shows but the LLM may still
+//     refine it. Group/pinned are restored too.
+//
+// Every tmux exec is guarded on a value diff, so the steady state and
 // already-restored windows do no work.
 func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
 	for i := range windows {
-		cwd := firstPaneCWD(windows[i])
-		if cwd == "" {
+		key, ok := c.windowNameKey(windows[i])
+		if !ok {
 			continue
 		}
 
 		if windows[i].NameLocked {
-			// CAPTURE: keep this dir's record in sync with the user-configured
-			// window. captureCWDIdentity no-ops (no disk write) when unchanged.
-			c.captureCWDIdentity(cwd, windows[i].Name, windows[i].Group, windows[i].Pinned)
+			if isGenericTabName(windows[i].Name) {
+				// An automatic-rename stub (e.g. "claude") got hard-locked: the
+				// `r` / right-click rename binding pre-fills the current name, so
+				// accepting it sets @tabby_name_locked on the stub. Unlock it so
+				// the tab flows back into the live AI-summary path, and DON'T
+				// persist it. Fall through to restore any real saved name.
+				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "-u", "@tabby_name_locked").Run()
+				windows[i].NameLocked = false
+			} else {
+				// CAPTURE: keep this project's record in sync with the user-named
+				// window. captureCWDIdentity no-ops (no disk write) when unchanged.
+				c.captureCWDIdentity(key, windows[i].Name, windows[i].Group, windows[i].Pinned, "user")
+				continue
+			}
+		}
+
+		rec, recOK := c.getCWDColorMapping(key)
+		if !recOK || strings.TrimSpace(rec.Name) == "" || isGenericTabName(rec.Name) {
+			// No record, empty, or a stale generic stub left by an older build —
+			// ignore it so a persisted "claude" can't re-freeze the tab.
 			continue
 		}
 
-		rec, ok := c.getCWDColorMapping(cwd)
-		if !ok || strings.TrimSpace(rec.Name) == "" {
-			continue
-		}
-
-		// APPLY: restore the saved identity onto this auto-named window.
+		// APPLY: restore the saved name onto this auto-named window. A "user"
+		// name hard-locks; an "llm" name is applied softly so the summary pass
+		// can keep refining it until the user renames.
+		soft := rec.NameSource == "llm"
 		if windows[i].Name != rec.Name {
 			exec.Command("tmux", "rename-window", "-t", windows[i].ID, rec.Name).Run()
 		}
-		exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_name_locked", "1").Run()
+		if soft {
+			if !windows[i].NameAuto {
+				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_name_auto", "1").Run()
+			}
+			windows[i].NameAuto = true
+		} else {
+			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_name_locked", "1").Run()
+			windows[i].NameLocked = true
+		}
 		windows[i].Name = rec.Name
-		windows[i].NameLocked = true
 
 		if g := strings.TrimSpace(rec.Group); g != "" && windows[i].Group != g {
 			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_group", g).Run()
@@ -3381,6 +3631,12 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 	// Track which pane IDs we see this cycle for stale cleanup
 	seenPanes := make(map[string]bool)
 
+	// Windows an attached client is actually viewing right now. The AI input
+	// "?" is an unseen-attention signal, so we only acknowledge it (and suppress
+	// it) for windows that are genuinely on someone's screen — not merely the
+	// active window of a detached session. Computed once per cycle.
+	viewedWindows := attachedClientWindows()
+
 	for i := range c.windows {
 		win := &c.windows[i]
 		idx := win.Index
@@ -3632,12 +3888,27 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 		// Multi-pane: indicators stay on pane lines; window shows nothing for busy/input
 		if !multiPane && len(aiPanes) == 1 {
 			pane := aiPanes[0]
+			pid := pane.ID
 			if pane.AIBusy {
 				win.Busy = true
 				win.Input = false
-			} else if pane.AIInput && !win.Active {
-				win.Input = true
-				win.Busy = false
+				// New activity re-arms the unseen-attention signal.
+				delete(c.aiInputAck, pid)
+			} else if pane.AIInput {
+				// The "?" means "something happened here you haven't seen yet" —
+				// not "Claude/AGY is sitting idle". Passive ✳-idle detection fires
+				// whenever the tool is simply ready for input, so once the user
+				// actually views the window (an attached client is on it) we
+				// acknowledge it and keep it quiet until the next busy cycle,
+				// instead of re-flagging every time they switch away.
+				viewed := viewedWindows[win.ID]
+				if viewed {
+					c.aiInputAck[pid] = true
+				}
+				if !viewed && !c.aiInputAck[pid] {
+					win.Input = true
+					win.Busy = false
+				}
 			}
 		} else if multiPane {
 			// Multi-pane: clear window-level busy/input (indicators are on pane lines)
@@ -3645,18 +3916,28 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			// Only clear the window-level flags that were set by passive detection.
 			anyPaneBusy := false
 			anyPaneInput := false
+			viewed := viewedWindows[win.ID]
 			for _, p := range aiPanes {
 				if p.AIBusy {
 					anyPaneBusy = true
+					delete(c.aiInputAck, p.ID)
 				}
 				if p.AIInput {
-					anyPaneInput = true
+					// Same unseen-attention acknowledgment as the single-pane path:
+					// once the window is actually viewed, stay quiet until the next
+					// busy cycle.
+					if viewed {
+						c.aiInputAck[p.ID] = true
+					}
+					if !c.aiInputAck[p.ID] {
+						anyPaneInput = true
+					}
 				}
 			}
 			// For collapsed multi-pane: aggregate to window level
 			if win.Collapsed {
 				win.Busy = anyPaneBusy
-				if !anyPaneBusy && anyPaneInput && !win.Active {
+				if !anyPaneBusy && anyPaneInput && !viewed {
 					win.Input = true
 				}
 			} else {
@@ -3666,8 +3947,9 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			}
 		}
 
-		// Clear window-level input for active panes in active window
-		if win.Active && multiPane {
+		// Clear input for the focused pane of a window an attached client is
+		// actually viewing (expanded multi-pane shows indicators on pane lines).
+		if multiPane && viewedWindows[win.ID] {
 			for _, pane := range aiPanes {
 				if pane.Active {
 					pane.AIInput = false
@@ -3683,6 +3965,7 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			delete(c.prevPaneTitle, pid)
 			delete(c.hookPaneActive, pid)
 			delete(c.hookPaneBusyIdleAt, pid)
+			delete(c.aiInputAck, pid)
 		}
 	}
 	for pid := range c.prevPaneTitle {
@@ -3844,6 +4127,41 @@ func (c *Coordinator) syncWindowNames() []tmuxWindowRename {
 		c.windows[i].Name = desiredName
 	}
 	return pending
+}
+
+// genericLauncherNames are window names that are clearly automatic-rename
+// artifacts rather than deliberate identities: the bare `claude` CLI name tmux
+// uses before Claude Code swaps its proc title to a semver, and bare shells.
+// (AI-tool commands like agy/gemini/codex and the semver title are caught by
+// tmux.IsAITool, so they're not repeated here.)
+var genericLauncherNames = map[string]bool{
+	"claude": true,
+	"zsh":    true,
+	"bash":   true,
+	"sh":     true,
+	"fish":   true,
+}
+
+// isGenericTabName reports whether a window name is a transient,
+// automatically-derived label (tmux automatic-rename artifact, an AI tool's
+// process title, or a "~"/"/" path stub) rather than a deliberate user
+// identity. Such names must never be persisted as a tab identity nor restored:
+// once saved they would be re-applied + hard-locked every refresh, freezing the
+// tab on the stub and suppressing the live AI summary.
+func isGenericTabName(name string) bool {
+	n := strings.TrimSpace(name)
+	if n == "" || n == "~" || n == "/" || strings.HasPrefix(n, "~/") {
+		return true
+	}
+	if isRawWindowID(n) {
+		return true
+	}
+	if genericLauncherNames[strings.ToLower(n)] {
+		return true
+	}
+	// semver proc title (Claude Code) or a configured AI-tool command
+	// (agy/Antigravity, gemini, codex, opencode, aider, cursor, copilot).
+	return tmux.IsAITool(n)
 }
 
 // isRawWindowID returns true if s looks like a raw tmux window ID (@N).
@@ -4476,7 +4794,7 @@ func (c *Coordinator) GetTeamClaudeStateHash() string {
 		if a.Remaining.Weekly != nil {
 			wk = *a.Remaining.Weekly
 		}
-		fmt.Fprintf(&b, "%s:%.2f:%.2f:%v|", a.Name, sess, wk, a.RateLimited())
+		fmt.Fprintf(&b, "%s:%.2f:%.2f:%v:%d|", a.Name, sess, wk, a.RateLimited(), a.ActiveRequests)
 	}
 	return b.String()
 }
@@ -4600,6 +4918,268 @@ func (c *Coordinator) UpdatePetState() bool {
 		c.pet.LastThought = "back home."
 	}
 
+	// === DRAGON MECHANICS ===
+
+	// Manage dragon appearance schedule
+	if c.pet.DragonState != "" {
+		if c.pet.DragonDisappearsAt.IsZero() {
+			c.pet.DragonDisappearsAt = now.Add(time.Hour)
+			c.pet.DragonAppearedAt = now
+		}
+		if !c.pet.DragonDisappearsAt.IsZero() && now.After(c.pet.DragonDisappearsAt) {
+			c.pet.DragonState = ""
+			c.pet.DragonHasTarget = false
+			c.pet.DragonActionPending = ""
+			c.pet.LastThought = "bye turbo!"
+		}
+	} else {
+		// Only appear if we haven't appeared today
+		if c.pet.DragonAppearedAt.YearDay() != now.YearDay() || c.pet.DragonAppearedAt.Year() != now.Year() {
+			c.pet.DragonState = "idle"
+			c.pet.DragonPos = pos2D{X: maxX - 2, Y: 0}
+			c.pet.DragonAppearedAt = now
+			c.pet.DragonDisappearsAt = now.Add(time.Hour)
+			c.pet.State = "happy"
+			c.pet.LastThought = "turbo is here!"
+		}
+	}
+
+	// Dragon Gravity
+	if c.pet.DragonPos.Y > 0 && c.pet.DragonState != "flying" {
+		c.pet.DragonPos.Y--
+		if c.pet.DragonPos.Y == 0 && c.pet.DragonState == "jumping" {
+			c.pet.DragonState = "idle"
+		}
+	}
+
+	// Dragon Target Movement
+	if c.pet.DragonHasTarget {
+		nextX := c.pet.DragonPos.X
+		if c.pet.DragonPos.X < c.pet.DragonTargetPos.X {
+			nextX++
+			c.pet.DragonDirection = 1
+		} else if c.pet.DragonPos.X > c.pet.DragonTargetPos.X {
+			nextX--
+			c.pet.DragonDirection = -1
+		}
+
+		// Collision check with Cat
+		isCatAhead := false
+		if c.pet.DragonPos.Y == c.pet.Pos.Y {
+			dist := nextX - c.pet.Pos.X
+			if dist < 0 {
+				dist = -dist
+			}
+			if dist < 2 {
+				isCatAhead = true
+			}
+		}
+
+		if isCatAhead && c.pet.DragonPos.Y == 0 && c.pet.DragonActionPending != "cuddle" {
+			// Jump over the Cat!
+			c.pet.DragonPos.Y = 2
+			c.pet.DragonState = "jumping"
+		}
+
+		c.pet.DragonPos.X = nextX
+
+		// Clamp
+		if c.pet.DragonPos.X > maxX {
+			c.pet.DragonPos.X = maxX
+		}
+		if c.pet.DragonPos.X < 0 {
+			c.pet.DragonPos.X = 0
+		}
+
+		// Dragon interactions
+		if c.pet.DragonActionPending == "play" {
+			yarnX := c.pet.YarnPos.X
+			if yarnX < 0 {
+				yarnX = width - 4
+			}
+			if c.pet.DragonPos.X == yarnX || c.pet.DragonPos.X == yarnX-1 || c.pet.DragonPos.X == yarnX+1 {
+				if c.pet.YarnPushCount >= 2 {
+					c.pet.DragonTargetPos = c.pet.DragonPos
+				} else {
+					newYarnX := yarnX + c.pet.DragonDirection*2
+					if newYarnX >= 2 && newYarnX < width-2 {
+						c.pet.YarnPos.X = newYarnX
+						c.pet.YarnPos.Y = 1
+						c.pet.DragonTargetPos.X = newYarnX
+						c.pet.YarnPushCount++
+					} else {
+						c.pet.DragonTargetPos = c.pet.DragonPos
+					}
+				}
+			}
+		}
+
+		if c.pet.DragonPos.X == c.pet.DragonTargetPos.X && c.pet.DragonPos.Y == c.pet.DragonTargetPos.Y {
+			c.pet.DragonHasTarget = false
+			if c.pet.DragonState == "flying" && strings.HasPrefix(c.pet.DragonActionPending, "fly_") {
+				countStr := strings.TrimPrefix(c.pet.DragonActionPending, "fly_")
+				count, _ := strconv.Atoi(countStr)
+				if count > 0 {
+					// Fly around in variations of height and distance!
+					targetY := 2
+					if rand.Intn(100) < 50 {
+						targetY = 1 // swoop down!
+					}
+					c.pet.DragonTargetPos = pos2D{X: safeRandRange(0, maxX), Y: targetY}
+					c.pet.DragonHasTarget = true
+					c.pet.DragonActionPending = fmt.Sprintf("fly_%d", count-1)
+					
+					if rand.Intn(100) < 60 {
+						dir := 1
+						if c.pet.DragonPos.X > c.pet.DragonTargetPos.X {
+							dir = -1
+						}
+						// Shoot fire! Sometimes it goes straight, sometimes down, sometimes leaves a puff
+						fireYVel := 0
+						if c.pet.DragonPos.Y == 2 && rand.Intn(100) < 50 {
+							fireYVel = -1 // shoot downwards
+						}
+						emoji := "🔥"
+						if rand.Intn(100) < 30 {
+							emoji = "💨" // puff of smoke
+						}
+						c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+							Emoji:     emoji,
+							Pos:       pos2D{X: c.pet.DragonPos.X + dir, Y: c.pet.DragonPos.Y},
+							Velocity:  pos2D{X: dir, Y: fireYVel},
+							ExpiresAt: now.Add(2 * time.Second),
+						})
+					}
+				} else {
+					c.pet.DragonState = "idle"
+					c.pet.DragonActionPending = ""
+				}
+			} else if c.pet.DragonActionPending == "cuddle" {
+				c.pet.DragonState = "happy"
+				c.pet.State = "happy" // Cat also gets happy!
+			} else if c.pet.DragonActionPending == "play" {
+				c.pet.DragonState = "playing"
+				c.pet.YarnPos = pos2D{X: -1, Y: 0}
+				c.pet.YarnExpiresAt = time.Time{}
+				c.pet.YarnPushCount = 0
+			} else {
+				c.pet.DragonState = "idle"
+			}
+			c.pet.DragonActionPending = ""
+		}
+	} else if c.pet.DragonState == "playing" || c.pet.DragonState == "happy" || c.pet.DragonState == "fire_breathing" {
+		if c.pet.AnimFrame%20 == 0 {
+			c.pet.DragonState = "idle"
+		}
+	} else if c.pet.DragonState == "sleeping" {
+		if c.pet.AnimFrame%60 == 0 && rand.Intn(100) < 30 {
+			c.pet.DragonState = "idle"
+		}
+	}
+
+	// Dragon Random Behaviors
+	if c.pet.DragonState == "idle" && !c.pet.DragonHasTarget && c.pet.AnimFrame%10 == 0 {
+		hour := now.Hour()
+		if hour >= 2 && hour < 6 && rand.Intn(100) < 80 {
+			c.pet.DragonState = "sleeping"
+		} else {
+			if rand.Intn(100) < 25 {
+				action := rand.Intn(7)
+				switch action {
+				case 0:
+					// Walk
+					c.pet.DragonState = "walking"
+					c.pet.DragonDirection = []int{-1, 1}[rand.Intn(2)]
+					c.pet.DragonTargetPos = pos2D{X: rand.Intn(maxX), Y: 0}
+					c.pet.DragonHasTarget = true
+				case 1:
+					// Jump
+					c.pet.DragonState = "jumping"
+					c.pet.DragonPos.Y = 2
+				case 2:
+					// Play with yarn
+					if c.pet.YarnPos.X >= 0 {
+						c.pet.DragonTargetPos = pos2D{X: c.pet.YarnPos.X, Y: 0}
+						c.pet.DragonHasTarget = true
+						c.pet.DragonActionPending = "play"
+						c.pet.DragonState = "walking"
+					}
+				case 3:
+					// Chase/Cuddle Cat
+					targetX := c.pet.Pos.X - 2
+					if targetX < 0 || c.pet.DragonPos.X > c.pet.Pos.X {
+						targetX = c.pet.Pos.X + 2
+					}
+					if targetX > maxX {
+						targetX = c.pet.Pos.X - 2
+					}
+					c.pet.DragonTargetPos = pos2D{X: targetX, Y: 0}
+					c.pet.DragonHasTarget = true
+					c.pet.DragonActionPending = "cuddle"
+					c.pet.DragonState = "walking"
+				case 4:
+					// Happy
+					c.pet.DragonState = "happy"
+				case 5:
+					// Fly around
+					c.pet.DragonState = "flying"
+					c.pet.DragonPos.Y = 1 + rand.Intn(2) // Y=1 or Y=2
+					c.pet.DragonDirection = []int{-1, 1}[rand.Intn(2)]
+					c.pet.DragonTargetPos = pos2D{X: rand.Intn(maxX), Y: c.pet.DragonPos.Y}
+					c.pet.DragonHasTarget = true
+				case 6:
+					// Breathe fire
+					c.pet.DragonState = "fire_breathing"
+					dir := c.pet.DragonDirection
+					if dir == 0 {
+						dir = 1
+					}
+					fireX := c.pet.DragonPos.X + dir
+					if fireX < 0 {
+						fireX = 0
+					}
+					if fireX > maxX {
+						fireX = maxX
+					}
+					c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+						Emoji:     "🔥",
+						Pos:       pos2D{X: fireX, Y: c.pet.DragonPos.Y},
+						Velocity:  pos2D{X: dir, Y: 0},
+						ExpiresAt: now.Add(2 * time.Second),
+					})
+				}
+			}
+		}
+	}
+
+	// === GRAVITY ===
+
+	// Yarn gravity - falls if in air
+	if c.pet.YarnPos.Y > 0 {
+		c.pet.YarnPos.Y--
+	}
+
+	// Cat gravity - falls back to ground after jumping
+	if c.pet.Pos.Y > 0 {
+		c.pet.Pos.Y--
+		if c.pet.Pos.Y == 0 && c.pet.State == "jumping" {
+			c.pet.State = "idle"
+		}
+	}
+
+	// Food gravity - falls if in air
+	if c.pet.FoodItem.X >= 0 && c.pet.FoodItem.Y > 0 {
+		c.pet.FoodItem.Y--
+		// When food lands, pet should chase it
+		if c.pet.FoodItem.Y == 0 && !c.pet.HasTarget {
+			c.pet.TargetPos = pos2D{X: c.pet.FoodItem.X, Y: 0}
+			c.pet.HasTarget = true
+			c.pet.ActionPending = "eat"
+			c.pet.State = "walking"
+			c.pet.LastThought = "food!"
+		}
+	}
+
 	// === ADVENTURE MODE ===
 	// If adventure is active, update it and skip normal mechanics
 	if c.pet.Adventure.Active {
@@ -4633,34 +5213,6 @@ func (c *Coordinator) UpdatePetState() bool {
 			c.pet.ActionPending = ""
 			c.pet.State = "idle"
 			c.pet.LastThought = "where'd it go?"
-		}
-	}
-
-	// === GRAVITY ===
-
-	// Yarn gravity - falls if in air
-	if c.pet.YarnPos.Y > 0 {
-		c.pet.YarnPos.Y--
-	}
-
-	// Cat gravity - falls back to ground after jumping
-	if c.pet.Pos.Y > 0 {
-		c.pet.Pos.Y--
-		if c.pet.Pos.Y == 0 && c.pet.State == "jumping" {
-			c.pet.State = "idle"
-		}
-	}
-
-	// Food gravity - falls if in air
-	if c.pet.FoodItem.X >= 0 && c.pet.FoodItem.Y > 0 {
-		c.pet.FoodItem.Y--
-		// When food lands, pet should chase it
-		if c.pet.FoodItem.Y == 0 && !c.pet.HasTarget {
-			c.pet.TargetPos = pos2D{X: c.pet.FoodItem.X, Y: 0}
-			c.pet.HasTarget = true
-			c.pet.ActionPending = "eat"
-			c.pet.State = "walking"
-			c.pet.LastThought = "food!"
 		}
 	}
 
@@ -4719,22 +5271,36 @@ func (c *Coordinator) UpdatePetState() bool {
 				break
 			}
 		}
-		if isPoopAhead && c.pet.Pos.Y == 0 {
-			// Jump over the poop!
+		
+		isDragonAhead := false
+		if c.pet.DragonState != "" && c.pet.DragonPos.Y == c.pet.Pos.Y {
+			dist := nextX - c.pet.DragonPos.X
+			if dist < 0 {
+				dist = -dist
+			}
+			if dist < 2 {
+				isDragonAhead = true
+			}
+		}
+
+		if (isPoopAhead || isDragonAhead) && c.pet.Pos.Y == 0 {
+			// Jump over the obstacle!
 			c.pet.Pos.Y = 2
 			c.pet.State = "jumping"
-			c.pet.LastThought = randomThought("poop_jump")
+			if isPoopAhead {
+				c.pet.LastThought = randomThought("poop_jump")
+			}
 		}
-
-		c.pet.Pos.X = nextX
 
 		// Clamp after move
-		if c.pet.Pos.X > maxX {
-			c.pet.Pos.X = maxX
+		if nextX > maxX {
+			nextX = maxX
 		}
-		if c.pet.Pos.X < 0 {
-			c.pet.Pos.X = 0
+		if nextX < 0 {
+			nextX = 0
 		}
+		
+		c.pet.Pos.X = nextX
 
 		// If chasing yarn, push it or catch it when reached
 		if c.pet.ActionPending == "play" {
@@ -4919,8 +5485,8 @@ func (c *Coordinator) UpdatePetState() bool {
 					if dir == 0 {
 						dir = 1
 					}
-					// Gun appears in the direction the pet is facing (fixes #23: physics make sense now)
-					gunX := c.pet.Pos.X + dir
+					// Gun appears in the direction the pet is facing, offset by 2 to account for emoji width
+					gunX := c.pet.Pos.X + (dir * 2)
 					if gunX < 0 {
 						gunX = 0
 					}
@@ -5294,7 +5860,7 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 
 	switch adv.Phase {
 	case advPhaseDeparting:
-		if c.pet.AnimFrame%3 == 0 {
+		if c.pet.AnimFrame%6 == 0 {
 			adv.CatX++
 			if adv.CatX > maxX {
 				adv.CatX = maxX
@@ -5304,14 +5870,14 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 			// Transition to exploring
 			adv.Phase = advPhaseExploring
 			adv.PhaseStart = now
-			adv.PhaseDuration = time.Duration(5+rand.Intn(10)) * time.Second
+			adv.PhaseDuration = time.Duration(10+rand.Intn(20)) * time.Second
 			adv.CatX = maxX / 2 // Cat centered during exploration
 			c.pet.LastThought = "exploring..."
 		}
 
 	case advPhaseExploring:
 		// Scenery scrolls past, cat stays centered
-		if c.pet.AnimFrame%2 == 0 {
+		if c.pet.AnimFrame%4 == 0 {
 			adv.SceneOffset++
 		}
 
@@ -5324,12 +5890,12 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 		if adv.Wildlife != nil {
 			adv.Phase = advPhaseEncounter
 			adv.PhaseStart = now
-			adv.PhaseDuration = time.Duration(5+rand.Intn(5)) * time.Second
+			adv.PhaseDuration = time.Duration(10+rand.Intn(10)) * time.Second
 		} else if elapsed >= adv.PhaseDuration {
 			// No encounter, start returning
 			adv.Phase = advPhaseReturning
 			adv.PhaseStart = now
-			adv.PhaseDuration = time.Duration(3+rand.Intn(3)) * time.Second
+			adv.PhaseDuration = time.Duration(6+rand.Intn(6)) * time.Second
 			c.pet.Direction = -1
 			c.pet.LastThought = "heading home..."
 		}
@@ -5343,7 +5909,7 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 			if elapsed >= adv.PhaseDuration {
 				adv.Phase = advPhaseReturning
 				adv.PhaseStart = now
-				adv.PhaseDuration = time.Duration(3+rand.Intn(3)) * time.Second
+				adv.PhaseDuration = time.Duration(6+rand.Intn(6)) * time.Second
 				adv.Wildlife = nil
 				c.pet.Direction = -1
 				c.pet.LastThought = "heading home..."
@@ -5352,7 +5918,7 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 			// Encounter timed out without resolution — give up and return home
 			adv.Phase = advPhaseReturning
 			adv.PhaseStart = now
-			adv.PhaseDuration = time.Duration(3+rand.Intn(3)) * time.Second
+			adv.PhaseDuration = time.Duration(6+rand.Intn(6)) * time.Second
 			adv.Wildlife = nil
 			c.pet.Direction = -1
 			c.pet.LastThought = "heading home..."
@@ -5360,7 +5926,7 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 
 	case advPhaseReturning:
 		// Scenery scrolls back
-		if c.pet.AnimFrame%2 == 0 && adv.SceneOffset > 0 {
+		if c.pet.AnimFrame%4 == 0 && adv.SceneOffset > 0 {
 			adv.SceneOffset--
 		}
 
@@ -5369,13 +5935,13 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 		if elapsed >= adv.PhaseDuration {
 			adv.Phase = advPhaseArriving
 			adv.PhaseStart = now
-			adv.PhaseDuration = time.Duration(1+rand.Intn(2)) * time.Second
+			adv.PhaseDuration = time.Duration(2+rand.Intn(4)) * time.Second
 			adv.CatX = maxX
 		}
 
 	case advPhaseArriving:
 		// Cat walks back to home position
-		if c.pet.AnimFrame%3 == 0 && adv.CatX > adv.HomeX {
+		if c.pet.AnimFrame%6 == 0 && adv.CatX > adv.HomeX {
 			adv.CatX--
 		}
 
@@ -5485,7 +6051,7 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 
 	// Phase 1: Spotting (wildlife enters view)
 	if !w.Spotted {
-		if c.pet.AnimFrame%3 == 0 {
+		if c.pet.AnimFrame%6 == 0 {
 			w.X--
 		}
 		// Wildlife is spotted when it enters play area
@@ -5529,15 +6095,15 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 	}
 
 	if w.Stalking && !w.Pounced {
-		stepEvery := 5
+		stepEvery := 10
 		stopDist := 2
 		pounceDist := 3
 		if w.Approach == 1 {
-			stepEvery = 3
+			stepEvery = 6
 			stopDist = 1
 			pounceDist = 2
 		} else if w.Approach == 2 {
-			stepEvery = 2
+			stepEvery = 4
 			stopDist = 0
 			pounceDist = 1
 		}
@@ -5547,11 +6113,11 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 			}
 		}
 
-		moveEvery := 7
+		moveEvery := 14
 		if w.Speed >= 3 {
-			moveEvery = 3
+			moveEvery = 6
 		} else if w.Speed == 2 {
-			moveEvery = 5
+			moveEvery = 10
 		}
 		if c.pet.AnimFrame%moveEvery == 0 {
 			if adv.CatX <= w.X {
@@ -5728,6 +6294,38 @@ func (c *Coordinator) renderAdventurePlayArea(safePlayWidth int, petSprite strin
 			lowAirSprites[catX] = petSprite
 		} else {
 			groundSprites[catX] = petSprite
+		}
+	}
+	
+	// Place dragon! The dragon follows on the adventure
+	if c.pet.DragonState != "" {
+		dragonX := c.pet.DragonPos.X
+		if dragonX >= 0 && dragonX < safePlayWidth {
+			dragonSprite := "🐉"
+		if c.pet.DragonState == "sleeping" {
+			dragonSprite = "💤"
+		}
+		
+		// Anti-occlusion for adventure mode
+		if c.pet.Pos.Y == 0 && c.pet.DragonPos.Y == 0 {
+			if dragonX == catX+1 || dragonX == catX-1 || dragonX == catX {
+				if dragonX >= catX {
+					dragonX++
+				} else {
+					dragonX--
+				}
+			}
+		}
+		
+		if dragonX >= 0 && dragonX < safePlayWidth {
+			if c.pet.DragonPos.Y >= 2 {
+				highAirSprites[dragonX] = dragonSprite
+			} else if c.pet.DragonPos.Y == 1 {
+				lowAirSprites[dragonX] = dragonSprite
+			} else {
+				groundSprites[dragonX] = dragonSprite
+			}
+		}
 		}
 	}
 
@@ -6080,14 +6678,57 @@ func hasNarrowClient() bool {
 // back to the original window, and join-pane them in at the left edge.
 const sidebarStashWindowPrefix = "_tabby_stash_"
 
-// sidebarStashParkBase is the lowest tmux window index used for sidebar
-// stash windows. Stashes are parked at indices >= this value so they never
-// collide with the contiguous visual numbering (0..N) that
-// syncWindowIndices assigns to real windows. Without this, stash windows
-// occupy low indices on multi-window mobile sessions, blocking Phase 2 of
-// the renumber and causing the focus-restore feedback loop responsible
-// for the post-`+`-tap window-cycling bug.
+// sidebarStashParkBase is the base tmux window index used for sidebar stash
+// windows INSIDE the limbo session (see sidebarLimboSession). Stashes are
+// appended at indices >= this value purely to keep them clustered and away
+// from index 0 (the limbo session's placeholder window). They no longer need
+// to dodge the user session's visual numbering — stashes live in a separate
+// session now — but a high base keeps `move-window -a` collision-free.
 const sidebarStashParkBase = 9000
+
+// sidebarLimboSession is a dedicated DETACHED tmux session that holds stashed
+// sidebar panes while the sidebar is hidden on mobile. Parking the stashes in
+// a separate session (instead of high-index windows in the user's own session)
+// makes them unreachable from every NATIVE window-cycling path — next/prev
+// window, prefix-n/p, choose-tree -w, status-bar clicks — since those are all
+// session-scoped. The sidebar-renderer processes keep running here; the
+// hamburger "show sidebar" button join-panes them back. The session is created
+// on demand (ensureLimboSession) and torn down once empty
+// (cleanupLimboSessionIfEmpty). It is invisible to tabby's own window
+// management, which is scoped to the daemon's session via SetSessionTarget.
+const sidebarLimboSession = "_tabby_limbo"
+
+// ensureLimboSession creates the detached limbo holding session if it does not
+// already exist, and pins destroy-unattached off so tmux never reaps it while
+// it is parking live sidebar panes.
+func ensureLimboSession() {
+	if err := exec.Command("tmux", "has-session", "-t", sidebarLimboSession).Run(); err == nil {
+		return // already exists
+	}
+	// Give the detached session an explicit size so tmux's
+	// clients_calculate_size path doesn't dereference a null client during
+	// spawn (the same null-deref guarded against in tabby.tmux).
+	if err := exec.Command("tmux", "new-session", "-d", "-s", sidebarLimboSession, "-x", "80", "-y", "24").Run(); err != nil {
+		coordinatorDebugLog.Printf("ensureLimboSession: new-session failed: %v", err)
+		return
+	}
+	exec.Command("tmux", "set-option", "-t", sidebarLimboSession, "destroy-unattached", "off").Run()
+	coordinatorDebugLog.Printf("ensureLimboSession: created %s", sidebarLimboSession)
+}
+
+// cleanupLimboSessionIfEmpty kills the limbo session once no stash windows
+// remain anywhere (across all sessions). This also removes the placeholder
+// window new-session created, so the limbo session stops appearing in the
+// native session chooser the moment the sidebar is fully restored.
+func cleanupLimboSessionIfEmpty() {
+	if sidebarIsStashed() {
+		return // stashes still parked somewhere — keep the holder alive
+	}
+	if err := exec.Command("tmux", "has-session", "-t", sidebarLimboSession).Run(); err == nil {
+		exec.Command("tmux", "kill-session", "-t", sidebarLimboSession).Run()
+		coordinatorDebugLog.Printf("cleanupLimboSessionIfEmpty: killed %s", sidebarLimboSession)
+	}
+}
 
 func stashNameForWindow(windowID string) string {
 	return sidebarStashWindowPrefix + strings.TrimPrefix(windowID, "@")
@@ -6117,6 +6758,9 @@ func (c *Coordinator) hideSidebarPanes() {
 	if err != nil {
 		return
 	}
+	// Make sure the detached holding session exists before we start moving
+	// stash windows into it.
+	ensureLimboSession()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.SplitN(line, "|", 5)
 		if len(parts) < 5 {
@@ -6140,17 +6784,15 @@ func (c *Coordinator) hideSidebarPanes() {
 			continue
 		}
 		stashWinID := strings.TrimSpace(string(out))
-		// Park the stash window at a high tmux index (>= sidebarStashParkBase)
-		// so it never collides with the sequential visual indices (0..N) that
-		// syncWindowIndices wants to assign to real windows. Without this,
-		// stash windows occupy low indices, which causes syncWindowIndices'
-		// Phase 2 (move from temp 1000+ to desired 0..N) to fail or shuffle
-		// — the underlying cause of the post-`+`-tap window cycling bug on
-		// phone with sidebar detached. `move-window -a -t :<base>` picks the
-		// first free index >= base, so each stash gets its own slot without
-		// us needing to track allocations.
+		// Move the stash window OUT of the user's session into the detached
+		// limbo session, so it is unreachable from native window cycling
+		// (next/prev, prefix-n/p, choose-tree, status clicks) — all of which
+		// are session-scoped. `break-pane` created it in the user's session;
+		// `move-window -a -t <limbo>:<base>` appends it at the first free index
+		// >= base inside limbo, so each stash gets its own slot without us
+		// tracking allocations.
 		if stashWinID != "" {
-			parkArgs := []string{"move-window", "-d", "-a", "-s", stashWinID, "-t", fmt.Sprintf(":%d", sidebarStashParkBase)}
+			parkArgs := []string{"move-window", "-d", "-a", "-s", stashWinID, "-t", fmt.Sprintf("%s:%d", sidebarLimboSession, sidebarStashParkBase)}
 			if err := exec.Command("tmux", parkArgs...).Run(); err != nil {
 				coordinatorDebugLog.Printf("hideSidebarPanes: park-stash move-window failed for %s: %v", stashWinID, err)
 			}
@@ -6168,7 +6810,7 @@ func (c *Coordinator) hideSidebarPanes() {
 					"@tabby_stashed_width", strconv.Itoa(w)).Run()
 			}
 		}
-		coordinatorDebugLog.Printf("hideSidebarPanes: %s (window %s) -> %s width=%s parked_at=>=%d", paneID, winID, stashName, paneW, sidebarStashParkBase)
+		coordinatorDebugLog.Printf("hideSidebarPanes: %s (window %s) -> %s width=%s parked_in=%s", paneID, winID, stashName, paneW, sidebarLimboSession)
 	}
 }
 
@@ -6318,6 +6960,10 @@ func (c *Coordinator) restoreSidebarPanes() {
 			}
 		}
 	}
+
+	// Once every stash has been rejoined, tear down the now-empty limbo holder
+	// so it stops lingering in the native session chooser.
+	cleanupLimboSessionIfEmpty()
 }
 
 // selectNeighborWindow cycles to the prev/next non-stash window relative to
@@ -11395,6 +12041,18 @@ func teamClaudeDisplayName(name string) string {
 	return name
 }
 
+// teamClaudeBareEmail extracts just the email address from an account name,
+// dropping ANY " (org)" suffix — personal ("'s Organization") or a real team
+// name alike. Unlike teamClaudeDisplayName (which keeps a real org suffix for
+// display), this collapses a personal+team pair on the SAME email to one key, so
+// duplicate-email detection groups them and the personal row can be marked PER.
+func teamClaudeBareEmail(name string) string {
+	if i := strings.Index(name, " ("); i >= 0 {
+		return strings.TrimSpace(name[:i])
+	}
+	return strings.TrimSpace(name)
+}
+
 // teamClaudeTruncateName fits a display name into max columns, adding an "…"
 // ellipsis when it must cut. If the name carries a trailing " (org)" suffix,
 // that suffix is preserved and the head (email) is ellipsized instead, so the
@@ -11553,15 +12211,20 @@ func (c *Coordinator) renderTeamClaudeWidget(width int) string {
 			if tcCfg.BarFg != "" {
 				return tcCfg.BarFg
 			}
+			// Healthy headroom (and unknown) stays a calm, desaturated gray; the bar
+			// only takes on a warning hue once it crosses into yellow/red territory.
+			// A neutral gray (zero saturation) reads as muted on any theme while
+			// keeping enough contrast for the dark in-bar percentage text.
+			const grayHealthy = "#b9bdc2"
 			switch {
 			case pct < 0:
-				return "#888888"
+				return grayHealthy
 			case pct < 30:
 				return "#ff6b6b" // red — low headroom
 			case pct < 60:
-				return "#ffd93d" // yellow
+				return "#ffd93d" // yellow — getting low
 			default:
-				return "#6bcb77" // green — plenty left
+				return grayHealthy // plenty left — muted gray, not green
 			}
 		}
 		// inBar renders one bar of exactly bw cells with the percentage (and,
@@ -11664,12 +12327,37 @@ func (c *Coordinator) renderTeamClaudeWidget(width int) string {
 			return b.String() + "\n"
 		}
 
+		// Detect duplicate accounts (same email surfacing as both a personal and
+		// an organization account). teamClaudeDisplayName strips the " (… Organization)"
+		// suffix, so a personal/org pair collapses to the same base here. When that
+		// happens we disambiguate the rows with a trailing [PER]/[ORG] tag.
+		baseCounts := map[string]int{}
 		for _, a := range status.Accounts {
 			if tcCfg.ShowCurrentOnly && a.Name != status.CurrentAccount {
 				continue
 			}
+			baseCounts[teamClaudeBareEmail(a.Name)]++
+		}
+
+		nowMs := time.Now().UnixMilli()
+		for _, a := range status.Accounts {
+			if tcCfg.ShowCurrentOnly && a.Name != status.CurrentAccount {
+				continue
+			}
+			// The proxy load-balances sessions across accounts, so more than one
+			// account can be serving traffic at once. "active" mirrors the
+			// teamclaude TUI's green rule (in-flight requests, or used in the last
+			// 15m); every such account gets the green treatment below — not just
+			// the single CurrentAccount.
+			active := a.ActivelyUsed(nowMs)
 			marker := " "
 			if a.Name == status.CurrentAccount {
+				marker = "▸"
+			}
+			// Every actively-serving account gets a left indicator (not just the
+			// single CurrentAccount), since the proxy load-balances across accounts.
+			// It's colored green below; the account name itself stays uncolored.
+			if active && !a.RateLimited() && marker == " " {
 				marker = "▸"
 			}
 			if a.RateLimited() {
@@ -11681,19 +12369,93 @@ func (c *Coordinator) renderTeamClaudeWidget(width int) string {
 			if a.IsActiveExtraUsage && !a.RateLimited() {
 				marker = "$"
 			}
-			// Truncate the plain name (reserving 1 col for the marker) before
-			// coloring, so the colored line doesn't exceed the sidebar and trigger
-			// constrainWidgetWidth's lossy truncation.
+			// The header row is "email | conns | tier":
+			//   conns — live connections "active/max" (activeRequests/maxConcurrency),
+			//           shown whenever a concurrency cap is known (not just while
+			//           busy). Green only when MORE THAN ONE request is in flight
+			//           (genuine concurrency); a single/zero active request stays dim.
+			//   tier  — the compact subscription token (teamclaude.ShortTier:
+			//           "Max 20x"->"20x", "Team 5x"->"5x", "Pro"->"Pro"), prefixed
+			//           with "PER" for a PERSONAL account whose email is shared
+			//           with a team account (so the personal/team pair is
+			//           distinguishable: e.g. "PER20x" vs "5x").
+			// Separators are a dim compact "|". The email takes whatever width is
+			// left after the (reserved) conns and tier segments, so it — not the
+			// distinguishing tier/conns — is what gets ellipsized on a narrow sidebar.
+			email := teamClaudeDisplayName(a.Name)
+			tierTok := teamclaude.ShortTier(a.Tier)
+			if tierTok != "" && a.IsPersonalOrg() && baseCounts[teamClaudeBareEmail(a.Name)] > 1 {
+				tierTok = "PER" + tierTok
+			}
+			conns := ""
+			if a.MaxConcurrency > 0 {
+				conns = fmt.Sprintf("%d/%d", a.ActiveRequests, a.MaxConcurrency)
+			}
+
+			const sep = "|" // compact, no surrounding spaces
+			sepW := runewidth.StringWidth(sep)
 			markerW := runewidth.StringWidth(marker)
-			plainName := marker + teamClaudeTruncateName(teamClaudeDisplayName(a.Name), width-markerW)
-			// Color: warning amber when this account is the live extra-usage one,
-			// so the whole row stands out. Otherwise default label color.
+			availForName := width - markerW
+
+			// Reserve the conns segment (rightmost) first, then the tier segment.
+			// These are short and the distinguishing info, so they win — the email
+			// is truncated (with an ellipsis) to whatever's left, down to 1 col.
+			connsSeg, tierSeg := "", ""
+			if conns != "" {
+				if w := sepW + runewidth.StringWidth(conns); availForName-w >= 1 {
+					connsSeg = conns
+					availForName -= w
+				}
+			}
+			if tierTok != "" {
+				if w := sepW + runewidth.StringWidth(tierTok); availForName-w >= 1 {
+					tierSeg = tierTok
+					availForName -= w
+				}
+			}
+
+			nameText := teamClaudeTruncateName(email, availForName)
+
+			// The active state is carried by a green LEFT marker (below), not by
+			// coloring the name. Extra-usage amber (paid territory) still tints the
+			// whole row so it reads as a clear heads-up.
 			nameStyle := labelStyle
 			if a.IsActiveExtraUsage {
-				warnFg := lipgloss.Color("#ffd93d")
-				nameStyle = lipgloss.NewStyle().Foreground(warnFg).Bold(true)
+				nameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd93d")).Bold(true)
 			}
-			result.WriteString(nameStyle.Render(plainName) + "\n")
+			// Marker color precedence: extra-usage amber wins, then an actively-
+			// serving (non-rate-limited) account goes green so multiple live accounts
+			// stand out at a glance.
+			markerStyle := nameStyle
+			switch {
+			case a.IsActiveExtraUsage:
+				// keep amber (already set via nameStyle)
+			case active && !a.RateLimited():
+				markerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6bcb77")).Bold(true)
+			}
+
+			// Dim separators / tier; conns green when actively serving (amber under
+			// extra usage), dim otherwise. dividerStyle carries the (dim) divider
+			// color when configured; it renders plain when not, which is fine.
+			sepStyle := dividerStyle
+			var b strings.Builder
+			b.WriteString(markerStyle.Render(marker))
+			b.WriteString(nameStyle.Render(nameText))
+			if connsSeg != "" {
+				connStyle := labelStyle
+				// Green only when more than one request is genuinely in flight.
+				if a.ActiveRequests > 1 {
+					connStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6bcb77"))
+				}
+				if a.IsActiveExtraUsage {
+					connStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd93d"))
+				}
+				b.WriteString(sepStyle.Render(sep) + connStyle.Render(connsSeg))
+			}
+			if tierSeg != "" {
+				b.WriteString(sepStyle.Render(sep) + nameStyle.Render(tierSeg))
+			}
+			result.WriteString(b.String() + "\n")
 
 			// Extra-usage budget on its OWN line under the name so it stays
 			// visible even on a narrow sidebar (where a right-aligned suffix would
@@ -12325,6 +13087,16 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	}
 	petY := c.pet.Pos.Y
 
+	dragonX := c.pet.DragonPos.X
+	if c.pet.DragonState == "" {
+		dragonX = -1
+	}
+	dragonY := c.pet.DragonPos.Y
+	dragonSprite := "🐉"
+	if c.pet.DragonState == "sleeping" {
+		dragonSprite = "💤" // Share the zzz!
+	}
+
 	yarnX := c.pet.YarnPos.X
 	yarnY := c.pet.YarnPos.Y
 
@@ -12333,13 +13105,43 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 
 	// Clamp all positions to fit their sprites within bounds
 	petX = clampSpriteX(petX, petSprite, safePlayWidth)
+	dragonX = clampSpriteX(dragonX, dragonSprite, safePlayWidth)
 	yarnX = clampSpriteX(yarnX, sprites.Yarn, safePlayWidth)
 	foodX = clampSpriteX(foodX, sprites.Food, safePlayWidth)
+
+	// Anti-occlusion: prevent 2-width emojis from completely hiding each other when adjacent
+	if petY == 0 && dragonY == 0 {
+		if dragonX == petX+1 || dragonX == petX-1 {
+			// Push the dragon away so both are visible
+			if dragonX > petX {
+				dragonX++
+			} else {
+				dragonX--
+			}
+			dragonX = clampSpriteX(dragonX, dragonSprite, safePlayWidth)
+		}
+	}
 
 	// Line 1: High air (Y=2) - build with proper width accounting
 	coordinatorDebugLog.Printf("Pet render: petX=%d, petY=%d, yarnX=%d, yarnY=%d, foodX=%d, foodY=%d, safePlayWidth=%d, petSprite=%q",
 		petX, petY, yarnX, yarnY, foodX, foodY, safePlayWidth, petSprite)
 	highAirSprites := make(map[int]string)
+	
+	// Add scrolling clouds based on AnimFrame (passive wind)
+	for i := 0; i < safePlayWidth; i++ {
+		// Parallax effect: background moves slowly over time
+		bgWorldX := i + (c.pet.AnimFrame / 15)
+		
+		cloudMod1 := ((bgWorldX % 15) + 15) % 15
+		cloudMod2 := ((bgWorldX % 27) + 27) % 27
+		
+		if cloudMod1 == 0 {
+			highAirSprites[i] = "☁️"
+		} else if cloudMod2 == 0 {
+			highAirSprites[i] = "⛅"
+		}
+	}
+
 	for _, item := range c.pet.FloatingItems {
 		if item.Pos.Y == 2 && item.Pos.X >= 0 && item.Pos.X < safePlayWidth {
 			highAirSprites[item.Pos.X] = item.Emoji
@@ -12347,6 +13149,9 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	}
 	if petY >= 2 && petX >= 0 && petX < safePlayWidth {
 		highAirSprites[petX] = petSprite
+	}
+	if dragonY >= 2 && dragonX >= 0 && dragonX < safePlayWidth {
+		highAirSprites[dragonX] = dragonSprite
 	}
 	if yarnY >= 2 && yarnX >= 0 && yarnX < safePlayWidth {
 		highAirSprites[yarnX] = sprites.Yarn
@@ -12373,6 +13178,9 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	}
 	if petY == 1 && petX >= 0 && petX < safePlayWidth {
 		lowAirSprites[petX] = petSprite
+	}
+	if dragonY == 1 && dragonX >= 0 && dragonX < safePlayWidth {
+		lowAirSprites[dragonX] = dragonSprite
 	}
 	if yarnY == 1 && yarnX >= 0 && yarnX < safePlayWidth {
 		lowAirSprites[yarnX] = sprites.Yarn
@@ -12404,6 +13212,20 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	// Map of positions to sprites (position -> sprite string)
 	// Each position represents a display column, not a rune slot
 	groundSprites := make(map[int]string)
+	
+	// Add static ground texture based on screen position
+	for i := 0; i < safePlayWidth; i++ {
+		worldX := i
+		
+		groundMod1 := ((worldX % 9) + 9) % 9
+		groundMod2 := ((worldX % 14) + 14) % 14
+		
+		if groundMod1 == 0 {
+			groundSprites[i] = "."
+		} else if groundMod2 == 0 {
+			groundSprites[i] = "_"
+		}
+	}
 
 	// Place floating items
 	for _, item := range c.pet.FloatingItems {
@@ -12440,6 +13262,11 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 		} else {
 			placeSprite(groundSprites, petX, petSprite, safePlayWidth)
 		}
+	}
+
+	// Place dragon on top
+	if dragonY == 0 {
+		placeSprite(groundSprites, dragonX, dragonSprite, safePlayWidth)
 	}
 
 	// Build the ground row using helper
@@ -15135,6 +15962,22 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		yarnPosX = safePlayWidth - 1
 	}
 
+	dragonPosX := c.pet.DragonPos.X
+	if dragonPosX >= safePlayWidth {
+		dragonPosX = safePlayWidth - 1
+	}
+	if dragonPosX < 0 {
+		dragonPosX = 0
+	}
+	dragonSprite := "🐉"
+	if c.pet.DragonState == "sleeping" {
+		dragonSprite = "💤"
+	}
+	dragonWidth := uniseg.StringWidth(dragonSprite)
+	if dragonWidth < 1 {
+		dragonWidth = 1
+	}
+
 	// Get cat sprite based on current state
 	catSprite := sprites.Idle
 	switch c.pet.State {
@@ -15207,6 +16050,51 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		c.pet.LastPet = time.Now()
 		c.pet.State = "happy"
 		c.pet.LastThought = randomThought("petting")
+		petSnap := c.pet
+		c.stateMu.Unlock()
+		savePetStateData(petSnap)
+		return true
+	}
+
+	// Check if clicking on dragon
+	if c.pet.DragonState != "" && c.pet.DragonPos.Y == petY && clickX >= dragonPosX && clickX < dragonPosX+dragonWidth {
+		coordinatorDebugLog.Printf("    -> Clicked on dragon at X=%d! Dragon flies and breathes fire.", clickX)
+		c.pet.DragonState = "flying"
+		c.pet.DragonPos.Y = 2
+		c.pet.DragonDirection = []int{-1, 1}[rand.Intn(2)]
+		c.pet.DragonTargetPos = pos2D{X: safeRandRange(0, safePlayWidth-5), Y: 2}
+		c.pet.DragonHasTarget = true
+		c.pet.DragonActionPending = "fly_4"
+		
+		// Breathe fire!
+		dir := c.pet.DragonDirection
+		if dir == 0 {
+			dir = 1
+		}
+		fireX := c.pet.DragonPos.X + dir
+		if fireX < 0 {
+			fireX = 0
+		}
+		if fireX >= safePlayWidth {
+			fireX = safePlayWidth - 1
+		}
+		c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+			Emoji:     "🔥",
+			Pos:       pos2D{X: fireX, Y: c.pet.DragonPos.Y},
+			Velocity:  pos2D{X: dir, Y: 0},
+			ExpiresAt: time.Now().Add(2 * time.Second),
+		})
+		
+		// Spawn some clouds
+		for i := 0; i < 2; i++ {
+			c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
+				Emoji:     "☁️",
+				Pos:       pos2D{X: safeRandRange(0, safePlayWidth-1), Y: 1 + rand.Intn(2)},
+				Velocity:  pos2D{X: []int{-1, 1}[rand.Intn(2)], Y: 0},
+				ExpiresAt: time.Now().Add(4 * time.Second),
+			})
+		}
+		
 		petSnap := c.pet
 		c.stateMu.Unlock()
 		savePetStateData(petSnap)
@@ -15580,14 +16468,17 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 		parts := strings.SplitN(item.Command, ":", 2)
 		if len(parts) == 2 {
 			if windowIndex, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
-				// Forget the directory's saved tab identity so neither this tab
-				// nor future tabs in the same dir get re-named on the next refresh.
-				if cwd := c.resolveWindowCWD(windowIndex); cwd != "" {
-					c.clearCWDIdentity(cwd)
+				// Forget the project's saved tab identity (keyed on the project
+				// root / ssh host) so neither this tab nor future tabs in the same
+				// project get re-named on the next refresh.
+				if key, ok := c.windowNameKeyByIndex(windowIndex); ok {
+					c.clearCWDIdentity(key)
 				}
-				// Then drop the per-window lock so syncWindowNames auto-renames it
-				// back to the directory basename.
-				exec.Command("tmux", "set-window-option", "-t", c.windowTargetForIndex(windowIndex), "-u", "@tabby_name_locked").Run()
+				// Then drop both the hard lock and the soft auto-name flag so
+				// syncWindowNames auto-renames it back to the directory basename.
+				target := c.windowTargetForIndex(windowIndex)
+				exec.Command("tmux", "set-window-option", "-t", target, "-u", "@tabby_name_locked").Run()
+				exec.Command("tmux", "set-window-option", "-t", target, "-u", "@tabby_name_auto").Run()
 			}
 		}
 		return
@@ -15729,8 +16620,11 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		"-T", fmt.Sprintf("Window %d: %s", win.Index, win.Name),
 	}, pos.args()...)
 
-	// Rename option - locks the name so syncWindowNames won't overwrite it
-	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d @tabby_name_locked 1\"", win.Name, win.Index, win.Index)
+	// Rename option - hard-locks the name so syncWindowNames won't overwrite it.
+	// Also clears any soft @tabby_name_auto flag so the manual name is a clean
+	// hard lock (the LLM stops refining it; applyCWDIdentityMappings upgrades the
+	// saved record's source to "user" on the next capture).
+	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t :%d -- '%%%%' ; set-window-option -t :%d @tabby_name_locked 1 ; set-window-option -t :%d -u @tabby_name_auto\"", win.Name, win.Index, win.Index, win.Index)
 	args = append(args, "Rename", "r", renameCmd)
 
 	// Unlock name option - routes through the daemon so it can forget the

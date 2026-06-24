@@ -99,6 +99,7 @@ func newTestCoordinator(t *testing.T) *Coordinator {
 		windowVisualPos:    make(map[string]int),
 		collapsedGroups:    make(map[string]bool),
 		cwdColors:          make(map[string]CWDColorMapping),
+		gitTopCache:        make(map[string]string),
 		clientWidths:       make(map[string]int),
 		prevPaneBusy:       make(map[string]bool),
 		prevPaneTitle:      make(map[string]string),

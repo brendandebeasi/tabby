@@ -69,6 +69,7 @@ type Pane struct {
 	Width        int    // Pane width
 	Height       int    // Pane height
 	CurrentPath  string // Current working directory of pane
+	RemoteCWD    string // Remote "host\x1ftopmost" reported by the remote-cwd shell hook (from @tabby_remote_cwd); empty for local panes
 	LastActivity int64  // Unix timestamp of last pane output (for idle detection)
 	PID          int    // Process ID of the shell in this pane
 	Collapsed    bool   // Pane is collapsed to header only
@@ -338,7 +339,8 @@ type Window struct {
 	CustomColor string // User-defined tab color (set via @tabby_color option)
 	Group       string // User-assigned group name (set via @tabby_group option)
 	Collapsed   bool   // Panes are hidden in sidebar (set via @tabby_collapsed option)
-	NameLocked  bool   // Window name was explicitly set by user (set via @tabby_name_locked)
+	NameLocked  bool   // Window name was hard-locked by an explicit user rename (set via @tabby_name_locked)
+	NameAuto    bool   // Window name came from a soft LLM-inferred per-project name (set via @tabby_name_auto); shown verbatim but still LLM-refinable until hard-locked
 	SyncWidth   bool   // Sync sidebar width with global setting (set via @tabby_sync_width, default true)
 	Pinned      bool   // Window is pinned to top of sidebar (set via @tabby_pinned option)
 	Icon        string // Custom icon/emoji for window (set via @tabby_icon option)
@@ -358,7 +360,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}", "#{@tabby_ai_title}"}, tmuxFieldSep))
+		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}", "#{@tabby_ai_title}", "#{@tabby_name_auto}"}, tmuxFieldSep))
 	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -470,6 +472,13 @@ func ListWindows() ([]Window, error) {
 		if len(parts) >= 24 {
 			aiTitle = strings.TrimSpace(stripANSI(parts[23]))
 		}
+		// Soft auto-name flag from @tabby_name_auto option (set when a soft
+		// LLM-inferred per-project name has been applied to this window).
+		nameAuto := false
+		if len(parts) >= 25 {
+			tabbyNameAuto := strings.TrimSpace(parts[24])
+			nameAuto = tabbyNameAuto == "1" || tabbyNameAuto == "true"
+		}
 		// Session ID safety net: skip windows that belong to a different session.
 		// tmux list-windows -t $SESSION can transiently return wrong-session windows.
 		if sessionTarget != "" && len(parts) >= 19 {
@@ -500,6 +509,7 @@ func ListWindows() ([]Window, error) {
 			Group:       group,
 			Collapsed:   collapsed,
 			NameLocked:  nameLocked,
+			NameAuto:    nameAuto,
 			SyncWidth:   syncWidth,
 			Pinned:      pinned,
 			Icon:        icon,
@@ -522,7 +532,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 		windowTarget = fmt.Sprintf("%s:%d", sessionTarget, windowIndex)
 	}
 	out, err := DefaultRunner.Run("list-panes", "-t", windowTarget, "-F",
-		strings.Join([]string{"#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_current_command}", "#{pane_title}", "#{pane_pid}", "#{pane_last_activity}", "#{@tabby_pane_title}", "#{pane_top}", "#{pane_left}", "#{pane_current_path}", "#{@tabby_pane_collapsed}", "#{@tabby_pane_prev_height}", "#{pane_start_command}", "#{pane_dead}"}, tmuxFieldSep))
+		strings.Join([]string{"#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_current_command}", "#{pane_title}", "#{pane_pid}", "#{pane_last_activity}", "#{@tabby_pane_title}", "#{pane_top}", "#{pane_left}", "#{pane_current_path}", "#{@tabby_pane_collapsed}", "#{@tabby_pane_prev_height}", "#{pane_start_command}", "#{pane_dead}", "#{@tabby_remote_cwd}"}, tmuxFieldSep))
 	if err != nil {
 		return nil, err
 	}
@@ -612,6 +622,10 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 			collapsedVal := strings.TrimSpace(parts[10])
 			collapsed = collapsedVal == "1" || strings.EqualFold(collapsedVal, "true")
 		}
+		remoteCWD := ""
+		if len(parts) >= 16 {
+			remoteCWD = strings.TrimSpace(parts[15])
+		}
 		panes = append(panes, Pane{
 			ID:           parts[0],
 			Index:        index,
@@ -625,6 +639,7 @@ func ListPanesForWindow(windowIndex int) ([]Pane, error) {
 			Top:          top,
 			Left:         left,
 			CurrentPath:  currentPath,
+			RemoteCWD:    remoteCWD,
 			LastActivity: lastActivityTS,
 			PID:          panePID,
 			Collapsed:    collapsed,
@@ -649,7 +664,7 @@ func ListAllPanes() (map[int][]Pane, error) {
 		args = append(args, "-a")
 	}
 	args = append(args, "-F",
-		strings.Join([]string{"#{window_index}", "#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_current_command}", "#{pane_title}", "#{pane_pid}", "#{pane_last_activity}", "#{@tabby_pane_title}", "#{pane_top}", "#{pane_left}", "#{pane_current_path}", "#{@tabby_pane_collapsed}", "#{@tabby_pane_prev_height}", "#{pane_start_command}", "#{pane_width}", "#{pane_height}"}, tmuxFieldSep))
+		strings.Join([]string{"#{window_index}", "#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_current_command}", "#{pane_title}", "#{pane_pid}", "#{pane_last_activity}", "#{@tabby_pane_title}", "#{pane_top}", "#{pane_left}", "#{pane_current_path}", "#{@tabby_pane_collapsed}", "#{@tabby_pane_prev_height}", "#{pane_start_command}", "#{pane_width}", "#{pane_height}", "#{@tabby_remote_cwd}"}, tmuxFieldSep))
 	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, err
@@ -742,6 +757,11 @@ func ListAllPanes() (map[int][]Pane, error) {
 			height, _ = strconv.Atoi(parts[16])
 		}
 
+		remoteCWD := ""
+		if len(parts) >= 18 {
+			remoteCWD = strings.TrimSpace(parts[17])
+		}
+
 		pane := Pane{
 			ID:           parts[1],
 			Index:        paneIdx,
@@ -757,6 +777,7 @@ func ListAllPanes() (map[int][]Pane, error) {
 			Width:        width,
 			Height:       height,
 			CurrentPath:  currentPath,
+			RemoteCWD:    remoteCWD,
 			LastActivity: lastActivityTS,
 			PID:          panePID,
 		}

@@ -2,6 +2,7 @@ package teamclaude
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -132,6 +133,85 @@ func TestFetch(t *testing.T) {
 	}
 }
 
+func TestActivelyUsed(t *testing.T) {
+	// Fixed reference "now" so the recency math is deterministic.
+	base := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	nowMs := base.UnixMilli()
+	iso := func(d time.Duration) string { return base.Add(d).Format(time.RFC3339) }
+
+	cases := []struct {
+		name string
+		acct Account
+		want bool
+	}{
+		{
+			name: "in-flight requests => active even if lastUsed is stale",
+			acct: Account{ActiveRequests: 2, Usage: Usage{LastUsed: iso(-2 * time.Hour)}},
+			want: true,
+		},
+		{
+			name: "no in-flight but used 5m ago => active (within 15m window)",
+			acct: Account{ActiveRequests: 0, Usage: Usage{LastUsed: iso(-5 * time.Minute)}},
+			want: true,
+		},
+		{
+			name: "no in-flight, used 30m ago => not active",
+			acct: Account{ActiveRequests: 0, Usage: Usage{LastUsed: iso(-30 * time.Minute)}},
+			want: false,
+		},
+		{
+			name: "empty lastUsed, no in-flight => not active",
+			acct: Account{ActiveRequests: 0, Usage: Usage{LastUsed: ""}},
+			want: false,
+		},
+		{
+			name: "unparseable lastUsed, no in-flight => not active",
+			acct: Account{ActiveRequests: 0, Usage: Usage{LastUsed: "not-a-timestamp"}},
+			want: false,
+		},
+		{
+			name: "in-flight requests with empty lastUsed => active",
+			acct: Account{ActiveRequests: 1, Usage: Usage{LastUsed: ""}},
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.acct.ActivelyUsed(nowMs); got != tc.want {
+				t.Errorf("ActivelyUsed = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecodeActiveFields(t *testing.T) {
+	// New proxy (teamclaude 74bdcdd+) carries activeRequests/maxConcurrency.
+	withFields := `{"accounts":[{"name":"a","activeRequests":3,"maxConcurrency":3}]}`
+	var st Status
+	if err := json.Unmarshal([]byte(withFields), &st); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := st.Accounts[0].ActiveRequests; got != 3 {
+		t.Errorf("ActiveRequests = %d, want 3", got)
+	}
+	if got := st.Accounts[0].MaxConcurrency; got != 3 {
+		t.Errorf("MaxConcurrency = %d, want 3", got)
+	}
+
+	// Older proxy omits the fields entirely — they must default to 0 so the
+	// widget degrades gracefully (falls back to lastUsed recency).
+	var st2 Status
+	if err := json.Unmarshal([]byte(realPayload), &st2); err != nil {
+		t.Fatalf("unmarshal realPayload: %v", err)
+	}
+	if got := st2.Accounts[0].ActiveRequests; got != 0 {
+		t.Errorf("legacy ActiveRequests = %d, want 0", got)
+	}
+	if got := st2.Accounts[0].MaxConcurrency; got != 0 {
+		t.Errorf("legacy MaxConcurrency = %d, want 0", got)
+	}
+}
+
 func TestFetchNoKeyOmitsHeader(t *testing.T) {
 	hasKey := true
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -233,5 +313,56 @@ func TestFetchModelsNon200(t *testing.T) {
 
 	if _, err := FetchModels(context.Background(), srv.URL, "k"); err == nil {
 		t.Errorf("expected error on 500, got nil")
+	}
+}
+
+func TestShortTier(t *testing.T) {
+	cases := map[string]string{
+		"Max 20x":  "20x",
+		"Max 5x":   "5x",
+		"Team 5x":  "5x",
+		"Team 20x": "20x",
+		"Pro":      "Pro",
+		"":         "",
+		"Max":      "Max", // no suffix to strip down to
+		"weird":    "weird",
+	}
+	for in, want := range cases {
+		if got := ShortTier(in); got != want {
+			t.Errorf("ShortTier(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestIsPersonalOrg(t *testing.T) {
+	personal := Account{OrgName: "brendan@gunpowder.tech's Organization"}
+	if !personal.IsPersonalOrg() {
+		t.Errorf("expected auto-generated personal org to be detected")
+	}
+	team := Account{OrgName: "Gunpowder"}
+	if team.IsPersonalOrg() {
+		t.Errorf("a real team org must not be flagged personal")
+	}
+	empty := Account{OrgName: ""}
+	if empty.IsPersonalOrg() {
+		t.Errorf("empty orgName is not a personal org")
+	}
+}
+
+func TestStatusDecodesTier(t *testing.T) {
+	body := `{"accounts":[{"name":"a","tier":"Max 20x","orgName":"a's Organization"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	st, err := Fetch(context.Background(), srv.URL, "")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(st.Accounts) != 1 || st.Accounts[0].Tier != "Max 20x" {
+		t.Errorf("tier not decoded: %+v", st.Accounts)
+	}
+	if !st.Accounts[0].IsPersonalOrg() {
+		t.Errorf("expected personal org from decoded account")
 	}
 }

@@ -227,19 +227,20 @@ func TestCaptureCWDIdentity_StoresNameGroupPinned(t *testing.T) {
 	t.Setenv("TABBY_STATE_DIR", t.TempDir())
 	c := newTestCoordinator(t)
 
-	c.captureCWDIdentity("/home/user/project", "  api  ", "  Work  ", true)
+	c.captureCWDIdentity("/home/user/project", "  api  ", "  Work  ", true, "user")
 	m, ok := c.getCWDColorMapping("/home/user/project")
 	assert.True(t, ok)
 	assert.Equal(t, "api", m.Name, "name should be trimmed and stored")
 	assert.Equal(t, "Work", m.Group, "group should be trimmed and stored")
 	assert.True(t, m.Pinned)
+	assert.Equal(t, "user", m.NameSource)
 }
 
 func TestCaptureCWDIdentity_EmptyNameIsNoOp(t *testing.T) {
 	t.Setenv("TABBY_STATE_DIR", t.TempDir())
 	c := newTestCoordinator(t)
 
-	c.captureCWDIdentity("/tmp/p", "   ", "Work", true)
+	c.captureCWDIdentity("/tmp/p", "   ", "Work", true, "user")
 	_, ok := c.getCWDColorMapping("/tmp/p")
 	assert.False(t, ok, "an empty name carries nothing to capture")
 }
@@ -250,7 +251,7 @@ func TestCaptureCWDIdentity_PreservesColorIcon(t *testing.T) {
 
 	c.setCWDColor("/tmp/x", "#aabbcc")
 	c.setCWDIcon("/tmp/x", "🌟")
-	c.captureCWDIdentity("/tmp/x", "db", "Infra", true)
+	c.captureCWDIdentity("/tmp/x", "db", "Infra", true, "user")
 
 	m, ok := c.getCWDColorMapping("/tmp/x")
 	assert.True(t, ok)
@@ -266,7 +267,7 @@ func TestClearCWDIdentity_RemovesIdentityKeepsColorIcon(t *testing.T) {
 	c := newTestCoordinator(t)
 
 	c.setCWDColor("/tmp/x", "#aabbcc")
-	c.captureCWDIdentity("/tmp/x", "db", "Infra", true)
+	c.captureCWDIdentity("/tmp/x", "db", "Infra", true, "user")
 
 	c.clearCWDIdentity("/tmp/x")
 	m, ok := c.getCWDColorMapping("/tmp/x")
@@ -281,13 +282,83 @@ func TestClearCWDIdentity_DeletesEntryWhenNothingRemains(t *testing.T) {
 	t.Setenv("TABBY_STATE_DIR", t.TempDir())
 	c := newTestCoordinator(t)
 
-	c.captureCWDIdentity("/tmp/only-name", "api", "", false)
+	c.captureCWDIdentity("/tmp/only-name", "api", "", false, "user")
 	_, ok := c.getCWDColorMapping("/tmp/only-name")
 	assert.True(t, ok)
 
 	c.clearCWDIdentity("/tmp/only-name")
 	_, ok = c.getCWDColorMapping("/tmp/only-name")
 	assert.False(t, ok, "entry should be removed when no color/icon/identity remains")
+}
+
+func TestCaptureCWDIdentity_LLMDoesNotClobberUserName(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	// A user name is authoritative; a later llm capture must not overwrite it.
+	c.captureCWDIdentity("/tmp/proj", "my api", "", false, "user")
+	c.captureCWDIdentity("/tmp/proj", "guessed name", "", false, "llm")
+	m, ok := c.getCWDColorMapping("/tmp/proj")
+	assert.True(t, ok)
+	assert.Equal(t, "my api", m.Name, "llm must not clobber a user name")
+	assert.Equal(t, "user", m.NameSource)
+}
+
+func TestCaptureCWDIdentity_UserUpgradesLLMName(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	// A soft llm name can be set, then a user rename upgrades the source.
+	c.captureCWDIdentity("/tmp/proj", "guessed", "", false, "llm")
+	m, _ := c.getCWDColorMapping("/tmp/proj")
+	assert.Equal(t, "llm", m.NameSource)
+
+	c.captureCWDIdentity("/tmp/proj", "real name", "", false, "user")
+	m, _ = c.getCWDColorMapping("/tmp/proj")
+	assert.Equal(t, "real name", m.Name)
+	assert.Equal(t, "user", m.NameSource, "a user rename upgrades the source and freezes it")
+}
+
+func TestCaptureCWDIdentity_LLMRefinesPriorLLMName(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	c.captureCWDIdentity("/tmp/proj", "first guess", "", false, "llm")
+	c.captureCWDIdentity("/tmp/proj", "better guess", "", false, "llm")
+	m, _ := c.getCWDColorMapping("/tmp/proj")
+	assert.Equal(t, "better guess", m.Name, "an llm name may be refined by a later llm capture")
+	assert.Equal(t, "llm", m.NameSource)
+}
+
+func TestWindowNameKey_LocalAndRemote(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	// Remote window whose hook has reported in: keyed on ssh://host/topmost.
+	remote := tmux.Window{
+		RemoteHost: "bdm1",
+		Panes: []tmux.Pane{
+			{ID: "%1", Command: "ssh", Remote: true, RemoteCWD: "client-b7" + "\x1f" + "/srv/app"},
+		},
+	}
+	key, ok := c.windowNameKey(remote)
+	assert.True(t, ok)
+	assert.Equal(t, "ssh://client-b7/srv/app", key)
+
+	// Remote window with no reported cwd yet: no key (don't collide on the
+	// local ssh-launch path).
+	remoteNoHook := tmux.Window{
+		RemoteHost: "bdm1",
+		Panes:      []tmux.Pane{{ID: "%2", Command: "ssh", Remote: true, CurrentPath: "/home/user"}},
+	}
+	_, ok = c.windowNameKey(remoteNoHook)
+	assert.False(t, ok, "a remote window with no remote-cwd report yields no key")
+
+	// Local window outside a repo: keyed on the cwd itself.
+	local := tmux.Window{Panes: []tmux.Pane{{ID: "%3", Command: "zsh", CurrentPath: t.TempDir()}}}
+	key, ok = c.windowNameKey(local)
+	assert.True(t, ok)
+	assert.NotEmpty(t, key)
 }
 
 func TestParseAbbreviations(t *testing.T) {
@@ -346,6 +417,18 @@ func TestComposeTabBaseName(t *testing.T) {
 			assert.Equal(t, tc.want, c.composeTabBaseName(win(tc.name, tc.aiTitle)))
 		})
 	}
+
+	// A user-locked name is authoritative: shown verbatim, with neither the
+	// dir-code abbreviation nor the AI summary. Regression guard for the LLM
+	// clobbering manual renames and for abbreviation mangling them.
+	t.Run("locked name shows verbatim, no abbreviation or summary", func(t *testing.T) {
+		w := tmux.Window{ID: "@x", Name: "API Server", AITitle: "deploy now", NameLocked: true}
+		assert.Equal(t, "API Server", c.composeTabBaseName(w))
+	})
+	t.Run("unlocked name still shows AI summary", func(t *testing.T) {
+		w := tmux.Window{ID: "@x", Name: "API Server", AITitle: "deploy now", NameLocked: false}
+		assert.Equal(t, "AS deploy now", c.composeTabBaseName(w))
+	})
 }
 
 func TestComposeTabBaseName_AISummaryOnly(t *testing.T) {
@@ -540,4 +623,53 @@ func TestWindowTransitionRejectsBeginWhileInProgress(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "transition already in progress")
 	assert.Contains(t, err.Error(), "target=@2")
+}
+
+func TestTeamClaudeBareEmail(t *testing.T) {
+	cases := map[string]string{
+		"brendan@gunpowder.tech (brendan@gunpowder.tech's Organization)": "brendan@gunpowder.tech",
+		"brendan@gunpowder.tech (Gunpowder)":                            "brendan@gunpowder.tech",
+		"b@debea.si":                                                    "b@debea.si",
+		"  Shaked@studiodome.com  ":                                     "Shaked@studiodome.com",
+	}
+	for in, want := range cases {
+		if got := teamClaudeBareEmail(in); got != want {
+			t.Errorf("teamClaudeBareEmail(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// A personal + team pair on the same email collapses to one bare-email key,
+	// so duplicate-email detection groups them (and the personal row gets PER).
+	if teamClaudeBareEmail("brendan@gunpowder.tech (Gunpowder)") !=
+		teamClaudeBareEmail("brendan@gunpowder.tech (brendan@gunpowder.tech's Organization)") {
+		t.Errorf("personal and team accounts on the same email must share a bare-email key")
+	}
+}
+
+// TestIsGenericTabName verifies the guard that keeps automatic-rename artifacts
+// (notably the bare "claude" CLI name and Claude Code's semver proc title) from
+// being persisted/restored as a tab identity, while leaving deliberate names
+// (group-prefixed or custom) untouched.
+func TestIsGenericTabName(t *testing.T) {
+	// "agy"/"gemini" etc. resolve via tmux.IsAITool, which reads configured
+	// ai_tools; configure them so the AI-command branch is exercised.
+	tmux.ConfigureBusyDetection(nil, []string{"agy", "gemini", "codex"}, 10)
+
+	generic := []string{
+		"", "~", "/", "~/git", "@3", "@17",
+		"claude", "CLAUDE", "zsh", "bash",
+		"2.1.187", // Claude Code semver proc title
+		"agy",     // Antigravity (configured ai_tool)
+		"gemini",
+	}
+	for _, n := range generic {
+		assert.Truef(t, isGenericTabName(n), "expected %q to be generic", n)
+	}
+
+	deliberate := []string{
+		"GP|Ignite|instance-types", "SD|publications-plan",
+		"squint-axe", "studio dome", "tabby", "digest-body",
+	}
+	for _, n := range deliberate {
+		assert.Falsef(t, isGenericTabName(n), "expected %q to be a real name", n)
+	}
 }

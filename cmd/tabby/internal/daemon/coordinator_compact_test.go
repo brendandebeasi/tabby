@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -10,8 +11,20 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Isolate persisted state (cwd-colors.json, pet.json, ...) into a throwaway
+	// dir so tests that exercise saveCWDColors/captureCWDIdentity never clobber
+	// the developer's real ~/.local/state/tabby. Must run before any
+	// paths.StateDir() call caches its sync.Once value.
+	stateDir, _ := os.MkdirTemp("", "tabby-test-state")
+	if stateDir != "" {
+		os.Setenv("TABBY_STATE_DIR", stateDir)
+	}
 	zone.NewGlobal()
-	m.Run()
+	code := m.Run()
+	if stateDir != "" {
+		os.RemoveAll(stateDir)
+	}
+	os.Exit(code)
 }
 
 func TestRenderNavButtonsHasArrows(t *testing.T) {
