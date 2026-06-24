@@ -100,9 +100,18 @@ install: build
 	@chmod +x $(PLUGIN_DIR)/tabby.tmux
 	@echo "Installation complete. Reload tmux config with: tmux source ~/.tmux.conf"
 
-# Sync development to install location
+# Sync development to install location.
+# IMPORTANT: remove the destination binaries before copying (fresh inode) and
+# re-sign on macOS. Overwriting an exec'd binary IN PLACE poisons the kernel's
+# cached code signature for that path, so macOS AMFI SIGKILLs every subsequent
+# `tabby` exec (signal 9) — the watchdog can't respawn the daemon and the
+# sidebar dies. rm-then-cp + `codesign --force` avoids it.
 sync: build
+	@rm -f $(PLUGIN_DIR)/bin/*
 	@cp $(BIN_DIR)/* $(PLUGIN_DIR)/bin/
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		for f in $(PLUGIN_DIR)/bin/*; do codesign --force --sign - "$$f" >/dev/null 2>&1 || true; done; \
+	fi
 	@cp scripts/*.sh $(PLUGIN_DIR)/scripts/
 	@cp tabby.tmux $(PLUGIN_DIR)/
 	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml
