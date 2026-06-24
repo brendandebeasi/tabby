@@ -6442,17 +6442,44 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		return
 	}
 
-	// User manually resized the active window's sidebar — adopt as new global width
+	// User manually resized the active window's sidebar — adopt as new global width.
+	// Clamp to a window-relative hard ceiling first, so a too-wide drag (or a
+	// spurious large width report during layout thrash) can't become a permanent,
+	// self-reinforcing global width that spreads to every window. When we clamp
+	// DOWN, the pane is still at the oversized width, so we also resize it back to
+	// the clamped value — otherwise the oversized pane keeps re-triggering this
+	// adopt path on every sync and the sidebar never shrinks.
 	if isActive && currentWidth != c.globalWidth && currentWidth >= 10 {
-		coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global", clientID, c.globalWidth, currentWidth)
-		c.globalWidth = currentWidth
+		adopted := currentWidth
+		if ceiling, ok := c.sidebarHardCeilingForWindow(clientID); ok && adopted > ceiling {
+			adopted = ceiling
+		}
+		coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d (adopt %d), updating global", clientID, c.globalWidth, currentWidth, adopted)
+		c.globalWidth = adopted
 		c.lastWidthSync = time.Now()
-		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", currentWidth)).Run()
+		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", adopted)).Run()
 		if justBecameActive {
 			c.lastActiveWindowID = clientID
 		}
+		needResize := adopted != currentWidth
 		c.widthSyncMu.Unlock()
-		c.persistSidebarWidthProfile(clientID, currentWidth)
+		c.persistSidebarWidthProfile(clientID, adopted)
+		if needResize {
+			listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer listCancel()
+			if out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
+				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+					parts := strings.SplitN(line, "|", 3)
+					if len(parts) >= 3 && isSidebarPaneCommand(parts[1], parts[2]) {
+						coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (adopt clamp)", parts[0], adopted)
+						resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+						exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", adopted)).Run()
+						resizeCancel()
+						break
+					}
+				}
+			}
+		}
 		return
 	}
 
@@ -7947,6 +7974,52 @@ func (c *Coordinator) updateKeyboardHoldLocked(clientID string, reportedHeight i
 	}
 }
 
+// sidebarHardCeiling is the pure arithmetic behind the window-relative sidebar
+// width ceiling: the smaller of maxPercent of the window width and
+// (windowWidth - minContentCols), never below 15. Extracted so the clamp logic
+// is unit-testable without a live tmux server.
+func sidebarHardCeiling(windowWidth, maxPercent, minContentCols int) int {
+	ceiling := windowWidth * maxPercent / 100
+	if byContent := windowWidth - minContentCols; byContent < ceiling {
+		ceiling = byContent
+	}
+	if ceiling < 15 {
+		ceiling = 15
+	}
+	return ceiling
+}
+
+// sidebarHardCeilingForWindow returns the largest sidebar width that is
+// reasonable for the given window, derived purely from window geometry — a
+// fraction (@tabby_sidebar_mobile_max_percent, default 20%) of the window
+// width, floored so content keeps at least @tabby_sidebar_mobile_min_content_cols
+// columns. Unlike sidebarReasonableMaxForWindow it deliberately does NOT consider
+// any persisted/configured per-profile width, so it can clamp a freshly adopted
+// drag width: the user may widen up to this ceiling, but no further. Returns
+// (0,false) if the window width can't be read (caller should not clamp).
+func (c *Coordinator) sidebarHardCeilingForWindow(windowID string) (int, bool) {
+	if windowID == "" {
+		return 0, false
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", windowID, "#{window_width}").Output()
+	if err != nil {
+		return 0, false
+	}
+	windowWidth, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || windowWidth <= 0 {
+		return 0, false
+	}
+	maxPercent := 20
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_mobile_max_percent")); err == nil && v >= 10 && v <= 60 {
+		maxPercent = v
+	}
+	minContentCols := 40
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_mobile_min_content_cols")); err == nil && v >= 20 {
+		minContentCols = v
+	}
+	return sidebarHardCeiling(windowWidth, maxPercent, minContentCols), true
+}
+
 func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeight int) (int, bool) {
 	if windowID == "" {
 		return 0, false
@@ -8011,7 +8084,26 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 		widthDesktop = v
 	}
 
+	// Window-relative hard ceiling, shared by every profile branch below: a
+	// sidebar should never exceed maxPercent of the window, nor leave less than
+	// minContentCols for content. Mobile/keyboard already enforced this; desktop
+	// and tablet did not, so a corrupt persisted width (e.g. a runaway drag
+	// adopted as the global) propagated verbatim and the sidebar "got very large"
+	// on every window. Clamping here heals such a value on the next sync.
+	maxByFraction := windowWidth * maxPercent / 100
+	if maxByFraction < 15 {
+		maxByFraction = 15
+	}
+	maxByContent := windowWidth - minContentCols
+	if maxByContent < 15 {
+		maxByContent = 15
+	}
+	hardCeiling := sidebarHardCeiling(windowWidth, maxPercent, minContentCols)
+
 	if windowWidth > tabletMaxWindowCols {
+		if widthDesktop > hardCeiling {
+			return hardCeiling, true
+		}
 		return widthDesktop, true
 	}
 
@@ -8023,6 +8115,9 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 	if windowWidth > maxWindowCols {
 		if widthTablet < 15 {
 			widthTablet = 15
+		}
+		if widthTablet > hardCeiling {
+			return hardCeiling, true
 		}
 		return widthTablet, true
 	}
@@ -8048,16 +8143,6 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 	if keyboardThreshold == 0 {
 		keyboardThreshold = 38
 	}
-	maxByFraction := windowWidth * maxPercent / 100
-	if maxByFraction < 15 {
-		maxByFraction = 15
-	}
-
-	maxByContent := windowWidth - minContentCols
-	if maxByContent < 15 {
-		maxByContent = 15
-	}
-
 	if height > 0 && height <= keyboardThreshold {
 		// Keyboard mode: enforce the same fraction/content floors as the
 		// non-keyboard mobile branch. Without these, a corrupt user
