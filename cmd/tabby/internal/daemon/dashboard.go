@@ -89,6 +89,43 @@ func lightenHex(hex string, frac float64) string {
 
 const dashboardWindowName = "Dashboard"
 
+// dashLayoutOption is the global tmux option that persists the chosen dashboard
+// arrangement across gathers and daemon restarts. Read/written via the cached
+// tmuxGlobalOption / setTmuxGlobalOption helpers so a write is visible to a
+// same-cycle read (avoids the 30s option-cache staleness trap).
+const dashLayoutOption = "@tabby_dash_layout"
+
+// dashAllowedLayouts is the set of native tmux layout names the dashboard layout
+// picker can apply, in the order the picker presents them. The first entry is
+// the default (and historical) arrangement.
+var dashAllowedLayouts = []string{
+	"tiled",           // Grid
+	"even-horizontal", // Columns
+	"even-vertical",   // Rows
+	"main-vertical",   // Main + stack (big left)
+	"main-horizontal", // Main + row (big top)
+}
+
+// isAllowedDashLayout reports whether name is one of the supported arrangements.
+func isAllowedDashLayout(name string) bool {
+	for _, l := range dashAllowedLayouts {
+		if l == name {
+			return true
+		}
+	}
+	return false
+}
+
+// dashboardLayoutName returns the persisted dashboard layout (global
+// @tabby_dash_layout option), validated against the supported set. Falls back
+// to "tiled" when unset or invalid.
+func (c *Coordinator) dashboardLayoutName() string {
+	if name := tmuxGlobalOption(dashLayoutOption); isAllowedDashLayout(name) {
+		return name
+	}
+	return "tiled"
+}
+
 // dashWindowSnapshot records enough of an origin window to recreate it on exit
 // and to render it in the sidebar while gathered.
 type dashWindowSnapshot struct {
@@ -262,7 +299,12 @@ func (c *Coordinator) enterDashboard() {
 		}
 	}
 
-	_ = tmuxRun("select-layout", "-t", dashID, "tiled")
+	// Apply the user's chosen arrangement (default "tiled"). The in-loop
+	// re-tiles above intentionally stay "tiled" — joining repeatedly into one
+	// target halves it each time, and "tiled" reflows give the most headroom so
+	// the Nth join doesn't fail for lack of space. We only switch to a non-grid
+	// arrangement once, here, after every pane has landed.
+	_ = tmuxRun("select-layout", "-t", dashID, c.dashboardLayoutName())
 	_ = tmuxRun("select-window", "-t", dashID)
 
 	// Label each tile with tmux's NATIVE pane-border-status (a single line on the

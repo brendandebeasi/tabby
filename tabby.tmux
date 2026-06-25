@@ -340,8 +340,9 @@ tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M 
     "Split Horizontal" "-" "split-window -v -c '#{pane_current_path}'" \
     "" \
     "Break to New Window" "b" "break-pane" \
-    "Swap Up" "u" "swap-pane -U" \
-    "Swap Down" "d" "swap-pane -D" \
+    "Promote to Primary" "p" "run-shell '$CYCLE_PANE_BIN --move promote'" \
+    "Move Up" "u" "run-shell '$CYCLE_PANE_BIN --move prev'" \
+    "Move Down" "d" "run-shell '$CYCLE_PANE_BIN --move next'" \
     "" \
     "Kill Pane" "x" "run-shell '$KILL_PANE_SCRIPT'"
 
@@ -620,6 +621,17 @@ if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key o run-shell "$CYCLE_PANE_BIN"
 fi
 
+# Move/promote the focused CONTENT pane (skips the sidebar/aux panes and, in the
+# dashboard, reflows to the active @tabby_dash_layout). prefix+P promotes the
+# pane to the primary/main slot; prefix+{ / prefix+} shuffle it one slot back/
+# forward. These override tmux's default prefix+{ / } (raw swap-pane -U/-D),
+# which don't skip aux panes or rebuild main-* layouts.
+if [ -x "$TABBY_CYCLE_BIN" ]; then
+    tmux bind-key P run-shell "$CYCLE_PANE_BIN --move promote"
+    tmux bind-key "{" run-shell "$CYCLE_PANE_BIN --move prev"
+    tmux bind-key "}" run-shell "$CYCLE_PANE_BIN --move next"
+fi
+
 # Optional: Also bind to a prefix-less key for quick access
 # tmux bind-key -n M-Tab run-shell "$CURRENT_DIR/bin/tabby-toggle"
 
@@ -655,6 +667,12 @@ tmux bind-key k confirm-before -p 'Close window? (y/n)' "run-shell '$KILL_WINDOW
 # windows 1-9 and the header tabs still reach every window.
 tmux bind-key 0 run-shell -b "$CURRENT_DIR/bin/tabby dashboard"
 tmux bind-key g run-shell -b "$CURRENT_DIR/bin/tabby dashboard"
+
+# prefix + L opens the dashboard layout-style picker: an ASCII popup that
+# previews each native tmux arrangement (Grid/Columns/Rows/Main+stack/Main+row).
+# Choosing one applies it to the live dashboard and is remembered for the next
+# gather. Overrides tmux's default prefix+L (last-client), unused by tabby.
+tmux bind-key L run-shell -b "$CURRENT_DIR/bin/tabby dashboard-layout"
 
 # Direct window access with prefix + number (match tmux window indexes)
 tmux bind-key 1 select-window -t :1

@@ -23,6 +23,7 @@ import (
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/cyclepane"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/daemon"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashboard"
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashboardlayout"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dev"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/hook"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/managegroup"
@@ -48,13 +49,14 @@ var subcommands = []subcommand{
 	{"cycle-pane", "cycle the active content pane and dim inactive panes", cyclepane.Run},
 	{"daemon", "run the tabby daemon (socket server + coordinator)", daemon.Run},
 	{"dashboard", "toggle the all-panes dashboard (gather panes into a tiled grid)", dashboard.Run},
+	{"dashboard-layout", "open the dashboard layout-style picker popup", dashboardlayout.Run},
 	{"dev", "developer commands: reload, status", dev.Run},
 	{"hook", "tmux hook dispatcher (split-pane, kill-pane, resize, etc.)", hook.Run},
 	{"manage-group", "edit window-group entries in the tabby config file", managegroup.Run},
 	{"new-window", "create a new tmux window with sidebar", newwindow.Run},
 	{"pane-picker", "interactive pane picker TUI", panepicker.Run},
 	{"pet", "interact with the cat: ask, traits, forget", pet.Run},
-	{"render", "spawn a renderer: sidebar | window-header | pane-header | sidebar-popup | pet-qa-popup", renderdispatch.Run},
+	{"render", "spawn a renderer: sidebar | window-header | pane-header | sidebar-popup | pet-qa-popup | dash-layout-popup", renderdispatch.Run},
 	{"setup", "interactive configuration wizard", setup.Run},
 	{"toggle", "enable or disable the tabby sidebar for this session", toggle.Run},
 	{"watchdog", "supervise the tabby daemon, restarting on crash", watchdog.Run},
