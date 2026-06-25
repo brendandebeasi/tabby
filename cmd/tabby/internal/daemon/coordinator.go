@@ -3351,26 +3351,31 @@ func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
 // already-restored windows do no work.
 func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
 	for i := range windows {
+		// A generic stub (claude/zsh/bash/~/...) that got hard-locked is almost
+		// always the `r` / right-click rename binding pre-filling the current
+		// auto-name and the user accepting it — which sets @tabby_name_locked on
+		// the stub. That lock is bogus: a real user lock always has a non-generic
+		// name. Clear it UNCONDITIONALLY, before the windowNameKey guard below, so
+		// the stub is freed even when no project key resolves (a remote tab whose
+		// hook hasn't reported, a $HOME tab, etc.) — otherwise such a window keeps
+		// its bad lock forever and never flows back into the live summary path.
+		if windows[i].NameLocked && isGenericTabName(windows[i].Name) {
+			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "-u", "@tabby_name_locked").Run()
+			windows[i].NameLocked = false
+			logEvent("IDENTITY_UNLOCK_GENERIC win=%s name=%q", windows[i].ID, windows[i].Name)
+		}
+
 		key, ok := c.windowNameKey(windows[i])
 		if !ok {
 			continue
 		}
 
 		if windows[i].NameLocked {
-			if isGenericTabName(windows[i].Name) {
-				// An automatic-rename stub (e.g. "claude") got hard-locked: the
-				// `r` / right-click rename binding pre-fills the current name, so
-				// accepting it sets @tabby_name_locked on the stub. Unlock it so
-				// the tab flows back into the live AI-summary path, and DON'T
-				// persist it. Fall through to restore any real saved name.
-				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "-u", "@tabby_name_locked").Run()
-				windows[i].NameLocked = false
-			} else {
-				// CAPTURE: keep this project's record in sync with the user-named
-				// window. captureCWDIdentity no-ops (no disk write) when unchanged.
-				c.captureCWDIdentity(key, windows[i].Name, windows[i].Group, windows[i].Pinned, "user")
-				continue
-			}
+			// A non-generic hard-locked name is a deliberate user identity.
+			// CAPTURE it so this project's record stays in sync with the window.
+			// captureCWDIdentity no-ops (no disk write) when unchanged.
+			c.captureCWDIdentity(key, windows[i].Name, windows[i].Group, windows[i].Pinned, "user")
+			continue
 		}
 
 		rec, recOK := c.getCWDColorMapping(key)

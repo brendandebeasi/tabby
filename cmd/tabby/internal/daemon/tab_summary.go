@@ -98,15 +98,29 @@ func (c *Coordinator) RefreshTabSummaries() {
 		aiSummaryOnly := cfg.AISummaryOnly
 		changed := false
 		for _, win := range windows {
-			// A hard-locked name (explicit user rename) is authoritative — never
-			// override it. Clear any transient title a prior tick left so a stale
-			// summary doesn't linger, then move on without calling the LLM.
 			if win.NameLocked {
-				if strings.TrimSpace(win.AITitle) != "" {
-					exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_ai_title").Run()
+				// A hard lock on a GENERIC stub (claude/zsh/~/...) is bogus — the
+				// `r` rename binding pre-fills the auto-name and sets the lock when
+				// accepted. This pass runs on the after-rename-window hook, so it
+				// fires the instant that happens: clear the lock and fall through to
+				// summarize, rather than waiting for the periodic identity pass to
+				// win a race against the tab's live OSC renames.
+				if isGenericTabName(win.Name) {
+					exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_name_locked").Run()
+					win.NameLocked = false
 					changed = true
+					// fall through — summarize this window this pass
+				} else {
+					// A non-generic hard-locked name (explicit user rename) is
+					// authoritative — never override it. Clear any transient title a
+					// prior tick left so a stale summary doesn't linger, then move on
+					// without calling the LLM.
+					if strings.TrimSpace(win.AITitle) != "" {
+						exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_ai_title").Run()
+						changed = true
+					}
+					continue
 				}
-				continue
 			}
 
 			paneID := firstContentPaneID(win)
