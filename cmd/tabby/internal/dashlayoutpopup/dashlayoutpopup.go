@@ -86,6 +86,23 @@ var choices = []layoutChoice{
 		"├─┬─┬─┬─┤",
 		"└─┴─┴─┴─┘",
 	}},
+	// "-auto" modes: same geometry as the main-* layouts, but the ACTIVE pane is
+	// always the big one (it follows focus). The "*" marks the slot the focused
+	// pane occupies.
+	{"main-vertical-auto", "Main + stack (active)", []string{
+		"┌─────┬─┐",
+		"│  *  ├─┤",
+		"│     ├─┤",
+		"│     ├─┤",
+		"└─────┴─┘",
+	}},
+	{"main-horizontal-auto", "Main + row (active)", []string{
+		"┌───────┐",
+		"│   *   │",
+		"│       │",
+		"├─┬─┬─┬─┤",
+		"└─┴─┴─┴─┘",
+	}},
 }
 
 // ── styling (dark card; Background set on every text style so near-white text

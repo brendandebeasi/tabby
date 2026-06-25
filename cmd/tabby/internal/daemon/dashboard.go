@@ -95,15 +95,20 @@ const dashboardWindowName = "Dashboard"
 // same-cycle read (avoids the 30s option-cache staleness trap).
 const dashLayoutOption = "@tabby_dash_layout"
 
-// dashAllowedLayouts is the set of native tmux layout names the dashboard layout
-// picker can apply, in the order the picker presents them. The first entry is
-// the default (and historical) arrangement.
+// dashAllowedLayouts is the set of dashboard arrangements the picker can apply,
+// in the order the picker presents them. The first entry is the default (and
+// historical) arrangement. The "-auto" entries reuse the main-* geometry but
+// keep the ACTIVE pane in the big slot (see promoteActivePaneToMain and
+// cycle-pane --main-follow); they map to their base tmux layout via
+// baseTmuxLayout when handed to select-layout.
 var dashAllowedLayouts = []string{
-	"tiled",           // Grid
-	"even-horizontal", // Columns
-	"even-vertical",   // Rows
-	"main-vertical",   // Main + stack (big left)
-	"main-horizontal", // Main + row (big top)
+	"tiled",                // Grid
+	"even-horizontal",      // Columns
+	"even-vertical",        // Rows
+	"main-vertical",        // Main + stack (big left)
+	"main-horizontal",      // Main + row (big top)
+	"main-vertical-auto",   // Main + stack, active pane is the big one
+	"main-horizontal-auto", // Main + row, active pane is the big one
 }
 
 // isAllowedDashLayout reports whether name is one of the supported arrangements.
@@ -114,6 +119,63 @@ func isAllowedDashLayout(name string) bool {
 		}
 	}
 	return false
+}
+
+// baseTmuxLayout maps a dashboard layout name to the native tmux layout to hand
+// select-layout: the "-auto" variants share their base main-* geometry (only
+// which pane occupies the big slot differs, handled separately).
+func baseTmuxLayout(name string) string {
+	return strings.TrimSuffix(name, "-auto")
+}
+
+// isAutoMainLayout reports whether name is an "active pane is the big one" mode.
+func isAutoMainLayout(name string) bool {
+	return strings.HasSuffix(name, "-auto")
+}
+
+// promoteActivePaneToMain swaps the dashboard's active content pane into the
+// main (largest-area) slot so the focused pane becomes the big one, preserving
+// the window geometry. Used to make an "-auto" layout take effect immediately
+// when selected; ongoing focus tracking is handled by cycle-pane --main-follow
+// from the after-select-pane hook. No-op if the active pane is already the main.
+func (c *Coordinator) promoteActivePaneToMain(winID string) {
+	if winID == "" {
+		return
+	}
+	out := tmuxOutputTrimmed("list-panes", "-t", winID, "-F",
+		"#{pane_id}\t#{pane_active}\t#{pane_width}\t#{pane_height}\t#{pane_current_command}\t#{pane_start_command}")
+	var activeID, mainID string
+	maxArea := -1
+	for _, line := range dashLines(out) {
+		parts := strings.SplitN(line, "\t", 6)
+		if len(parts) < 4 {
+			continue
+		}
+		cur, start := "", ""
+		if len(parts) >= 5 {
+			cur = parts[4]
+		}
+		if len(parts) >= 6 {
+			start = parts[5]
+		}
+		if isAuxiliaryPaneCommand(cur) || isSidebarPaneCommand(cur, start) {
+			continue
+		}
+		w, _ := atoiSafe(parts[2])
+		h, _ := atoiSafe(parts[3])
+		if parts[1] == "1" {
+			activeID = parts[0]
+		}
+		if w*h > maxArea {
+			maxArea = w * h
+			mainID = parts[0]
+		}
+	}
+	if activeID == "" || mainID == "" || activeID == mainID {
+		return
+	}
+	_ = tmuxRun("swap-pane", "-s", activeID, "-t", mainID)
+	_ = tmuxRun("select-pane", "-t", activeID)
 }
 
 // dashboardLayoutName returns the persisted dashboard layout (global
@@ -304,7 +366,13 @@ func (c *Coordinator) enterDashboard() {
 	// target halves it each time, and "tiled" reflows give the most headroom so
 	// the Nth join doesn't fail for lack of space. We only switch to a non-grid
 	// arrangement once, here, after every pane has landed.
-	_ = tmuxRun("select-layout", "-t", dashID, c.dashboardLayoutName())
+	layout := c.dashboardLayoutName()
+	_ = tmuxRun("select-layout", "-t", dashID, baseTmuxLayout(layout))
+	if isAutoMainLayout(layout) {
+		// Put the focused pane in the big slot right away; the after-select-pane
+		// hook keeps it there as focus moves.
+		c.promoteActivePaneToMain(dashID)
+	}
 	_ = tmuxRun("select-window", "-t", dashID)
 
 	// Label each tile with tmux's NATIVE pane-border-status (a single line on the

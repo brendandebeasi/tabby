@@ -14877,7 +14877,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		_ = setTmuxGlobalOption(dashLayoutOption, name)
 		if c.dashboardWindowID != "" {
-			_ = tmuxRun("select-layout", "-t", c.dashboardWindowID, name)
+			_ = tmuxRun("select-layout", "-t", c.dashboardWindowID, baseTmuxLayout(name))
+			if isAutoMainLayout(name) {
+				// "-auto" mode: make the focused pane the big one immediately;
+				// the after-select-pane hook keeps it tracking focus afterward.
+				c.promoteActivePaneToMain(c.dashboardWindowID)
+			}
 			c.applyDashboardBorders()
 			coordinatorDebugLog.Printf("dashboard_set_layout: applied %q to live dashboard %s", name, c.dashboardWindowID)
 		} else {
@@ -16049,9 +16054,9 @@ func (c *Coordinator) launchDashLayoutPopup(clientID string) {
 	// launchQuestionPopup for the flash-open-then-close failure mode otherwise).
 	escSess := strings.ReplaceAll(sessID, "'", `'\''`)
 	popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
-	// Fixed small geometry sized to the ASCII preview list (5 rows of 4-line
-	// previews + header/footer). Columns/rows, not %, so the box hugs content.
-	go exec.Command("tmux", "display-popup", "-E", "-w", "48", "-h", "20",
+	// Fixed geometry sized to the menu (7 choices) + a 5-line ASCII preview +
+	// title/footer/padding. Columns/rows, not %, so the box hugs content.
+	go exec.Command("tmux", "display-popup", "-E", "-w", "48", "-h", "24",
 		"--", popupCmd).Run()
 }
 

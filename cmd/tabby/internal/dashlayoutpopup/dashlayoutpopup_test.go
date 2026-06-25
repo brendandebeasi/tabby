@@ -14,10 +14,11 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
-// The picker must offer exactly the 5 native tmux arrangements, in this order,
-// with "tiled" first (the default). The daemon validates against the same set.
+// The picker must offer exactly these arrangements, in this order, with "tiled"
+// first (the default): the 5 native tmux layouts plus the 2 "-auto" main modes.
+// The daemon validates against the same set.
 func TestChoicesMatchExpectedLayouts(t *testing.T) {
-	want := []string{"tiled", "even-horizontal", "even-vertical", "main-vertical", "main-horizontal"}
+	want := []string{"tiled", "even-horizontal", "even-vertical", "main-vertical", "main-horizontal", "main-vertical-auto", "main-horizontal-auto"}
 	if len(choices) != len(want) {
 		t.Fatalf("got %d choices, want %d", len(choices), len(want))
 	}
@@ -70,11 +71,13 @@ func TestPadPreviewAlwaysFixedHeight(t *testing.T) {
 
 func TestCurrentIndex(t *testing.T) {
 	cases := map[string]int{
-		"":                0, // unset -> default (tiled)
-		"tiled":           0,
-		"even-horizontal": 1,
-		"main-horizontal": 4,
-		"bogus":           0, // unknown -> default
+		"":                     0, // unset -> default (tiled)
+		"tiled":                0,
+		"even-horizontal":      1,
+		"main-horizontal":      4,
+		"main-vertical-auto":   5,
+		"main-horizontal-auto": 6,
+		"bogus":                0, // unknown -> default
 	}
 	for in, want := range cases {
 		if got := currentIndex(in); got != want {

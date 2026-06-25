@@ -487,7 +487,10 @@ tmux bind-key r command-prompt -I "#W" "rename-window '%%' ; set-window-option @
 # inside the tiled dashboard grid don't change anything the sidebar depends on,
 # but the resulting BroadcastRender makes the sidebar renderer redraw — visible
 # as an up/down flicker on every [/]/swap. Other windows still refresh normally.
-tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' '' 'run-shell -b \"$SIGNAL_CMD\"'"
+# In the dashboard we instead run cycle-pane --main-follow, which only acts when
+# the layout is an "-auto" mode (Main+stack/row, active) — keeping the focused
+# pane in the big slot as focus moves; it's a cheap no-op for other layouts.
+tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' 'run-shell -b \"$CYCLE_PANE_BIN --main-follow\"' 'run-shell -b \"$SIGNAL_CMD\"'"
 # after-split-window: daemon handles window name preservation (PreserveWindowNames)
 tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_CMD'"
 

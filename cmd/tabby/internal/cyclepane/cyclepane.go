@@ -42,6 +42,13 @@ func Run(args []string) int {
 		return movePane(args[1])
 	}
 
+	// --main-follow keeps the active pane in the main/largest slot when the
+	// dashboard is in an "-auto" layout (Main+stack/row, active). Wired to the
+	// after-select-pane hook so the big pane follows focus. No-op otherwise.
+	if len(args) >= 1 && args[0] == "--main-follow" {
+		return mainFollow()
+	}
+
 	dimOnly := len(args) > 0 && args[0] == "--dim-only"
 	ensureContent := len(args) > 0 && args[0] == "--ensure-content"
 
@@ -239,6 +246,69 @@ func movePane(dir string) int {
 		return 0
 	}
 	signalDaemon()
+	return 0
+}
+
+// dashLayout returns the persisted dashboard arrangement (global
+// @tabby_dash_layout option), defaulting to "tiled" when unset.
+func dashLayout() string {
+	out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_dash_layout").Output()
+	if err != nil {
+		return "tiled"
+	}
+	if v := strings.TrimSpace(string(out)); v != "" {
+		return v
+	}
+	return "tiled"
+}
+
+// mainFollow swaps the active content pane into the main (largest) slot so the
+// focused pane is always the big one. Only acts when in the dashboard AND the
+// saved layout is an "-auto" mode (main-vertical-auto / main-horizontal-auto);
+// otherwise it's a cheap no-op. Wired to after-select-pane so the main pane
+// tracks focus. The swap preserves the window's geometry (one big + a stack);
+// it only exchanges which pane occupies the big slot.
+func mainFollow() int {
+	if !inDashboardWindow() || !strings.HasSuffix(dashLayout(), "-auto") {
+		return 0
+	}
+	out, err := exec.Command("tmux", "list-panes", "-F",
+		"#{pane_id}\t#{pane_active}\t#{pane_width}\t#{pane_height}\t#{pane_current_command}\t#{pane_start_command}").Output()
+	if err != nil {
+		return 0
+	}
+	var activeID, mainID string
+	maxArea := -1
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "\t", 6)
+		if len(parts) < 4 {
+			continue
+		}
+		p := paneInfo{id: parts[0], active: parts[1] == "1"}
+		if len(parts) >= 5 {
+			p.command = parts[4]
+		}
+		if len(parts) >= 6 {
+			p.startCommand = parts[5]
+		}
+		if isUtility(p) {
+			continue
+		}
+		w, _ := strconv.Atoi(parts[2])
+		h, _ := strconv.Atoi(parts[3])
+		if p.active {
+			activeID = p.id
+		}
+		if w*h > maxArea {
+			maxArea = w * h
+			mainID = p.id
+		}
+	}
+	if activeID == "" || mainID == "" || activeID == mainID {
+		return 0
+	}
+	_ = exec.Command("tmux", "swap-pane", "-s", activeID, "-t", mainID).Run()
+	_ = exec.Command("tmux", "select-pane", "-t", activeID).Run()
 	return 0
 }
 
