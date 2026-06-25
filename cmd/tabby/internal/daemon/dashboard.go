@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashlayout"
 )
 
 // paneBorderFormat returns the tmux pane-border-format string used by BOTH
@@ -133,49 +135,53 @@ func isAutoMainLayout(name string) bool {
 	return strings.HasSuffix(name, "-auto")
 }
 
-// promoteActivePaneToMain swaps the dashboard's active content pane into the
-// main (largest-area) slot so the focused pane becomes the big one, preserving
-// the window geometry. Used to make an "-auto" layout take effect immediately
-// when selected; ongoing focus tracking is handled by cycle-pane --main-follow
-// from the after-select-pane hook. No-op if the active pane is already the main.
+// promoteActivePaneToMain rearranges the dashboard so the active content pane
+// occupies the main/big slot with the remaining panes in a stable, pane-id
+// sorted order (so panes don't drift as focus moves). Used to make an "-auto"
+// layout take effect immediately when selected; ongoing focus tracking is
+// handled by cycle-pane --main-follow from the after-select-pane hook. Shares
+// the swap planner with that binary so both arrange panes identically.
 func (c *Coordinator) promoteActivePaneToMain(winID string) {
 	if winID == "" {
 		return
 	}
 	out := tmuxOutputTrimmed("list-panes", "-t", winID, "-F",
-		"#{pane_id}\t#{pane_active}\t#{pane_width}\t#{pane_height}\t#{pane_current_command}\t#{pane_start_command}")
-	var activeID, mainID string
-	maxArea := -1
+		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_start_command}")
+	var ids []string
+	active := ""
 	for _, line := range dashLines(out) {
-		parts := strings.SplitN(line, "\t", 6)
-		if len(parts) < 4 {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 2 {
 			continue
 		}
 		cur, start := "", ""
-		if len(parts) >= 5 {
-			cur = parts[4]
+		if len(parts) >= 3 {
+			cur = parts[2]
 		}
-		if len(parts) >= 6 {
-			start = parts[5]
+		if len(parts) >= 4 {
+			start = parts[3]
 		}
 		if isAuxiliaryPaneCommand(cur) || isSidebarPaneCommand(cur, start) {
 			continue
 		}
-		w, _ := atoiSafe(parts[2])
-		h, _ := atoiSafe(parts[3])
+		ids = append(ids, parts[0])
 		if parts[1] == "1" {
-			activeID = parts[0]
-		}
-		if w*h > maxArea {
-			maxArea = w * h
-			mainID = parts[0]
+			active = parts[0]
 		}
 	}
-	if activeID == "" || mainID == "" || activeID == mainID {
+	swaps := dashlayout.PlanActiveMainSwaps(ids, active)
+	if len(swaps) == 0 {
 		return
 	}
-	_ = tmuxRun("swap-pane", "-s", activeID, "-t", mainID)
-	_ = tmuxRun("select-pane", "-t", activeID)
+	args := make([]string, 0, len(swaps)*5+4)
+	for i, sw := range swaps {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, "swap-pane", "-s", sw[0], "-t", sw[1])
+	}
+	args = append(args, ";", "select-pane", "-t", active)
+	_ = tmuxRun(args...)
 }
 
 // dashboardLayoutName returns the persisted dashboard layout (global
