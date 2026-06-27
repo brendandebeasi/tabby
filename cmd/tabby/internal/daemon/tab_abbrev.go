@@ -25,8 +25,9 @@ func (c *Coordinator) tabAbbreviation(folder string) string {
 	return abbreviateFolder(folder)
 }
 
-// abbreviateWindowName produces the short code shown for a tab, derived from the
-// window's actual name (which respects manual renames). Composite names — panes
+// abbreviateWindowName abbreviates a window's name as a fallback project code,
+// used by windowDirCode only when no project DIRECTORY can be resolved (e.g. a
+// $HOME window, or a window with no content cwd). Composite names — panes
 // spanning different dirs, joined by " | " — are abbreviated segment-by-segment
 // with the separator preserved, e.g. "api | web" -> "API | WEB". Returns "" for
 // empty/home/root names so the tab keeps its plain label.

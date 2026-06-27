@@ -52,25 +52,23 @@ var (
 	deadlockThreshold = 5 * time.Second // Alert if no heartbeat for this long
 )
 
-// CWDColorMapping holds the per-directory tab identity that Tabby remembers and
-// re-applies to windows whose first pane is in that exact directory. Originally
-// just color+icon; now also persists the user's locked tab name, group, and
-// pinned state so a renamed/grouped/pinned tab is restored across daemon
-// restarts, tmux-resurrect, and freshly-opened tabs in the same directory.
+// CWDColorMapping holds the per-directory state that Tabby remembers and
+// re-applies to windows whose first pane is in that exact directory: the user's
+// chosen color/icon, plus group and pinned state.
+//
+// NOTE: tab NAMES are deliberately NOT persisted here. Auto names are per-window
+// live summaries (set on @tabby_ai_title, recomputed each session) and a manual
+// rename lives only on the window's @tabby_name_locked option for the window's
+// lifetime. Persisting names keyed by directory caused stale, unrelated names to
+// be resurrected onto freshly-opened tabs; the legacy `name`/`nameSource` fields
+// are stripped from cwd-colors.json on load by migrateCWDColorsDropNames.
+//
 // Persisted to cwd-colors.json; all fields use omitempty for back-compat.
 type CWDColorMapping struct {
 	Color  string `json:"color,omitempty"`
 	Icon   string `json:"icon,omitempty"`
-	Name   string `json:"name,omitempty"`   // saved tab name (mirrors a name-locked window)
 	Group  string `json:"group,omitempty"`  // saved @tabby_group
 	Pinned bool   `json:"pinned,omitempty"` // saved @tabby_pinned
-	// NameSource records how Name was set: "user" (an explicit rename — hard,
-	// authoritative, frozen; the LLM never touches it) or "llm" (a soft
-	// auto-inferred per-project name — persisted and re-applied to new sessions,
-	// but the LLM may still refine it until the user hard-locks with a rename).
-	// Empty is treated as "user" for back-compat with records written before this
-	// field existed (those came from explicit renames).
-	NameSource string `json:"nameSource,omitempty"`
 }
 
 func init() {
@@ -654,7 +652,8 @@ type Coordinator struct {
 	// abbreviations while holding stateMu.RLock without risking a deadlock.
 	tabAbbrevMu  sync.Mutex
 	tabAbbrevCfg *config.Config
-	tabAbbrevMap map[string]string
+	tabAbbrevMap map[string]string // tab_names.abbreviations: folder(lower) -> CODE
+	tabProjMap   map[string]string // ai.tab_summary.project_names: folder(lower) -> abbrev
 
 	// gitTopMu guards gitTopCache, which memoizes a local directory -> git
 	// repository toplevel (or "" when not in a repo). windowNameKey consults this
@@ -2674,9 +2673,40 @@ func (c *Coordinator) loadCWDColors() {
 		return
 	}
 
+	// CWDColorMapping no longer has Name/NameSource, so json.Unmarshal silently
+	// drops any legacy "name"/"nameSource" keys: the loaded map is already
+	// name-free. Detect whether the on-disk file still carried those keys and, if
+	// so, rewrite it once to purge the legacy data (and drop entries left empty
+	// once their name is gone). One-time, idempotent — a clean file rewrites to
+	// itself and is skipped.
+	migrated := false
+	if cwdColorsHasLegacyNameFields(data) {
+		for k, m := range loaded {
+			if cwdMappingEmpty(m) {
+				delete(loaded, k)
+			}
+		}
+		migrated = true
+	}
+
 	c.cwdColorsMu.Lock()
 	c.cwdColors = loaded
 	c.cwdColorsMu.Unlock()
+
+	if migrated {
+		logEvent("CWDCOLORS_MIGRATE_DROP_NAMES entries=%d", len(loaded))
+		c.saveCWDColors()
+	}
+}
+
+// cwdColorsHasLegacyNameFields reports whether the raw cwd-colors.json bytes
+// still contain the retired per-directory name fields. A plain substring scan is
+// enough: the keys are fixed JSON object keys we control, and a false positive
+// (e.g. a directory literally named "name") only triggers a harmless idempotent
+// rewrite.
+func cwdColorsHasLegacyNameFields(data []byte) bool {
+	return strings.Contains(string(data), "\"name\"") ||
+		strings.Contains(string(data), "\"nameSource\"")
 }
 
 func (c *Coordinator) saveCWDColors() {
@@ -2904,6 +2934,7 @@ func (c *Coordinator) dirAbbreviation(folder string) (string, bool) {
 	c.tabAbbrevMu.Lock()
 	if c.tabAbbrevCfg != cfg {
 		c.tabAbbrevMap = parseAbbreviations(cfg.TabNames.Abbreviations)
+		c.tabProjMap = parseAbbreviations(cfg.AI.TabSummary.ProjectNames)
 		c.tabAbbrevCfg = cfg
 	}
 	code, ok := c.tabAbbrevMap[strings.ToLower(folder)]
@@ -2911,13 +2942,93 @@ func (c *Coordinator) dirAbbreviation(folder string) (string, bool) {
 	return code, ok
 }
 
-// composeTabBaseName builds a window's inline sidebar label: the auto-derived
-// directory code (abbreviateWindowName, overridable via config) followed by the
-// AI summary (@tabby_ai_title) when present — e.g. "TBY config reload", or just
-// "TBY" with no summary. For AI-tool windows (Claude Code) with ai_summary_only
-// set, the dir code is dropped and only the summary is shown. Home/root/raw-id
-// names fall back to the plain name. The render may word-wrap this across up to
-// MaxLines rows; it does NOT apply SSH-host or icon decoration.
+// projectNameCode returns the configured ai.tab_summary.project_names prefix for
+// a directory's folder name, if any. This is the same abbreviation the summary
+// pass prepends to a tab's work summary (e.g. "tby", "gp"), so using it for the
+// no-summary fallback label keeps the prefix visually stable as a fresh tab
+// upgrades from bare code to "code + summary". Shares dirAbbreviation's cache.
+func (c *Coordinator) projectNameCode(folder string) (string, bool) {
+	if folder == "" {
+		return "", false
+	}
+	cfg := c.config
+	if cfg == nil {
+		return "", false
+	}
+	c.tabAbbrevMu.Lock()
+	if c.tabAbbrevCfg != cfg {
+		c.tabAbbrevMap = parseAbbreviations(cfg.TabNames.Abbreviations)
+		c.tabProjMap = parseAbbreviations(cfg.AI.TabSummary.ProjectNames)
+		c.tabAbbrevCfg = cfg
+	}
+	code, ok := c.tabProjMap[strings.ToLower(folder)]
+	c.tabAbbrevMu.Unlock()
+	return code, ok
+}
+
+// windowProjectBasename resolves the human-facing project folder name for a
+// window: the remote topmost dir for an ssh/mosh window, else the git toplevel
+// basename of the first CONTENT pane's cwd, else that cwd's basename. Returns ""
+// for a $HOME / root / unresolved window (which has no project identity and is
+// labeled per-window by its live summary instead).
+func (c *Coordinator) windowProjectBasename(win tmux.Window) string {
+	if _, topmost, ok := firstPaneRemoteCWD(win); ok {
+		if b := filepath.Base(topmost); b != "" && b != "." && b != "/" {
+			return b
+		}
+		return ""
+	}
+	cwd := firstPaneCWD(win)
+	if cwd == "" || isHomeDir(cwd) {
+		return ""
+	}
+	base := cwd
+	if top := c.gitToplevel(cwd); top != "" {
+		base = top
+	}
+	if b := filepath.Base(base); b != "" && b != "." && b != "/" {
+		return b
+	}
+	return ""
+}
+
+// windowDirCode returns the deterministic project prefix for a window: the
+// configured project_names abbreviation, else the tab_names.abbreviations
+// override, else an auto-derived code (abbreviateFolder) — all derived from the
+// window's resolved PROJECT DIRECTORY, never from win.Name (a tmux
+// automatic-rename artifact that can be a stale/unrelated label).
+//
+// Fallback: when no project directory resolves (a $HOME window, or one with no
+// content cwd), abbreviate the window name instead. Returns "" only for a
+// home/root/unresolved name so such a window shows no prefix.
+func (c *Coordinator) windowDirCode(win tmux.Window) string {
+	if base := c.windowProjectBasename(win); base != "" {
+		if code, ok := c.projectNameCode(base); ok && code != "" {
+			return code
+		}
+		return c.tabAbbreviation(base)
+	}
+	name := win.Name
+	if isRawWindowID(name) {
+		name = "" // automatic-rename hasn't fired — no name to abbreviate
+	}
+	return c.abbreviateWindowName(name)
+}
+
+// composeTabBaseName builds a window's inline sidebar label from three
+// independent, non-persisted signals (see CWDColorMapping for why nothing is
+// persisted by directory):
+//
+//	1. Manual rename (win.NameLocked, on @tabby_name_locked) — shown verbatim.
+//	2. Deterministic project code (windowDirCode, from the resolved DIRECTORY —
+//	   project_names / abbreviations / auto), the stable prefix.
+//	3. Live AI work summary (@tabby_ai_title) — the per-window task topic.
+//
+// Composition: a locked name wins. Otherwise the label is "CODE summary" (e.g.
+// "tby reload config"), or just "CODE" before the first summary, or just the
+// summary for AI-tool windows in ai_summary_only mode. $HOME / unresolved
+// windows (no code) fall back to the plain window name. The render may word-wrap
+// this across up to MaxLines rows; it does NOT apply SSH-host or icon decoration.
 func (c *Coordinator) composeTabBaseName(win tmux.Window) string {
 	name := win.Name
 	if isRawWindowID(name) {
@@ -2925,35 +3036,35 @@ func (c *Coordinator) composeTabBaseName(win tmux.Window) string {
 	}
 	summary := strings.TrimSpace(win.AITitle)
 
-	// A hard user rename (NameLocked) is the strongest signal: show it verbatim,
-	// even for an AI window. The render path (wrapTabLabel) wraps/truncates it.
-	if win.NameLocked && name != "~" {
+	// 1. A hard user rename is the strongest signal: show it verbatim. (A generic
+	//    launcher stub that somehow carries a lock is ignored — it falls through
+	//    to the deterministic code; applyCWDIdentityMappings also clears it.)
+	if win.NameLocked && !isGenericTabName(win.Name) {
 		return name
 	}
 
-	// AI-tool windows (e.g. Claude Code) in ai_summary_only mode want a LIVE task
-	// summary, which beats a static per-project name — so this branch sits above
-	// the soft NameAuto check below.
-	if summary != "" && c.config.AI.TabSummary.AISummaryOnly && isAIWindow(win) {
-		return summary
-	}
+	dirCode := c.windowDirCode(win)
 
-	// A soft restored per-project name (NameAuto — user- or LLM-sourced) is shown
-	// verbatim: no dir-code abbreviation and no AI summary. RefreshTabSummaries
-	// owns refining it in place until the user hard-locks with a rename.
-	if win.NameAuto && name != "~" {
-		return name
-	}
-
-	if code := c.abbreviateWindowName(name); code != "" {
-		if summary != "" {
-			return code + " " + summary
-		}
-		return code
-	}
+	// 2. A live AI work summary is present: it is the per-window task topic.
 	if summary != "" {
+		// AI-tool windows (e.g. Claude Code) in ai_summary_only mode show just the
+		// topic, with no project prefix.
+		if c.config.AI.TabSummary.AISummaryOnly && isAIWindow(win) {
+			return summary
+		}
+		if dirCode != "" {
+			return dirCode + " " + summary
+		}
 		return summary
 	}
+
+	// 3. No summary yet (fresh tab, auto_generate off, or LLM unavailable): show
+	//    the deterministic project code. Upgrades to "CODE summary" next tick.
+	if dirCode != "" {
+		return dirCode
+	}
+
+	// 4. $HOME / unresolved: fall back to the plain window name.
 	return name
 }
 
@@ -3108,74 +3219,44 @@ func (c *Coordinator) setCWDIcon(cwd, icon string) {
 func cwdMappingEmpty(m CWDColorMapping) bool {
 	return strings.TrimSpace(m.Color) == "" &&
 		strings.TrimSpace(m.Icon) == "" &&
-		strings.TrimSpace(m.Name) == "" &&
 		strings.TrimSpace(m.Group) == "" &&
 		!m.Pinned
 }
 
-// captureCWDIdentity records a window's tab identity (name + group + pinned)
-// under the given project key so it can be restored later. key is a
-// windowNameKey result (a local git-toplevel path or an "ssh://host/topmost"
-// string), NOT a raw pane cwd. source is "user" (an explicit rename — hard and
-// authoritative) or "llm" (a soft auto-inferred name). It is called every
-// refresh, so it only writes the map + persists to disk when something actually
-// changed — steady state does no I/O. Color/Icon for the key are left untouched.
-// An empty name is treated as "nothing to capture".
+// captureCWDIdentity records a window's group + pinned state under the given
+// project key so it can be restored to future windows in the same directory. key
+// is a windowNameKey result (a local git-toplevel path or an "ssh://host/topmost"
+// string), NOT a raw pane cwd. It is called every refresh, so it only writes the
+// map + persists to disk when something actually changed — steady state does no
+// I/O. Color/Icon for the key are left untouched.
 //
-// Precedence: a soft "llm" capture never overwrites an existing "user" name —
-// a manual rename is authoritative and freezes the name against further LLM
-// inference. A "user" capture always wins (and upgrades the source).
-func (c *Coordinator) captureCWDIdentity(key, name, group string, pinned bool, source string) {
+// NOTE: tab names are intentionally not captured here (see CWDColorMapping).
+func (c *Coordinator) captureCWDIdentity(key, group string, pinned bool) {
 	normalized := normalizeCWD(key)
 	if normalized == "" {
 		return
 	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return
-	}
-	// Never persist an automatic-rename artifact (e.g. "claude", a Claude Code
-	// semver proc title, "agy"/other AI-tool command names, a bare shell, or a
-	// "~" path stub) as a tab identity. Captured once, applyCWDIdentityMappings
-	// would re-apply + hard-lock it every refresh across all future sessions,
-	// freezing the tab on the stub and suppressing the live AI summary.
-	if isGenericTabName(name) {
-		return
-	}
 	group = strings.TrimSpace(group)
-	if source == "" {
-		source = "user"
-	}
 
 	c.cwdColorsMu.Lock()
 	mapping := c.cwdColors[normalized]
-	// A user name is authoritative — an llm refinement must not clobber it.
-	// (An empty stored NameSource with a non-empty Name predates this field and
-	// came from an explicit rename, so it counts as "user".)
-	if source == "llm" && strings.TrimSpace(mapping.Name) != "" &&
-		(mapping.NameSource == "user" || mapping.NameSource == "") {
-		c.cwdColorsMu.Unlock()
-		return
-	}
-	if mapping.Name == name && mapping.Group == group && mapping.Pinned == pinned &&
-		mapping.NameSource == source {
+	if mapping.Group == group && mapping.Pinned == pinned {
 		c.cwdColorsMu.Unlock()
 		return // no change — skip the disk write
 	}
-	mapping.Name = name
 	mapping.Group = group
 	mapping.Pinned = pinned
-	mapping.NameSource = source
 	c.cwdColors[normalized] = mapping
 	c.cwdColorsMu.Unlock()
 
 	c.saveCWDColors()
 }
 
-// clearCWDIdentity forgets a directory's saved tab identity (name/group/pinned),
-// leaving any color/icon mapping intact. If nothing remains, the entry is
-// dropped entirely. Backs the "Unlock Name" action so unlocking a tab stops it —
-// and future tabs in the same directory — from being re-named on the next refresh.
+// clearCWDIdentity forgets a directory's saved group/pinned state, leaving any
+// color/icon mapping intact. If nothing remains, the entry is dropped entirely.
+// Backs the "Unlock Name" action: with names no longer persisted, this only
+// clears the group/pinned record (the window's own @tabby_name_locked is dropped
+// separately by the caller).
 func (c *Coordinator) clearCWDIdentity(cwd string) {
 	normalized := normalizeCWD(cwd)
 	if normalized == "" {
@@ -3184,14 +3265,12 @@ func (c *Coordinator) clearCWDIdentity(cwd string) {
 
 	c.cwdColorsMu.Lock()
 	mapping, ok := c.cwdColors[normalized]
-	if !ok || (mapping.Name == "" && mapping.Group == "" && !mapping.Pinned) {
+	if !ok || (mapping.Group == "" && !mapping.Pinned) {
 		c.cwdColorsMu.Unlock()
 		return // nothing to clear — skip the disk write
 	}
-	mapping.Name = ""
 	mapping.Group = ""
 	mapping.Pinned = false
-	mapping.NameSource = ""
 	if cwdMappingEmpty(mapping) {
 		delete(c.cwdColors, normalized)
 	} else {
@@ -3233,21 +3312,6 @@ func (c *Coordinator) resolveWindowCWDByID(windowID string) string {
 		return cwd
 	}
 	return c.getActiveWindowFirstPaneCWD()
-}
-
-// windowNameKeyByID resolves the persisted-name key (windowNameKey) for the
-// window with the given stable tmux window ID, looking it up in the current
-// window snapshot. Returns false when the window isn't found or no key can be
-// derived. Takes stateMu as an RLock; do not call while already holding stateMu.
-func (c *Coordinator) windowNameKeyByID(windowID string) (string, bool) {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	for i := range c.windows {
-		if c.windows[i].ID == windowID {
-			return c.windowNameKey(c.windows[i])
-		}
-	}
-	return "", false
 }
 
 func (c *Coordinator) setWindowColor(windowID, color string) {
@@ -3330,22 +3394,19 @@ func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
 	}
 }
 
-// applyCWDIdentityMappings persists and restores per-PROJECT tab identity
-// (name + group + pinned). Runs each refresh, right after the color/icon pass,
-// on the same windows slice (which becomes c.windows) BEFORE syncWindowNames and
-// the grouping pass — so in-memory mirroring below is honored in the same cycle.
+// applyCWDIdentityMappings persists and restores per-PROJECT group + pinned
+// state. Runs each refresh, right after the color/icon pass, on the same windows
+// slice (which becomes c.windows) BEFORE syncWindowNames and the grouping pass —
+// so in-memory mirroring below is honored in the same cycle.
 //
 // The identity is keyed on windowNameKey — the project root (git toplevel) for a
-// local window, or "ssh://host/topmost" for a remote one — so a name set at a
-// repo root is reused across its subdirs, future sessions, and ssh hosts.
+// local window, or "ssh://host/topmost" for a remote one — so group/pinned set
+// at a repo root is reused across its subdirs, future sessions, and ssh hosts.
 //
-//   - Hard-locked window (explicit user rename): CAPTURE its name/group/pinned
-//     for its project as source "user".
-//   - Unlocked window whose project has a saved "user" name: APPLY it and
-//     hard-lock (@tabby_name_locked), restore group/pinned, mirror in memory.
-//   - Unlocked window whose project has a saved "llm" name: APPLY it as a SOFT
-//     name (@tabby_name_auto, NOT name_locked) so it shows but the LLM may still
-//     refine it. Group/pinned are restored too.
+// Tab NAMES are deliberately NOT restored here: auto names are per-window live
+// summaries and a manual rename lives only on the window's @tabby_name_locked
+// option (see CWDColorMapping). The only name-related work left is clearing a
+// bogus generic hard-lock.
 //
 // Every tmux exec is guarded on a value diff, so the steady state and
 // already-restored windows do no work.
@@ -3355,10 +3416,8 @@ func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
 		// always the `r` / right-click rename binding pre-filling the current
 		// auto-name and the user accepting it — which sets @tabby_name_locked on
 		// the stub. That lock is bogus: a real user lock always has a non-generic
-		// name. Clear it UNCONDITIONALLY, before the windowNameKey guard below, so
-		// the stub is freed even when no project key resolves (a remote tab whose
-		// hook hasn't reported, a $HOME tab, etc.) — otherwise such a window keeps
-		// its bad lock forever and never flows back into the live summary path.
+		// name. Clear it UNCONDITIONALLY so the stub flows back into the live
+		// summary path instead of freezing on the launcher name.
 		if windows[i].NameLocked && isGenericTabName(windows[i].Name) {
 			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "-u", "@tabby_name_locked").Run()
 			windows[i].NameLocked = false
@@ -3371,37 +3430,16 @@ func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
 		}
 
 		if windows[i].NameLocked {
-			// A non-generic hard-locked name is a deliberate user identity.
-			// CAPTURE it so this project's record stays in sync with the window.
-			// captureCWDIdentity no-ops (no disk write) when unchanged.
-			c.captureCWDIdentity(key, windows[i].Name, windows[i].Group, windows[i].Pinned, "user")
+			// A deliberately-named window: keep this project's group/pinned record
+			// in sync. captureCWDIdentity no-ops (no disk write) when unchanged.
+			c.captureCWDIdentity(key, windows[i].Group, windows[i].Pinned)
 			continue
 		}
 
 		rec, recOK := c.getCWDColorMapping(key)
-		if !recOK || strings.TrimSpace(rec.Name) == "" || isGenericTabName(rec.Name) {
-			// No record, empty, or a stale generic stub left by an older build —
-			// ignore it so a persisted "claude" can't re-freeze the tab.
+		if !recOK {
 			continue
 		}
-
-		// APPLY: restore the saved name onto this auto-named window. A "user"
-		// name hard-locks; an "llm" name is applied softly so the summary pass
-		// can keep refining it until the user renames.
-		soft := rec.NameSource == "llm"
-		if windows[i].Name != rec.Name {
-			exec.Command("tmux", "rename-window", "-t", windows[i].ID, rec.Name).Run()
-		}
-		if soft {
-			if !windows[i].NameAuto {
-				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_name_auto", "1").Run()
-			}
-			windows[i].NameAuto = true
-		} else {
-			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_name_locked", "1").Run()
-			windows[i].NameLocked = true
-		}
-		windows[i].Name = rec.Name
 
 		if g := strings.TrimSpace(rec.Group); g != "" && windows[i].Group != g {
 			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_group", g).Run()
@@ -16612,17 +16650,12 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 		parts := strings.SplitN(item.Command, ":", 2)
 		if len(parts) == 2 {
 			if windowID := strings.TrimSpace(parts[1]); windowID != "" {
-				// Forget the project's saved tab identity (keyed on the project
-				// root / ssh host) so neither this tab nor future tabs in the same
-				// project get re-named on the next refresh.
-				if key, ok := c.windowNameKeyByID(windowID); ok {
-					c.clearCWDIdentity(key)
-				}
-				// Then drop both the hard lock and the soft auto-name flag so
-				// syncWindowNames auto-renames it back to the directory basename.
-				// tmux accepts the stable window ID ("@123") as a -t target.
+				// Drop the hard name lock so the tab returns to auto naming
+				// (deterministic dir code + live summary). Names aren't persisted
+				// by directory, so there is nothing on disk to forget — the group/
+				// pinned record is left intact. tmux accepts the stable window ID
+				// ("@123") as a -t target.
 				exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_name_locked").Run()
-				exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_name_auto").Run()
 			}
 		}
 		return
@@ -16771,16 +16804,14 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		"-T", fmt.Sprintf("Window %d: %s", win.Index, win.Name),
 	}, pos.args()...)
 
-	// Rename option - hard-locks the name so syncWindowNames won't overwrite it.
-	// Also clears any soft @tabby_name_auto flag so the manual name is a clean
-	// hard lock (the LLM stops refining it; applyCWDIdentityMappings upgrades the
-	// saved record's source to "user" on the next capture).
-	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t %s -- '%%%%' ; set-window-option -t %s @tabby_name_locked 1 ; set-window-option -t %s -u @tabby_name_auto\"", win.Name, wid, wid, wid)
+	// Rename option - hard-locks the name (@tabby_name_locked) so syncWindowNames
+	// and the live summary won't overwrite it. The lock lives on the window for
+	// its lifetime; it is not persisted by directory.
+	renameCmd := fmt.Sprintf("command-prompt -I '%s' \"rename-window -t %s -- '%%%%' ; set-window-option -t %s @tabby_name_locked 1\"", win.Name, wid, wid)
 	args = append(args, "Rename", "r", renameCmd)
 
-	// Unlock name option - routes through the daemon so it can forget the
-	// directory's saved name/group/pinned record (not just clear the per-window
-	// lock); otherwise applyCWDIdentityMappings would re-name + re-lock it next refresh.
+	// Unlock name option - drops the per-window hard lock so the tab returns to
+	// auto naming (deterministic dir code + live summary).
 	unlockCmd := fmt.Sprintf("tabby-unlock-window-name:%s", wid)
 	args = append(args, "Unlock Name", "u", unlockCmd)
 

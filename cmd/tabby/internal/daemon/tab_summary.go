@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -90,31 +89,25 @@ func (c *Coordinator) RefreshTabSummaries() {
 	}
 
 	maxWords := cfg.MaxWords
-	projAbbrev := parseAbbreviations(cfg.ProjectNames) // dir basename (lower) -> exact abbreviation
 	windows := c.GetWindows()
 	go func() {
 		defer c.summaryFetching.Store(false)
 
-		aiSummaryOnly := cfg.AISummaryOnly
 		changed := false
 		for _, win := range windows {
 			if win.NameLocked {
 				// A hard lock on a GENERIC stub (claude/zsh/~/...) is bogus — the
 				// `r` rename binding pre-fills the auto-name and sets the lock when
-				// accepted. This pass runs on the after-rename-window hook, so it
-				// fires the instant that happens: clear the lock and fall through to
-				// summarize, rather than waiting for the periodic identity pass to
-				// win a race against the tab's live OSC renames.
+				// accepted. Clear it and fall through to summarize. A non-generic
+				// lock is a deliberate user name: composeTabBaseName shows it
+				// verbatim and hides the summary, so don't spend an LLM call — just
+				// clear any stale transient title lingering behind it.
 				if isGenericTabName(win.Name) {
 					exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_name_locked").Run()
 					win.NameLocked = false
 					changed = true
 					// fall through — summarize this window this pass
 				} else {
-					// A non-generic hard-locked name (explicit user rename) is
-					// authoritative — never override it. Clear any transient title a
-					// prior tick left so a stale summary doesn't linger, then move on
-					// without calling the LLM.
 					if strings.TrimSpace(win.AITitle) != "" {
 						exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_ai_title").Run()
 						changed = true
@@ -143,12 +136,10 @@ func (c *Coordinator) RefreshTabSummaries() {
 			// Per-window cooldown: never re-summarize a window more than once per
 			// summaryCooldown, no matter how often rename/tick triggers fire. An
 			// active tab (a live Claude/log window) changes content continuously,
-			// so the hash check above never skips it; combined with the
-			// after-rename-window hook that tabby's own rename-window fires, that
-			// would self-perpetuate into a rename storm. The cooldown bounds churn
-			// and breaks the loop. Check-and-claim atomically, recording now BEFORE
-			// the LLM call so a slow/failed call also cools the window down instead
-			// of being retried on the next trigger.
+			// so the hash check above never skips it. The cooldown bounds the LLM
+			// call rate. Check-and-claim atomically, recording now BEFORE the LLM
+			// call so a slow/failed call also cools the window down instead of
+			// being retried on the next trigger.
 			c.summaryHashMu.Lock()
 			if last, ok := c.summaryLastAt[win.ID]; ok && time.Since(last) < summaryCooldown {
 				c.summaryHashMu.Unlock()
@@ -160,82 +151,18 @@ func (c *Coordinator) RefreshTabSummaries() {
 			c.summaryLastAt[win.ID] = time.Now()
 			c.summaryHashMu.Unlock()
 
-			// Decide between two behaviors:
-			//   - NAME this project: the window resolves to a stable project key
-			//     (local git root, or ssh://host/root) and is NOT a Claude-Code
-			//     tab in ai_summary_only mode. We infer a persisted per-project
-			//     name (soft) so new sessions in the same project reuse it.
-			//   - Transient SUMMARY (legacy @tabby_ai_title): everything else —
-			//     no usable key (e.g. an ssh tab whose remote-cwd hook hasn't
-			//     reported yet), or an ai_summary_only Claude tab that wants a
-			//     live task label rather than a static project name.
-			key, hasKey := c.windowNameKey(win)
-			nameThis := hasKey && !(aiSummaryOnly && isAIWindow(win))
-
-			if nameThis {
-				// A user-sourced name owns this project; the LLM must not touch it
-				// (applyCWDIdentityMappings restores it). Record the hash so we
-				// don't re-capture this window's content until it changes.
-				if rec, ok := c.getCWDColorMapping(key); ok && strings.TrimSpace(rec.Name) != "" && (rec.NameSource == "user" || rec.NameSource == "") {
-					c.recordSummaryHash(win.ID, h)
-					continue
-				}
-
-				project := projectBasename(win, key)
-				fixed := projAbbrev[strings.ToLower(project)]
-
-				ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-				out, err := client.Generate(ctx, gollm.NewPrompt(projectNamePrompt(project, content)))
-				cancel()
-				if err != nil {
-					continue
-				}
-				name := truncateSummaryWords(out, maxWords)
-				if fixed != "" {
-					// A configured abbreviation is authoritative for the lead token.
-					work := truncateSummaryWords(out, maxWords-1)
-					name = strings.TrimSpace(fixed + " " + work)
-				}
-				if name == "" {
-					continue
-				}
-
-				// Soft-persist (no-ops when unchanged; precedence protects any
-				// user name) and apply to this window as a soft auto-name.
-				c.captureCWDIdentity(key, name, "", false, "llm")
-				if win.Name != name {
-					exec.Command("tmux", "rename-window", "-t", win.ID, name).Run()
-				}
-				if !win.NameAuto {
-					exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_name_auto", "1").Run()
-				}
-				c.recordSummaryHash(win.ID, h)
-				changed = true
-				continue
-			}
-
-			// Transient summary (legacy @tabby_ai_title) path.
-			project := projectBasename(win, key)
-			fixed := projAbbrev[strings.ToLower(project)]
-
+			// Generate an ephemeral, TASK-ONLY summary stored on @tabby_ai_title.
+			// The deterministic project prefix is added at render time by
+			// composeTabBaseName (windowDirCode), so the LLM is asked only for the
+			// component/task with no project hint — and the result is never
+			// persisted to disk nor shared across windows.
 			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-			prompt := summaryPrompt(project, content)
-			if fixed != "" {
-				prompt = workPrompt(content)
-			}
-			out, err := client.Generate(ctx, gollm.NewPrompt(prompt))
+			out, err := client.Generate(ctx, gollm.NewPrompt(workPrompt(content)))
 			cancel()
 			if err != nil {
 				continue
 			}
-
-			var summary string
-			if fixed != "" {
-				work := truncateSummaryWords(out, maxWords-1) // leave room for the prefix
-				summary = strings.TrimSpace(fixed + " " + work)
-			} else {
-				summary = truncateSummaryWords(out, maxWords)
-			}
+			summary := truncateSummaryWords(out, maxWords)
 			if summary == "" {
 				continue
 			}
@@ -260,50 +187,6 @@ func (c *Coordinator) recordSummaryHash(winID, h string) {
 	}
 	c.summaryHash[winID] = h
 	c.summaryHashMu.Unlock()
-}
-
-// projectBasename returns the human-facing folder name of a window's project for
-// use as an LLM hint / abbreviation lookup. Prefers the resolved name key's
-// final path component (the project root, or the remote topmost dir for an
-// ssh:// key), falling back to the first content pane's cwd basename.
-func projectBasename(win tmux.Window, key string) string {
-	if key != "" {
-		if b := filepath.Base(key); b != "" && b != "." && b != "/" {
-			return b
-		}
-	}
-	if cwd := firstPaneCWD(win); cwd != "" {
-		if isHomeDir(cwd) {
-			// $HOME is not a project — return no basename so the summary prompt
-			// carries no project hint and the LLM produces a pure content/task
-			// label (not "b ...") for a window running in the home dir.
-			return ""
-		}
-		return filepath.Base(cwd)
-	}
-	return ""
-}
-
-// projectNamePrompt asks the LLM for a SHORT, STABLE label identifying the
-// project itself (not the live task), so every tab/session in the same project
-// resolves to the same name. The directory name is the dominant signal; the
-// terminal content only disambiguates. Kept deliberately identity-focused (vs.
-// summaryPrompt's task focus) so the persisted soft name doesn't churn as work
-// changes.
-func projectNamePrompt(project, content string) string {
-	hint := ""
-	if p := strings.TrimSpace(project); p != "" {
-		hint = "The project directory is named \"" + p + "\". Base the label primarily " +
-			"on this name; clean it up into 2-3 readable lowercase words (e.g. " +
-			"\"studiodome-infra\"->\"studiodome infra\", \"gunpowder-msg\"->\"gunpowder msg\", " +
-			"\"tabby\"->\"tabby\"). "
-	}
-	return "You are giving a stable name to a terminal tab's PROJECT in a narrow " +
-		"sidebar. " + hint + "Reply with ONLY 2-3 short lowercase words naming the " +
-		"project or codebase — NOT the current task or command. Prefer the directory " +
-		"name; use the terminal output only to disambiguate." +
-		asciiOnlyRules +
-		"\n\n--- terminal output ---\n" + content
 }
 
 // firstContentPaneID returns the id of the window's first non-auxiliary pane
@@ -347,33 +230,16 @@ const asciiOnlyRules = " OUTPUT LANGUAGE: ENGLISH ONLY. " +
 	"translate the gist into English first, then label in plain ASCII. If you cannot " +
 	"produce a valid ASCII label, reply with the single word \"work\". "
 
-// workPrompt asks for just the task/component (no project name), used when a
-// project abbreviation is configured and prepended deterministically.
+// workPrompt asks the LLM for just the task/component being worked on — no
+// project name. The deterministic project prefix is added separately at render
+// time (composeTabBaseName / windowDirCode), so the summary stays a pure,
+// per-window task topic that is never persisted.
 func workPrompt(content string) string {
 	return "You are labeling a terminal tab in a narrow sidebar. Based on the recent " +
 		"terminal output below, reply with ONLY 2-3 short lowercase words for the " +
 		"specific component or task being worked on. Do NOT mention the project, repo, " +
 		"or directory name. Abbreviate aggressively (e.g. \"paperclip resend\", " +
 		"\"deploy fix\", \"gh token\")." +
-		asciiOnlyRules +
-		"\n\n--- terminal output ---\n" + content
-}
-
-// summaryPrompt builds the LLM instruction for an ultra-terse tab label that
-// leads with an abbreviation of the project/working directory so the user can
-// tell which project the tab belongs to (e.g. "sd paperclip resend", "infra gp").
-func summaryPrompt(project, content string) string {
-	hint := ""
-	if p := strings.TrimSpace(project); p != "" {
-		hint = "The project / working directory is \"" + p + "\". Start the label with a " +
-			"very short abbreviation of it (e.g. \"studiodome-infra\"->\"sd\", " +
-			"\"gunpowder-infra\"->\"gp\", \"infras\"->\"infra\", \"tabby\"->\"tby\"). "
-	}
-	return "You are labeling a terminal tab in a narrow sidebar. " + hint +
-		"Based on the recent terminal output below, reply with ONLY a short lowercase " +
-		"label: the project abbreviation, then the component or task, then the action. " +
-		"Up to 4 short words, abbreviated aggressively (e.g. \"sd paperclip resend\", " +
-		"\"gp paperclip\", \"infra deploy fix\")." +
 		asciiOnlyRules +
 		"\n\n--- terminal output ---\n" + content
 }

@@ -42,20 +42,15 @@ func TestHashString(t *testing.T) {
 	assert.NotEmpty(t, a)
 }
 
-func TestSummaryPrompt(t *testing.T) {
-	p := summaryPrompt("studiodome-infra", "$ go test ./...\nok")
-	assert.Contains(t, p, "studiodome-infra") // project context passed to the LLM
-	assert.Contains(t, p, "abbreviation")     // asks for a project abbreviation
-	assert.Contains(t, p, "$ go test ./...")  // includes the captured content
-
-	// No project -> no project hint, still asks for a terse label.
-	assert.NotContains(t, summaryPrompt("", "x"), "project / working directory is")
-
-	// workPrompt (used when a fixed project abbrev is configured) asks for the
-	// task only and tells the model not to name the project.
+func TestWorkPrompt(t *testing.T) {
+	// The summary is task-only: workPrompt asks for the task and explicitly tells
+	// the model NOT to name the project (the deterministic project prefix is added
+	// at render time by composeTabBaseName / windowDirCode), and includes the
+	// captured terminal content.
 	wp := workPrompt("$ kubectl apply")
 	assert.Contains(t, wp, "Do NOT mention the project")
 	assert.Contains(t, wp, "$ kubectl apply")
+	assert.Contains(t, wp, "ENGLISH ONLY") // asciiOnlyRules appended
 }
 
 func TestEnsureSummaryClient(t *testing.T) {

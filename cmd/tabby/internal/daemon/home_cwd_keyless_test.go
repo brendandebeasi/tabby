@@ -51,18 +51,35 @@ func TestWindowNameKey_HomeIsKeyless(t *testing.T) {
 	}
 }
 
-// TestProjectBasename_HomeIsEmpty verifies the summary prompt gets no project
-// prefix for a $HOME window (so the LLM produces a pure task label, not "b ...").
-func TestProjectBasename_HomeIsEmpty(t *testing.T) {
+// TestWindowDirCode_HomeIsEmpty verifies a $HOME window gets no deterministic
+// project code (so composeTabBaseName shows the live summary alone, never a
+// "b ..." derived from the home dir), while a sub-directory resolves to its
+// basename code.
+func TestWindowDirCode_HomeIsEmpty(t *testing.T) {
 	if daemonHomeDir == "" {
 		t.Skip("home dir unresolved in this environment")
 	}
+	c := newTestCoordinator(t)
+
 	atHome := tmux.Window{Panes: []tmux.Pane{{ID: "%1", Command: "zsh", CurrentPath: daemonHomeDir}}}
-	if got := projectBasename(atHome, ""); got != "" {
-		t.Errorf("projectBasename for a $HOME window = %q, want empty", got)
+	if got := c.windowProjectBasename(atHome); got != "" {
+		t.Errorf("windowProjectBasename for a $HOME window = %q, want empty", got)
 	}
-	// An explicit key still wins.
-	if got := projectBasename(atHome, "/Users/b/git/tabby"); got != "tabby" {
-		t.Errorf("projectBasename with key = %q, want \"tabby\"", got)
+	if got := c.windowDirCode(atHome); got != "" {
+		t.Errorf("windowDirCode for a $HOME window = %q, want empty", got)
+	}
+
+	// A non-repo sub-directory resolves to its basename (prime gitTopCache so we
+	// don't fork git): "some-project" -> auto code "SP" (multi-word initials).
+	sub := normalizeCWD(filepath.Join(daemonHomeDir, "some-project"))
+	c.gitTopMu.Lock()
+	c.gitTopCache[sub] = ""
+	c.gitTopMu.Unlock()
+	below := tmux.Window{Panes: []tmux.Pane{{ID: "%2", Command: "zsh", CurrentPath: sub}}}
+	if got := c.windowProjectBasename(below); got != "some-project" {
+		t.Errorf("windowProjectBasename for a sub-dir = %q, want \"some-project\"", got)
+	}
+	if got := c.windowDirCode(below); got != "SP" {
+		t.Errorf("windowDirCode for some-project = %q, want \"SP\"", got)
 	}
 }

@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -223,26 +225,25 @@ func TestSetCWDIcon_PreservesExistingColor(t *testing.T) {
 	assert.Equal(t, "🌟", m.Icon)
 }
 
-func TestCaptureCWDIdentity_StoresNameGroupPinned(t *testing.T) {
+func TestCaptureCWDIdentity_StoresGroupPinned(t *testing.T) {
 	t.Setenv("TABBY_STATE_DIR", t.TempDir())
 	c := newTestCoordinator(t)
 
-	c.captureCWDIdentity("/home/user/project", "  api  ", "  Work  ", true, "user")
+	c.captureCWDIdentity("/home/user/project", "  Work  ", true)
 	m, ok := c.getCWDColorMapping("/home/user/project")
 	assert.True(t, ok)
-	assert.Equal(t, "api", m.Name, "name should be trimmed and stored")
 	assert.Equal(t, "Work", m.Group, "group should be trimmed and stored")
 	assert.True(t, m.Pinned)
-	assert.Equal(t, "user", m.NameSource)
 }
 
-func TestCaptureCWDIdentity_EmptyNameIsNoOp(t *testing.T) {
+func TestCaptureCWDIdentity_EmptyGroupUnpinnedIsNoOp(t *testing.T) {
 	t.Setenv("TABBY_STATE_DIR", t.TempDir())
 	c := newTestCoordinator(t)
 
-	c.captureCWDIdentity("/tmp/p", "   ", "Work", true, "user")
+	// Nothing to persist: no group, not pinned -> no entry created.
+	c.captureCWDIdentity("/tmp/p", "   ", false)
 	_, ok := c.getCWDColorMapping("/tmp/p")
-	assert.False(t, ok, "an empty name carries nothing to capture")
+	assert.False(t, ok, "an empty group + unpinned carries nothing to capture")
 }
 
 func TestCaptureCWDIdentity_PreservesColorIcon(t *testing.T) {
@@ -251,29 +252,27 @@ func TestCaptureCWDIdentity_PreservesColorIcon(t *testing.T) {
 
 	c.setCWDColor("/tmp/x", "#aabbcc")
 	c.setCWDIcon("/tmp/x", "🌟")
-	c.captureCWDIdentity("/tmp/x", "db", "Infra", true, "user")
+	c.captureCWDIdentity("/tmp/x", "Infra", true)
 
 	m, ok := c.getCWDColorMapping("/tmp/x")
 	assert.True(t, ok)
 	assert.Equal(t, "#aabbcc", m.Color, "capture must not disturb the saved color")
 	assert.Equal(t, "🌟", m.Icon, "capture must not disturb the saved icon")
-	assert.Equal(t, "db", m.Name)
 	assert.Equal(t, "Infra", m.Group)
 	assert.True(t, m.Pinned)
 }
 
-func TestClearCWDIdentity_RemovesIdentityKeepsColorIcon(t *testing.T) {
+func TestClearCWDIdentity_RemovesGroupPinnedKeepsColorIcon(t *testing.T) {
 	t.Setenv("TABBY_STATE_DIR", t.TempDir())
 	c := newTestCoordinator(t)
 
 	c.setCWDColor("/tmp/x", "#aabbcc")
-	c.captureCWDIdentity("/tmp/x", "db", "Infra", true, "user")
+	c.captureCWDIdentity("/tmp/x", "Infra", true)
 
 	c.clearCWDIdentity("/tmp/x")
 	m, ok := c.getCWDColorMapping("/tmp/x")
-	assert.True(t, ok, "color mapping should survive an identity clear")
+	assert.True(t, ok, "color mapping should survive a group/pinned clear")
 	assert.Equal(t, "#aabbcc", m.Color)
-	assert.Equal(t, "", m.Name)
 	assert.Equal(t, "", m.Group)
 	assert.False(t, m.Pinned)
 }
@@ -282,52 +281,61 @@ func TestClearCWDIdentity_DeletesEntryWhenNothingRemains(t *testing.T) {
 	t.Setenv("TABBY_STATE_DIR", t.TempDir())
 	c := newTestCoordinator(t)
 
-	c.captureCWDIdentity("/tmp/only-name", "api", "", false, "user")
-	_, ok := c.getCWDColorMapping("/tmp/only-name")
+	c.captureCWDIdentity("/tmp/only-group", "Infra", false)
+	_, ok := c.getCWDColorMapping("/tmp/only-group")
 	assert.True(t, ok)
 
-	c.clearCWDIdentity("/tmp/only-name")
-	_, ok = c.getCWDColorMapping("/tmp/only-name")
-	assert.False(t, ok, "entry should be removed when no color/icon/identity remains")
+	c.clearCWDIdentity("/tmp/only-group")
+	_, ok = c.getCWDColorMapping("/tmp/only-group")
+	assert.False(t, ok, "entry should be removed when no color/icon/group/pinned remains")
 }
 
-func TestCaptureCWDIdentity_LLMDoesNotClobberUserName(t *testing.T) {
-	t.Setenv("TABBY_STATE_DIR", t.TempDir())
-	c := newTestCoordinator(t)
+// TestCWDColorsMigrate_DropsLegacyNames verifies the one-time migration strips
+// the retired per-directory name fields from cwd-colors.json on load while
+// keeping color/icon/group/pinned, and deletes entries left empty.
+func TestCWDColorsMigrate_DropsLegacyNames(t *testing.T) {
+	// The package TestMain pins TABBY_STATE_DIR for the whole run, so write the
+	// seed to the actually-resolved cwd-colors path (per-test Setenv is a no-op
+	// once paths.StateDir's sync.Once has cached). Clean up after.
+	path := cwdColorsPath()
+	t.Cleanup(func() { os.Remove(path) })
 
-	// A user name is authoritative; a later llm capture must not overwrite it.
-	c.captureCWDIdentity("/tmp/proj", "my api", "", false, "user")
-	c.captureCWDIdentity("/tmp/proj", "guessed name", "", false, "llm")
-	m, ok := c.getCWDColorMapping("/tmp/proj")
+	// Seed a legacy file: a name-only "llm" entry (should be dropped entirely),
+	// a "user" entry that also carries a color (name dropped, color kept), and a
+	// pure color/icon entry (untouched).
+	legacy := `{
+  "/Users/b/git": {"name": "squint", "nameSource": "llm"},
+  "/Users/b/git/tabby": {"name": "tby tabby", "nameSource": "user", "color": "#aabbcc"},
+  "/Users/b/git/infra": {"color": "#112233", "icon": "🚀", "group": "Infra"}
+}`
+	if err := os.WriteFile(path, []byte(legacy), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := newTestCoordinator(t)
+	c.loadCWDColors()
+
+	// Name-only llm entry: gone.
+	_, ok := c.getCWDColorMapping("/Users/b/git")
+	assert.False(t, ok, "a name-only legacy entry should be dropped once its name is stripped")
+
+	// User entry with a color: kept, color survives (name is gone — not a field).
+	m, ok := c.getCWDColorMapping("/Users/b/git/tabby")
+	assert.True(t, ok, "an entry with a color survives the name strip")
+	assert.Equal(t, "#aabbcc", m.Color)
+
+	// Color/icon/group entry: untouched.
+	m, ok = c.getCWDColorMapping("/Users/b/git/infra")
 	assert.True(t, ok)
-	assert.Equal(t, "my api", m.Name, "llm must not clobber a user name")
-	assert.Equal(t, "user", m.NameSource)
-}
+	assert.Equal(t, "#112233", m.Color)
+	assert.Equal(t, "🚀", m.Icon)
+	assert.Equal(t, "Infra", m.Group)
 
-func TestCaptureCWDIdentity_UserUpgradesLLMName(t *testing.T) {
-	t.Setenv("TABBY_STATE_DIR", t.TempDir())
-	c := newTestCoordinator(t)
-
-	// A soft llm name can be set, then a user rename upgrades the source.
-	c.captureCWDIdentity("/tmp/proj", "guessed", "", false, "llm")
-	m, _ := c.getCWDColorMapping("/tmp/proj")
-	assert.Equal(t, "llm", m.NameSource)
-
-	c.captureCWDIdentity("/tmp/proj", "real name", "", false, "user")
-	m, _ = c.getCWDColorMapping("/tmp/proj")
-	assert.Equal(t, "real name", m.Name)
-	assert.Equal(t, "user", m.NameSource, "a user rename upgrades the source and freezes it")
-}
-
-func TestCaptureCWDIdentity_LLMRefinesPriorLLMName(t *testing.T) {
-	t.Setenv("TABBY_STATE_DIR", t.TempDir())
-	c := newTestCoordinator(t)
-
-	c.captureCWDIdentity("/tmp/proj", "first guess", "", false, "llm")
-	c.captureCWDIdentity("/tmp/proj", "better guess", "", false, "llm")
-	m, _ := c.getCWDColorMapping("/tmp/proj")
-	assert.Equal(t, "better guess", m.Name, "an llm name may be refined by a later llm capture")
-	assert.Equal(t, "llm", m.NameSource)
+	// The on-disk file is rewritten clean: no legacy name keys remain.
+	data, err := os.ReadFile(path)
+	assert.NoError(t, err)
+	assert.NotContains(t, string(data), "\"name\"")
+	assert.NotContains(t, string(data), "nameSource")
 }
 
 func TestWindowNameKey_LocalAndRemote(t *testing.T) {
@@ -388,71 +396,89 @@ func TestDirAbbreviation_CaseInsensitive(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// dirCodeWindow builds a window whose first content pane is in <base> (under a
+// throwaway parent), priming gitTopCache so windowDirCode resolves the project
+// code from the directory basename without forking git. cmd selects the pane's
+// command (e.g. "zsh" for a plain window, a semver like "2.1.159" for an AI tool).
+func dirCodeWindow(c *Coordinator, name, base, cmd, aiTitle string) tmux.Window {
+	cwd := normalizeCWD(filepath.Join("/tmp/tabby-dircode-test", base))
+	c.gitTopMu.Lock()
+	c.gitTopCache[cwd] = "" // not a repo -> windowProjectBasename uses the basename
+	c.gitTopMu.Unlock()
+	return tmux.Window{
+		ID: "@x", Name: name, AITitle: aiTitle,
+		Panes: []tmux.Pane{{ID: "%1", Command: cmd, CurrentPath: cwd}},
+	}
+}
+
 func TestComposeTabBaseName(t *testing.T) {
 	c := newTestCoordinator(t)
 
-	win := func(name, aiTitle string) tmux.Window {
-		return tmux.Window{ID: "@x", Name: name, AITitle: aiTitle}
-	}
-
 	cases := []struct {
-		desc, name, aiTitle, want string
+		desc, base, aiTitle, want string
 	}{
-		// Abbreviation is derived from the window NAME (respects renames); the
-		// summary follows the code, space-separated (render may wrap it).
-		{"summary: single word name", "tabby", "refactor auth", "TBY refactor auth"},
-		{"summary: short name kept whole", "foo", "do thing", "FOO do thing"},
-		{"summary: renamed tab with space", "API Server", "deploy now", "AS deploy now"},
-		{"summary: composite multi-pane name", "api | web", "fix bug", "API | WEB fix bug"},
-		// No summary -> code alone.
-		{"no summary: single word", "tabby", "", "TBY"},
-		{"no summary: composite name", "client | server", "", "CLN | SRV"},
-		// Plain fallbacks (no code).
-		{"raw window id -> ~", "@5", "", "~"},
-		{"home name stays plain", "~", "", "~"},
-		{"home with summary -> summary only", "~", "fix it", "fix it"},
+		// The project code is derived from the DIRECTORY (not the window name);
+		// the live summary follows it, space-separated (render may wrap it).
+		{"summary: single word dir", "tabby", "refactor auth", "TBY refactor auth"},
+		{"summary: short dir kept whole", "foo", "do thing", "FOO do thing"},
+		// No summary -> deterministic code alone.
+		{"no summary: single word dir", "tabby", "", "TBY"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
-			assert.Equal(t, tc.want, c.composeTabBaseName(win(tc.name, tc.aiTitle)))
+			w := dirCodeWindow(c, "irrelevant-window-name", tc.base, "zsh", tc.aiTitle)
+			assert.Equal(t, tc.want, c.composeTabBaseName(w))
 		})
 	}
 
+	// $HOME / unresolved window (no content cwd): no dir code. Falls back to the
+	// summary when present, else the plain window name.
+	t.Run("unresolved with summary -> summary only", func(t *testing.T) {
+		w := tmux.Window{ID: "@x", Name: "~", AITitle: "fix it"}
+		assert.Equal(t, "fix it", c.composeTabBaseName(w))
+	})
+	t.Run("unresolved no summary -> plain name", func(t *testing.T) {
+		w := tmux.Window{ID: "@x", Name: "~"}
+		assert.Equal(t, "~", c.composeTabBaseName(w))
+	})
+	t.Run("raw window id -> ~", func(t *testing.T) {
+		w := tmux.Window{ID: "@x", Name: "@5"}
+		assert.Equal(t, "~", c.composeTabBaseName(w))
+	})
+
 	// A user-locked name is authoritative: shown verbatim, with neither the
-	// dir-code abbreviation nor the AI summary. Regression guard for the LLM
-	// clobbering manual renames and for abbreviation mangling them.
-	t.Run("locked name shows verbatim, no abbreviation or summary", func(t *testing.T) {
-		w := tmux.Window{ID: "@x", Name: "API Server", AITitle: "deploy now", NameLocked: true}
+	// dir-code nor the AI summary. Regression guard against names being mangled
+	// or overridden by the live summary.
+	t.Run("locked name shows verbatim", func(t *testing.T) {
+		w := dirCodeWindow(c, "API Server", "tabby", "zsh", "deploy now")
+		w.NameLocked = true
 		assert.Equal(t, "API Server", c.composeTabBaseName(w))
 	})
-	t.Run("unlocked name still shows AI summary", func(t *testing.T) {
-		w := tmux.Window{ID: "@x", Name: "API Server", AITitle: "deploy now", NameLocked: false}
-		assert.Equal(t, "AS deploy now", c.composeTabBaseName(w))
+	t.Run("unlocked still shows code + summary", func(t *testing.T) {
+		w := dirCodeWindow(c, "API Server", "tabby", "zsh", "deploy now")
+		assert.Equal(t, "TBY deploy now", c.composeTabBaseName(w))
 	})
 }
 
 func TestComposeTabBaseName_AISummaryOnly(t *testing.T) {
-	// A Claude Code pane (IsAITool matches its semver process name).
-	aiWin := tmux.Window{ID: "@1", Name: "tabby", AITitle: "fixing tests",
-		Panes: []tmux.Pane{{ID: "%1", Command: "2.1.159"}}}
-	plainWin := tmux.Window{ID: "@2", Name: "tabby", AITitle: "fixing tests",
-		Panes: []tmux.Pane{{ID: "%1", Command: "nvim"}}}
-
 	t.Run("ai window drops the dir code", func(t *testing.T) {
 		c := newTestCoordinator(t)
 		c.config.AI.TabSummary.AISummaryOnly = true
+		aiWin := dirCodeWindow(c, "tabby", "tabby", "2.1.159", "fixing tests")
 		assert.Equal(t, "fixing tests", c.composeTabBaseName(aiWin))
 	})
 
 	t.Run("non-ai window keeps the code", func(t *testing.T) {
 		c := newTestCoordinator(t)
 		c.config.AI.TabSummary.AISummaryOnly = true
+		plainWin := dirCodeWindow(c, "tabby", "tabby", "nvim", "fixing tests")
 		assert.Equal(t, "TBY fixing tests", c.composeTabBaseName(plainWin))
 	})
 
 	t.Run("flag off keeps the code even for ai windows", func(t *testing.T) {
 		c := newTestCoordinator(t)
 		c.config.AI.TabSummary.AISummaryOnly = false
+		aiWin := dirCodeWindow(c, "tabby", "tabby", "2.1.159", "fixing tests")
 		assert.Equal(t, "TBY fixing tests", c.composeTabBaseName(aiWin))
 	})
 }
@@ -483,20 +509,29 @@ func TestComposeTabBaseName_ConfigOverridesAutoCode(t *testing.T) {
 	c := newTestCoordinator(t)
 	c.config.TabNames.Abbreviations = []string{"ZZZ>tabby"} // override the auto "TBY"
 
-	win := tmux.Window{ID: "@1", Name: "tabby", AITitle: "refactor auth"}
+	win := dirCodeWindow(c, "tabby", "tabby", "zsh", "refactor auth")
 	assert.Equal(t, "ZZZ refactor auth", c.composeTabBaseName(win))
 }
 
-// TestCWDColorMapping_LegacyJSONBackCompat ensures the new Name/Group/Pinned
-// fields don't break deserialization of pre-existing cwd-colors.json entries
-// that only carry color/icon.
+func TestComposeTabBaseName_ProjectNamesCode(t *testing.T) {
+	c := newTestCoordinator(t)
+	// ai.tab_summary.project_names supplies the deterministic prefix and takes
+	// precedence over the auto-derived code (which would be "TMC" for teamclaude).
+	c.config.AI.TabSummary.ProjectNames = []string{"tc>teamclaude"}
+
+	win := dirCodeWindow(c, "teamclaude", "teamclaude", "zsh", "council tool")
+	assert.Equal(t, "tc council tool", c.composeTabBaseName(win))
+}
+
+// TestCWDColorMapping_LegacyJSONBackCompat ensures the retired name/nameSource
+// fields don't break deserialization of pre-existing cwd-colors.json entries:
+// unknown JSON keys are silently ignored and color/icon still load.
 func TestCWDColorMapping_LegacyJSONBackCompat(t *testing.T) {
 	var m CWDColorMapping
-	err := json.Unmarshal([]byte(`{"color":"#aabbcc","icon":"🚀"}`), &m)
+	err := json.Unmarshal([]byte(`{"color":"#aabbcc","icon":"🚀","name":"old","nameSource":"llm"}`), &m)
 	assert.NoError(t, err)
 	assert.Equal(t, "#aabbcc", m.Color)
 	assert.Equal(t, "🚀", m.Icon)
-	assert.Equal(t, "", m.Name)
 	assert.Equal(t, "", m.Group)
 	assert.False(t, m.Pinned)
 }
