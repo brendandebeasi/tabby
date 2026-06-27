@@ -2966,11 +2966,18 @@ func (c *Coordinator) projectNameCode(folder string) (string, bool) {
 	return code, ok
 }
 
-// windowProjectBasename resolves the human-facing project folder name for a
-// window: the remote topmost dir for an ssh/mosh window, else the git toplevel
-// basename of the first CONTENT pane's cwd, else that cwd's basename. Returns ""
-// for a $HOME / root / unresolved window (which has no project identity and is
-// labeled per-window by its live summary instead).
+// windowProjectBasename resolves the human-facing folder name for a window's
+// dir code: the basename of the first CONTENT pane's working directory (the
+// remote topmost dir for an ssh/mosh window). Returns "" for a $HOME / root /
+// unresolved window (no project identity — labeled per-window by its live
+// summary instead).
+//
+// This is the LEAF working directory, deliberately NOT the git toplevel: the
+// user works in (and wants the tab to name) the actual directory they are in.
+// Collapsing to the git root mislabels worktrees and subdirs — e.g. a session in
+// `<repo>/.claude/worktrees/publications-phase1/imgen` should read "imgen", not
+// the worktree-root's configured abbreviation. It also matches the window name
+// that syncWindowNames derives from the same cwd.
 func (c *Coordinator) windowProjectBasename(win tmux.Window) string {
 	if _, topmost, ok := firstPaneRemoteCWD(win); ok {
 		if b := filepath.Base(topmost); b != "" && b != "." && b != "/" {
@@ -2982,11 +2989,7 @@ func (c *Coordinator) windowProjectBasename(win tmux.Window) string {
 	if cwd == "" || isHomeDir(cwd) {
 		return ""
 	}
-	base := cwd
-	if top := c.gitToplevel(cwd); top != "" {
-		base = top
-	}
-	if b := filepath.Base(base); b != "" && b != "." && b != "/" {
+	if b := filepath.Base(cwd); b != "" && b != "." && b != "/" {
 		return b
 	}
 	return ""

@@ -523,6 +523,27 @@ func TestComposeTabBaseName_ProjectNamesCode(t *testing.T) {
 	assert.Equal(t, "tc council tool", c.composeTabBaseName(win))
 }
 
+// TestComposeTabBaseName_WorktreeUsesLeafNotToplevel guards the regression where
+// a session in a worktree SUBDIR was collapsed up to the git toplevel and
+// mislabeled by the root's configured abbreviation. The code must come from the
+// LEAF working directory the user is actually in.
+func TestComposeTabBaseName_WorktreeUsesLeafNotToplevel(t *testing.T) {
+	c := newTestCoordinator(t)
+	// An abbreviation is configured for the worktree ROOT name.
+	c.config.TabNames.Abbreviations = []string{"SD>publications-phase1"}
+
+	cwd := normalizeCWD("/tmp/x/.claude/worktrees/publications-phase1/imgen")
+	// Prime gitTopCache to the worktree ROOT — proving that even when a toplevel
+	// IS resolvable, the leaf (imgen) wins, not the root's "SD" abbreviation.
+	c.gitTopMu.Lock()
+	c.gitTopCache[cwd] = "/tmp/x/.claude/worktrees/publications-phase1"
+	c.gitTopMu.Unlock()
+
+	w := tmux.Window{ID: "@x", Name: "imgen",
+		Panes: []tmux.Pane{{ID: "%1", Command: "zsh", CurrentPath: cwd}}}
+	assert.Equal(t, "IMG", c.composeTabBaseName(w), "leaf 'imgen' -> IMG, not root 'SD'")
+}
+
 // TestCWDColorMapping_LegacyJSONBackCompat ensures the retired name/nameSource
 // fields don't break deserialization of pre-existing cwd-colors.json entries:
 // unknown JSON keys are silently ignored and color/icon still load.
