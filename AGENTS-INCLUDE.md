@@ -54,7 +54,7 @@ Tabby shows per-window status indicators. AI agents can set these via hooks:
 ~/git/tabby/bin/tabby-hook set-indicator input 0
 ```
 
-These are typically wired into Claude Code hooks (UserPromptSubmit, Stop, Notification) in `~/.claude/settings.json`.
+These are typically wired into Claude Code hooks (UserPromptSubmit, Stop, Notification) in `~/.claude/settings.json`. Grok CLI (xAI's Grok Build) uses the same Claude-compatible hook events in `~/.grok/user-settings.json`, so the same `set-indicator` commands wire in unchanged. The `grok` process is in `busy_detection.ai_tools`, so a Grok pane also gets AI busy/idle detection and live tab summaries without any hooks.
 
 ## Restarting the Sidebar After Changes
 

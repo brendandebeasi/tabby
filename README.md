@@ -725,7 +725,7 @@ repo hooks so commits and pushes do not depend on extra binaries.
 
 Tabby includes helper scripts for creating notifications that deep-link back to specific tmux windows/panes. When clicked, the notification brings your terminal to the foreground and navigates to the target location.
 
-Works with both **Claude Code** and **OpenCode** out of the box.
+Works with **Claude Code**, **OpenCode**, and **Grok CLI** (xAI's Grok Build) out of the box.
 
 ### Requirements
 
@@ -918,6 +918,47 @@ Create `~/.config/opencode/opencode-notifier.json`:
 ```
 
 Set `sound` and `notification` to `false` in the notifier config since the hook script handles notifications directly via growlrrr/terminal-notifier.
+
+### Integration with Grok CLI
+
+xAI's **Grok Build** CLI (`grok`) ships a Claude-compatible hooks system, so it wires into Tabby exactly like Claude Code — the same `UserPromptSubmit` / `Stop` / `Notification` lifecycle events, the same hook-JSON-on-stdin contract, and the same `TMUX_PANE` capture rule. The only difference is where the hooks live: `~/.grok/user-settings.json` instead of `~/.claude/settings.json`.
+
+Add to `~/.grok/user-settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "<tabby-dir>/bin/tabby-hook set-indicator busy 1" },
+          { "type": "command", "command": "<tabby-dir>/bin/tabby-hook set-indicator input 0" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "<tabby-dir>/bin/tabby-hook set-indicator busy 0" },
+          { "type": "command", "command": "<tabby-dir>/bin/tabby-hook set-indicator input 1" }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "<tabby-dir>/bin/tabby-hook set-indicator bell 1" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Grok's process name is `grok`, which is already listed under `busy_detection.ai_tools` in `config.yaml` — so a Grok pane gets AI busy/idle treatment and the live AI tab summary even before any hooks fire. The hooks above just make the busy/input/bell indicators flip precisely on turn boundaries rather than on output heuristics. For deep-link notifications, point `Stop`/`Notification` at the same notify script you use for Claude Code (it reads hook JSON from stdin and uses `TMUX_PANE` identically).
 
 ### Notification Persistence
 

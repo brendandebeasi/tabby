@@ -151,6 +151,7 @@ busy_detection:
     - aider
     - cursor
     - copilot
+    - grok
   idle_timeout: 10   # Seconds of no output before AI tool shows "?" (input needed)
   # extra_idle: []   # Additional commands to suppress busy (e.g., "make")
 
