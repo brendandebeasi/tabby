@@ -4,7 +4,7 @@ Tabby detects AI coding tool states two ways:
 
 1. **Passive detection** (automatic) -- The daemon watches pane titles for spinner
    characters and title changes. Works for all tools, no configuration needed.
-2. **Hook-based detection** (precise) -- AI tools call `tabby-hook set-indicator`
+2. **Hook-based detection** (precise) -- AI tools call `tabby hook set-indicator`
    via their hook/notification systems. Gives instant, accurate state transitions.
 
 This guide covers option 2: configuring each tool's hook system.
@@ -22,12 +22,12 @@ This guide covers option 2: configuring each tool's hook system.
 ## How It Works
 
 ```
-  AI tool event ──> hook fires ──> tabby-hook set-indicator ──> tmux option set
+  AI tool event ──> hook fires ──> tabby hook set-indicator ──> tmux option set
                                                             ──> daemon USR1 signal
                                                             ──> sidebar re-renders
 ```
 
-The helper binary `bin/tabby-hook set-indicator` sets tmux window options
+The helper binary `bin/tabby hook set-indicator` sets tmux window options
 (`@tabby_busy`, `@tabby_bell`, `@tabby_input`) and signals the daemon for
 instant refresh. It auto-detects which tmux window the tool is running in via
 `$TMUX_PANE` or process tree walking.
@@ -55,10 +55,10 @@ indicators:
 
 | What happened              | Hook call                                           |
 |----------------------------|-----------------------------------------------------|
-| User submitted a prompt    | `tabby-hook set-indicator busy 1`                   |
-| Tool finished responding   | `tabby-hook set-indicator busy 0`                   |
-|                            | `tabby-hook set-indicator input 1`                  |
-| Tool exited / session end  | `tabby-hook set-indicator bell 1`                   |
+| User submitted a prompt    | `tabby hook set-indicator busy 1`                   |
+| Tool finished responding   | `tabby hook set-indicator busy 0`                   |
+|                            | `tabby hook set-indicator input 1`                  |
+| Tool exited / session end  | `tabby hook set-indicator bell 1`                   |
 
 ---
 
@@ -78,7 +78,7 @@ Add to the `"hooks"` key:
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/tabby/bin/tabby-hook set-indicator busy 1"
+            "command": "/path/to/tabby/bin/tabby hook set-indicator busy 1"
           }
         ]
       }
@@ -88,7 +88,7 @@ Add to the `"hooks"` key:
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/tabby/bin/tabby-hook set-indicator busy 0 && /path/to/tabby/bin/tabby-hook set-indicator input 1"
+            "command": "/path/to/tabby/bin/tabby hook set-indicator busy 0 && /path/to/tabby/bin/tabby hook set-indicator input 1"
           }
         ]
       }
@@ -98,7 +98,7 @@ Add to the `"hooks"` key:
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/tabby/bin/tabby-hook set-indicator busy 1"
+            "command": "/path/to/tabby/bin/tabby hook set-indicator busy 1"
           }
         ]
       }
@@ -134,7 +134,7 @@ cause errors.
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/tabby/bin/tabby-hook set-indicator busy 1; echo '{}'",
+            "command": "/path/to/tabby/bin/tabby hook set-indicator busy 1; echo '{}'",
             "timeout": 5000
           }
         ]
@@ -145,7 +145,7 @@ cause errors.
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/tabby/bin/tabby-hook set-indicator busy 0; /path/to/tabby/bin/tabby-hook set-indicator input 1; echo '{}'",
+            "command": "/path/to/tabby/bin/tabby hook set-indicator busy 0; /path/to/tabby/bin/tabby hook set-indicator input 1; echo '{}'",
             "timeout": 5000
           }
         ]
@@ -156,7 +156,7 @@ cause errors.
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/tabby/bin/tabby-hook set-indicator bell 1; echo '{}'",
+            "command": "/path/to/tabby/bin/tabby hook set-indicator bell 1; echo '{}'",
             "timeout": 5000
           }
         ]
@@ -179,14 +179,14 @@ cause errors.
 ### Antigravity CLI (`agy`)
 
 Google's Antigravity CLI (the `agy` binary, Gemini-based, config under
-`~/.gemini/antigravity-cli/`) has no `tabby-hook`-style lifecycle hooks, but it
+`~/.gemini/antigravity-cli/`) has no `tabby hook`-style lifecycle hooks, but it
 has something better for our purposes: a **`statusLine` command** that the TUI
 runs **on every agent-state change**, piping a JSON payload to the script's
 stdin and rendering the script's stdout in its status bar.
 
 We exploit that invocation to mirror the agent state into the terminal **title**
 using the same glyphs Claude Code uses, so tabby's existing passive detection
-lights up the busy/input indicator -- no `tabby-hook`, no daemon changes, and it
+lights up the busy/input indicator -- no `tabby hook`, no daemon changes, and it
 rides over SSH like any other title.
 
 ```
@@ -267,9 +267,9 @@ sidebar label, so the ⠿/✳ glyph shows there exactly like a remote Claude Cod
 session.
 
 **Alternative (explicit hook path)**: instead of setting the title, the bridge
-can call `tabby-hook set-indicator` directly (`busy 1` when `state` is non-idle,
+can call `tabby hook set-indicator` directly (`busy 1` when `state` is non-idle,
 `busy 0` + `input 1` when idle). That gives a true tmux-option indicator even
-over SSH, but requires `tabby-hook` on the remote PATH; the title approach does
+over SSH, but requires `tabby` on the remote PATH; the title approach does
 not.
 
 ---
@@ -284,8 +284,8 @@ a CLI argument (not stdin) when the agent finishes a turn.
 ```toml
 notify = ["bash", "-c", """
 PAYLOAD="$1"
-/path/to/tabby/bin/tabby-hook set-indicator busy 0
-/path/to/tabby/bin/tabby-hook set-indicator input 1
+/path/to/tabby/bin/tabby hook set-indicator busy 0
+/path/to/tabby/bin/tabby hook set-indicator input 1
 """, "--"]
 ```
 
@@ -295,9 +295,9 @@ watches for title changes) or add a shell alias:
 ```bash
 # ~/.bashrc or ~/.zshrc
 codex() {
-    /path/to/tabby/bin/tabby-hook set-indicator busy 1
+    /path/to/tabby/bin/tabby hook set-indicator busy 1
     command codex "$@"
-    /path/to/tabby/bin/tabby-hook set-indicator bell 1
+    /path/to/tabby/bin/tabby hook set-indicator bell 1
 }
 ```
 
@@ -317,18 +317,18 @@ Aider fires a single notification when it finishes and waits for user input.
 ```yaml
 # .aider.conf.yml (project root or ~/.aider.conf.yml)
 notifications: true
-notifications_command: "/path/to/tabby/bin/tabby-hook set-indicator input 1"
+notifications_command: "/path/to/tabby/bin/tabby hook set-indicator input 1"
 ```
 
 Or via command line:
 ```bash
-aider --notifications --notifications-command "/path/to/tabby/bin/tabby-hook set-indicator input 1"
+aider --notifications --notifications-command "/path/to/tabby/bin/tabby hook set-indicator input 1"
 ```
 
 Or via environment variable:
 ```bash
 export AIDER_NOTIFICATIONS=true
-export AIDER_NOTIFICATIONS_COMMAND="/path/to/tabby/bin/tabby-hook set-indicator input 1"
+export AIDER_NOTIFICATIONS_COMMAND="/path/to/tabby/bin/tabby hook set-indicator input 1"
 ```
 
 Aider has no "start" event. Pair with passive detection or a shell wrapper:
@@ -336,9 +336,9 @@ Aider has no "start" event. Pair with passive detection or a shell wrapper:
 ```bash
 # ~/.bashrc or ~/.zshrc
 aider() {
-    /path/to/tabby/bin/tabby-hook set-indicator busy 1
+    /path/to/tabby/bin/tabby hook set-indicator busy 1
     command aider "$@"
-    /path/to/tabby/bin/tabby-hook set-indicator bell 1
+    /path/to/tabby/bin/tabby hook set-indicator bell 1
 }
 ```
 
@@ -367,8 +367,8 @@ commands.
   "notification": false,
   "command": {
     "enabled": true,
-    "path": "/path/to/tabby/bin/tabby-hook",
-    "args": ["set-indicator", "input", "1"],
+    "path": "/path/to/tabby/bin/tabby",
+    "args": ["hook", "set-indicator", "input", "1"],
     "minDuration": 0
   },
   "events": {
@@ -390,12 +390,12 @@ small wrapper:
 EVENT="$1"
 case "$EVENT" in
     complete|permission|question)
-        /path/to/tabby/bin/tabby-hook set-indicator busy 0
-        /path/to/tabby/bin/tabby-hook set-indicator input 1
+        /path/to/tabby/bin/tabby hook set-indicator busy 0
+        /path/to/tabby/bin/tabby hook set-indicator input 1
         ;;
     error)
-        /path/to/tabby/bin/tabby-hook set-indicator busy 0
-        /path/to/tabby/bin/tabby-hook set-indicator bell 1
+        /path/to/tabby/bin/tabby hook set-indicator busy 0
+        /path/to/tabby/bin/tabby hook set-indicator bell 1
         ;;
 esac
 ```
@@ -427,13 +427,13 @@ Then in the notifier config:
     "userPromptSubmitted": [
       {
         "type": "command",
-        "bash": "/path/to/tabby/bin/tabby-hook set-indicator busy 1"
+        "bash": "/path/to/tabby/bin/tabby hook set-indicator busy 1"
       }
     ],
     "sessionEnd": [
       {
         "type": "command",
-        "bash": "/path/to/tabby/bin/tabby-hook set-indicator bell 1"
+        "bash": "/path/to/tabby/bin/tabby hook set-indicator bell 1"
       }
     ]
   }
@@ -458,10 +458,10 @@ To verify the script works:
 
 ```bash
 # Set busy indicator on current window
-./bin/tabby-hook set-indicator busy 1
+./bin/tabby hook set-indicator busy 1
 
 # Check it appeared in the sidebar, then clear it
-./bin/tabby-hook set-indicator busy 0
+./bin/tabby hook set-indicator busy 0
 ```
 
 Debug logs are written to `/tmp/tabby-indicator-debug.log`.

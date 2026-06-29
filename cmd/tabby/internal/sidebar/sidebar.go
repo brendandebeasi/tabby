@@ -333,19 +333,21 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonRestartTriggered = true
 			debugLog.Printf("Daemon appears dead after %d reconnect attempts, triggering restart", m.reconnectAttempts)
 			go func() {
-				hookBin := filepath.Join(filepath.Dir(os.Args[0]), "tabby-hook")
+				// Single-binary form: `tabby hook ensure-sidebar` (the standalone
+				// tabby-hook binary no longer exists).
+				hookBin := filepath.Join(filepath.Dir(os.Args[0]), "tabby")
 				if _, err := os.Stat(hookBin); err != nil {
 					if home, err := os.UserHomeDir(); err == nil {
-						hookBin = filepath.Join(home, ".tmux", "plugins", "tabby", "bin", "tabby-hook")
+						hookBin = filepath.Join(home, ".tmux", "plugins", "tabby", "bin", "tabby")
 					}
 				}
-				debugLog.Printf("Running tabby-hook ensure-sidebar: %s", hookBin)
-				cmd := exec.Command(hookBin, "ensure-sidebar")
+				debugLog.Printf("Running tabby hook ensure-sidebar: %s", hookBin)
+				cmd := exec.Command(hookBin, "hook", "ensure-sidebar")
 				cmd.Env = append(os.Environ(), fmt.Sprintf("TMUX_PANE=%s", os.Getenv("TMUX_PANE")))
 				if out, err := cmd.CombinedOutput(); err != nil {
-					debugLog.Printf("tabby-hook ensure-sidebar failed: %v: %s", err, string(out))
+					debugLog.Printf("tabby hook ensure-sidebar failed: %v: %s", err, string(out))
 				} else {
-					debugLog.Printf("tabby-hook ensure-sidebar succeeded")
+					debugLog.Printf("tabby hook ensure-sidebar succeeded")
 				}
 			}()
 		}

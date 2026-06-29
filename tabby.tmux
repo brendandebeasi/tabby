@@ -444,7 +444,7 @@ SIGNAL_SIDEBAR_SCRIPT="$SIGNAL_CMD"
 # Refresh status bar: trivial inline command (replaces refresh_status.sh)
 REFRESH_STATUS_SCRIPT="tmux refresh-client -S"
 
-# All lifecycle scripts now handled by Go binaries via tabby-hook
+# All lifecycle scripts now handled by Go binaries via `tabby hook`
 HOOK_BIN="$CURRENT_DIR/bin/tabby hook"
 ENSURE_SIDEBAR_CMD="$HOOK_BIN ensure-sidebar"
 RESTORE_SIDEBAR_CMD="$HOOK_BIN ensure-sidebar"
@@ -454,7 +454,7 @@ FOCUS_RECOVERY_CMD="$HOOK_BIN restore-input-focus"
 
 # Apply group to new window: now handled by daemon (createNewWindowInCurrentGroup)
 
-# Window kill and exit-if-no-main: now handled by tabby-hook -> daemon
+# Window kill and exit-if-no-main: now handled by `tabby hook` -> daemon
 KILL_WINDOW_SCRIPT="$CURRENT_DIR/bin/tabby hook kill-window"
 EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby hook exit-if-no-main"
 
@@ -588,7 +588,7 @@ NEW_WINDOW_BINDING=$(grep "new_window_global:" "$CONFIG_FILE" 2>/dev/null | awk 
 KILL_WINDOW_BINDING=$(grep "kill_window_global:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
 TOGGLE_MINIMIZE_BINDING=$(grep "toggle_minimize_window:" "$CONFIG_FILE" 2>/dev/null | awk -F': ' '{print $2}' | sed 's/"//g' || echo "")
 
-# Route next/prev through tabby-hook so the daemon filter (which skips
+# Route next/prev through `tabby hook` so the daemon filter (which skips
 # minimized windows) runs on keybinding presses, matching the sidebar path.
 bind_from_config "$NEXT_WINDOW_BINDING" "run-shell -b 'TABBY_INVOKING_TTY=\"#{client_tty}\" $HOOK_BIN next-window'"
 bind_from_config "$PREV_WINDOW_BINDING" "run-shell -b 'TABBY_INVOKING_TTY=\"#{client_tty}\" $HOOK_BIN prev-window'"

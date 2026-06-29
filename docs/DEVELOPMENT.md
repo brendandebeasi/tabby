@@ -14,7 +14,7 @@ see `docs/CURRENT_STATE.md`.
 
 ```bash
 ./scripts/install.sh
-./bin/tabby-dev status
+./bin/tabby dev status
 ```
 
 ## Build
@@ -26,8 +26,8 @@ see `docs/CURRENT_STATE.md`.
 ## Runtime Freshness
 
 ```bash
-./bin/tabby-dev status
-./bin/tabby-dev reload
+./bin/tabby dev status
+./bin/tabby dev reload
 ```
 
 ## Tests

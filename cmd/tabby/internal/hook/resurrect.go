@@ -12,7 +12,7 @@ import (
 // strips Tabby utility pane lines from the resurrect save file so that
 // sidebar-renderer, pane-header, and tabby-daemon panes are not restored
 // as zombie shells on next resurrect-restore.
-// Usage: tabby-hook resurrect-save <save-file>
+// Usage: tabby hook resurrect-save <save-file>
 func doResurrectSave(args []string) {
 	if len(args) < 1 {
 		return
@@ -59,7 +59,7 @@ func doResurrectSave(args []string) {
 // doResurrectRestore replaces resurrect_restore_hook.sh:
 // cleans stale Tabby state and re-initializes the sidebar after
 // a tmux-resurrect restore.
-// Usage: tabby-hook resurrect-restore
+// Usage: tabby hook resurrect-restore
 func doResurrectRestore(args []string) {
 	// 1. Kill stale Tabby processes
 	for _, proc := range []string{"tabby-daemon", "sidebar-renderer", "pane-header"} {

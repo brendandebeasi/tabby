@@ -100,41 +100,41 @@ func Run(allArgs []string) int {
 	switch action {
 	case "delete-group":
 		if len(args) < 1 {
-			fatal("Usage: tabby-hook delete-group <name>")
+			fatal("Usage: tabby hook delete-group <name>")
 		}
 		target = args[0]
 
 	case "rename-group":
 		if len(args) < 2 {
-			fatal("Usage: tabby-hook rename-group <old-name> <new-name>")
+			fatal("Usage: tabby hook rename-group <old-name> <new-name>")
 		}
 		target = args[0]
 		value = args[1]
 
 	case "set-group-color":
 		if len(args) < 2 {
-			fatal("Usage: tabby-hook set-group-color <name> <color>")
+			fatal("Usage: tabby hook set-group-color <name> <color>")
 		}
 		target = args[0]
 		value = args[1]
 
 	case "set-group-marker":
 		if len(args) < 2 {
-			fatal("Usage: tabby-hook set-group-marker <name> <marker>")
+			fatal("Usage: tabby hook set-group-marker <name> <marker>")
 		}
 		target = args[0]
 		value = args[1]
 
 	case "set-group-working-dir":
 		if len(args) < 2 {
-			fatal("Usage: tabby-hook set-group-working-dir <name> <dir>")
+			fatal("Usage: tabby hook set-group-working-dir <name> <dir>")
 		}
 		target = args[0]
 		value = args[1]
 
 	case "toggle-group-collapse":
 		if len(args) < 2 {
-			fatal("Usage: tabby-hook toggle-group-collapse <name> <collapse|expand>")
+			fatal("Usage: tabby hook toggle-group-collapse <name> <collapse|expand>")
 		}
 		target = args[0]
 		value = args[1]
@@ -172,13 +172,13 @@ func Run(allArgs []string) int {
 
 	case "kill-window":
 		if len(args) < 1 {
-			fatal("Usage: tabby-hook kill-window <window-id-or-index>")
+			fatal("Usage: tabby hook kill-window <window-id-or-index>")
 		}
 		target = args[0]
 
 	case "split-pane":
 		if len(args) < 1 {
-			fatal("Usage: tabby-hook split-pane <v|h>")
+			fatal("Usage: tabby hook split-pane <v|h>")
 		}
 		target = args[0]
 		if len(args) > 1 {
@@ -189,7 +189,7 @@ func Run(allArgs []string) int {
 
 	case "pane-click":
 		if len(args) < 5 {
-			fatal("Usage: tabby-hook pane-click <pane-id> <mouse-x> <mouse-y> <pane-left> <pane-top>")
+			fatal("Usage: tabby hook pane-click <pane-id> <mouse-x> <mouse-y> <pane-left> <pane-top>")
 		}
 		target = args[0]
 		value = args[1] + "," + args[2] + "," + args[3] + "," + args[4]

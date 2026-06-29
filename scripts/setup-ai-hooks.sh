@@ -4,7 +4,7 @@
 # Usage: ./setup-ai-hooks.sh [--dry-run] [--tool TOOL]
 #
 # Configures hooks for: claude, gemini, codex, aider, opencode
-# Each tool calls tabby-hook set-indicator on state transitions:
+# Each tool calls tabby hook set-indicator on state transitions:
 #   UserPromptSubmit / BeforeAgent  -->  busy 1
 #   Stop / AfterAgent              -->  busy 0, input 1
 #   SessionEnd / exit              -->  bell 1

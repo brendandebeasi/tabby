@@ -136,7 +136,7 @@ prompt:
   shell_integration: true
   fallback_icon: "•"  # Icon used when a group has no icon defined
 
-# Terminal app for notifications deep-linking (used by tabby-hook focus-pane)
+# Terminal app for notifications deep-linking (used by tabby hook focus-pane)
 # Options: Ghostty, iTerm, Terminal, Alacritty, kitty, WezTerm
 terminal_app: Ghostty
 

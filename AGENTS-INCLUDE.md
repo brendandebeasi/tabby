@@ -42,16 +42,16 @@ Tabby shows per-window status indicators. AI agents can set these via hooks:
 
 ```bash
 # Mark window as busy (agent is working)
-~/git/tabby/bin/tabby-hook set-indicator busy 1
+~/git/tabby/bin/tabby hook set-indicator busy 1
 
 # Clear busy indicator (agent stopped)
-~/git/tabby/bin/tabby-hook set-indicator busy 0
+~/git/tabby/bin/tabby hook set-indicator busy 0
 
 # Show input-needed indicator
-~/git/tabby/bin/tabby-hook set-indicator input 1
+~/git/tabby/bin/tabby hook set-indicator input 1
 
 # Clear input indicator
-~/git/tabby/bin/tabby-hook set-indicator input 0
+~/git/tabby/bin/tabby hook set-indicator input 0
 ```
 
 These are typically wired into Claude Code hooks (UserPromptSubmit, Stop, Notification) in `~/.claude/settings.json`. Grok CLI (xAI's Grok Build) uses the same Claude-compatible hook events in `~/.grok/user-settings.json`, so the same `set-indicator` commands wire in unchanged. The `grok` process is in `busy_detection.ai_tools`, so a Grok pane also gets AI busy/idle detection and live tab summaries without any hooks.
@@ -61,6 +61,6 @@ These are typically wired into Claude Code hooks (UserPromptSubmit, Stop, Notifi
 If you make changes to the tabby codebase, restart the sidebar:
 
 ```bash
-pkill -f "tabby-daemon"; pkill -f "sidebar-renderer"; rm -f /tmp/tabby-daemon-*
+pkill -f "tabby daemon"; pkill -f "sidebar-renderer"; rm -f /tmp/tabby-daemon-*
 TABBY_USE_RENDERER=1 /Users/b/git/tabby/scripts/toggle_sidebar_daemon.sh
 ```

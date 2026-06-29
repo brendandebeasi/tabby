@@ -14624,11 +14624,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			}
 			return true
 		}
-		// No name provided — prompt user, then call back via tabby-hook
-		exe, _ := os.Executable()
-		hookPath := filepath.Join(filepath.Dir(exe), "tabby-hook")
-		cmd := fmt.Sprintf("command-prompt -p 'New group name:' \"run-shell '%s new-group %%%% '\"", hookPath)
-		exec.Command("tmux", strings.Split(cmd, " ")...).Run()
+		// No name provided — prompt user, then call back via `tabby hook new-group`.
+		hookPath := c.getHookPath()
+		callback := fmt.Sprintf("run-shell '%s new-group %%%% '", hookPath)
+		exec.Command("tmux", "command-prompt", "-p", "New group name:", callback).Run()
 		return false
 
 	case "close_tab":
@@ -15648,7 +15647,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Use tmux run-shell to restart asynchronously (the daemon dies on toggle-off)
 		toggleScript := c.getToggleScript()
 		if toggleScript != "" {
-			restartCmd := fmt.Sprintf("tmux set-option -g @tabby_sidebar_position %s; '%s'; sleep 0.3; '%s'", newPos, toggleScript, toggleScript)
+			restartCmd := fmt.Sprintf("tmux set-option -g @tabby_sidebar_position %s; %s; sleep 0.3; %s", newPos, toggleScript, toggleScript)
 			exec.Command("tmux", "run-shell", "-b", restartCmd).Run()
 		}
 		return false
@@ -16950,8 +16949,7 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	// --- Destructive ---
 	args = append(args, "", "", "")
 
-	exe, _ := os.Executable()
-	hookPath := filepath.Join(filepath.Dir(exe), "tabby-hook")
+	hookPath := c.getHookPath()
 	killCmd := fmt.Sprintf("confirm-before -p 'Close window? (y/n)' \"run-shell '%s kill-window %s'\"", hookPath, wid)
 	args = append(args, "Kill", "k", killCmd)
 
@@ -17548,21 +17546,26 @@ func (c *Coordinator) showIndicatorContextMenu(clientID string, windowTarget str
 	c.executeOrSendMenu(clientID, args, pos)
 }
 
-// getToggleScript returns the path to the tabby-toggle binary
+// getToggleScript returns the `tabby toggle` invocation (binary path + subcommand).
+// The standalone tabby-toggle binary no longer exists; everything is one binary.
 func (c *Coordinator) getToggleScript() string {
 	exe, err := os.Executable()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(exe), "tabby-toggle")
+	// Callers run this as an unquoted shell command (it contains a space).
+	return filepath.Join(filepath.Dir(exe), "tabby") + " toggle"
 }
 
+// getHookPath returns the `tabby hook` invocation (binary path + subcommand).
+// The standalone tabby-hook binary no longer exists; everything is one binary.
+// Callers append the hook subcommand, e.g. fmt.Sprintf("...'%s kill-pane'", hookPath).
 func (c *Coordinator) getHookPath() string {
 	exe, err := os.Executable()
 	if err != nil {
-		return "tabby-hook"
+		return "tabby hook"
 	}
-	return filepath.Join(filepath.Dir(exe), "tabby-hook")
+	return filepath.Join(filepath.Dir(exe), "tabby") + " hook"
 }
 
 func (c *Coordinator) getScriptPath(name string) string {
@@ -17582,7 +17585,7 @@ func (c *Coordinator) showSidebarSettingsMenu(clientID string, pos menuPosition)
 		if toggleScript == "" {
 			return setCmd
 		}
-		return fmt.Sprintf("%s; run-shell -b \"'%s'; sleep 0.3; '%s'\"", setCmd, toggleScript, toggleScript)
+		return fmt.Sprintf("%s; run-shell -b \"%s; sleep 0.3; %s\"", setCmd, toggleScript, toggleScript)
 	}
 
 	args := append([]string{

@@ -10,7 +10,7 @@ import (
 
 // doSetIndicator replaces set-tabby-indicator.sh: set tabby indicators
 // (busy, bell, activity, silence, input, crash) on a tmux window.
-// Usage: tabby-hook set-indicator <type> <0|1>
+// Usage: tabby hook set-indicator <type> <0|1>
 func doSetIndicator(args []string) {
 	if len(args) < 2 {
 		return

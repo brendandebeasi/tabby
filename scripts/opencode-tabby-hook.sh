@@ -271,7 +271,7 @@ send_notification() {
     local message="${NOTIFIER_MESSAGE:-${db_text:-$fallback_message}}"
 
     # Deep-link strategy:
-    # 1. If we have tmux context → tabby-hook focus-pane to jump to the correct pane (CLI mode)
+    # 1. If we have tmux context → tabby hook focus-pane to jump to the correct pane (CLI mode)
     # 2. Otherwise → opencode:// URL scheme to open the desktop app
     local focus_cmd=""
     local open_url=""

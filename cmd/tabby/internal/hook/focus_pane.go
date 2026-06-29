@@ -9,7 +9,7 @@ import (
 
 // doFocusPane replaces focus_pane.sh: focus a specific tmux
 // session/window/pane and optionally bring terminal to foreground.
-// Usage: tabby-hook focus-pane [session:]window[.pane]
+// Usage: tabby hook focus-pane [session:]window[.pane]
 func doFocusPane(args []string) {
 	target := "0"
 	if len(args) > 0 {
