@@ -615,6 +615,14 @@ if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key -n "M-\`" run-shell "$CYCLE_PANE_BIN"
     tmux bind-key -n "M-~"  run-shell "$CYCLE_PANE_BIN"
 fi
+# Option+] -> next window, Option+[ -> previous window. Matches the cmd+]/cmd+[
+# direction (those arrive as M-}/M-{ via the Ghostty `text:` keybinds). With
+# tmux `extended-keys on`, Ghostty reports Option+[/] as CSI-u / modifyOtherKeys
+# and tmux decodes them to M-[ / M-]. Unlike the earlier bare "/' experiment
+# these are unique sequences, so normal typing (quotes included) is unaffected.
+# Uses the same tabby hook as cmd+]/cmd+[ for consistent minimized/group nav.
+tmux bind-key -n "M-]" run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN next-window"
+tmux bind-key -n "M-[" run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
 # Also override prefix+o to use the smart cycle binary
 if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key o run-shell "$CYCLE_PANE_BIN"
