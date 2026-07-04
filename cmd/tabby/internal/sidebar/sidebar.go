@@ -1087,6 +1087,38 @@ func (m rendererModel) menuItemAtScreenY(screenY int) int {
 	return itemIdx
 }
 
+// menuStyles returns the lipgloss styles used by the context menu, resolved
+// from the theme plumbed by the daemon with fallback defaults.
+func (m rendererModel) menuStyles() (borderStyle, normalStyle, headerStyle, highlightStyle lipgloss.Style) {
+	borderColor := lipgloss.Color(m.borderFg)
+	if m.borderFg == "" {
+		borderColor = lipgloss.Color(m.dividerFg)
+		if m.dividerFg == "" {
+			borderColor = lipgloss.Color("#666")
+		}
+	}
+	borderStyle = lipgloss.NewStyle().Foreground(borderColor)
+
+	textColor := lipgloss.Color(m.activeFg)
+	if m.activeFg == "" {
+		textColor = lipgloss.Color("#000000")
+	}
+	normalStyle = lipgloss.NewStyle().Foreground(textColor)
+	headerStyle = lipgloss.NewStyle().
+		Foreground(textColor).
+		Bold(true)
+
+	highlightColor := lipgloss.Color(m.indicatorBg)
+	if m.indicatorBg == "" {
+		highlightColor = lipgloss.Color("#2563eb")
+	}
+	highlightStyle = lipgloss.NewStyle().
+		Foreground(highlightColor).
+		Bold(true)
+
+	return
+}
+
 // renderMenuLines generates styled lines for the menu overlay
 func (m rendererModel) renderMenuLines() []string {
 	w := m.width
@@ -1094,15 +1126,7 @@ func (m rendererModel) renderMenuLines() []string {
 		return nil
 	}
 
-	borderColor := lipgloss.Color("#666")
-	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#000000"))
-	highlightStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#2563eb")).
-		Bold(true)
-	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#000000")).
-		Bold(true)
+	borderStyle, normalStyle, headerStyle, highlightStyle := m.menuStyles()
 
 	var lines []string
 

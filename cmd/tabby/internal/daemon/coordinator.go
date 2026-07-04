@@ -8386,9 +8386,19 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 
 	sidebarBg := ""
 	terminalBg := ""
+	activeFg := ""
+	inactiveFg := ""
+	borderFg := ""
+	dividerFg := ""
+	indicatorBg := ""
 	if c.theme != nil {
 		sidebarBg = c.theme.SidebarBg
 		terminalBg = c.theme.TerminalBg
+		activeFg = c.theme.ActiveFg
+		inactiveFg = c.theme.InactiveFg
+		borderFg = c.theme.BorderFg
+		dividerFg = c.theme.DividerFg
+		indicatorBg = c.theme.DefaultIndicatorBg
 	}
 
 	return &daemon.RenderPayload{
@@ -8402,6 +8412,11 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		PinnedRegions: nil, // All regions are in main Regions array now
 		SidebarBg:     sidebarBg,
 		TerminalBg:    terminalBg,
+		ActiveFg:      activeFg,
+		InactiveFg:    inactiveFg,
+		BorderFg:      borderFg,
+		DividerFg:     dividerFg,
+		IndicatorBg:   indicatorBg,
 	}
 }
 
@@ -9182,9 +9197,19 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	sidebarBg := ""
 	terminalBg := ""
+	activeFg := ""
+	inactiveFg := ""
+	borderFg := ""
+	dividerFg := ""
+	indicatorBg := ""
 	if c.theme != nil {
 		sidebarBg = c.theme.SidebarBg
 		terminalBg = c.theme.TerminalBg
+		activeFg = c.theme.ActiveFg
+		inactiveFg = c.theme.InactiveFg
+		borderFg = c.theme.BorderFg
+		dividerFg = c.theme.DividerFg
+		indicatorBg = c.theme.DefaultIndicatorBg
 	}
 
 	if c.config.PaneHeader.CustomBorder {
@@ -9206,6 +9231,11 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		Regions:      regions,
 		SidebarBg:    sidebarBg,
 		TerminalBg:   terminalBg,
+		ActiveFg:     activeFg,
+		InactiveFg:   inactiveFg,
+		BorderFg:     borderFg,
+		DividerFg:    dividerFg,
+		IndicatorBg:  indicatorBg,
 		ActiveClient: activeClient,
 	}
 }
@@ -9675,9 +9705,19 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 
 	sidebarBg := ""
 	terminalBg := ""
+	activeFg := ""
+	inactiveFg := ""
+	borderFg := ""
+	dividerFg := ""
+	indicatorBg := ""
 	if c.theme != nil {
 		sidebarBg = c.theme.SidebarBg
 		terminalBg = c.theme.TerminalBg
+		activeFg = c.theme.ActiveFg
+		inactiveFg = c.theme.InactiveFg
+		borderFg = c.theme.BorderFg
+		dividerFg = c.theme.DividerFg
+		indicatorBg = c.theme.DefaultIndicatorBg
 	}
 
 	if c.config.PaneHeader.CustomBorder {
@@ -9698,6 +9738,11 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 		Regions:      regions,
 		SidebarBg:    sidebarBg,
 		TerminalBg:   terminalBg,
+		ActiveFg:     activeFg,
+		InactiveFg:   inactiveFg,
+		BorderFg:     borderFg,
+		DividerFg:    dividerFg,
+		IndicatorBg:  indicatorBg,
 		ActiveClient: activeClient,
 	}
 }

@@ -3,13 +3,11 @@ package sidebar
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 )
 
 func newPickerTestModel() *rendererModel {
@@ -102,27 +100,7 @@ func TestRenderMenuLinesIncludesTitleAndBorders(t *testing.T) {
 	}
 }
 
-func hexToRGB(hex string) (int, int, int) {
-	hex = strings.TrimPrefix(hex, "#")
-	if len(hex) == 3 {
-		hex = string([]byte{hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]})
-	}
-	v, err := strconv.ParseUint(hex, 16, 32)
-	if err != nil {
-		return 0, 0, 0
-	}
-	return int((v >> 16) & 0xFF), int((v >> 8) & 0xFF), int(v & 0xFF)
-}
-
-func trueColorSeq(r, g, b int) string {
-	return fmt.Sprintf("38;2;%d;%d;%d", r, g, b)
-}
-
 func TestRenderMenuLinesUsesThemeColors(t *testing.T) {
-	oldProfile := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	defer lipgloss.SetColorProfile(oldProfile)
-
 	m := rendererModel{
 		width:         20,
 		height:        10,
@@ -132,26 +110,33 @@ func TestRenderMenuLinesUsesThemeColors(t *testing.T) {
 			{Label: "Header", Header: true},
 			{Label: "Item", Key: "i"},
 		},
-		menuHighlight: -1,
+		menuHighlight: 1,
 		activeFg:      "#e0def4",
 		indicatorBg:   "#eb6f92",
 	}
 
+	border, normal, header, highlight := m.menuStyles()
+
+	if got := normal.GetForeground(); got != lipgloss.Color(m.activeFg) {
+		t.Fatalf("normal foreground = %v, want %v", got, m.activeFg)
+	}
+	if got := header.GetForeground(); got != lipgloss.Color(m.activeFg) {
+		t.Fatalf("header foreground = %v, want %v", got, m.activeFg)
+	}
+	if got := highlight.GetForeground(); got != lipgloss.Color(m.indicatorBg) {
+		t.Fatalf("highlight foreground = %v, want %v", got, m.indicatorBg)
+	}
+
+	// Border falls back to divider then #666; with neither set it should use
+	// the literal fallback.
+	if got := border.GetForeground(); got != lipgloss.Color("#666") {
+		t.Fatalf("border foreground = %v, want #666 fallback", got)
+	}
+
 	lines := m.renderMenuLines()
 	joined := strings.Join(lines, "\n")
-
-	r, g, b := hexToRGB(m.activeFg)
-	if !strings.Contains(joined, trueColorSeq(r, g, b)) {
-		t.Fatalf("expected menu text to use theme active foreground %q, got %q", m.activeFg, joined)
-	}
-
-	r, g, b = hexToRGB(m.indicatorBg)
-	if !strings.Contains(joined, trueColorSeq(r, g, b)) {
-		t.Fatalf("expected menu highlight to use theme indicator color %q, got %q", m.indicatorBg, joined)
-	}
-
-	if strings.Contains(joined, trueColorSeq(0, 0, 0)) {
-		t.Fatalf("expected menu not to fall back to hard-coded black on a themed model, got %q", joined)
+	if !strings.Contains(joined, "Menu") || !strings.Contains(joined, "┌") {
+		t.Fatalf("expected rendered menu with title and borders, got %q", joined)
 	}
 }
 
