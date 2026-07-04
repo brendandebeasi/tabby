@@ -140,6 +140,11 @@ type rendererModel struct {
 	sequenceNum    uint64
 	sidebarBg      string
 	terminalBg     string
+	activeFg       string
+	inactiveFg     string
+	borderFg       string
+	dividerFg      string
+	indicatorBg    string
 
 	// Viewport scroll state
 	scrollY int
@@ -422,6 +427,11 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sequenceNum = msg.payload.SequenceNum
 		m.sidebarBg = msg.payload.SidebarBg
 		m.terminalBg = msg.payload.TerminalBg
+		m.activeFg = msg.payload.ActiveFg
+		m.inactiveFg = msg.payload.InactiveFg
+		m.borderFg = msg.payload.BorderFg
+		m.dividerFg = msg.payload.DividerFg
+		m.indicatorBg = msg.payload.IndicatorBg
 
 		// SIMPLIFIED: Clamp scroll based on simple height calculation
 		maxScroll := m.totalLines - m.height

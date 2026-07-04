@@ -215,6 +215,11 @@ type RenderPayload struct {
 	PinnedRegions  []ClickableRegion `json:"pinned_regions"`  // Clickable regions in pinned content (Y relative to pinned start)
 	SidebarBg      string            `json:"sidebar_bg,omitempty"`
 	TerminalBg     string            `json:"terminal_bg,omitempty"`
+	ActiveFg       string            `json:"active_fg,omitempty"`
+	InactiveFg     string            `json:"inactive_fg,omitempty"`
+	BorderFg       string            `json:"border_fg,omitempty"`
+	DividerFg      string            `json:"divider_fg,omitempty"`
+	IndicatorBg    string            `json:"indicator_bg,omitempty"`
 	ActiveClient   ActiveClient      `json:"active_client,omitempty"`
 }
 
