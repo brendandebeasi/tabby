@@ -140,6 +140,37 @@ func TestRenderMenuLinesUsesThemeColors(t *testing.T) {
 	}
 }
 
+func TestRenderMenuLinesFallsBackWhenThemeEmpty(t *testing.T) {
+	m := rendererModel{
+		width:         20,
+		height:        10,
+		menuY:         0,
+		menuTitle:     "Menu",
+		menuItems:     []daemon.MenuItemPayload{{Label: "Item", Key: "i"}},
+		menuHighlight: 0,
+	}
+
+	border, normal, header, highlight := m.menuStyles()
+
+	if got := normal.GetForeground(); got != lipgloss.Color("#000000") {
+		t.Fatalf("normal fallback foreground = %v, want #000000", got)
+	}
+	if got := header.GetForeground(); got != lipgloss.Color("#000000") {
+		t.Fatalf("header fallback foreground = %v, want #000000", got)
+	}
+	if got := highlight.GetForeground(); got != lipgloss.Color("#2563eb") {
+		t.Fatalf("highlight fallback foreground = %v, want #2563eb", got)
+	}
+	if got := border.GetForeground(); got != lipgloss.Color("#666") {
+		t.Fatalf("border fallback foreground = %v, want #666", got)
+	}
+
+	lines := m.renderMenuLines()
+	if len(lines) == 0 {
+		t.Fatal("expected rendered menu lines when theme fields are empty")
+	}
+}
+
 func TestRenderPickerModalShowsEmptyStateAndMeta(t *testing.T) {
 	m := newPickerTestModel()
 	m.pickerQuery = "zzzz-no-match"
