@@ -3460,6 +3460,20 @@ func (c *Coordinator) seedWindowAppearance(win *tmux.Window, key string) {
 		win.Icon = icon
 	}
 
+	// Seed the window's GROUP from a configured preset the first (and only) time
+	// we see it: a brand-new tab opened inside a group's working_dir (e.g.
+	// ~/git/gunpowder) joins that group automatically, while a tab opened
+	// anywhere else stays in Default. Only when it doesn't already belong to a
+	// group — a cache-restored or user-set @tabby_group always wins — and, like
+	// the color/marker seed above, exactly once: gated by @tabby_color_seeded so
+	// moving the tab out of the group later makes it stay out.
+	if strings.TrimSpace(win.Group) == "" {
+		if g := c.presetGroupForWindow(*win); g != "" {
+			exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_group", g).Run()
+			win.Group = g
+		}
+	}
+
 	// Mark the one-time decision as made REGARDLESS of whether anything was
 	// seeded. If there was no remembered appearance (or the window already had
 	// its own), we must not reconsider on a later refresh — that would turn this
@@ -3484,6 +3498,72 @@ func seedAppearancePlan(win tmux.Window, rec CWDColorMapping, recOK bool) (color
 		icon = strings.TrimSpace(rec.Icon)
 	}
 	return color, icon
+}
+
+// presetGroupForWindow returns the name of the configured group whose working_dir
+// contains this window's directory, or "" when none matches. This is what lets a
+// brand-new tab opened inside a project directory (e.g. ~/git/gunpowder) land in
+// that project's group automatically; a tab opened anywhere without a matching
+// preset stays in Default. Remote windows are skipped (working_dir is a local
+// path). $HOME never matches — it has no project identity. When several groups'
+// working_dirs would match (nested), the most specific (longest) one wins.
+func (c *Coordinator) presetGroupForWindow(win tmux.Window) string {
+	if win.RemoteHost != "" || hasRemoteContentPane(win) {
+		return ""
+	}
+	cwd := firstPaneCWD(win)
+	if cwd == "" || isHomeDir(cwd) {
+		return ""
+	}
+
+	best := ""
+	bestLen := -1
+	for _, g := range c.config.Groups {
+		if g.Name == "" || g.Name == "Default" {
+			continue
+		}
+		dir := expandWorkingDir(g.WorkingDir)
+		if dir == "" {
+			continue
+		}
+		if cwd == dir || strings.HasPrefix(cwd, dir+string(filepath.Separator)) {
+			if len(dir) > bestLen {
+				best = g.Name
+				bestLen = len(dir)
+			}
+		}
+	}
+	return best
+}
+
+// expandWorkingDir normalizes a config working_dir for prefix matching: a leading
+// "~/" (or a bare "~") expands to the user's home directory, and the result is
+// cleaned. Returns "" for empty input.
+func expandWorkingDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	if dir == "~" {
+		return daemonHomeDir
+	}
+	if strings.HasPrefix(dir, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, dir[2:])
+		}
+	}
+	return normalizeCWD(dir)
+}
+
+// effectiveWindowMarker returns the marker to display for a tab: the window's own
+// @tabby_icon when it has one, otherwise its group's configured marker. A tab
+// without a marker of its own inherits the group's, so the group's identity
+// carries onto every tab in it. groupIcon is the tab's group Theme.Icon.
+func effectiveWindowMarker(winIcon, groupIcon string) string {
+	if m := strings.TrimSpace(winIcon); m != "" {
+		return m
+	}
+	return strings.TrimSpace(groupIcon)
 }
 
 // loadConfigCached returns the parsed config, using a mtime-keyed cache so
@@ -9999,7 +10079,11 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 	// path already holds the state RLock; taking it again would deadlock).
 	for i := range c.windows {
 		if c.windows[i].Active {
-			if mk := strings.TrimSpace(c.windows[i].Icon); mk != "" {
+			groupIcon := ""
+			if gt := c.getActiveWindowGroupTheme(); gt != nil {
+				groupIcon = gt.Icon
+			}
+			if mk := effectiveWindowMarker(c.windows[i].Icon, groupIcon); mk != "" {
 				if headerText == "" {
 					headerText = mk + " " + mk
 				} else {
@@ -10595,8 +10679,8 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					remoteContinuation = ""
 				}
 			}
-			if win.Icon != "" {
-				displayName = win.Icon + " " + displayName
+			if mk := effectiveWindowMarker(win.Icon, group.Theme.Icon); mk != "" {
+				displayName = mk + " " + displayName
 			}
 			visualNum := c.windowVisualPos[win.ID]
 			baseContent := fmt.Sprintf("%d. %s", visualNum, displayName)
@@ -11198,8 +11282,8 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				remoteContinuation = ""
 			}
 		}
-		if win.Icon != "" {
-			displayName = win.Icon + " " + displayName
+		if mk := effectiveWindowMarker(win.Icon, theme.Icon); mk != "" {
+			displayName = mk + " " + displayName
 		}
 		visualNum := c.windowVisualPos[win.ID]
 		baseContent := fmt.Sprintf("%d. %s%s", visualNum, groupPrefix, displayName)
