@@ -850,11 +850,6 @@ type Coordinator struct {
 	configCacheMtime time.Time
 	configCachePath  string
 	configCacheCfg   *config.Config
-	// cwdMappingCache stores the last applied (cwd | color | icon) signature
-	// per window for applyCWDColorIconMappings, so the per-window tmux
-	// set-option calls are skipped when the cwd hasn't moved.
-	cwdMappingMu    sync.Mutex
-	cwdMappingCache map[string]string
 	// Set true by an action handler when its work doesn't change anything the
 	// renderers display (e.g. an in-dashboard pane cycle) — handleRendererInput
 	// then skips SendRenderToClient + BroadcastRender to avoid the redraw flicker.
@@ -1086,7 +1081,7 @@ type petState struct {
 	HasTarget         bool
 	ActionPending     string
 	AnimFrame         int
-	CameraX           int       // Scrolling background tracker
+	CameraX           int // Scrolling background tracker
 	TotalPets         int
 	TotalFeedings     int
 	TotalPoopsCleaned int
@@ -1105,12 +1100,12 @@ type petState struct {
 	// Debug state
 	DebugThoughtIdx int // Index into debugThoughtCategories for debug bar
 	// Dragon friend state
-	DragonPos           pos2D  `json:"dragon_pos"`
-	DragonState         string `json:"dragon_state"`
-	DragonTargetPos     pos2D  `json:"dragon_target_pos"`
-	DragonHasTarget     bool   `json:"dragon_has_target"`
-	DragonDirection     int    `json:"dragon_direction"`
-	DragonActionPending string `json:"dragon_action_pending"`
+	DragonPos           pos2D     `json:"dragon_pos"`
+	DragonState         string    `json:"dragon_state"`
+	DragonTargetPos     pos2D     `json:"dragon_target_pos"`
+	DragonHasTarget     bool      `json:"dragon_has_target"`
+	DragonDirection     int       `json:"dragon_direction"`
+	DragonActionPending string    `json:"dragon_action_pending"`
 	DragonAppearedAt    time.Time `json:"dragon_appeared_at"`
 	DragonDisappearsAt  time.Time `json:"dragon_disappears_at"`
 	// Q&A personality-building loop. Mirrors the wire-format
@@ -2681,12 +2676,19 @@ func (c *Coordinator) loadCWDColors() {
 	// itself and is skipped.
 	migrated := false
 	if cwdColorsHasLegacyNameFields(data) {
-		for k, m := range loaded {
-			if cwdMappingEmpty(m) {
-				delete(loaded, k)
-			}
-		}
 		migrated = true
+	}
+
+	// Color/Icon ARE remembered per directory again — as a "last used" appearance
+	// that seeds a future NEW window in the same dir/host (never a per-refresh
+	// repaint; see captureCWDAppearance / seedWindowAppearance). So they are
+	// loaded verbatim and must survive daemon restarts, exactly like group/pinned.
+	// Drop only entries that carry nothing at all (defensive; empties are already
+	// pruned on write).
+	for k, m := range loaded {
+		if cwdMappingEmpty(m) {
+			delete(loaded, k)
+		}
 	}
 
 	c.cwdColorsMu.Lock()
@@ -3022,10 +3024,10 @@ func (c *Coordinator) windowDirCode(win tmux.Window) string {
 // independent, non-persisted signals (see CWDColorMapping for why nothing is
 // persisted by directory):
 //
-//	1. Manual rename (win.NameLocked, on @tabby_name_locked) — shown verbatim.
-//	2. Deterministic project code (windowDirCode, from the resolved DIRECTORY —
-//	   project_names / abbreviations / auto), the stable prefix.
-//	3. Live AI work summary (@tabby_ai_title) — the per-window task topic.
+//  1. Manual rename (win.NameLocked, on @tabby_name_locked) — shown verbatim.
+//  2. Deterministic project code (windowDirCode, from the resolved DIRECTORY —
+//     project_names / abbreviations / auto), the stable prefix.
+//  3. Live AI work summary (@tabby_ai_title) — the per-window task topic.
 //
 // Composition: a locked name wins. Otherwise the label is "CODE summary" (e.g.
 // "tby reload config"), or just "CODE" before the first summary, or just the
@@ -3178,44 +3180,6 @@ func (c *Coordinator) getCWDColorMapping(cwd string) (CWDColorMapping, bool) {
 	return mapping, ok
 }
 
-func (c *Coordinator) setCWDColor(cwd, color string) {
-	normalized := normalizeCWD(cwd)
-	if normalized == "" {
-		return
-	}
-
-	c.cwdColorsMu.Lock()
-	mapping := c.cwdColors[normalized]
-	mapping.Color = strings.TrimSpace(color)
-	if cwdMappingEmpty(mapping) {
-		delete(c.cwdColors, normalized)
-	} else {
-		c.cwdColors[normalized] = mapping
-	}
-	c.cwdColorsMu.Unlock()
-
-	c.saveCWDColors()
-}
-
-func (c *Coordinator) setCWDIcon(cwd, icon string) {
-	normalized := normalizeCWD(cwd)
-	if normalized == "" {
-		return
-	}
-
-	c.cwdColorsMu.Lock()
-	mapping := c.cwdColors[normalized]
-	mapping.Icon = strings.TrimSpace(icon)
-	if cwdMappingEmpty(mapping) {
-		delete(c.cwdColors, normalized)
-	} else {
-		c.cwdColors[normalized] = mapping
-	}
-	c.cwdColorsMu.Unlock()
-
-	c.saveCWDColors()
-}
-
 // cwdMappingEmpty reports whether a per-dir record carries no remembered state
 // and can be dropped from the map entirely. Used by every setter so that, e.g.,
 // resetting a directory's color does not also discard a saved tab name.
@@ -3253,6 +3217,58 @@ func (c *Coordinator) captureCWDIdentity(key, group string, pinned bool) {
 	c.cwdColorsMu.Unlock()
 
 	c.saveCWDColors()
+}
+
+// captureCWDAppearance records a window's chosen color + marker under the given
+// project key so a FUTURE window opened in the same directory (or ssh host+dir)
+// can seed its appearance from it. key is a windowNameKey result. Like
+// captureCWDIdentity it is diff-guarded — steady state does no disk I/O — and it
+// touches only the Color/Icon fields, leaving Group/Pinned intact. Passing empty
+// strings clears the remembered appearance (e.g. after the user resets a color),
+// which matches the "last used wins" semantic; if that empties the whole record
+// the entry is dropped.
+//
+// NOTE: this is a "last used" cache, NOT the old blanket per-dir restore that
+// bled a color onto every sibling window every refresh. The remembered value is
+// only ever SEEDED once onto a brand-new window (see the seed pass in
+// applyCWDIdentityMappings); it never repaints a window that already exists.
+func (c *Coordinator) captureCWDAppearance(key, color, icon string) {
+	normalized := normalizeCWD(key)
+	if normalized == "" {
+		return
+	}
+	color = strings.TrimSpace(color)
+	icon = strings.TrimSpace(icon)
+
+	c.cwdColorsMu.Lock()
+	mapping := c.cwdColors[normalized]
+	if mapping.Color == color && mapping.Icon == icon {
+		c.cwdColorsMu.Unlock()
+		return // no change — skip the disk write
+	}
+	mapping.Color = color
+	mapping.Icon = icon
+	if cwdMappingEmpty(mapping) {
+		delete(c.cwdColors, normalized)
+	} else {
+		c.cwdColors[normalized] = mapping
+	}
+	c.cwdColorsMu.Unlock()
+
+	c.saveCWDColors()
+}
+
+// getWindowByID returns the tracked window with the given stable tmux window ID.
+// Used to resolve a window's project key when a color/marker is set on it.
+func (c *Coordinator) getWindowByID(windowID string) (tmux.Window, bool) {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	for _, win := range c.windows {
+		if win.ID == windowID {
+			return win, true
+		}
+	}
+	return tmux.Window{}, false
 }
 
 // clearCWDIdentity forgets a directory's saved group/pinned state, leaving any
@@ -3324,10 +3340,18 @@ func (c *Coordinator) setWindowColor(windowID, color string) {
 	}
 
 	// tmux accepts the stable window ID ("@123") as a -t target directly.
+	// The color lives on this window's own @tabby_color option (for the
+	// window's lifetime).
 	exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_color", trimmedColor).Run()
 
-	if cwd := c.resolveWindowCWDByID(windowID); cwd != "" {
-		c.setCWDColor(cwd, trimmedColor)
+	// Remember the color as this project's "last used" appearance so a future
+	// NEW window in the same directory (or ssh host+dir) can seed from it. This
+	// is a one-time seed, never a per-refresh repaint of existing siblings —
+	// see captureCWDAppearance / the seed pass in applyCWDIdentityMappings.
+	if win, ok := c.getWindowByID(windowID); ok {
+		if key, keyOK := c.windowNameKey(win); keyOK {
+			c.captureCWDAppearance(key, trimmedColor, win.Icon)
+		}
 	}
 }
 
@@ -3338,69 +3362,25 @@ func (c *Coordinator) setWindowIcon(windowID, icon string) {
 	} else {
 		exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_icon", trimmedIcon).Run()
 	}
-
-	if cwd := c.resolveWindowCWDByID(windowID); cwd != "" {
-		c.setCWDIcon(cwd, trimmedIcon)
-	}
-}
-
-func (c *Coordinator) applyCWDColorIconMappings(windows []tmux.Window) {
-	c.cwdMappingMu.Lock()
-	if c.cwdMappingCache == nil {
-		c.cwdMappingCache = make(map[string]string)
-	}
-	c.cwdMappingMu.Unlock()
-	for i := range windows {
-		cwd := firstPaneCWD(windows[i])
-		if cwd == "" {
-			continue
+	// The marker lives on this window's own @tabby_icon option. Like color
+	// (see setWindowColor), the value is remembered as the project's "last used"
+	// appearance so a future NEW window in the same dir/host can seed from it —
+	// a one-time seed, never a per-refresh repaint of existing siblings.
+	if win, ok := c.getWindowByID(windowID); ok {
+		if key, keyOK := c.windowNameKey(win); keyOK {
+			c.captureCWDAppearance(key, win.CustomColor, trimmedIcon)
 		}
-
-		mapping, ok := c.getCWDColorMapping(cwd)
-		if !ok {
-			continue
-		}
-
-		// Cache by (windowID, cwd, mapping-fingerprint). When the windowID's
-		// cwd + mapping match the last applied state, skip the per-window
-		// tmux calls below — they're idempotent but each costs ~5–10ms.
-		sig := cwd + "|" + mapping.Color + "|" + mapping.Icon
-		c.cwdMappingMu.Lock()
-		prev := c.cwdMappingCache[windows[i].ID]
-		c.cwdMappingMu.Unlock()
-		if prev == sig {
-			// Still mirror the cached mapping onto the in-memory window so
-			// downstream renderers see the resolved color/icon even on cache
-			// hits (mirrors what the tmux set-option did originally).
-			if windows[i].CustomColor == "" && strings.TrimSpace(mapping.Color) != "" {
-				windows[i].CustomColor = mapping.Color
-			}
-			if strings.TrimSpace(windows[i].Icon) == "" && strings.TrimSpace(mapping.Icon) != "" {
-				windows[i].Icon = mapping.Icon
-			}
-			continue
-		}
-
-		if windows[i].CustomColor == "" && strings.TrimSpace(mapping.Color) != "" {
-			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_color", mapping.Color).Run()
-			windows[i].CustomColor = mapping.Color
-		}
-
-		if strings.TrimSpace(windows[i].Icon) == "" && strings.TrimSpace(mapping.Icon) != "" {
-			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_icon", mapping.Icon).Run()
-			windows[i].Icon = mapping.Icon
-		}
-
-		c.cwdMappingMu.Lock()
-		c.cwdMappingCache[windows[i].ID] = sig
-		c.cwdMappingMu.Unlock()
 	}
 }
 
 // applyCWDIdentityMappings persists and restores per-PROJECT group + pinned
-// state. Runs each refresh, right after the color/icon pass, on the same windows
-// slice (which becomes c.windows) BEFORE syncWindowNames and the grouping pass —
-// so in-memory mirroring below is honored in the same cycle.
+// state. Runs each refresh on the same windows slice (which becomes c.windows)
+// BEFORE syncWindowNames and the grouping pass — so in-memory mirroring below is
+// honored in the same cycle.
+//
+// NOTE: unlike group/pinned, a tab's custom color and marker are deliberately
+// NOT persisted or restored by directory (see setWindowColor/setWindowIcon).
+// They live only on the window's own @tabby_color / @tabby_icon options.
 //
 // The identity is keyed on windowNameKey — the project root (git toplevel) for a
 // local window, or "ssh://host/topmost" for a remote one — so group/pinned set
@@ -3436,24 +3416,74 @@ func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
 			// A deliberately-named window: keep this project's group/pinned record
 			// in sync. captureCWDIdentity no-ops (no disk write) when unchanged.
 			c.captureCWDIdentity(key, windows[i].Group, windows[i].Pinned)
-			continue
+		} else if rec, recOK := c.getCWDColorMapping(key); recOK {
+			if g := strings.TrimSpace(rec.Group); g != "" && windows[i].Group != g {
+				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_group", g).Run()
+				windows[i].Group = g
+			}
+
+			if rec.Pinned && !windows[i].Pinned {
+				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_pinned", "1").Run()
+				windows[i].Pinned = true
+			}
 		}
 
-		rec, recOK := c.getCWDColorMapping(key)
-		if !recOK {
-			continue
-		}
-
-		if g := strings.TrimSpace(rec.Group); g != "" && windows[i].Group != g {
-			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_group", g).Run()
-			windows[i].Group = g
-		}
-
-		if rec.Pinned && !windows[i].Pinned {
-			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_pinned", "1").Run()
-			windows[i].Pinned = true
-		}
+		// Seed this window's color/marker from the project's remembered "last
+		// used" appearance — but only ONCE, when the window is brand-new (see
+		// seedWindowAppearance). This is what gives a freshly-opened tab in a
+		// known directory/host its remembered look without repainting existing
+		// siblings every refresh (the bug that retired the old per-dir restore).
+		c.seedWindowAppearance(&windows[i], key)
 	}
+}
+
+// seedWindowAppearance applies the project's remembered color/marker to a window
+// exactly once in the window's lifetime, then records that the decision was made
+// via the durable @tabby_color_seeded option. "Once" is the whole point: a
+// second concurrent window in the same repo gets the same seed but can be
+// recolored freely, and a color the user later CLEARS never comes back on the
+// next refresh or after a daemon reload. It never overwrites an appearance the
+// window already has — only empty fields are seeded.
+func (c *Coordinator) seedWindowAppearance(win *tmux.Window, key string) {
+	if win.AppearanceSeeded {
+		return
+	}
+
+	rec, recOK := c.getCWDColorMapping(key)
+	color, icon := seedAppearancePlan(*win, rec, recOK)
+	if color != "" {
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_color", color).Run()
+		win.CustomColor = color
+	}
+	if icon != "" {
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_icon", icon).Run()
+		win.Icon = icon
+	}
+
+	// Mark the one-time decision as made REGARDLESS of whether anything was
+	// seeded. If there was no remembered appearance (or the window already had
+	// its own), we must not reconsider on a later refresh — that would turn this
+	// one-shot seed back into the per-refresh restore we deliberately removed.
+	exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_color_seeded", "1").Run()
+	win.AppearanceSeeded = true
+}
+
+// seedAppearancePlan decides which color/marker a not-yet-seeded window should
+// inherit from its project's remembered appearance record. An empty return means
+// "leave that field as-is": only a field the window lacks of its own is seeded,
+// and an already-seeded window inherits nothing. Pure (no tmux) so the seed
+// decision is unit-testable independently of the side effects.
+func seedAppearancePlan(win tmux.Window, rec CWDColorMapping, recOK bool) (color, icon string) {
+	if win.AppearanceSeeded || !recOK {
+		return "", ""
+	}
+	if win.CustomColor == "" {
+		color = strings.TrimSpace(rec.Color)
+	}
+	if win.Icon == "" {
+		icon = strings.TrimSpace(rec.Icon)
+	}
+	return color, icon
 }
 
 // loadConfigCached returns the parsed config, using a mtime-keyed cache so
@@ -3524,7 +3554,6 @@ func (c *Coordinator) RefreshWindows() {
 		windows = filtered
 	}
 
-	c.applyCWDColorIconMappings(windows)
 	c.applyCWDIdentityMappings(windows)
 
 	// Pre-load process tree BEFORE acquiring stateMu. loadProcessTree runs
@@ -5109,7 +5138,7 @@ func (c *Coordinator) UpdatePetState() bool {
 					c.pet.DragonTargetPos = pos2D{X: safeRandRange(0, maxX), Y: targetY}
 					c.pet.DragonHasTarget = true
 					c.pet.DragonActionPending = fmt.Sprintf("fly_%d", count-1)
-					
+
 					if rand.Intn(100) < 60 {
 						dir := 1
 						if c.pet.DragonPos.X > c.pet.DragonTargetPos.X {
@@ -5352,7 +5381,7 @@ func (c *Coordinator) UpdatePetState() bool {
 				break
 			}
 		}
-		
+
 		isDragonAhead := false
 		if c.pet.DragonState != "" && c.pet.DragonPos.Y == c.pet.Pos.Y {
 			dist := nextX - c.pet.DragonPos.X
@@ -5380,7 +5409,7 @@ func (c *Coordinator) UpdatePetState() bool {
 		if nextX < 0 {
 			nextX = 0
 		}
-		
+
 		c.pet.Pos.X = nextX
 
 		// If chasing yarn, push it or catch it when reached
@@ -6377,36 +6406,36 @@ func (c *Coordinator) renderAdventurePlayArea(safePlayWidth int, petSprite strin
 			groundSprites[catX] = petSprite
 		}
 	}
-	
+
 	// Place dragon! The dragon follows on the adventure
 	if c.pet.DragonState != "" {
 		dragonX := c.pet.DragonPos.X
 		if dragonX >= 0 && dragonX < safePlayWidth {
 			dragonSprite := "🐉"
-		if c.pet.DragonState == "sleeping" {
-			dragonSprite = "💤"
-		}
-		
-		// Anti-occlusion for adventure mode
-		if c.pet.Pos.Y == 0 && c.pet.DragonPos.Y == 0 {
-			if dragonX == catX+1 || dragonX == catX-1 || dragonX == catX {
-				if dragonX >= catX {
-					dragonX++
-				} else {
-					dragonX--
+			if c.pet.DragonState == "sleeping" {
+				dragonSprite = "💤"
+			}
+
+			// Anti-occlusion for adventure mode
+			if c.pet.Pos.Y == 0 && c.pet.DragonPos.Y == 0 {
+				if dragonX == catX+1 || dragonX == catX-1 || dragonX == catX {
+					if dragonX >= catX {
+						dragonX++
+					} else {
+						dragonX--
+					}
 				}
 			}
-		}
-		
-		if dragonX >= 0 && dragonX < safePlayWidth {
-			if c.pet.DragonPos.Y >= 2 {
-				highAirSprites[dragonX] = dragonSprite
-			} else if c.pet.DragonPos.Y == 1 {
-				lowAirSprites[dragonX] = dragonSprite
-			} else {
-				groundSprites[dragonX] = dragonSprite
+
+			if dragonX >= 0 && dragonX < safePlayWidth {
+				if c.pet.DragonPos.Y >= 2 {
+					highAirSprites[dragonX] = dragonSprite
+				} else if c.pet.DragonPos.Y == 1 {
+					lowAirSprites[dragonX] = dragonSprite
+				} else {
+					groundSprites[dragonX] = dragonSprite
+				}
 			}
-		}
 		}
 	}
 
@@ -9963,6 +9992,24 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 	activeColor := headerBoolDefault(hdr.ActiveColor)
 	bold := headerBoolDefault(hdr.Bold)
 
+	// Mirror the active tab's marker into the header: if the current window has a
+	// marker (@tabby_icon), flank the header text with it on BOTH sides so "TABBY"
+	// reads e.g. "🚀 TABBY 🚀". Re-rendered per active window, so it switches on
+	// window switch. Read lock-free like the active-color block below (the render
+	// path already holds the state RLock; taking it again would deadlock).
+	for i := range c.windows {
+		if c.windows[i].Active {
+			if mk := strings.TrimSpace(c.windows[i].Icon); mk != "" {
+				if headerText == "" {
+					headerText = mk + " " + mk
+				} else {
+					headerText = mk + " " + headerText + " " + mk
+				}
+			}
+			break
+		}
+	}
+
 	// Resolve colors from this window's tab colors
 	fgColor := hdr.Fg
 	bgColor := hdr.Bg
@@ -13292,15 +13339,15 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	coordinatorDebugLog.Printf("Pet render: petX=%d, petY=%d, yarnX=%d, yarnY=%d, foodX=%d, foodY=%d, safePlayWidth=%d, petSprite=%q",
 		petX, petY, yarnX, yarnY, foodX, foodY, safePlayWidth, petSprite)
 	highAirSprites := make(map[int]string)
-	
+
 	// Add scrolling clouds based on AnimFrame (passive wind)
 	for i := 0; i < safePlayWidth; i++ {
 		// Parallax effect: background moves slowly over time
 		bgWorldX := i + (c.pet.AnimFrame / 15)
-		
+
 		cloudMod1 := ((bgWorldX % 15) + 15) % 15
 		cloudMod2 := ((bgWorldX % 27) + 27) % 27
-		
+
 		if cloudMod1 == 0 {
 			highAirSprites[i] = "☁️"
 		} else if cloudMod2 == 0 {
@@ -13378,14 +13425,14 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	// Map of positions to sprites (position -> sprite string)
 	// Each position represents a display column, not a rune slot
 	groundSprites := make(map[int]string)
-	
+
 	// Add static ground texture based on screen position
 	for i := 0; i < safePlayWidth; i++ {
 		worldX := i
-		
+
 		groundMod1 := ((worldX % 9) + 9) % 9
 		groundMod2 := ((worldX % 14) + 14) % 14
-		
+
 		if groundMod1 == 0 {
 			groundSprites[i] = "."
 		} else if groundMod2 == 0 {
@@ -16251,7 +16298,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		c.pet.DragonTargetPos = pos2D{X: safeRandRange(0, safePlayWidth-5), Y: 2}
 		c.pet.DragonHasTarget = true
 		c.pet.DragonActionPending = "fly_4"
-		
+
 		// Breathe fire!
 		dir := c.pet.DragonDirection
 		if dir == 0 {
@@ -16270,7 +16317,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 			Velocity:  pos2D{X: dir, Y: 0},
 			ExpiresAt: time.Now().Add(2 * time.Second),
 		})
-		
+
 		// Spawn some clouds
 		for i := 0; i < 2; i++ {
 			c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
@@ -16280,7 +16327,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 				ExpiresAt: time.Now().Add(4 * time.Second),
 			})
 		}
-		
+
 		petSnap := c.pet
 		c.stateMu.Unlock()
 		savePetStateData(petSnap)
@@ -16862,7 +16909,10 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		// Show remove option only if a marker is currently set
 		if win.Icon != "" {
 			resetIconCmd := fmt.Sprintf("tabby-set-window-icon:%s:", wid)
-			args = append(args, "Remove Marker", "0", resetIconCmd)
+			// Key must differ from "Remove from Group" (also a candidate "0"):
+			// tmux display-menu binds a duplicate mnemonic to the FIRST entry, so
+			// sharing "0" made this item fire the group removal instead.
+			args = append(args, "Remove Marker", "x", resetIconCmd)
 		}
 	}
 

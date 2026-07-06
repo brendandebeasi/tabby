@@ -180,49 +180,16 @@ func TestGetCWDColorMapping_EmptyCWDReturnsFalse(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestSetAndGetCWDColor(t *testing.T) {
-	t.Setenv("TABBY_STATE_DIR", t.TempDir())
-	c := newTestCoordinator(t)
-
-	c.setCWDColor("/home/user/project", "#3498db")
-	m, ok := c.getCWDColorMapping("/home/user/project")
-	assert.True(t, ok)
-	assert.Equal(t, "#3498db", m.Color)
-}
-
-func TestSetCWDColor_DeletesEntryWhenBothEmpty(t *testing.T) {
-	t.Setenv("TABBY_STATE_DIR", t.TempDir())
-	c := newTestCoordinator(t)
-
-	c.setCWDColor("/tmp/project", "#ff0000")
-	_, ok := c.getCWDColorMapping("/tmp/project")
-	assert.True(t, ok)
-
-	c.setCWDColor("/tmp/project", "")
-	_, ok = c.getCWDColorMapping("/tmp/project")
-	assert.False(t, ok, "entry should be removed when color and icon are both empty")
-}
-
-func TestSetAndGetCWDIcon(t *testing.T) {
-	t.Setenv("TABBY_STATE_DIR", t.TempDir())
-	c := newTestCoordinator(t)
-
-	c.setCWDIcon("/home/user/project", "🚀")
-	m, ok := c.getCWDColorMapping("/home/user/project")
-	assert.True(t, ok)
-	assert.Equal(t, "🚀", m.Icon)
-}
-
-func TestSetCWDIcon_PreservesExistingColor(t *testing.T) {
-	t.Setenv("TABBY_STATE_DIR", t.TempDir())
-	c := newTestCoordinator(t)
-
-	c.setCWDColor("/tmp/x", "#aabbcc")
-	c.setCWDIcon("/tmp/x", "🌟")
-	m, ok := c.getCWDColorMapping("/tmp/x")
-	assert.True(t, ok)
-	assert.Equal(t, "#aabbcc", m.Color)
-	assert.Equal(t, "🌟", m.Icon)
+// seedCWDMapping writes a raw per-directory record directly, bypassing the
+// setWindowColor/setWindowIcon capture path. Color/marker are remembered per
+// directory as a "last used" appearance that seeds a future NEW window in the
+// same dir (see captureCWDAppearance / seedWindowAppearance), never a per-refresh
+// repaint. These helpers let the tests below drive that record directly.
+func seedCWDMapping(t *testing.T, c *Coordinator, cwd string, m CWDColorMapping) {
+	t.Helper()
+	c.cwdColorsMu.Lock()
+	c.cwdColors[normalizeCWD(cwd)] = m
+	c.cwdColorsMu.Unlock()
 }
 
 func TestCaptureCWDIdentity_StoresGroupPinned(t *testing.T) {
@@ -250,14 +217,13 @@ func TestCaptureCWDIdentity_PreservesColorIcon(t *testing.T) {
 	t.Setenv("TABBY_STATE_DIR", t.TempDir())
 	c := newTestCoordinator(t)
 
-	c.setCWDColor("/tmp/x", "#aabbcc")
-	c.setCWDIcon("/tmp/x", "🌟")
+	seedCWDMapping(t, c, "/tmp/x", CWDColorMapping{Color: "#aabbcc", Icon: "🌟"})
 	c.captureCWDIdentity("/tmp/x", "Infra", true)
 
 	m, ok := c.getCWDColorMapping("/tmp/x")
 	assert.True(t, ok)
-	assert.Equal(t, "#aabbcc", m.Color, "capture must not disturb the saved color")
-	assert.Equal(t, "🌟", m.Icon, "capture must not disturb the saved icon")
+	assert.Equal(t, "#aabbcc", m.Color, "capture must not disturb a legacy color")
+	assert.Equal(t, "🌟", m.Icon, "capture must not disturb a legacy icon")
 	assert.Equal(t, "Infra", m.Group)
 	assert.True(t, m.Pinned)
 }
@@ -266,12 +232,12 @@ func TestClearCWDIdentity_RemovesGroupPinnedKeepsColorIcon(t *testing.T) {
 	t.Setenv("TABBY_STATE_DIR", t.TempDir())
 	c := newTestCoordinator(t)
 
-	c.setCWDColor("/tmp/x", "#aabbcc")
+	seedCWDMapping(t, c, "/tmp/x", CWDColorMapping{Color: "#aabbcc"})
 	c.captureCWDIdentity("/tmp/x", "Infra", true)
 
 	c.clearCWDIdentity("/tmp/x")
 	m, ok := c.getCWDColorMapping("/tmp/x")
-	assert.True(t, ok, "color mapping should survive a group/pinned clear")
+	assert.True(t, ok, "a legacy color mapping should survive a group/pinned clear")
 	assert.Equal(t, "#aabbcc", m.Color)
 	assert.Equal(t, "", m.Group)
 	assert.False(t, m.Pinned)
@@ -290,19 +256,101 @@ func TestClearCWDIdentity_DeletesEntryWhenNothingRemains(t *testing.T) {
 	assert.False(t, ok, "entry should be removed when no color/icon/group/pinned remains")
 }
 
-// TestCWDColorsMigrate_DropsLegacyNames verifies the one-time migration strips
-// the retired per-directory name fields from cwd-colors.json on load while
-// keeping color/icon/group/pinned, and deletes entries left empty.
-func TestCWDColorsMigrate_DropsLegacyNames(t *testing.T) {
+func TestCaptureCWDAppearance_StoresColorIcon(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	c.captureCWDAppearance("/home/user/project", "  #112233  ", "  🚀  ")
+	m, ok := c.getCWDColorMapping("/home/user/project")
+	assert.True(t, ok)
+	assert.Equal(t, "#112233", m.Color, "color should be trimmed and stored")
+	assert.Equal(t, "🚀", m.Icon, "icon should be trimmed and stored")
+}
+
+func TestCaptureCWDAppearance_PreservesGroupPinned(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	seedCWDMapping(t, c, "/tmp/x", CWDColorMapping{Group: "Infra", Pinned: true})
+	c.captureCWDAppearance("/tmp/x", "#abcdef", "★")
+
+	m, ok := c.getCWDColorMapping("/tmp/x")
+	assert.True(t, ok)
+	assert.Equal(t, "#abcdef", m.Color)
+	assert.Equal(t, "★", m.Icon)
+	assert.Equal(t, "Infra", m.Group, "appearance capture must not disturb group")
+	assert.True(t, m.Pinned, "appearance capture must not disturb pinned")
+}
+
+func TestCaptureCWDAppearance_EmptyClearsAndDropsBareEntry(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+
+	// A record carrying only appearance is removed entirely when both are cleared
+	// (mirrors "last used wins" after a reset).
+	seedCWDMapping(t, c, "/tmp/x", CWDColorMapping{Color: "#111111", Icon: "🌟"})
+	c.captureCWDAppearance("/tmp/x", "", "")
+	_, ok := c.getCWDColorMapping("/tmp/x")
+	assert.False(t, ok, "clearing the only fields should drop the entry")
+
+	// But a record that still has group/pinned survives an appearance clear.
+	seedCWDMapping(t, c, "/tmp/y", CWDColorMapping{Color: "#111111", Group: "Work"})
+	c.captureCWDAppearance("/tmp/y", "", "")
+	m, ok := c.getCWDColorMapping("/tmp/y")
+	assert.True(t, ok, "group keeps the entry alive after an appearance clear")
+	assert.Equal(t, "", m.Color)
+	assert.Equal(t, "Work", m.Group)
+}
+
+func TestSeedAppearancePlan_SeedsBlankFieldsFromRecord(t *testing.T) {
+	rec := CWDColorMapping{Color: "#123456", Icon: "🚀"}
+	color, icon := seedAppearancePlan(tmux.Window{}, rec, true)
+	assert.Equal(t, "#123456", color, "a blank window seeds the remembered color")
+	assert.Equal(t, "🚀", icon, "a blank window seeds the remembered marker")
+}
+
+func TestSeedAppearancePlan_DoesNotOverwriteOwnAppearance(t *testing.T) {
+	rec := CWDColorMapping{Color: "#123456", Icon: "🚀"}
+	win := tmux.Window{CustomColor: "#ffffff", Icon: "★"}
+	color, icon := seedAppearancePlan(win, rec, true)
+	assert.Equal(t, "", color, "a window with its own color is not reseeded")
+	assert.Equal(t, "", icon, "a window with its own marker is not reseeded")
+}
+
+func TestSeedAppearancePlan_SeedsOnlyMissingField(t *testing.T) {
+	rec := CWDColorMapping{Color: "#123456", Icon: "🚀"}
+	win := tmux.Window{CustomColor: "#ffffff"} // has color, no icon
+	color, icon := seedAppearancePlan(win, rec, true)
+	assert.Equal(t, "", color, "existing color is kept")
+	assert.Equal(t, "🚀", icon, "missing marker is seeded")
+}
+
+func TestSeedAppearancePlan_AlreadySeededOrNoRecordIsNoOp(t *testing.T) {
+	rec := CWDColorMapping{Color: "#123456", Icon: "🚀"}
+
+	color, icon := seedAppearancePlan(tmux.Window{AppearanceSeeded: true}, rec, true)
+	assert.Equal(t, "", color, "an already-seeded window inherits nothing")
+	assert.Equal(t, "", icon)
+
+	color, icon = seedAppearancePlan(tmux.Window{}, CWDColorMapping{}, false)
+	assert.Equal(t, "", color, "no remembered record means nothing to seed")
+	assert.Equal(t, "", icon)
+}
+
+// TestCWDColorsMigrate_DropsLegacyNamesKeepsColors verifies the one-time
+// migration strips ONLY the retired per-directory name fields from cwd-colors.json
+// on load. Color/icon are remembered again (as a seed-on-create appearance) and
+// must survive the load, alongside group/pinned; entries left empty are dropped.
+func TestCWDColorsMigrate_DropsLegacyNamesKeepsColors(t *testing.T) {
 	// The package TestMain pins TABBY_STATE_DIR for the whole run, so write the
 	// seed to the actually-resolved cwd-colors path (per-test Setenv is a no-op
 	// once paths.StateDir's sync.Once has cached). Clean up after.
 	path := cwdColorsPath()
 	t.Cleanup(func() { os.Remove(path) })
 
-	// Seed a legacy file: a name-only "llm" entry (should be dropped entirely),
-	// a "user" entry that also carries a color (name dropped, color kept), and a
-	// pure color/icon entry (untouched).
+	// Seed a legacy file: a name-only "llm" entry (dropped entirely once its name
+	// is gone), a "user" entry that also carries a color (name stripped, color
+	// kept -> survives), and a color/icon/group entry (all kept).
 	legacy := `{
   "/Users/b/git": {"name": "squint", "nameSource": "llm"},
   "/Users/b/git/tabby": {"name": "tby tabby", "nameSource": "user", "color": "#aabbcc"},
@@ -315,27 +363,29 @@ func TestCWDColorsMigrate_DropsLegacyNames(t *testing.T) {
 	c := newTestCoordinator(t)
 	c.loadCWDColors()
 
-	// Name-only llm entry: gone.
+	// Name-only llm entry: gone (nothing left after the name is dropped).
 	_, ok := c.getCWDColorMapping("/Users/b/git")
 	assert.False(t, ok, "a name-only legacy entry should be dropped once its name is stripped")
 
-	// User entry with a color: kept, color survives (name is gone — not a field).
+	// Name + color entry: survives with just the color (name stripped).
 	m, ok := c.getCWDColorMapping("/Users/b/git/tabby")
-	assert.True(t, ok, "an entry with a color survives the name strip")
-	assert.Equal(t, "#aabbcc", m.Color)
+	assert.True(t, ok, "an entry that still carries a color survives the name strip")
+	assert.Equal(t, "#aabbcc", m.Color, "per-dir color is remembered again")
 
-	// Color/icon/group entry: untouched.
+	// Color/icon/group entry: everything is kept.
 	m, ok = c.getCWDColorMapping("/Users/b/git/infra")
 	assert.True(t, ok)
-	assert.Equal(t, "#112233", m.Color)
-	assert.Equal(t, "🚀", m.Icon)
+	assert.Equal(t, "#112233", m.Color, "per-dir color is remembered")
+	assert.Equal(t, "🚀", m.Icon, "per-dir marker is remembered")
 	assert.Equal(t, "Infra", m.Group)
 
-	// The on-disk file is rewritten clean: no legacy name keys remain.
+	// The on-disk file is rewritten without legacy name keys, but keeps color/icon.
 	data, err := os.ReadFile(path)
 	assert.NoError(t, err)
 	assert.NotContains(t, string(data), "\"name\"")
 	assert.NotContains(t, string(data), "nameSource")
+	assert.Contains(t, string(data), "\"color\"")
+	assert.Contains(t, string(data), "\"icon\"")
 }
 
 func TestWindowNameKey_LocalAndRemote(t *testing.T) {
@@ -684,9 +734,9 @@ func TestWindowTransitionRejectsBeginWhileInProgress(t *testing.T) {
 func TestTeamClaudeBareEmail(t *testing.T) {
 	cases := map[string]string{
 		"brendan@gunpowder.tech (brendan@gunpowder.tech's Organization)": "brendan@gunpowder.tech",
-		"brendan@gunpowder.tech (Gunpowder)":                            "brendan@gunpowder.tech",
-		"b@debea.si":                                                    "b@debea.si",
-		"  Shaked@studiodome.com  ":                                     "Shaked@studiodome.com",
+		"brendan@gunpowder.tech (Gunpowder)":                             "brendan@gunpowder.tech",
+		"b@debea.si":                                                     "b@debea.si",
+		"  Shaked@studiodome.com  ":                                      "Shaked@studiodome.com",
 	}
 	for in, want := range cases {
 		if got := teamClaudeBareEmail(in); got != want {
