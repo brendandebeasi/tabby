@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/navtrace"
 	"github.com/brendandebeasi/tabby/pkg/perf"
 )
 
@@ -248,7 +249,20 @@ func (l *Loop) Submit(ev Event) {
 	case ch <- ev:
 	default:
 		l.drops.Add(1)
-		logEvent("LOOP_DROP kind=%s queue_full drops_total=%d", ev.kind(), l.drops.Load())
+		// Attribute the drop. A bare "kind=renderer_input" hid which input was
+		// lost — for a window-nav keypress that's exactly the dropped request the
+		// user notices, so surface the action/target and mirror it into the nav
+		// trace (correlatable with the hook's HOOK_SENT via navid).
+		if rie, ok := ev.(RendererInputEvent); ok && rie.Input != nil {
+			logEvent("LOOP_DROP kind=%s action=%s target=%s queue_full drops_total=%d",
+				ev.kind(), rie.Input.ResolvedAction, strings.TrimSpace(rie.Input.ResolvedTarget), l.drops.Load())
+			if isNavAction(rie.Input.ResolvedAction) {
+				navtrace.Write("LOOP_DROP navid=%s action=%s target=%s queue_full",
+					navIDFromValue(rie.Input.PickerValue), rie.Input.ResolvedAction, strings.TrimSpace(rie.Input.ResolvedTarget))
+			}
+		} else {
+			logEvent("LOOP_DROP kind=%s queue_full drops_total=%d", ev.kind(), l.drops.Load())
+		}
 	}
 }
 

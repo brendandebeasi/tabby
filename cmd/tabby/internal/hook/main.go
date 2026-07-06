@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/navtrace"
 )
 
 func Run(allArgs []string) int {
@@ -96,6 +97,9 @@ func Run(allArgs []string) int {
 
 	// Socket-based commands
 	var target, value string
+	// navID is minted for next-window/prev-window keypresses (see that case) so
+	// the send can be traced end-to-end and correlated with the daemon.
+	var navID string
 
 	switch action {
 	case "delete-group":
@@ -240,7 +244,12 @@ func Run(allArgs []string) int {
 				}
 			}
 		}
-		value = "invoking=" + invokingTTY + ";most_active=" + mostActiveTTY
+		// Mint a correlation id for this keypress and carry it in the payload so
+		// the daemon can echo it: a HOOK_SENT here with no matching RECV in the
+		// daemon means the request was dropped in transit (socket/queue). See
+		// pkg/navtrace.
+		navID = fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
+		value = "invoking=" + invokingTTY + ";most_active=" + mostActiveTTY + ";navid=" + navID
 
 	case "toggle-minimize-window":
 		// Default to current active pane; daemon resolves its window.
@@ -261,9 +270,21 @@ func Run(allArgs []string) int {
 		daemonAction = "exit_if_no_main_windows"
 	}
 
+	// Trace window-nav keypresses across the process boundary. A HOOK_SENT with
+	// no matching daemon RECV (see pkg/navtrace) pinpoints a request dropped in
+	// transit — e.g. the socket write below failing while the daemon restarts,
+	// which was previously a fully silent return.
+	isNav := daemonAction == "next_window" || daemonAction == "prev_window"
+	if isNav {
+		navtrace.Write("HOOK_SENT navid=%s action=%s target=%s", navID, daemonAction, target)
+	}
+
 	if err := sendAction(daemonAction, target, value); err != nil {
 		// Silently exit — daemon may be restarting or not yet ready.
 		// Exiting non-zero causes tmux to display error messages to the user.
+		if isNav {
+			navtrace.Write("HOOK_SEND_FAILED navid=%s action=%s target=%s err=%v", navID, daemonAction, target, err)
+		}
 		return 0
 	}
 	return 0

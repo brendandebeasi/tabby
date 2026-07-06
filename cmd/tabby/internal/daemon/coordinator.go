@@ -31,6 +31,7 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/config"
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/grouping"
+	"github.com/brendandebeasi/tabby/pkg/navtrace"
 	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/perf"
 	"github.com/brendandebeasi/tabby/pkg/teamclaude"
@@ -330,6 +331,24 @@ func logNavKeyTrigger(action, sourcePane, activeClientTTY string) {
 	resolvedTTY := strings.TrimSpace(clientTTYForWindow(winID))
 	logEvent("NAV_KEY_TRIGGER action=%s source_pane=%q source_window=%s pane_owner_tty=%s ctx=%s",
 		action, sourcePane, winID, resolvedTTY, activeClientTTY)
+}
+
+// isNavAction reports whether a resolved action is a keyboard window-nav request
+// (the ones we trace end-to-end via pkg/navtrace).
+func isNavAction(action string) bool {
+	return action == "next_window" || action == "prev_window"
+}
+
+// navIDFromValue extracts the correlation id the hook embedded in an input's
+// PickerValue ("...;navid=<id>"), or "" if absent. Lets a daemon-side nav trace
+// line be matched to the HOOK_SENT line that produced it.
+func navIDFromValue(pickerValue string) string {
+	for _, p := range strings.Split(pickerValue, ";") {
+		if strings.HasPrefix(p, "navid=") {
+			return strings.TrimPrefix(p, "navid=")
+		}
+	}
+	return ""
 }
 
 func tmuxClientWindowSnapshot() string {
@@ -14793,6 +14812,14 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			}
 		}
 
+		// Trace the request the moment the daemon starts handling it. Paired with
+		// the hook's HOOK_SENT (same navid) this proves delivery; every return
+		// below emits a matching outcome, so a request that reaches here but does
+		// not switch is no longer invisible. See pkg/navtrace.
+		navID := navIDFromValue(input.PickerValue)
+		navtrace.Write("RECV navid=%s action=%s target=%s invoking=%s",
+			navID, input.ResolvedAction, strings.TrimSpace(input.ResolvedTarget), invokingTTY)
+
 		suppress := false
 		reason := ""
 		if c.ActiveClientProfile() == "phone" {
@@ -14811,6 +14838,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if suppress {
 			logEvent("NAV_KEY_SUPPRESSED action=%s reason=%s target=%s invoking=%s",
 				input.ResolvedAction, reason, strings.TrimSpace(input.ResolvedTarget), invokingTTY)
+			navtrace.Write("OUTCOME navid=%s result=suppressed reason=%s", navID, reason)
 			return false
 		}
 
@@ -14825,6 +14853,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// the sidebar's content doesn't change for an in-dashboard pane cycle,
 		// and the broadcast was causing the renderer to repaint (visible judder).
 		if c.dashboardNavStep(delta) {
+			navtrace.Write("OUTCOME navid=%s result=dashboard_cycle delta=%d", navID, delta)
 			return false
 		}
 		sourceWindowID := navSourceWindowFromTarget(input.ResolvedTarget)
@@ -14840,10 +14869,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// we'd run those — defer to a goroutine so the input handler
 		// returns and the loop can render the broadcast immediately.
 		if sourceWindowID != "" && c.selectNeighborWindowPerClient(sourceWindowID, delta, "global_key") {
+			navtrace.Write("OUTCOME navid=%s result=switched path=per_client source=%s delta=%d", navID, sourceWindowID, delta)
 			go focusContentPaneInActiveWindow()
 			return true
 		}
 		c.selectNeighborWindowFrom(sourceWindowID, delta, "global_key")
+		navtrace.Write("OUTCOME navid=%s result=switched path=global source=%s delta=%d", navID, sourceWindowID, delta)
 		go focusContentPaneInActiveWindow()
 		return true
 
