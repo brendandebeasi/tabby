@@ -47,7 +47,11 @@ func paneBorderFormat() string {
 	// their origin name instead of "Dashboard" on every tile. When the option
 	// is unset (non-dashboard windows, or pre-existing dashboards from before
 	// this tag landed) it falls back to the live #{window_name}.
-	const content = " #{?#{!=:#{@tabby_dash_origin_name},},#{@tabby_dash_origin_name},#{window_name}} #[fg=default] | #[fg=default]" +
+	// Prefix the window's marker (@tabby_icon) when set, so the pane-border label
+	// mirrors the tab's marker — same as the sidebar row and TABBY header. The
+	// #{!=…,} empty-check matches the origin-name pattern below; the trailing
+	// space in the "then" branch separates the marker from the name.
+	const content = " #{?#{!=:#{@tabby_icon},},#{@tabby_icon} ,}#{?#{!=:#{@tabby_dash_origin_name},},#{@tabby_dash_origin_name},#{window_name}} #[fg=default] | #[fg=default]" +
 		"#{?#{&&:#{!=:#{pane_title},}," +
 		"#{&&:#{!=:#{pane_title},#{host_short}}," +
 		"#{!=:#{m:*#{host_short}*,#{pane_title}},1}}}," +
@@ -606,11 +610,30 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	if inactiveFg == "" {
 		inactiveFg = "#bbbbbb"
 	}
+	// The border colour tracks the TAB colour: a window's own custom @tabby_color
+	// wins, exactly as it does for the sidebar row and window header. Only when the
+	// window carries no custom colour do we fall back to its group theme (then
+	// Default, then any group, then config / hardcoded).
 	activeBg := ""
 	for _, g := range c.grouped {
-		if g.Name == groupName && g.Theme.Bg != "" {
-			activeBg = g.Theme.Bg
+		for _, w := range g.Windows {
+			if w.ID == winID {
+				if cc := strings.TrimSpace(w.CustomColor); cc != "" && cc != "transparent" {
+					activeBg = cc
+				}
+				break
+			}
+		}
+		if activeBg != "" {
 			break
+		}
+	}
+	if activeBg == "" {
+		for _, g := range c.grouped {
+			if g.Name == groupName && g.Theme.Bg != "" {
+				activeBg = g.Theme.Bg
+				break
+			}
 		}
 	}
 	if activeBg == "" {
