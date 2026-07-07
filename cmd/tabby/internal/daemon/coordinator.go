@@ -661,6 +661,11 @@ type Coordinator struct {
 
 	// Pet state
 	pet petState
+	// petIsOwner reports whether THIS daemon currently owns writing the shared
+	// pet.json. pet.json is global but every tmux session runs its own daemon;
+	// without ownership they all tick+write it and clobber each other (a stale
+	// daemon perpetually resetting hunger). Set each tick by acquirePetOwnership.
+	petIsOwner bool
 
 	cwdColors   map[string]CWDColorMapping
 	cwdColorsMu sync.RWMutex
@@ -2756,9 +2761,91 @@ func (c *Coordinator) triggerPetEventThought(event string) {
 	}()
 }
 
+// petOwnerPath is the single-writer lock for the global pet.json.
+func petOwnerPath() string {
+	paths.EnsureStateDir()
+	return paths.StatePath("pet.owner")
+}
+
+const petOwnershipTTL = 30 * time.Second
+
+// acquirePetOwnership returns whether this daemon may WRITE the shared pet.json,
+// refreshing its lease when it may. pet.json is one global file but each tmux
+// session runs its own daemon; letting them all tick+save it means a stale/older
+// daemon perpetually overwrites hunger back to its own state (the "food resets on
+// reboot" bug). A TTL lock elects one writer; a lease older than the TTL is stale
+// and reclaimable, so a crashed owner frees the pet automatically.
+func (c *Coordinator) acquirePetOwnership(now time.Time) bool {
+	me := c.sessionID
+	if data, err := os.ReadFile(petOwnerPath()); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) >= 2 {
+			owner := fields[0]
+			exp, _ := strconv.ParseInt(fields[1], 10, 64)
+			if owner != me && now.Unix() < exp {
+				return false // a different daemon holds a live lease
+			}
+		}
+	}
+	os.WriteFile(petOwnerPath(), []byte(fmt.Sprintf("%s %d", me, now.Add(petOwnershipTTL).Unix())), 0644)
+	return true
+}
+
+// petWriteAllowed gates savePetStateData at the process level: 1 = this daemon
+// currently owns the pet and may write pet.json, 0 = it must not (another daemon
+// owns it). Set atomically from UpdatePetState each tick and by stealPetOwnership,
+// and read inside savePetStateData so EVERY save site is gated with no per-call
+// changes. Avoids a data race on the ownership decision across the tick loop and
+// the socket-action goroutines.
+var petWriteAllowed int32 = 1
+
+// stealPetOwnership forces this daemon to become the pet writer. Called on user
+// pet actions (feed/clean/play) so the session the user is actually interacting
+// with always persists — even if another daemon currently holds the lease.
+func (c *Coordinator) stealPetOwnership() {
+	os.WriteFile(petOwnerPath(), []byte(fmt.Sprintf("%s %d", c.sessionID, time.Now().Add(petOwnershipTTL).Unix())), 0644)
+	atomic.StoreInt32(&petWriteAllowed, 1)
+}
+
+// loadPersistentPetStats refreshes only the SHARED persistent fields (hunger,
+// happiness, lifetime totals, poop, death, decay anchors) from disk into c.pet,
+// leaving this daemon's local animation state (position, current action) intact.
+// A non-owner calls this each tick so its sidebar shows the owner's real stats.
+func (c *Coordinator) loadPersistentPetStats() {
+	data, err := os.ReadFile(petStatePath())
+	if err != nil {
+		return
+	}
+	var d petState
+	if json.Unmarshal(data, &d) != nil {
+		return
+	}
+	c.pet.Hunger = d.Hunger
+	c.pet.Happiness = d.Happiness
+	c.pet.TotalPets = d.TotalPets
+	c.pet.TotalFeedings = d.TotalFeedings
+	c.pet.TotalPoopsCleaned = d.TotalPoopsCleaned
+	c.pet.TotalYarnPlays = d.TotalYarnPlays
+	c.pet.TotalMouseCatches = d.TotalMouseCatches
+	c.pet.PoopPositions = d.PoopPositions
+	c.pet.LastFed = d.LastFed
+	c.pet.LastPet = d.LastPet
+	c.pet.LastPoop = d.LastPoop
+	c.pet.IsDead = d.IsDead
+	c.pet.DeathTime = d.DeathTime
+	c.pet.StarvingStart = d.StarvingStart
+	c.pet.LastHungerTick = d.LastHungerTick
+	c.pet.LastHappyTick = d.LastHappyTick
+}
+
 // savePetStateData saves the given pet state snapshot to the shared file.
 // Safe to call without holding stateMu since it only writes the provided data.
+// No-op when this daemon doesn't own the pet (petWriteAllowed==0), so a non-owner
+// daemon's ticks/animations never clobber the owning daemon's stats.
 func savePetStateData(pet petState) {
+	if atomic.LoadInt32(&petWriteAllowed) == 0 {
+		return
+	}
 	data, _ := json.Marshal(pet)
 	os.WriteFile(petStatePath(), data, 0644)
 }
@@ -5290,6 +5377,18 @@ func (c *Coordinator) UpdatePetState() bool {
 
 	c.pet.AnimFrame++
 	now := time.Now()
+
+	// Single-writer election for the shared pet.json. Only the owner decays and
+	// saves; a non-owner mirrors the owner's stats for display so multiple
+	// per-session daemons can't clobber each other's hunger.
+	c.petIsOwner = c.acquirePetOwnership(now)
+	if c.petIsOwner {
+		atomic.StoreInt32(&petWriteAllowed, 1)
+	} else {
+		atomic.StoreInt32(&petWriteAllowed, 0)
+		c.loadPersistentPetStats()
+	}
+
 	width := c.lastWidth
 	if width < 10 {
 		width = 25
@@ -6047,7 +6146,11 @@ func (c *Coordinator) UpdatePetState() bool {
 	hasConnectedClients := len(c.clientWidths) > 0
 	c.clientWidthsMu.RUnlock()
 
-	if !hasConnectedClients {
+	if !c.petIsOwner {
+		// Not the pet writer: hunger/happiness already came from disk via
+		// loadPersistentPetStats. Do NOT decay or touch the anchors — the owning
+		// daemon does that; touching them here would fight the owner.
+	} else if !hasConnectedClients {
 		// No renderer attached: pause decay and keep the anchors current so a long
 		// detach doesn't dump a backlog of decrements the moment a client reattaches.
 		c.pet.LastHungerTick = now
@@ -14522,6 +14625,7 @@ func (c *Coordinator) renderDebugBar(width int) []string {
 // handleDebugBarClick handles clicks on the debug bar
 // Returns true if click was handled
 func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) bool {
+	c.stealPetOwnership() // pet interaction on this session must persist
 	layout := c.petLayout
 
 	if clickX < 0 {
@@ -15713,6 +15817,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "drop_food":
+		c.stealPetOwnership() // a feed on this session must persist
 		// Drop food at a random position for the pet to eat
 		c.stateMu.Lock()
 		// If dead, food revives the pet!
@@ -15783,6 +15888,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return false // Pet action, no window refresh needed
 
 	case "clean_poop":
+		c.stealPetOwnership()
 		// Clean up poop at the clicked position
 		c.stateMu.Lock()
 		if len(c.pet.PoopPositions) > 0 {
@@ -15798,6 +15904,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return false // Pet action, no window refresh needed
 
 	case "pet_pet":
+		c.stealPetOwnership()
 		// Pet the pet - increase happiness (and wake up if sleeping)
 		c.stateMu.Lock()
 		wasSleeping := c.pet.State == "sleeping"
@@ -16745,6 +16852,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 // This bypasses BubbleZone and uses tracked line positions for precise hit testing
 // Returns true if the click was handled, false otherwise
 func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputPayload) bool {
+	c.stealPetOwnership() // a click in the pet widget makes this session the writer
 	// Get client-specific width for accurate click detection
 	clientWidth := c.getClientWidth(clientID)
 
@@ -17134,6 +17242,7 @@ func (c *Coordinator) getSprites() petSprites {
 // handlePetPlayAreaClick handles clicks within the pet play area
 // clickX is the X position, petY is the Y in pet coordinate space (0=ground, 1=low air, 2=high air)
 func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.InputPayload, clickX, petY int) bool {
+	c.stealPetOwnership()
 	c.stateMu.Lock()
 
 	// Get sprite strings for width calculation
