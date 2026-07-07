@@ -537,12 +537,12 @@ func TestWrapTabLabel(t *testing.T) {
 	// Single line when it fits.
 	assert.Equal(t, []string{"1. TB ok"}, wrapTabLabel("1. TB ok", 20, 20, 2))
 
-	// Wraps whole words across 2 lines; overflow ("sidebar") drops with a "~".
+	// Wraps at the CHARACTER (not word) across 2 lines; overflow truncates with "~".
 	got := wrapTabLabel("1. INF setting sidebar", 8, 10, 2)
-	assert.Equal(t, []string{"1. INF", "setting~"}, got)
+	assert.Equal(t, []string{"1. INF s", "etting si~"}, got)
 
-	// Exactly fits 2 lines, no truncation marker.
-	assert.Equal(t, []string{"1. INF", "setting"}, wrapTabLabel("1. INF setting", 8, 10, 2))
+	// Char-wrap fills line 0 to its budget, continues on line 1.
+	assert.Equal(t, []string{"1. INF s", "etting"}, wrapTabLabel("1. INF setting", 8, 10, 2))
 
 	// Overflow past maxLines truncates the last line with "~".
 	got2 := wrapTabLabel("1. AAA bbb ccc ddd eee", 6, 6, 2)

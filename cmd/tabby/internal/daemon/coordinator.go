@@ -3297,8 +3297,7 @@ func wrapTabLabel(text string, line1Width, contWidth, maxLines int) []string {
 	if maxLines < 1 {
 		maxLines = 1
 	}
-	words := strings.Fields(text)
-	if len(words) == 0 {
+	if text == "" {
 		return []string{""}
 	}
 	budgetFor := func(lineIdx int) int {
@@ -3312,43 +3311,26 @@ func wrapTabLabel(text string, line1Width, contWidth, maxLines int) []string {
 		return w
 	}
 
+	// Wrap at the CHARACTER, not the word: fill each line rune-by-rune up to its
+	// budget, then break — even mid-word. A space that would land at the start of a
+	// wrapped line is dropped so continuation rows don't begin with a blank.
 	var lines []string
 	cur := ""
-	for _, w := range words {
-		// Hard-split words longer than the current line's budget.
-		for lipgloss.Width(w) > budgetFor(len(lines)) {
-			b := budgetFor(len(lines))
-			if cur != "" {
-				lines = append(lines, cur)
-				cur = ""
-				continue
-			}
-			part := ""
-			for _, r := range w {
-				if lipgloss.Width(part+string(r)) > b {
-					break
-				}
-				part += string(r)
-			}
-			if part == "" {
-				part = string([]rune(w)[0])
-			}
-			lines = append(lines, part)
-			w = string([]rune(w)[len([]rune(part)):])
-		}
-		cand := w
-		if cur != "" {
-			cand = cur + " " + w
-		}
-		if lipgloss.Width(cand) <= budgetFor(len(lines)) {
-			cur = cand
-		} else {
+	for _, r := range text {
+		if lipgloss.Width(cur+string(r)) > budgetFor(len(lines)) && cur != "" {
 			lines = append(lines, cur)
-			cur = w
+			cur = ""
 		}
+		if cur == "" && r == ' ' {
+			continue
+		}
+		cur += string(r)
 	}
 	if cur != "" {
 		lines = append(lines, cur)
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
 	}
 	if len(lines) <= maxLines {
 		return lines
@@ -12003,7 +11985,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					paneRowEndBg := ""
 					if paneLineBg != "" {
 						fromBg, toBg := gradientEndColor(paneLineBg), paneLineBg
-						paneRowEndBg = toBg
+						paneRowEndBg = gradientTailColor(paneLineBg) // dark tail, so the pane row's menu button continues the gradient like the tab line
 						paneContent = c.applyGradientFill(paneContent, fromBg, toBg, paneContentW)
 					}
 
@@ -19131,7 +19113,10 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 	leadingRendered := " " + treeStyle.Render(col1) + " "
 	chip := nameStyle.Render(chipText)
 	if bgColor != "" {
-		chip = c.applyBackgroundFill(chip, bgColor, avail)
+		// Gradient-fill the continuation row (not a flat solid) so a wrapped tab's
+		// second row carries the same light->base->dark sheen as its first row —
+		// otherwise the gradient appears to "stop" at the wrap.
+		chip = c.applyGradientFill(chip, gradientEndColor(bgColor), bgColor, avail)
 	}
 	s.WriteString(leadingRendered + chip + "\n")
 }
