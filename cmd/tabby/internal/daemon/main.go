@@ -359,8 +359,8 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 	dashWin := dashboardActiveWindowID(sessionID)
 	allCovered := true
 	for _, win := range windows {
-		if win.ID == "" || win.ID == dashWin {
-			continue
+		if win.ID == "" || win.ID == dashWin || win.Minimized {
+			continue // minimized/parked windows never get a renderer (see spawn loop)
 		}
 		if !connectedClients[win.ID] {
 			allCovered = false
@@ -483,6 +483,13 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			continue
 		}
 		firstPane := win.Panes[0].ID
+		// Minimized/parked windows live in the holding session and only appear as
+		// synthetic entries (pane "%parked"); there's no real pane to split against,
+		// so skip them — otherwise every refresh fires a failing split-window
+		// ("can't find pane: %parked") that needlessly loads the tmux server.
+		if win.Minimized || firstPane == "%parked" || firstPane == "" {
+			continue
+		}
 
 		// Compute bounded width for this window using coordinator's logic.
 		// This ensures the spawn uses the same width calculation as RunWidthSync,
