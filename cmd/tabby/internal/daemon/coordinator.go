@@ -11154,7 +11154,11 @@ func (c *Coordinator) sidebarRenderGroups() []grouping.GroupedWindows {
 		for i := range minimized {
 			real := strings.TrimSpace(minimized[i].CustomColor)
 			if real == "" || real == "transparent" {
-				real = groupBg[minimized[i].Group]
+				grp := minimized[i].Group
+				if grp == "" {
+					grp = "Default" // an ungrouped window shows in Default when unminimized
+				}
+				real = groupBg[grp]
 			}
 			if len(real) == 7 && real[0] == '#' {
 				// 40% toward the real colour: still clearly "minimized", but tinted.
