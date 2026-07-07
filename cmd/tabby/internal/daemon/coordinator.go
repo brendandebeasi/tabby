@@ -11396,9 +11396,17 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if fgColor == "" {
 					fgColor = theme.Fg
 				}
+				if fgColor == "" {
+					fgColor = contrastFg(bgColor, true) // contrast-aware when the group sets no fg
+				}
 			} else {
 				bgColor = theme.Bg
-				fgColor = inactiveFg
+				fgColor = theme.Fg
+				if fgColor == "" {
+					// Contrast-aware, and 10% lighter than active (see contrastFg) so
+					// inactive tabs read mostly the same as active, just softer.
+					fgColor = contrastFg(bgColor, false)
+				}
 			}
 			// Minimized windows read as dimmed — but NOT when they're the active
 			// (selected) window, so a selected minimized tab still shows its active
@@ -19136,13 +19144,16 @@ func readableFg(bg string) string {
 	return "#ffffff"
 }
 
-// contrastFg is readableFg but, for a non-active (unfocused) tab, gently softens
-// the text toward its background so unfocused tabs read as de-emphasised while
-// staying legible. Active tabs keep full contrast.
+// contrastFg is readableFg but, for a non-active (unfocused) tab, makes the text
+// just 10% LIGHTER than the active colour — so active and inactive read as mostly
+// the same, with inactive only slightly de-emphasised, rather than washing the
+// text toward the background (which hurt legibility). Active tabs keep full
+// contrast. On a dark bg the active colour is already white, so inactive stays
+// effectively identical.
 func contrastFg(bg string, active bool) string {
 	fg := readableFg(bg)
 	if !active {
-		fg = blendHexToward(fg, bg, 0.10)
+		fg = lightenHex(fg, 0.10)
 	}
 	return fg
 }
@@ -19505,17 +19516,22 @@ func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
 		if bgColor == "" {
 			bgColor = theme.Bg
 		}
-		// Match the sidebar TAB's active fg exactly (theme.ActiveFg -> theme.Fg),
-		// so the titlebar text colour tracks the tab rather than a fixed white.
+		// Mirror the sidebar TAB's fg resolution EXACTLY (theme.ActiveFg -> theme.Fg
+		// -> contrastFg), so the titlebar text colour tracks the tab instead of a
+		// fixed white for groups that leave fg empty.
 		fgColor = theme.ActiveFg
 		if fgColor == "" {
 			fgColor = theme.Fg
 		}
+		if fgColor == "" {
+			fgColor = contrastFg(bgColor, true)
+		}
 	} else {
 		bgColor = theme.Bg
-		// Match the sidebar TAB's inactive fg (config inactive_fg with fallback) so
-		// an inactive titlebar reads the same as its inactive tab row.
-		fgColor = c.getInactiveTextColorWithFallback(c.config.Sidebar.Colors.InactiveFg)
+		fgColor = theme.Fg
+		if fgColor == "" {
+			fgColor = contrastFg(bgColor, false)
+		}
 	}
 
 	if bgColor == "" {
