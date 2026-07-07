@@ -55,7 +55,11 @@ func paneBorderFormat() string {
 	// dashboard tiles, whose window-scoped @tabby_icon no longer reflects their
 	// origin tab) and fall back to the window's own @tabby_icon on normal windows.
 	const marker = "#{?#{!=:#{@tabby_dash_origin_icon},},#{@tabby_dash_origin_icon},#{@tabby_icon}}"
-	const content = " #{?#{!=:" + marker + ",}," + marker + " ,}#{?#{!=:#{@tabby_dash_origin_name},},#{@tabby_dash_origin_name},#{window_name}} #[fg=default] | #[fg=default]" +
+	// NOTE: no #[fg=default] before the divider/title — that reset to the terminal
+	// default (white) and washed out the title on a light INACTIVE-pane border bg
+	// (only visible in multi-pane windows). Let the divider + title inherit the
+	// contrast-aware border-STYLE fg tmux already sets per pane.
+	const content = " #{?#{!=:" + marker + ",}," + marker + " ,}#{?#{!=:#{@tabby_dash_origin_name},},#{@tabby_dash_origin_name},#{window_name}} | " +
 		"#{?#{&&:#{!=:#{pane_title},}," +
 		"#{&&:#{!=:#{pane_title},#{host_short}}," +
 		"#{!=:#{m:*#{host_short}*,#{pane_title}},1}}}," +
