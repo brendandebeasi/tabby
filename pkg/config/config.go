@@ -374,13 +374,39 @@ type PaneHeader struct {
 	ResizeVerticalShrinkIcon   string `yaml:"resize_vertical_shrink_icon"`
 	ResizeSeparator            string `yaml:"resize_separator"`
 	TerminalBg                 string `yaml:"terminal_bg"` // Terminal background color for hiding borders (default: #000000)
-	// Native: when true (default), tabby uses tmux's built-in pane-border-status
-	// row for per-pane chrome (command/folder/group color) instead of spawning a
-	// Bubbletea aux pane above each content pane. Loses in-header clickable
-	// buttons and dim animations; gains a simpler architecture and the
-	// prefix+, popup menu for pane actions. Set to false to restore the legacy
-	// aux-pane chrome.
+	// Native: when true, tabby uses tmux's built-in pane-border-status row for
+	// per-pane chrome (command/folder/group color). When false (the new default),
+	// tabby draws its OWN chrome in aux panes — the custom-border feature — which
+	// unlocks gradients, rounded corners, in-header clickable buttons, drag-resize,
+	// and per-pane/per-edge enable. Set to true to fall back to native tmux borders.
 	Native *bool `yaml:"native"`
+	// Border configures tabby's custom-rendered pane borders (used when Native is
+	// false). See PaneBorder.
+	Border PaneBorder `yaml:"border"`
+}
+
+// PaneBorder configures tabby's custom-drawn pane borders (the full-box feature).
+type PaneBorder struct {
+	// Style picks the line + corner glyph set: rounded (╭╮╰╯), single (┌┐└┘),
+	// double (╔╗╚╝), or heavy (┏┓┗┛). Default "rounded".
+	Style string `yaml:"style"`
+	// Edges lists which borders are drawn by default: any of top,bottom,left,right.
+	// Per-pane runtime overrides come from pane-local @tabby_border_<edge> options.
+	// Default ["top"] (Phase 0); the full box adds the rest.
+	Edges []string `yaml:"edges"`
+	// Color / ActiveColor override the border color (else it tracks the tab color
+	// like the sidebar row). Empty = auto from the window's group/custom color.
+	Color       string             `yaml:"color"`
+	ActiveColor string             `yaml:"active_color"`
+	Gradient    PaneBorderGradient `yaml:"gradient"`
+}
+
+// PaneBorderGradient controls an optional gradient along the border edges.
+type PaneBorderGradient struct {
+	Enabled   bool   `yaml:"enabled"`
+	From      string `yaml:"from"`
+	To        string `yaml:"to"`
+	Direction string `yaml:"direction"` // "horizontal" (default) or "vertical"
 }
 
 type SidebarHeader struct {

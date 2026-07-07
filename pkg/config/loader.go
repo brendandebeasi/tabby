@@ -254,10 +254,21 @@ func applyDefaults(cfg *Config) {
 		cfg.PaneHeader.DimOpacity = 0.7
 	}
 	if cfg.PaneHeader.Native == nil {
-		// Default to native tmux border-status chrome. Users can opt back into
-		// the legacy Bubbletea aux-pane chrome by setting native: false.
-		v := true
+		// Default to tabby's OWN custom-drawn pane chrome (native: false) so the
+		// gradient/rounded/buttoned/draggable border feature is on by default.
+		// Users can fall back to native tmux borders with native: true.
+		v := false
 		cfg.PaneHeader.Native = &v
+	}
+	// Custom pane-border defaults.
+	if cfg.PaneHeader.Border.Style == "" {
+		cfg.PaneHeader.Border.Style = "rounded"
+	}
+	if len(cfg.PaneHeader.Border.Edges) == 0 {
+		cfg.PaneHeader.Border.Edges = []string{"top"}
+	}
+	if cfg.PaneHeader.Border.Gradient.Direction == "" {
+		cfg.PaneHeader.Border.Gradient.Direction = "horizontal"
 	}
 
 	// Busy detection defaults
