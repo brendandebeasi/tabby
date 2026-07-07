@@ -415,6 +415,7 @@ type Sidebar struct {
 	Colors               SidebarColors `yaml:"colors"`                 // Manual color overrides (applied on top of theme)
 	HidePredefinedColors bool          `yaml:"hide_predefined_colors"` // Hide predefined color palette in context menus (keep Custom + Reset)
 	ShowSSHHost          bool          `yaml:"show_ssh_host"`          // Show SSH hostname in tab name when pane is connected via SSH
+	SSHIcon              string        `yaml:"ssh_icon"`               // When set, remote tabs render on ONE line prefixed with this glyph instead of a host-name row above the tab name (e.g. a nerdfont ""). Empty = legacy two-line host/name.
 }
 
 type SidebarColors struct {

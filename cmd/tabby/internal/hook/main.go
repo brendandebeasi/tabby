@@ -279,7 +279,20 @@ func Run(allArgs []string) int {
 		navtrace.Write("HOOK_SENT navid=%s action=%s target=%s", navID, daemonAction, target)
 	}
 
-	if err := sendAction(daemonAction, target, value); err != nil {
+	err := sendAction(daemonAction, target, value)
+	// A window-nav keypress that lands while the daemon is mid-restart (the socket
+	// briefly refuses connections after a crash/reload — the watchdog respawns in
+	// ~1-2s) was previously lost silently, which is exactly the "dropped next/prev"
+	// symptom. Retry nav actions across that gap so the press survives a restart.
+	// The happy path is unaffected: the first attempt succeeds instantly and we
+	// never sleep. Non-nav actions keep the old fire-and-forget behavior.
+	if err != nil && isNav {
+		for attempt := 0; attempt < 5 && err != nil; attempt++ {
+			time.Sleep(300 * time.Millisecond)
+			err = sendAction(daemonAction, target, value)
+		}
+	}
+	if err != nil {
 		// Silently exit — daemon may be restarting or not yet ready.
 		// Exiting non-zero causes tmux to display error messages to the user.
 		if isNav {

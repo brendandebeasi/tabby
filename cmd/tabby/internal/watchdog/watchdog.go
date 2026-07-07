@@ -81,8 +81,24 @@ func Run(args []string) int {
 		registerHooks(exe)
 
 		cmd := exec.Command(exe, daemonArgs...)
+		// Preserve the daemon's stdout, but tee stderr to a per-session file so a
+		// signal-kill or panic leaves a trace behind. Previously stderr flowed to
+		// the watchdog's own stderr, which tmux backgrounds with no redirect, so
+		// every crash was blind (a dropped next/prev-window key turned out to be
+		// the daemon being SIGKILLed mid-request by an in-place binary overwrite —
+		// with stderr discarded there was no evidence). GOTRACEBACK=crash makes a
+		// genuine fault dump a full stack so we can tell a signal-kill apart from
+		// a real panic next time.
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		stderrLog := fmt.Sprintf("/tmp/tabby-daemon-%s-stderr.log", sessionID)
+		var stderrFile *os.File
+		if f, ferr := os.OpenFile(stderrLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); ferr == nil {
+			cmd.Stderr = f
+			stderrFile = f
+		} else {
+			cmd.Stderr = os.Stderr
+		}
+		cmd.Env = append(os.Environ(), "GOTRACEBACK=crash")
 
 		// Start daemon, wait for PID file, then store PID in tmux option
 		cmd.Start()
@@ -99,6 +115,9 @@ func Run(args []string) int {
 			}
 		}()
 		err := cmd.Wait()
+		if stderrFile != nil {
+			stderrFile.Close()
+		}
 
 		exitCode := 0
 		if err != nil {

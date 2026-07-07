@@ -92,9 +92,26 @@ func TestRenderHeaderForClient_NonHeaderClientID(t *testing.T) {
 
 func TestRenderHeaderForClient_PaneNotFound(t *testing.T) {
 	c := newRenderCoordinator(t)
-	payload := c.RenderHeaderForClient("header:%99", 80, 1)
+	// Desktop width: no window/pane -> a GRADIENT-filled title bar (not a flat
+	// blank strip), so the titlebar border reads as part of the tab surface.
+	payload := c.RenderHeaderForClient("header:%99", 120, 1)
 	assert.NotNil(t, payload)
-	assert.Equal(t, strings.Repeat(" ", 80), payload.Content)
+	assert.Equal(t, 120, payload.Width)
+	assert.Equal(t, 1, payload.TotalLines)
+	// Visible width is still 120 columns of fill...
+	assert.Equal(t, strings.Repeat(" ", 120), stripAnsi(payload.Content))
+	// ...but it carries gradient bg escapes rather than being plain spaces.
+	assert.Contains(t, payload.Content, "\x1b[48;2;", "titlebar bar should be gradient-filled")
+}
+
+func TestRenderHeaderForClient_PhoneCarouselWithoutContentPane(t *testing.T) {
+	c := newRenderCoordinator(t)
+	// Phone width with no content pane (e.g. full-width sidebar open) must STILL
+	// render the 3-row button carousel, not a blank bar.
+	payload := c.RenderHeaderForClient("window-header:@nope", 60, 3)
+	assert.NotNil(t, payload)
+	assert.Equal(t, 3, payload.TotalLines, "phone carousel is 3 rows")
+	assert.NotEmpty(t, payload.Regions, "carousel buttons must be clickable")
 }
 
 func TestRenderHeaderForClient_PaneFound(t *testing.T) {

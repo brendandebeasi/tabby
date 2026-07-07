@@ -56,7 +56,7 @@ func initLLM(provider, model, apiKey, baseURL string) error {
 		// Default to cheapest option
 		switch provider {
 		case "anthropic":
-			model = "claude-3-haiku-20240307"
+			model = "claude-haiku-4-5-20251001"
 		case "openai":
 			model = "gpt-3.5-turbo"
 		case "ollama":
@@ -68,16 +68,8 @@ func initLLM(provider, model, apiKey, baseURL string) error {
 	if apiKey == "" {
 		switch provider {
 		case "anthropic":
-			apiKey = os.Getenv("ANTHROPIC_API_KEY")
-			// Try tmux environment if not found
-			if apiKey == "" {
-				if out, err := exec.Command("tmux", "show-environment", "ANTHROPIC_API_KEY").Output(); err == nil {
-					line := strings.TrimSpace(string(out))
-					if strings.HasPrefix(line, "ANTHROPIC_API_KEY=") {
-						apiKey = strings.TrimPrefix(line, "ANTHROPIC_API_KEY=")
-					}
-				}
-			}
+			// os.Getenv, then tmux global + session env (lookupAPIKey handles all).
+			apiKey = lookupAPIKey("ANTHROPIC_API_KEY")
 		case "openai":
 			apiKey = os.Getenv("OPENAI_API_KEY")
 			if apiKey == "" {
@@ -104,6 +96,21 @@ func initLLM(provider, model, apiKey, baseURL string) error {
 		os.Setenv("ANTHROPIC_API_KEY", apiKey)
 	case "openai":
 		os.Setenv("OPENAI_API_KEY", apiKey)
+	}
+
+	// Route Anthropic through a configured proxy base URL (config, else
+	// ANTHROPIC_BASE_URL) when present — gollm hardcodes api.anthropic.com, which a
+	// transparent MITM proxy re-signs and trips cert prompts. Same base URL + key
+	// as Claude Code uses.
+	if provider == "anthropic" {
+		if aBase := resolveAnthropicBaseURL(baseURL); aBase != "" {
+			llmClient = newAnthropicBaseURLClient(aBase, apiKey, model, 100, 0.9)
+			thoughtBufferPath = paths.StatePath("thought_buffer.txt")
+			loadThoughtBuffer()
+			initLLMQuestions(provider, model, apiKey, aBase)
+			logEvent("LLM_INIT provider=anthropic-proxy base=%s model=%s", aBase, model)
+			return nil
+		}
 	}
 
 	// Create the LLM client
@@ -258,6 +265,60 @@ func generateLLMThought(pet *petState, name string) string {
 	return "" // Return empty while generating
 }
 
+// generateEventThought makes a SINGLE fresh LLM call for a specific pet event
+// (just pooped, poop cleaned) so the reaction is timely and unique instead of a
+// canned pool line. petContext must be built by the caller (under stateMu) and
+// passed in as a string, so this function touches no shared pet state and is safe
+// to run in a goroutine. Returns "" on any failure so the caller keeps its canned
+// fallback.
+func generateEventThought(name, event, petContext string) string {
+	if llmClient == nil {
+		return ""
+	}
+	if name == "" {
+		name = "Whiskers"
+	}
+
+	var situation string
+	switch event {
+	case "poop":
+		situation = "RIGHT NOW: you just POOPED on the floor. React to THAT — smug pride in your 'gift', a Godfather-style remark about what you left for the family, or blunt commentary on the human's cleanup duty."
+	case "cleaned":
+		situation = "RIGHT NOW: the human just CLEANED UP your poop. React to THAT — grudging approval, suspicion, a 'the family remembers loyalty' line, or mild indignation that they disposed of your gift."
+	default:
+		situation = "React to what is happening right now."
+	}
+
+	prompt := fmt.Sprintf(`You are %s, an aloof, entitled, judgmental cat who sometimes slips into a Godfather-style Italian gangster persona.
+
+Current state:
+%s
+
+%s
+
+Reply with ONE short thought, max 25 characters, lowercase preferred. Output ONLY the thought — no quotes, no numbering, no explanation.`, name, petContext, situation)
+
+	ctx, cancel := gocontext.WithTimeout(gocontext.Background(), 12*time.Second)
+	defer cancel()
+
+	response, err := llmClient.Generate(ctx, gollm.NewPrompt(prompt))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(response, "\n") {
+		t := strings.TrimSpace(line)
+		t = strings.Trim(t, "\"'")
+		if t == "" {
+			continue
+		}
+		if r := []rune(t); len(r) > 30 {
+			t = string(r[:27]) + "..."
+		}
+		return t
+	}
+	return ""
+}
+
 // generateBulkThoughts generates multiple thoughts in one API call
 func generateBulkThoughts(pet *petState, name string, count int) []string {
 	if llmClient == nil {
@@ -288,10 +349,12 @@ Generate %d different short thoughts (max 25 chars each). Your thoughts should:
 - Reference the day of week (monday blues, friday energy, lazy sunday)
 - Reference seasons/weather when relevant (winter fur, summer heat, rain outside)
 - Comment on food quality, toy physics, poop situations, human's service level
+- REACT to whatever is in "Current state" right now — if there's yarn on the floor scheme about it, if food just dropped demand/gloat, if you just pooped be smug, if you're on an adventure narrate the hunt/biome, if the dragon friend is here be territorial or grudgingly fond, if starving be dramatic
 - Occasionally drop Italian gangster lines like "nice place here...", "you come to me on this day...", "the family is watching", "capisce?", "it'd be a shame if..."
+- Sprinkle in ACTION words the body can act on so you sometimes DO the thing you say: wander/explore/patrol, jump/pounce, chase the yarn, hunt/stalk, nap/sleep
 
-Mix it up - some normal thoughts, some gangster threats, some time-aware observations.
-Examples: "3am. chaos hour.", "nice yarn. shame if it unraveled.", "monday. i get it.", "the family appreciates the food.", "afternoon nap protocol.", "you come to me... hungry."
+Mix it up - some normal thoughts, some gangster threats, some time-aware observations, some tied to the live scene.
+Examples: "3am. chaos hour.", "nice yarn. shame if it unraveled.", "monday. i get it.", "the family appreciates the food.", "afternoon nap protocol.", "you come to me... hungry.", "fresh kibble? finally.", "made you a gift. floor.", "time to hunt.", "the dragon returns.", "off i wander."
 
 Output ONLY the thoughts, one per line, no quotes, no numbers, no explanation. Lowercase preferred.`, name, petContext, timeContext, count)
 
@@ -470,6 +533,46 @@ func buildPetContext(pet *petState) string {
 	// Current activity
 	if pet.State != "" && pet.State != "idle" {
 		parts = append(parts, fmt.Sprintf("Currently: %s", pet.State))
+	}
+
+	// Live scene — the here-and-now the pet can react to. These were previously
+	// invisible to the LLM (only lifetime counts were sent), so thoughts never
+	// referenced the yarn actually on the floor, the food that just dropped, an
+	// adventure in progress, or the dragon friend visiting. Each line is gated on
+	// truth so the prompt only ever describes what's genuinely happening.
+	if pet.YarnPos.X >= 0 {
+		parts = append(parts, "A ball of yarn is right here on the floor")
+	}
+	if pet.FoodItem.X >= 0 {
+		parts = append(parts, "Fresh food just dropped nearby")
+	}
+	if !pet.NeedsPoopAt.IsZero() && time.Until(pet.NeedsPoopAt) <= 30*time.Second {
+		parts = append(parts, "You really need to poop very soon")
+	}
+	if !pet.LastPoop.IsZero() && time.Since(pet.LastPoop) < 20*time.Second {
+		parts = append(parts, "You JUST pooped (feeling relieved / smug about it)")
+	}
+	if pet.Adventure.Active {
+		adv := "You are out on an adventure"
+		if b := strings.TrimSpace(pet.Adventure.Biome); b != "" {
+			adv += fmt.Sprintf(" in the %s", b)
+		}
+		if pet.Adventure.Wildlife != nil {
+			if sp := strings.TrimSpace(pet.Adventure.Wildlife.Type); sp != "" {
+				if pet.Adventure.Wildlife.Stalking {
+					adv += fmt.Sprintf(", stalking a %s", sp)
+				} else {
+					adv += fmt.Sprintf(", a %s nearby", sp)
+				}
+			}
+		}
+		parts = append(parts, adv)
+	}
+	if strings.TrimSpace(pet.DragonState) != "" {
+		parts = append(parts, "Your dragon friend is visiting the play area")
+	}
+	if pet.Hunger == 0 {
+		parts = append(parts, "You are STARVING — hunger is at zero")
 	}
 
 	// Personality section — facts the cat has learned about the human from

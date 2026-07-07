@@ -158,13 +158,23 @@ func ensureLLMQuestionsClient() promptGenerator {
 		if model == "" {
 			switch provider {
 			case "anthropic":
-				model = "claude-3-haiku-20240307"
+				model = "claude-haiku-4-5-20251001"
 			case "openai":
 				model = "gpt-3.5-turbo"
 			case "ollama":
 				model = "llama3"
 			}
 		}
+		// Anthropic proxy: same as the thoughts path — use the configured base URL
+		// (or ANTHROPIC_BASE_URL) instead of gollm's hardcoded api.anthropic.com.
+		if provider == "anthropic" {
+			if aBase := resolveAnthropicBaseURL(llmQuestionsBaseURL); aBase != "" {
+				key := firstNonEmpty(llmQuestionsAPIKey, lookupAPIKey("ANTHROPIC_API_KEY"))
+				llmQuestionsClient = newAnthropicBaseURLClient(aBase, key, model, questionMaxTokens, 0.8)
+				return
+			}
+		}
+
 		// API key resolution is already handled by initLLM (it sets the env
 		// vars), so gollm picks them up here without us re-walking the
 		// tmux/env fallback chain.

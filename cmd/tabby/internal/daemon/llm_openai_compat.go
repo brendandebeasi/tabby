@@ -161,13 +161,20 @@ func lookupAPIKey(name string) string {
 	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
 		return v
 	}
-	out, err := exec.Command("tmux", "show-environment", name).Output()
-	if err != nil {
-		return ""
-	}
-	line := strings.TrimSpace(string(out))
-	if strings.HasPrefix(line, name+"=") {
-		return strings.TrimSpace(strings.TrimPrefix(line, name+"="))
+	// Try the tmux GLOBAL environment first (the daemon has no attached client, so
+	// a bare `show-environment` has no reliable session context), then the session
+	// env as a fallback.
+	for _, args := range [][]string{{"show-environment", "-g", name}, {"show-environment", name}} {
+		out, err := exec.Command("tmux", args...).Output()
+		if err != nil {
+			continue
+		}
+		line := strings.TrimSpace(string(out))
+		if strings.HasPrefix(line, name+"=") {
+			if v := strings.TrimSpace(strings.TrimPrefix(line, name+"=")); v != "" {
+				return v
+			}
+		}
 	}
 	return ""
 }

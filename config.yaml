@@ -78,6 +78,10 @@ sidebar:
   close_button: false
   sort_by: "group"  # "group" or "index"
   hide_predefined_colors: false  # Hide predefined color palette in context menus (keep Custom + Reset)
+  # ssh_icon: When set, remote (ssh/mosh) tabs render on ONE line prefixed with
+  # this glyph instead of a host-name row stacked above the tab name. Nerd Font
+  # nf-md-ssh is "󰣀". Leave empty for the legacy two-line host/name layout.
+  ssh_icon: "󰒋"
   debug: false  # Enable debug logging to /tmp/tabby-debug.log
   line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
   mobile_max_percent: 15
@@ -226,11 +230,17 @@ widgets:
     thoughts: true         # Enable LLM thoughts
     thought_interval: 60   # Seconds between thoughts (60s = ~1 API call per 10 min)
     thought_speed: 3       # Frames per scroll step (1=fast, 5=slow)
-    # llm_api_key: ""      # Set in your local config (not in repo)
+    # llm_provider: "anthropic"   # optional; default is anthropic
+    # llm_base_url: ""            # optional Anthropic proxy base URL. Leave blank to
+    #                             # use $ANTHROPIC_BASE_URL (env / tmux) instead, like
+    #                             # Claude Code. Either one routes Anthropic through the
+    #                             # proxy so tabby avoids api.anthropic.com + its MITM
+    #                             # cert prompt. Empty here AND no env => plain api.anthropic.com.
+    # llm_api_key: ""             # keep OUT of the repo — set $ANTHROPIC_API_KEY (env / tmux)
     position: bottom
     pin: true
     priority: 50           # Between clock (100) and stats
-    hunger_decay: 1728     # Seconds between hunger ticks (~2 days to starve)
+    hunger_decay: 8640     # Seconds between hunger ticks (~5 days to starve)
     poop_chance: 50        # 50% chance to poop after eating
     debug_bar: true        # Show debug controls below pet widget
     divider: "─"

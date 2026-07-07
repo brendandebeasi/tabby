@@ -650,6 +650,13 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 		}
 
 		if hasSidebar && nonSystemLive == 0 {
+			// A window in full-width-sidebar mode legitimately has only its sidebar +
+			// carousel footer (its content is stashed in limbo). Never reap it as an
+			// orphan — that would destroy the full-width view. Authoritative check,
+			// only reached for candidate-orphan windows so the extra query is rare.
+			if fsv, _ := exec.Command("tmux", "show-window-option", "-v", "-t", windowID, "@tabby_fullscreen_sidebar").Output(); strings.TrimSpace(string(fsv)) == "1" {
+				continue
+			}
 			currentWindow := ""
 			if curOut, curErr := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); curErr == nil {
 				currentWindow = strings.TrimSpace(string(curOut))

@@ -765,7 +765,12 @@ type Coordinator struct {
 
 	// Sidebar visibility state (true while the sidebar pane is stashed in a
 	// holding window via break-pane; false when it is live in its parent window).
-	sidebarHidden    bool
+	sidebarHidden bool
+	// fullscreenSidebarWinID is the window whose CONTENT is currently stashed while
+	// its sidebar pane fills the content area full-width (phone-only "full-width
+	// sidebar" mode). Empty = not active. Mirrors the physical @tabby_fullscreen_sidebar
+	// window-option so it survives a daemon restart.
+	fullscreenSidebarWinID string
 	newWindowMu      sync.RWMutex
 	newWindowStatus  NewWindowStatus
 	windowTransition WindowTransition
@@ -1106,6 +1111,8 @@ type petState struct {
 	LastFed           time.Time
 	LastPet           time.Time
 	LastPoop          time.Time
+	LastHungerTick    time.Time // wall-clock anchor for hunger decay (predictable, reload-proof)
+	LastHappyTick     time.Time // wall-clock anchor for happiness decay
 	LastThought       string
 	ThoughtScroll     int
 	FloatingItems     []floatingItem
@@ -1582,6 +1589,14 @@ func NewCoordinator(sessionID string) *Coordinator {
 	// surfaced when a prior daemon died), so a restart immediately removes it from
 	// native window cycling and re-establishes the parked state.
 	c.parkExistingMinimizedWindows()
+
+	// Re-learn full-width-sidebar mode from tmux (the physical state — content in
+	// limbo, sidebar full-width, @tabby_fullscreen_sidebar set — survives a daemon
+	// restart; we just need the in-memory pointer back).
+	c.fullscreenSidebarWinID = fullscreenSidebarActiveWindowID(c.dashboardSession())
+	if c.fullscreenSidebarWinID != "" {
+		logEvent("FULLSCREEN_RECONCILE window=%s", c.fullscreenSidebarWinID)
+	}
 
 	return c
 }
@@ -2715,6 +2730,31 @@ func (c *Coordinator) loadPetState() {
 	}
 }
 
+// triggerPetEventThought fires a fresh LLM reaction to a pet EVENT (poop,
+// cleaned) in the background and, when it returns, promotes it to the pet's
+// current thought. The caller sets a canned line first (instant fallback); this
+// UPGRADES it to a unique LLM line a moment later. The pet context is built
+// synchronously here — callers MUST hold stateMu — and passed to the goroutine as
+// a string, so the goroutine never touches shared pet state until it re-locks to
+// write LastThought.
+func (c *Coordinator) triggerPetEventThought(event string) {
+	if llmClient == nil {
+		return
+	}
+	name := c.config.Widgets.Pet.Name
+	petContext := buildPetContext(&c.pet) // safe: caller holds stateMu
+	go func() {
+		thought := generateEventThought(name, event, petContext)
+		if thought == "" {
+			return
+		}
+		c.stateMu.Lock()
+		c.pet.LastThought = thought
+		c.pet.ThoughtScroll = 0
+		c.stateMu.Unlock()
+	}()
+}
+
 // savePetStateData saves the given pet state snapshot to the shared file.
 // Safe to call without holding stateMu since it only writes the provided data.
 func savePetStateData(pet petState) {
@@ -3424,6 +3464,11 @@ func (c *Coordinator) setWindowColor(windowID, color string) {
 	if win, ok := c.getWindowByID(windowID); ok {
 		if key, keyOK := c.windowNameKey(win); keyOK {
 			c.captureCWDAppearance(key, trimmedColor, win.Icon)
+			// Re-baseline the transition key to the current dir so this manual set
+			// isn't seen as a transition next refresh (which would re-apply the
+			// remembered color over the user's choice). The dir didn't change, so
+			// key==AppearanceKey holds and restoreAppearanceOnTransition no-ops.
+			exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_appearance_key", key).Run()
 		}
 	}
 }
@@ -3442,6 +3487,9 @@ func (c *Coordinator) setWindowIcon(windowID, icon string) {
 	if win, ok := c.getWindowByID(windowID); ok {
 		if key, keyOK := c.windowNameKey(win); keyOK {
 			c.captureCWDAppearance(key, win.CustomColor, trimmedIcon)
+			// Re-baseline the transition key (see setWindowColor) so a manual marker
+			// set isn't clobbered by restoreAppearanceOnTransition next refresh.
+			exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_appearance_key", key).Run()
 		}
 	}
 }
@@ -3507,6 +3555,11 @@ func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
 		// known directory/host its remembered look without repainting existing
 		// siblings every refresh (the bug that retired the old per-dir restore).
 		c.seedWindowAppearance(&windows[i], key)
+
+		// After the one-time seed, re-apply the remembered color/marker if this
+		// window has since moved into a DIFFERENT known directory/host (a cd or an
+		// ssh). No-ops in the steady state and for a just-seeded window.
+		c.restoreAppearanceOnTransition(&windows[i], key)
 	}
 }
 
@@ -3553,6 +3606,48 @@ func (c *Coordinator) seedWindowAppearance(win *tmux.Window, key string) {
 	// one-shot seed back into the per-refresh restore we deliberately removed.
 	exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_color_seeded", "1").Run()
 	win.AppearanceSeeded = true
+
+	// Establish the transition baseline: record the key whose appearance this window
+	// now carries so restoreAppearanceOnTransition can later detect a cd/ssh move.
+	// Stamp it unconditionally (even if nothing was seeded) so the very first refresh
+	// after seeding is never mistaken for a transition.
+	exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_appearance_key", key).Run()
+	win.AppearanceKey = key
+}
+
+// restoreAppearanceOnTransition re-applies a directory's remembered color/marker
+// when a window moves INTO that directory (a cd, or an ssh into a new host+dir),
+// and only then. It is deliberately gated so it is NOT the per-refresh restore that
+// was removed for bleeding siblings: it fires exactly once per transition, on the
+// single window whose live key changed, and never on a window merely sitting in a
+// directory. Group is intentionally not handled here — applyCWDIdentityMappings
+// already keeps @tabby_group in sync every refresh.
+func (c *Coordinator) restoreAppearanceOnTransition(win *tmux.Window, key string) {
+	if !win.AppearanceSeeded {
+		return // a brand-new window is seedWindowAppearance's job, not ours
+	}
+	if key == win.AppearanceKey {
+		return // steady state: no move, no repaint — this is the anti-bleed guard
+	}
+
+	// The window transitioned into a new directory/host. Stamp the new key up front
+	// so we don't retry the lookup every refresh, then apply that directory's
+	// remembered color/marker to THIS window only.
+	exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_appearance_key", key).Run()
+	win.AppearanceKey = key
+
+	rec, recOK := c.getCWDColorMapping(key)
+	if !recOK {
+		return
+	}
+	if color := strings.TrimSpace(rec.Color); color != "" && color != win.CustomColor {
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_color", color).Run()
+		win.CustomColor = color
+	}
+	if icon := strings.TrimSpace(rec.Icon); icon != "" && icon != win.Icon {
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_icon", icon).Run()
+		win.Icon = icon
+	}
 }
 
 // seedAppearancePlan decides which color/marker a not-yet-seeded window should
@@ -3704,7 +3799,7 @@ func (c *Coordinator) RefreshWindows() {
 	if len(windows) > 0 {
 		filtered := windows[:0]
 		for _, w := range windows {
-			if strings.HasPrefix(w.Name, sidebarStashWindowPrefix) {
+			if strings.HasPrefix(w.Name, sidebarStashWindowPrefix) || strings.HasPrefix(w.Name, contentStashWindowPrefix) {
 				continue
 			}
 			filtered = append(filtered, w)
@@ -5520,7 +5615,8 @@ func (c *Coordinator) UpdatePetState() bool {
 		c.pet.PoopPositions = append(c.pet.PoopPositions, poopX)
 		c.pet.LastPoop = now
 		c.pet.NeedsPoopAt = time.Time{}
-		c.pet.LastThought = randomThought("poop")
+		c.pet.LastThought = randomThought("poop") // instant fallback; LLM upgrades it below
+		c.triggerPetEventThought("poop")
 		// Move away from poop after placing it
 		if c.pet.Pos.X > maxX/2 {
 			c.pet.TargetPos = pos2D{X: c.pet.Pos.X - 3, Y: 0}
@@ -5949,22 +6045,56 @@ func (c *Coordinator) UpdatePetState() bool {
 	hasConnectedClients := len(c.clientWidths) > 0
 	c.clientWidthsMu.RUnlock()
 
-	if hasConnectedClients {
-		// Use config for hunger decay rate (frames = seconds * 10 since ~10fps)
-		hungerDecayFrames := c.config.Widgets.Pet.HungerDecay * 10
-		if hungerDecayFrames <= 0 {
-			hungerDecayFrames = 17280 // Default: ~2 days to starve (1728 sec/tick)
+	if !hasConnectedClients {
+		// No renderer attached: pause decay and keep the anchors current so a long
+		// detach doesn't dump a backlog of decrements the moment a client reattaches.
+		c.pet.LastHungerTick = now
+		c.pet.LastHappyTick = now
+	} else {
+		// Wall-clock decay anchored to a persisted tick time. This replaces the old
+		// AnimFrame%frames coupling, whose decay rate silently tracked the animation
+		// FPS and, combined with attach-gated frame counting, made "how fast does the
+		// pet get hungry" hard to reason about. Now it is exactly one hunger point per
+		// HungerDecay seconds of attached time, and LastHungerTick persists across the
+		// (frequent) daemon reloads so a restart isn't a reset.
+		hungerDecaySec := c.config.Widgets.Pet.HungerDecay
+		if hungerDecaySec <= 0 {
+			hungerDecaySec = 1728 // ~2 days to starve at the default
 		}
-		if c.pet.Hunger > 0 && c.pet.AnimFrame%hungerDecayFrames == 0 {
+		hungerInterval := time.Duration(hungerDecaySec) * time.Second
+		if c.pet.LastHungerTick.IsZero() {
+			c.pet.LastHungerTick = now
+		}
+		if c.pet.LastHappyTick.IsZero() {
+			c.pet.LastHappyTick = now
+		}
+		// Cap catch-up so a stale anchor (host asleep, daemon down for days) can't
+		// drain the whole bar in one tick — decay at most a few points per update.
+		const maxCatchup = 5
+		for n := 0; n < maxCatchup && c.pet.Hunger > 0 && now.Sub(c.pet.LastHungerTick) >= hungerInterval; n++ {
 			c.pet.Hunger--
+			c.pet.LastHungerTick = c.pet.LastHungerTick.Add(hungerInterval)
 		}
-		// Happiness decays 1.5x faster when hungry
-		happyDecayFrames := hungerDecayFrames * 2 / 3
-		if happyDecayFrames <= 0 {
-			happyDecayFrames = 11520 // Default: proportional to hunger decay
+		if now.Sub(c.pet.LastHungerTick) >= hungerInterval {
+			c.pet.LastHungerTick = now // discard any remaining backlog past the cap
 		}
-		if c.pet.Hunger < 30 && c.pet.Happiness > 0 && c.pet.AnimFrame%happyDecayFrames == 0 {
-			c.pet.Happiness--
+		// Happiness decays 1.5x faster, but only while hungry.
+		happyInterval := hungerInterval * 2 / 3
+		if happyInterval <= 0 {
+			happyInterval = hungerInterval
+		}
+		if c.pet.Hunger < 15 {
+			for n := 0; n < maxCatchup && c.pet.Happiness > 0 && now.Sub(c.pet.LastHappyTick) >= happyInterval; n++ {
+				c.pet.Happiness--
+				c.pet.LastHappyTick = c.pet.LastHappyTick.Add(happyInterval)
+			}
+			if now.Sub(c.pet.LastHappyTick) >= happyInterval {
+				c.pet.LastHappyTick = now
+			}
+		} else {
+			// Not hungry: keep the happy anchor fresh so it doesn't build a backlog
+			// that dumps all at once the instant hunger dips below 30.
+			c.pet.LastHappyTick = now
 		}
 	}
 
@@ -6932,6 +7062,12 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 		if narrow {
 			logEvent("PROFILE_TRANSITION_SKIP_DESKTOP reason=phone_client_still_attached")
 		} else {
+			// If a phone full-width sidebar is open, restore its content first — a
+			// desktop client must never be shown a content-less window.
+			if fs := fullscreenSidebarActiveWindowID(c.dashboardSession()); fs != "" {
+				c.closeFullscreenSidebar(fs, false)
+				coordinatorDebugLog.Printf("profile transition phone->desktop: closed full-width sidebar %s", fs)
+			}
 			// Kill the phone window-header (button bar) immediately, in the same
 			// tick as the sidebar restore. spawnWindowHeaders would eventually do
 			// this on its own, but only after loopFullRefreshCooldown elapses —
@@ -7001,6 +7137,17 @@ func hasNarrowClient() bool {
 // back to the original window, and join-pane them in at the left edge.
 const sidebarStashWindowPrefix = "_tabby_stash_"
 
+// contentStashWindowPrefix names holding windows for CONTENT panes parked while a
+// window is in full-width-sidebar mode (phone). Kept DISTINCT from
+// sidebarStashWindowPrefix so the sidebar stash/restore paths and the content
+// stash/restore paths never touch each other's windows. Content stashes live in
+// the same detached _tabby_limbo session.
+const contentStashWindowPrefix = "_tabby_content_"
+
+func contentStashNameForWindow(windowID string) string {
+	return contentStashWindowPrefix + strings.TrimPrefix(windowID, "@")
+}
+
 // sidebarStashParkBase is the base tmux window index used for sidebar stash
 // windows INSIDE the limbo session (see sidebarLimboSession). Stashes are
 // appended at indices >= this value purely to keep them clustered and away
@@ -7044,13 +7191,29 @@ func ensureLimboSession() {
 // window new-session created, so the limbo session stops appearing in the
 // native session chooser the moment the sidebar is fully restored.
 func cleanupLimboSessionIfEmpty() {
-	if sidebarIsStashed() {
-		return // stashes still parked somewhere — keep the holder alive
+	if sidebarIsStashed() || limboHasContentStash() {
+		return // sidebar OR content stashes still parked — keep the holder alive
 	}
 	if err := exec.Command("tmux", "has-session", "-t", sidebarLimboSession).Run(); err == nil {
 		exec.Command("tmux", "kill-session", "-t", sidebarLimboSession).Run()
 		coordinatorDebugLog.Printf("cleanupLimboSessionIfEmpty: killed %s", sidebarLimboSession)
 	}
+}
+
+// limboHasContentStash reports whether any full-width-sidebar CONTENT stash window
+// exists anywhere — used so cleanupLimboSessionIfEmpty never tears down the holder
+// (and the stashed content inside it) while a window is in full-width mode.
+func limboHasContentStash() bool {
+	out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_name}").Output()
+	if err != nil {
+		return false
+	}
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(name, contentStashWindowPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // minimizedHoldingSession is a dedicated DETACHED session that holds MINIMIZED
@@ -7547,6 +7710,191 @@ func (c *Coordinator) restoreSidebarPanes() {
 	// Once every stash has been rejoined, tear down the now-empty limbo holder
 	// so it stops lingering in the native session chooser.
 	cleanupLimboSessionIfEmpty()
+}
+
+// fullscreenSidebarActiveWindowID returns the window currently in full-width
+// sidebar mode (tagged @tabby_fullscreen_sidebar=1) for the session, or "".
+// Reads from tmux so it is correct across a daemon restart. Mirrors
+// dashboardActiveWindowID.
+func fullscreenSidebarActiveWindowID(sess string) string {
+	if sess == "" {
+		return ""
+	}
+	out := tmuxOutputTrimmed("list-windows", "-t", sess, "-F", "#{window_id}\t#{@tabby_fullscreen_sidebar}")
+	for _, line := range dashLines(out) {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[1]) == "1" {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	return ""
+}
+
+// fullscreenSidebarPanes classifies a window's panes into its content panes and
+// its window-header footer pane (+ that footer's height). Sidebar/other aux panes
+// are ignored.
+func fullscreenSidebarPanes(winID string) (content []string, footerPane string, footerHeight int) {
+	out := tmuxOutputTrimmed("list-panes", "-t", winID, "-F",
+		"#{pane_id}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_height}")
+	for _, line := range dashLines(out) {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		pid, cur, start := parts[0], parts[1], parts[2]
+		combined := cur + " " + start
+		if strings.Contains(combined, "window-header") {
+			footerPane = pid
+			footerHeight, _ = strconv.Atoi(strings.TrimSpace(parts[3]))
+			continue
+		}
+		if isSidebarPaneCommand(cur, start) || isAuxiliaryPaneCommand(cur) {
+			continue
+		}
+		content = append(content, pid)
+	}
+	return content, footerPane, footerHeight
+}
+
+// openFullscreenSidebar (phone) hides the window's CONTENT and fills the content
+// area with a full-width sidebar renderer, keeping the window-header carousel as a
+// bottom footer. The content pane(s) are break-pane'd into the detached _tabby_limbo
+// session (tagged @tabby_fs_origin) and restored on close. V1 supports single-pane
+// content windows; multi-pane windows are left unchanged (deferred).
+func (c *Coordinator) openFullscreenSidebar(winID string) {
+	winID = strings.TrimSpace(winID)
+	if winID == "" || c.fullscreenSidebarWinID != "" {
+		return
+	}
+	content, footerPane, footerH := fullscreenSidebarPanes(winID)
+	if footerPane == "" || len(content) == 0 {
+		return // need a footer to sit below and content to hide
+	}
+	if len(content) > 1 {
+		// V1: single content pane only. Leave multi-pane windows on today's
+		// behavior; full window_layout round-trip is a follow-up.
+		coordinatorDebugLog.Printf("openFullscreenSidebar: %s has %d content panes; V1 single-pane only", winID, len(content))
+		return
+	}
+	c.ForgetAllWindowLayouts()
+	// Bracket the whole swap with @tabby_spawning so the daemon's spawn/layout
+	// passes don't race us (respawn a narrow sidebar, snap a layout, etc.) while
+	// panes are mid-move. Mirrors enterDashboard.
+	_ = tmuxRun("set-option", "-g", "@tabby_spawning", "1")
+	defer tmuxRun("set-option", "-gu", "@tabby_spawning")
+	ensureLimboSession()
+
+	// Remember the footer height so close can pin it back exactly.
+	exec.Command("tmux", "set-window-option", "-t", winID, "@tabby_fs_footer_height", strconv.Itoa(footerH)).Run()
+
+	// Stash the content pane into the limbo session, tagged with its origin window.
+	stashName := contentStashNameForWindow(winID)
+	sw, err := exec.Command("tmux", "break-pane", "-d", "-P", "-F", "#{window_id}", "-s", content[0], "-n", stashName).Output()
+	if err != nil {
+		coordinatorDebugLog.Printf("openFullscreenSidebar: break-pane failed for %s: %v", content[0], err)
+		return
+	}
+	stashWin := strings.TrimSpace(string(sw))
+	if stashWin != "" {
+		exec.Command("tmux", "set-window-option", "-t", stashWin, "@tabby_fs_origin", winID).Run()
+		exec.Command("tmux", "move-window", "-d", "-a", "-s", stashWin,
+			"-t", fmt.Sprintf("%s:%d", sidebarLimboSession, sidebarStashParkBase)).Run()
+	}
+
+	// Kill any EXISTING sidebar pane(s) in the window (on a multi-client session the
+	// sidebar may be shown, not stashed) so we don't end up with two sidebars
+	// squeezing the footer. A fresh full-width one is spawned next.
+	killOut := tmuxOutputTrimmed("list-panes", "-t", winID, "-F",
+		"#{pane_id}\t#{pane_current_command}\t#{pane_start_command}")
+	for _, line := range dashLines(killOut) {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		if isSidebarPaneCommand(parts[1], parts[2]) {
+			exec.Command("tmux", "kill-pane", "-t", parts[0]).Run()
+		}
+	}
+
+	// Spawn a full-width sidebar renderer ABOVE the footer (-v -b -f), then pin the
+	// footer back to its height so the sidebar fills the rest. -f = full window
+	// width, so the sidebar is full-width with NO width clamp.
+	if rendererBin := getRendererBin(); rendererBin != "" {
+		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -window '%s'",
+			rendererBin, c.dashboardSession(), winID)
+		if err := exec.Command("tmux", "split-window", "-d", "-v", "-b", "-f", "-t", footerPane, cmdStr).Run(); err != nil {
+			coordinatorDebugLog.Printf("openFullscreenSidebar: sidebar spawn failed: %v", err)
+		}
+	}
+	if footerH > 0 {
+		exec.Command("tmux", "resize-pane", "-t", footerPane, "-y", strconv.Itoa(footerH)).Run()
+	}
+
+	exec.Command("tmux", "set-window-option", "-t", winID, "@tabby_fullscreen_sidebar", "1").Run()
+	c.fullscreenSidebarWinID = winID
+	logEvent("FULLSCREEN_OPEN window=%s", winID)
+}
+
+// closeFullscreenSidebar reverses openFullscreenSidebar: kill the full-width
+// sidebar pane, rejoin the stashed content above the footer, and clear the flag.
+func (c *Coordinator) closeFullscreenSidebar(winID string, focusContent bool) {
+	winID = strings.TrimSpace(winID)
+	if winID == "" {
+		return
+	}
+	c.ForgetAllWindowLayouts()
+	_ = tmuxRun("set-option", "-g", "@tabby_spawning", "1")
+	defer tmuxRun("set-option", "-gu", "@tabby_spawning")
+
+	// Kill the full-width sidebar pane(s) in the window (leave the footer).
+	content, footerPane, _ := fullscreenSidebarPanes(winID)
+	footerH := 0
+	if v := tmuxOutputTrimmed("show-window-option", "-v", "-t", winID, "@tabby_fs_footer_height"); v != "" {
+		footerH, _ = strconv.Atoi(v)
+	}
+	_ = content // content should be empty while open; kept for symmetry
+	sbOut := tmuxOutputTrimmed("list-panes", "-t", winID, "-F",
+		"#{pane_id}\t#{pane_current_command}\t#{pane_start_command}")
+	for _, line := range dashLines(sbOut) {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		if isSidebarPaneCommand(parts[1], parts[2]) {
+			exec.Command("tmux", "kill-pane", "-t", parts[0]).Run()
+		}
+	}
+
+	// Rejoin the stashed content ABOVE the footer, then pin the footer height.
+	if footerPane != "" {
+		out := tmuxOutputTrimmed("list-windows", "-t", sidebarLimboSession, "-F",
+			"#{window_id}\t#{@tabby_fs_origin}")
+		for _, line := range dashLines(out) {
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) != 2 || strings.TrimSpace(parts[1]) != winID {
+				continue
+			}
+			stashWin := strings.TrimSpace(parts[0])
+			cpane := firstToken(tmuxOutputTrimmed("list-panes", "-t", stashWin, "-F", "#{pane_id}"), "%")
+			if cpane != "" {
+				exec.Command("tmux", "join-pane", "-d", "-v", "-b", "-s", cpane, "-t", footerPane).Run()
+			}
+		}
+		if footerH > 0 {
+			exec.Command("tmux", "resize-pane", "-t", footerPane, "-y", strconv.Itoa(footerH)).Run()
+		}
+	}
+
+	exec.Command("tmux", "set-window-option", "-t", winID, "-u", "@tabby_fullscreen_sidebar").Run()
+	exec.Command("tmux", "set-window-option", "-t", winID, "-u", "@tabby_fs_footer_height").Run()
+	if c.fullscreenSidebarWinID == winID {
+		c.fullscreenSidebarWinID = ""
+	}
+	cleanupLimboSessionIfEmpty()
+	if focusContent {
+		focusContentPaneInActiveWindow()
+	}
+	logEvent("FULLSCREEN_CLOSE window=%s", winID)
 }
 
 // selectNeighborWindow cycles to the prev/next non-stash window relative to
@@ -9019,6 +9367,177 @@ func abbreviatePath(path string, maxWidth int) string {
 // RenderHeaderForClient renders a 1-line window header for a specific window.
 // Each window has one window-header that shows the active pane's label.
 // clientID format: "window-header:@123" where @123 is the window ID.
+// renderPhoneCarousel builds the 3-row fat-touch phone window-header (the bottom
+// button bar: prev, hamburger, cycle, new, close, next). It depends ONLY on the
+// window id, the pane width, and the pressed-button state — NOT on any content
+// pane. That's important: while the full-width phone sidebar is open the window
+// has no content pane (it's stashed in limbo), and RenderHeaderForClient's
+// content-pane lookup would otherwise blank the bar. Returns (content, regions,
+// totalLines).
+func (c *Coordinator) renderPhoneCarousel(windowID string, width int, headerBg string) (string, []daemon.ClickableRegion, int) {
+	var regions []daemon.ClickableRegion
+	const buttonCount = 6
+
+	fgColor := lipgloss.Color("230") // off-white
+	pressFg := lipgloss.Color("16")
+	pressBg := lipgloss.Color("255")
+	navBg := lipgloss.Color("24")    // blue
+	menuBg := lipgloss.Color("240")  // gray
+	cycleBg := lipgloss.Color("130") // amber
+	newBg := lipgloss.Color("28")    // green
+	closeBg := lipgloss.Color("124") // red
+
+	prevStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(navBg)
+	hamStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(menuBg)
+	cycleStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(cycleBg)
+	newStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(newBg)
+	closeStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(closeBg)
+	nextStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(navBg)
+	btnPressStyle := lipgloss.NewStyle().Bold(true).Foreground(pressFg).Background(pressBg)
+	fillStyle := lipgloss.NewStyle()
+	if headerBg != "" {
+		fillStyle = fillStyle.Background(lipgloss.Color(headerBg))
+	}
+
+	hamburger := "≡"  // ≡
+	prevGlyph := "▲"  // ▲
+	cycleGlyph := "⛶"      // toggle zoom on the active content pane
+	newGlyph := "+"        // new window
+	closeGlyph := "✕" // ✕
+	nextGlyph := "▼"  // ▼
+
+	gapW := 1
+	cellW := (width - gapW*(buttonCount-1)) / buttonCount
+	if cellW < 3 {
+		cellW = 3
+	}
+	used := cellW*buttonCount + gapW*(buttonCount-1)
+	if used > width {
+		gapW = 0
+		cellW = width / buttonCount
+		if cellW < 1 {
+			cellW = 1
+		}
+		used = cellW * buttonCount
+		if used > width {
+			used = width
+		}
+	}
+	leftover := width - used
+	if leftover < 0 {
+		leftover = 0
+	}
+
+	pressedAction := c.activeWindowHeaderPress(windowID)
+	isPrevPressed := pressedAction == "window_header:prev_window"
+	isHamPressed := pressedAction == "window_header:hamburger"
+	isCyclePressed := pressedAction == "window_header:cycle_pane"
+	isNewPressed := pressedAction == "window_header:new_window"
+	isClosePressed := pressedAction == "window_header:close_window"
+	isNextPressed := pressedAction == "window_header:next_window"
+
+	styleFor := func(base lipgloss.Style, pressed bool) lipgloss.Style {
+		if pressed {
+			return btnPressStyle
+		}
+		return base
+	}
+	renderCell := func(glyph string, base lipgloss.Style, pressed bool) string {
+		style := styleFor(base, pressed)
+		gw := uniseg.StringWidth(glyph)
+		if gw > cellW {
+			return style.Render(runewidth.Truncate(glyph, cellW, ""))
+		}
+		padTotal := cellW - gw
+		leftPad := padTotal / 2
+		rightPad := padTotal - leftPad
+		return style.Render(strings.Repeat(" ", leftPad) + glyph + strings.Repeat(" ", rightPad))
+	}
+	renderEmpty := func(base lipgloss.Style, pressed bool) string {
+		return styleFor(base, pressed).Render(strings.Repeat(" ", cellW))
+	}
+
+	gapStr := fillStyle.Render(strings.Repeat(" ", gapW))
+	midGapW := gapW + leftover
+	midGapStr := fillStyle.Render(strings.Repeat(" ", midGapW))
+
+	middleBare := renderCell(prevGlyph, prevStyle, isPrevPressed) + gapStr +
+		renderCell(hamburger, hamStyle, isHamPressed) + gapStr +
+		renderCell(cycleGlyph, cycleStyle, isCyclePressed) + midGapStr +
+		renderCell(newGlyph, newStyle, isNewPressed) + gapStr +
+		renderCell(closeGlyph, closeStyle, isClosePressed) + gapStr +
+		renderCell(nextGlyph, nextStyle, isNextPressed)
+	blankRow := renderEmpty(prevStyle, isPrevPressed) + gapStr +
+		renderEmpty(hamStyle, isHamPressed) + gapStr +
+		renderEmpty(cycleStyle, isCyclePressed) + midGapStr +
+		renderEmpty(newStyle, isNewPressed) + gapStr +
+		renderEmpty(closeStyle, isClosePressed) + gapStr +
+		renderEmpty(nextStyle, isNextPressed)
+	emptyRow := blankRow
+
+	p0 := 0
+	p1 := cellW
+	h0 := p1 + gapW
+	h1 := h0 + cellW
+	cy0 := h1 + gapW
+	cy1 := cy0 + cellW
+	nw0 := cy1 + midGapW
+	nw1 := nw0 + cellW
+	cl0 := nw1 + gapW
+	cl1 := cl0 + cellW
+	n0 := cl1 + gapW
+	n1 := n0 + cellW
+	regions = append(regions,
+		daemon.ClickableRegion{StartLine: 0, EndLine: 2, StartCol: p0, EndCol: p1, Action: "window_header:prev_window", Target: windowID},
+		daemon.ClickableRegion{StartLine: 0, EndLine: 2, StartCol: h0, EndCol: h1, Action: "window_header:hamburger", Target: windowID},
+		daemon.ClickableRegion{StartLine: 0, EndLine: 2, StartCol: cy0, EndCol: cy1, Action: "window_header:cycle_pane", Target: windowID},
+		daemon.ClickableRegion{StartLine: 0, EndLine: 2, StartCol: nw0, EndCol: nw1, Action: "window_header:new_window", Target: windowID},
+		daemon.ClickableRegion{StartLine: 0, EndLine: 2, StartCol: cl0, EndCol: cl1, Action: "window_header:close_window", Target: windowID},
+		daemon.ClickableRegion{StartLine: 0, EndLine: 2, StartCol: n0, EndCol: n1, Action: "window_header:next_window", Target: windowID},
+	)
+
+	content := emptyRow + "\n" + middleBare + "\n" + emptyRow
+	return content, regions, 3
+}
+
+// phoneCarouselPayload wraps renderPhoneCarousel into a RenderPayload. Used by the
+// early-return paths in RenderHeaderForClient so the button bar stays visible +
+// clickable even when the window has no content pane (full-width sidebar open).
+func (c *Coordinator) phoneCarouselPayload(windowID string, width int) *daemon.RenderPayload {
+	// Fill the bar's background with the window's tab colour (matching the normal
+	// carousel, which uses the active pane's header bg) so it doesn't render on a
+	// transparent background when there's no content pane. Both getters are
+	// lock-free reads — safe under the render RLock held by the caller.
+	headerBg := ""
+	if _, bg, ok := c.getWindowTabColors(windowID, true); ok {
+		headerBg = bg
+	}
+	if headerBg == "" {
+		headerBg = c.getPaneHeaderActiveBg()
+	}
+	content, regions, tl := c.renderPhoneCarousel(windowID, width, headerBg)
+	return &daemon.RenderPayload{
+		Content:    content,
+		Width:      width,
+		Height:     tl,
+		TotalLines: tl,
+		Regions:    regions,
+	}
+}
+
+// gradientBarPayload builds a 1-line header payload filled with the standard
+// lighter->base->dark-tail gradient (see applyGradientFill), used for the
+// titlebar/window-header bar when there's no pane content to render on it — so the
+// bar reads as part of the same gradient surface as the tabs instead of a flat
+// strip. A non-hex/empty bg falls back to a blank line.
+func (c *Coordinator) gradientBarPayload(bg string, width int) *daemon.RenderPayload {
+	line := strings.Repeat(" ", width)
+	if len(bg) == 7 && bg[0] == '#' {
+		line = c.applyGradientFill("", gradientEndColor(bg), bg, width)
+	}
+	return &daemon.RenderPayload{Content: line, Width: width, Height: 1, TotalLines: 1}
+}
+
 func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) *daemon.RenderPayload {
 	if width < 5 {
 		width = 5
@@ -9061,13 +9580,14 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	}
 
 	if foundWindow == nil {
-		blankLine := strings.Repeat(" ", width)
-		return &daemon.RenderPayload{
-			Content:    blankLine,
-			Width:      width,
-			Height:     1,
-			TotalLines: 1,
+		// Phone: still render the carousel — it needs only the window id, and while
+		// the full-width sidebar is open the window has no content pane to key off.
+		if width < 100 {
+			return c.phoneCarouselPayload(windowID, width)
 		}
+		// No window found: gradient a bar in the neutral header colour rather than
+		// leaving a flat pale strip.
+		return c.gradientBarPayload(c.getPaneHeaderActiveBg(), width)
 	}
 
 	// Find the specific pane this header belongs to
@@ -9079,13 +9599,18 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		}
 	}
 	if foundPane == nil {
-		blankLine := strings.Repeat(" ", width)
-		return &daemon.RenderPayload{
-			Content:    blankLine,
-			Width:      width,
-			Height:     1,
-			TotalLines: 1,
+		if width < 100 {
+			return c.phoneCarouselPayload(windowID, width)
 		}
+		// Window with no content pane (e.g. the sidebar's own window — all panes are
+		// auxiliary). Previously this rendered a FLAT pale strip; instead gradient a
+		// bar in the window's tab colour so the titlebar border matches the tab
+		// rows/TABBY header surface.
+		bg, _, _ := c.getWindowTabColors(windowID, foundWindow.Active)
+		if bg == "" {
+			bg = c.getPaneHeaderActiveBg()
+		}
+		return c.gradientBarPayload(bg, width)
 	}
 
 	// Detect which resize directions apply to this pane based on neighbors,
@@ -9526,169 +10051,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	totalLines := 1
 	_ = foundWindow // used by phone layout below
 	if width < 100 {
-		// Touch layout: 3 rows, 6 fat-tappable buttons spread across the full width.
-		// No title text — the pane-header strips below already show pane titles.
-		// Each button occupies width/6 cols with the glyph centered. Rows 0/1/2
-		// all map to the same click regions for fat touch targets.
-		// Buttons (left→right): prev window, hamburger, cycle pane, new window, close, next window.
-		regions = regions[:0]
-
-		const buttonCount = 6
-
-		// Function-coded colors. Nav buttons are neutral blue, hamburger is gray
-		// (neutral/menu), new window is green (constructive), close is red (destructive),
-		// cycle-pane is amber (within-window navigation, distinct from window-nav blue).
-		fgColor := lipgloss.Color("230") // off-white
-		pressFg := lipgloss.Color("16")
-		pressBg := lipgloss.Color("255")
-		navBg := lipgloss.Color("24")    // blue
-		menuBg := lipgloss.Color("240")  // gray
-		cycleBg := lipgloss.Color("130") // amber
-		newBg := lipgloss.Color("28")    // green
-		closeBg := lipgloss.Color("124") // red
-
-		prevStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(navBg)
-		hamStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(menuBg)
-		cycleStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(cycleBg)
-		newStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(newBg)
-		closeStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(closeBg)
-		nextStyle := lipgloss.NewStyle().Bold(true).Foreground(fgColor).Background(navBg)
-		btnPressStyle := lipgloss.NewStyle().Bold(true).Foreground(pressFg).Background(pressBg)
-		fillStyle := lipgloss.NewStyle()
-		if headerBg != "" {
-			fillStyle = fillStyle.Background(lipgloss.Color(headerBg))
-		}
-
-		hamburger := "\u2261"  // ≡
-		prevGlyph := "\u25b2"  // ▲ (up — prev window in the stack)
-		cycleGlyph := "⛶"      // toggle zoom on the active content pane
-		newGlyph := "+"        // new window
-		closeGlyph := "\u2715" // ✕
-		nextGlyph := "\u25bc"  // ▼ (down — next window in the stack)
-
-		gapW := 1
-		cellW := (width - gapW*(buttonCount-1)) / buttonCount
-		if cellW < 3 {
-			cellW = 3
-		}
-		used := cellW*buttonCount + gapW*(buttonCount-1)
-		if used > width {
-			// Not enough room for gaps — drop them entirely.
-			gapW = 0
-			cellW = width / buttonCount
-			if cellW < 1 {
-				cellW = 1
-			}
-			used = cellW * buttonCount
-			if used > width {
-				used = width
-			}
-		}
-		leftover := width - used
-		if leftover < 0 {
-			leftover = 0
-		}
-
-		pressedAction := c.activeWindowHeaderPress(windowID)
-		isPrevPressed := pressedAction == "window_header:prev_window"
-		isHamPressed := pressedAction == "window_header:hamburger"
-		isCyclePressed := pressedAction == "window_header:cycle_pane"
-		isNewPressed := pressedAction == "window_header:new_window"
-		isClosePressed := pressedAction == "window_header:close_window"
-		isNextPressed := pressedAction == "window_header:next_window"
-
-		styleFor := func(base lipgloss.Style, pressed bool) lipgloss.Style {
-			if pressed {
-				return btnPressStyle
-			}
-			return base
-		}
-
-		renderCell := func(glyph string, base lipgloss.Style, pressed bool) string {
-			style := styleFor(base, pressed)
-			gw := uniseg.StringWidth(glyph)
-			if gw > cellW {
-				return style.Render(runewidth.Truncate(glyph, cellW, ""))
-			}
-			padTotal := cellW - gw
-			leftPad := padTotal / 2
-			rightPad := padTotal - leftPad
-			return style.Render(strings.Repeat(" ", leftPad) + glyph + strings.Repeat(" ", rightPad))
-		}
-
-		renderEmpty := func(base lipgloss.Style, pressed bool) string {
-			return styleFor(base, pressed).Render(strings.Repeat(" ", cellW))
-		}
-
-		gapStr := fillStyle.Render(strings.Repeat(" ", gapW))
-		// Distribute any leftover columns into the gap between the 3 left and 3
-		// right buttons, so the bar stays edge-balanced when width%6 != 0.
-		midGapW := gapW + leftover
-		midGapStr := fillStyle.Render(strings.Repeat(" ", midGapW))
-
-		middleBare := renderCell(prevGlyph, prevStyle, isPrevPressed) + gapStr +
-			renderCell(hamburger, hamStyle, isHamPressed) + gapStr +
-			renderCell(cycleGlyph, cycleStyle, isCyclePressed) + midGapStr +
-			renderCell(newGlyph, newStyle, isNewPressed) + gapStr +
-			renderCell(closeGlyph, closeStyle, isClosePressed) + gapStr +
-			renderCell(nextGlyph, nextStyle, isNextPressed)
-
-		// Empty cells use the same pressed/unpressed style so the full 3-row block
-		// highlights as one button while pressed.
-		blankRow := renderEmpty(prevStyle, isPrevPressed) + gapStr +
-			renderEmpty(hamStyle, isHamPressed) + gapStr +
-			renderEmpty(cycleStyle, isCyclePressed) + midGapStr +
-			renderEmpty(newStyle, isNewPressed) + gapStr +
-			renderEmpty(closeStyle, isClosePressed) + gapStr +
-			renderEmpty(nextStyle, isNextPressed)
-		emptyRow := blankRow
-
-		// Click regions: gap cols between buttons are intentionally non-clickable.
-		p0 := 0
-		p1 := cellW
-		h0 := p1 + gapW
-		h1 := h0 + cellW
-		cy0 := h1 + gapW
-		cy1 := cy0 + cellW
-		nw0 := cy1 + midGapW
-		nw1 := nw0 + cellW
-		cl0 := nw1 + gapW
-		cl1 := cl0 + cellW
-		n0 := cl1 + gapW
-		n1 := n0 + cellW
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 2,
-			StartCol: p0, EndCol: p1,
-			Action: "window_header:prev_window", Target: windowID,
-		})
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 2,
-			StartCol: h0, EndCol: h1,
-			Action: "window_header:hamburger", Target: windowID,
-		})
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 2,
-			StartCol: cy0, EndCol: cy1,
-			Action: "window_header:cycle_pane", Target: windowID,
-		})
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 2,
-			StartCol: nw0, EndCol: nw1,
-			Action: "window_header:new_window", Target: windowID,
-		})
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 2,
-			StartCol: cl0, EndCol: cl1,
-			Action: "window_header:close_window", Target: windowID,
-		})
-		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: 2,
-			StartCol: n0, EndCol: n1,
-			Action: "window_header:next_window", Target: windowID,
-		})
-
-		content = emptyRow + "\n" + middleBare + "\n" + emptyRow
-		totalLines = 3
+		content, regions, totalLines = c.renderPhoneCarousel(windowID, width, headerBg)
 	}
 
 	sidebarBg := ""
@@ -10443,7 +10806,7 @@ func (c *Coordinator) getWindowTabColors(windowID string, isActive bool) (string
 		} else {
 			bgColor = grouping.ShadeColorByIndex(customColor, 1)
 		}
-		fgColor = "#ffffff"
+		fgColor = contrastFg(bgColor, isActive)
 	} else if isActive {
 		bgColor = theme.ActiveBg
 		if bgColor == "" {
@@ -10891,11 +11254,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					iconAndText = lipgloss.NewStyle().Width(restW).Render(iconAndText)
 				}
 
-				// Render hamburger menu button with matching background (gradient end
-				// colour so it continues seamlessly from the header body).
+				// Render hamburger menu button with the gradient's DARK tail colour so
+				// the row's right edge continues the shadow instead of popping back to
+				// the base colour.
 				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
 				if bg != "" {
-					menuBtn = c.applyBackgroundFill(menuBtn, bg, menuBtnW)
+					menuBtn = c.applyBackgroundFill(menuBtn, gradientTailColor(bg), menuBtnW)
 				}
 				s.WriteString(prefix + iconAndText + menuBtn + "\n")
 			} else {
@@ -10929,11 +11293,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					iconAndText = c.applyGradientFill(iconAndText, gradientEndColor(bg), bg, restW)
 				}
 
-				// Render hamburger menu button with matching background (gradient end
-				// colour so it continues seamlessly from the header body).
+				// Render hamburger menu button with the gradient's DARK tail colour so
+				// the row's right edge continues the shadow instead of popping back to
+				// the base colour.
 				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
 				if bg != "" {
-					menuBtn = c.applyBackgroundFill(menuBtn, bg, menuBtnW)
+					menuBtn = c.applyBackgroundFill(menuBtn, gradientTailColor(bg), menuBtnW)
 				}
 				s.WriteString(prefix + iconAndText + menuBtn + "\n")
 			}
@@ -11021,7 +11386,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				} else {
 					bgColor = grouping.ShadeColorByIndex(win.CustomColor, 1)
 				}
-				fgColor = "#ffffff"
+				fgColor = contrastFg(bgColor, isActive)
 			} else if isActive {
 				bgColor = theme.ActiveBg
 				if bgColor == "" {
@@ -11045,7 +11410,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if blendBg == "" {
 					blendBg = theme.Bg
 				}
-				dimmed := blendHexToward(fgColor, blendBg, 0.55)
+				dimmed := blendHexToward(fgColor, blendBg, 0.30)
 				if dimmed == fgColor {
 					dimmed = inactiveFg
 				}
@@ -11140,22 +11505,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			// numbering that matches sidebar order regardless of tmux renumbering)
 			// Display is 1-indexed by default (configurable via @tabby_base_index)
 			displayName := c.composeTabBaseName(win)
-			// SSH/mosh: tab line shows the host; the actual window name is
-			// rendered as a continuation row below. The window name may be a
-			// " | "-joined list of dir basenames (see syncWindowNames) where
-			// one segment is the ssh host itself — drop that segment so row 2
-			// only shows the local dirs. Skip row 2 entirely if nothing's left.
-			remoteContinuation := ""
-			if win.RemoteHost != "" {
-				remoteContinuation = dropHostSegment(stripRemotePrefix(displayName), win.RemoteHost)
-				displayName = win.RemoteHost
-				if strings.EqualFold(remoteContinuation, win.RemoteHost) {
-					remoteContinuation = ""
-				}
-			}
-			if mk := effectiveWindowMarker(win.Icon, group.Theme.Icon); mk != "" {
-				displayName = mk + " " + displayName
-			}
+			// SSH/mosh label. Legacy mode puts the host on the tab line and the
+			// local dir(s) on a continuation row; icon mode collapses to one line
+			// (glyph + dir). See remoteTabDisplay.
+			var remoteContinuation string
+			displayName, remoteContinuation = c.remoteTabDisplay(win, displayName)
+			// ssh glyph sits ahead of the group marker: "<glyph> <marker> <name>".
+			displayName = composeTabMarker(c.sshTabGlyph(win), effectiveWindowMarker(win.Icon, group.Theme.Icon)) + displayName
 			visualNum := c.windowVisualPos[win.ID]
 			baseContent := fmt.Sprintf("%d. %s", visualNum, displayName)
 
@@ -11261,7 +11617,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					// direction as live ones (the reverse-for-minimized scheme was
 					// dropped); the Minimized section's muted colour still sets it apart.
 					fromBg, toBg := gradientEndColor(bgColor), bgColor
-					rowEndBg = toBg
+					rowEndBg = gradientTailColor(bgColor) // dark tail, so the menu button continues the shadow
 					contentRendered = c.applyGradientFill(contentRendered, fromBg, toBg, contentWidth)
 				}
 
@@ -11624,8 +11980,8 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			} else {
 				bgColor = grouping.ShadeColorByIndex(win.CustomColor, 1)
 			}
-			// Custom colors typically have dark backgrounds, use white text
-			fgColor = "#ffffff"
+			// Contrast-aware: dark text on light custom colours, white on dark.
+			fgColor = contrastFg(bgColor, isActive)
 		} else if isActive {
 			bgColor = theme.ActiveBg
 			if bgColor == "" {
@@ -11650,7 +12006,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			if blendBg == "" {
 				blendBg = theme.Bg
 			}
-			dimmed := blendHexToward(fgColor, blendBg, 0.55)
+			dimmed := blendHexToward(fgColor, blendBg, 0.30)
 			if dimmed == fgColor {
 				dimmed = inactiveFg
 			}
@@ -11738,20 +12094,12 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		// Build tab content with group prefix
 		// Display is 0-indexed to match tmux window indices
 		displayName := c.composeTabBaseName(win)
-		// SSH/mosh: tab line shows host; window name renders as a continuation.
-		// Drop the host segment from " | "-joined names and skip the row when
-		// it would just repeat the host.
-		remoteContinuation := ""
-		if win.RemoteHost != "" {
-			remoteContinuation = dropHostSegment(stripRemotePrefix(displayName), win.RemoteHost)
-			displayName = win.RemoteHost
-			if strings.EqualFold(remoteContinuation, win.RemoteHost) {
-				remoteContinuation = ""
-			}
-		}
-		if mk := effectiveWindowMarker(win.Icon, theme.Icon); mk != "" {
-			displayName = mk + " " + displayName
-		}
+		// SSH/mosh label: host+continuation (legacy) or single-line glyph+dir
+		// (icon mode). See remoteTabDisplay.
+		var remoteContinuation string
+		displayName, remoteContinuation = c.remoteTabDisplay(win, displayName)
+		// ssh glyph sits ahead of the group marker: "<glyph> <marker> <name>".
+		displayName = composeTabMarker(c.sshTabGlyph(win), effectiveWindowMarker(win.Icon, theme.Icon)) + displayName
 		visualNum := c.windowVisualPos[win.ID]
 		baseContent := fmt.Sprintf("%d. %s%s", visualNum, groupPrefix, displayName)
 
@@ -13575,7 +13923,7 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	// Dead overrides everything
 	if c.pet.IsDead {
 		petSprite = sprites.Dead
-	} else if c.pet.Hunger < 30 {
+	} else if c.pet.Hunger < 15 {
 		petSprite = sprites.Hungry
 	}
 	if petSprite == "" {
@@ -13750,11 +14098,11 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 			requestBubble = "💀"
 		} else if len(c.pet.PoopPositions) > 0 {
 			requestBubble = "🧹?" // Asking for cleanup
-		} else if c.pet.Hunger < 20 {
+		} else if c.pet.Hunger < 10 {
 			requestBubble = "🍖?" // Asking for food (urgent)
 		} else if c.pet.Happiness < 20 {
 			requestBubble = "🧶?" // Asking for play (urgent)
-		} else if c.pet.Hunger < 40 {
+		} else if c.pet.Hunger < 20 {
 			requestBubble = "🍖" // Would like food
 		} else if c.pet.Happiness < 40 {
 			requestBubble = "🧶" // Would like play
@@ -14250,7 +14598,8 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 			}
 			poopX := safeRandRange(0, w-2)
 			c.pet.PoopPositions = append(c.pet.PoopPositions, poopX)
-			c.pet.LastThought = randomThought("poop")
+			c.pet.LastThought = randomThought("poop") // instant fallback; LLM upgrades it
+			c.triggerPetEventThought("poop")
 			petSnap := c.pet
 			c.stateMu.Unlock()
 			savePetStateData(petSnap)
@@ -14898,6 +15247,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	if strings.HasPrefix(input.ResolvedAction, "window_header:") {
 		sourceWindow := strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+		// When the full-width phone sidebar is open, any carousel button EXCEPT the
+		// hamburger must first close it (restore the stashed content) so the action
+		// lands on the real window — not the stranded full-width one. The hamburger
+		// is the open/close toggle and closes it via its own handler, so exclude it.
+		if c.fullscreenSidebarWinID != "" && input.ResolvedAction != "window_header:hamburger" {
+			c.closeFullscreenSidebar(c.fullscreenSidebarWinID, false)
+		}
 		status := c.NewWindowStatus()
 		if status.State == "ready" && time.Since(status.Created) > 3*time.Second {
 			logEvent("WINDOW_HEADER_READY_TIMEOUT action=%s source=%s ready=%s age_ms=%d", input.ResolvedAction, sourceWindow, status.WindowID, time.Since(status.Created).Milliseconds())
@@ -14934,6 +15290,20 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			} else {
 				c.exitDashboard()
 			}
+			return true
+		}
+		// Tapping a tab in the full-width phone sidebar: close it (restore the
+		// content of the window it was covering) and switch to the tapped window.
+		if c.fullscreenSidebarWinID != "" {
+			target := input.ResolvedTarget
+			if win := findWindowByTarget(c.windows, input.ResolvedTarget); win != nil {
+				target = win.ID
+			}
+			c.closeFullscreenSidebar(c.fullscreenSidebarWinID, false)
+			if err := c.SelectWindow(target, "fullscreen_select_window", clientID); err != nil {
+				logEvent("FULLSCREEN_SELECT_ERR target=%s err=%v", target, err)
+			}
+			go autoPickContentPane(target)
 			return true
 		}
 		rawTarget := input.ResolvedTarget
@@ -15409,7 +15779,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			// Remove the first poop (or use input.ResolvedTarget for specific position)
 			c.pet.PoopPositions = c.pet.PoopPositions[1:]
 			c.pet.TotalPoopsCleaned++
-			c.pet.LastThought = "much better."
+			c.pet.LastThought = "much better." // instant fallback; LLM upgrades it
+			c.triggerPetEventThought("cleaned")
 		}
 		petSnap := c.pet
 		c.stateMu.Unlock()
@@ -15594,6 +15965,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// the source window afterward. activeClientGeometry resolves via the
 		// ClientElector that was just pinned by the input handler.
 		_, _, userTTY, _, _ := activeClientGeometry()
+		// NOTE: the phone FULL-WIDTH sidebar mode is DISABLED for safety. It could
+		// strand and then KILL content panes: keyboard/other nav paths bypassed the
+		// carousel's close-first guard, leaving the window in full-width with its
+		// content stashed in _tabby_limbo, after which the orphan-cleanup reaped the
+		// emptied window (and its stashed content) during multi-client churn. Until
+		// it's redesigned so content can never be lost, the hamburger falls back to
+		// the legacy stash/restore of the inline sidebar (no content stashing).
 		if sidebarIsStashed() {
 			c.sidebarHidden = false
 			c.restoreSidebarPanes()
@@ -16319,7 +16697,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				// Clean this poop
 				c.pet.PoopPositions = append(c.pet.PoopPositions[:i], c.pet.PoopPositions[i+1:]...)
 				c.pet.TotalPoopsCleaned++
-				c.pet.LastThought = "much better."
+				c.pet.LastThought = "much better." // instant fallback; LLM upgrades it
+				c.triggerPetEventThought("cleaned")
 				petSnap := c.pet
 				c.stateMu.Unlock()
 				savePetStateData(petSnap)
@@ -16930,7 +17309,8 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 				coordinatorDebugLog.Printf("    -> Clicked on poop at X=%d (poop rendered at %d, width=%d)! Cleaning.", clickX, clampedPoopX, poopWidth)
 				c.pet.PoopPositions = append(c.pet.PoopPositions[:i], c.pet.PoopPositions[i+1:]...)
 				c.pet.TotalPoopsCleaned++
-				c.pet.LastThought = "much better."
+				c.pet.LastThought = "much better." // instant fallback; LLM upgrades it
+				c.triggerPetEventThought("cleaned")
 				petSnap := c.pet
 				c.stateMu.Unlock()
 				savePetStateData(petSnap)
@@ -18354,6 +18734,12 @@ func (c *Coordinator) triggerActionFromThought(thought string, maxX int) {
 		strings.Contains(lowerThought, "patrol") ||
 		strings.Contains(lowerThought, "walk") ||
 		strings.Contains(lowerThought, "going") ||
+		strings.Contains(lowerThought, "hunt") ||
+		strings.Contains(lowerThought, "stalk") ||
+		strings.Contains(lowerThought, "prey") ||
+		strings.Contains(lowerThought, "creep") ||
+		strings.Contains(lowerThought, "sniff") ||
+		strings.Contains(lowerThought, "prowl") ||
 		strings.Contains(lowerThought, "move") {
 		c.pet.State = "walking"
 		c.pet.Direction = []int{-1, 1}[rand.Intn(2)]
@@ -18367,6 +18753,7 @@ func (c *Coordinator) triggerActionFromThought(thought string, maxX int) {
 	if strings.Contains(lowerThought, "jump") ||
 		strings.Contains(lowerThought, "leap") ||
 		strings.Contains(lowerThought, "bounce") ||
+		strings.Contains(lowerThought, "pounce") ||
 		strings.Contains(lowerThought, "air") ||
 		strings.Contains(lowerThought, "zoom") {
 		c.pet.State = "jumping"
@@ -18502,6 +18889,60 @@ func stripRemotePrefix(name string) string {
 	return name
 }
 
+// remoteTabDisplay decides how a remote (ssh/mosh) window's label is shown.
+//   - Legacy mode (config ssh_icon empty): the tab line shows the HOST and the
+//     local dir name(s) drop to a continuation row below it.
+//   - Icon mode (ssh_icon set): everything collapses to ONE line — just the local
+//     dir name, no host row. The ssh glyph itself is NOT added here; it's placed
+//     ahead of the group marker by the caller (see sshTabGlyph) so a remote tab
+//     reads "<glyph> <marker> <name>" rather than eating two rows.
+//
+// It returns the (possibly rewritten) tab name and the continuation-row text; an
+// empty continuation means "no second row". Local windows pass through unchanged.
+func (c *Coordinator) remoteTabDisplay(win tmux.Window, displayName string) (name, continuation string) {
+	if win.RemoteHost == "" {
+		return displayName, ""
+	}
+	local := dropHostSegment(stripRemotePrefix(displayName), win.RemoteHost)
+	if strings.EqualFold(local, win.RemoteHost) {
+		local = ""
+	}
+	if icon := strings.TrimSpace(c.config.Sidebar.SSHIcon); icon != "" {
+		label := local
+		if label == "" {
+			label = win.RemoteHost // window name was just the host — keep it as the label
+		}
+		return label, ""
+	}
+	return win.RemoteHost, local
+}
+
+// sshTabGlyph returns the configured ssh glyph for a remote window in icon mode,
+// or "" for a local window / legacy (host-row) mode. Callers place it BEFORE the
+// group marker so the remote indicator sits in the slot ahead of the marker
+// rather than between the marker and the tab name.
+func (c *Coordinator) sshTabGlyph(win tmux.Window) string {
+	if win.RemoteHost == "" {
+		return ""
+	}
+	return strings.TrimSpace(c.config.Sidebar.SSHIcon)
+}
+
+// composeTabMarker builds the "<ssh glyph> <group marker> " prefix that precedes a
+// tab's name. Either piece may be empty; the ssh glyph, when present, always comes
+// first so it occupies the slot ahead of the marker.
+func composeTabMarker(sshGlyph, marker string) string {
+	switch {
+	case sshGlyph != "" && marker != "":
+		return sshGlyph + " " + marker + " "
+	case sshGlyph != "":
+		return sshGlyph + " "
+	case marker != "":
+		return marker + " "
+	}
+	return ""
+}
+
 // writeRemoteNameRow writes the window-name continuation row below the main
 // tab line for ssh/mosh windows. Layout: " │ <bg-padded-chip>" — one tree
 // pipe in tree color, a sidebar-bg gap, then the chip (tab bg) starting
@@ -18608,26 +19049,33 @@ func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width in
 		len(fromHex) != 7 || fromHex[0] != '#' || len(toHex) != 7 || toHex[0] != '#' {
 		return c.applyBackgroundFill(content, fromHex, width)
 	}
-	// Band the gradient into a handful of steps instead of a distinct colour per
-	// column. A "slight" gradient over ~25 cells changes by ~1/channel per cell, so
-	// a per-cell escape would bloat every row ~25x; banding emits an escape only
-	// when the band (hence colour) changes — a few per row — while still reading as
-	// a smooth sheen.
-	const numBands = 8
-	bands := numBands
-	if bands > width {
-		bands = width
-	}
+	// Compute a distinct colour PER COLUMN (no banding). The old banding read as
+	// visible steps; emit-on-change below (see `emit`) still collapses runs of
+	// identical rounded RGB into one escape, so the byte cost stays modest while
+	// the gradient looks smooth.
+	//
+	// The gradient lightens the base over the first ~85% of the row, then DARKENS
+	// it over the final ~15% so the tail deepens into a shadowed edge instead of
+	// flattening out at the base colour. The tail uses a smoothstep ease so it
+	// blends IN gradually (no visible slope seam at the junction). darkEnd is the
+	// base pushed toward black — also reused for the menu-button fill so the row's
+	// right edge doesn't pop back to the base colour.
+	const tailStart = 0.85
+	darkEnd := gradientTailColor(toHex)
 	bgAt := func(x int) string {
-		band := 0
-		if width > 1 && bands > 1 {
-			band = x * (bands - 1) / (width - 1)
-		}
 		frac := 0.0
-		if bands > 1 {
-			frac = float64(band) / float64(bands-1)
+		if width > 1 {
+			frac = float64(x) / float64(width-1)
 		}
-		r, g, b := hexToRGB(blendHexToward(fromHex, toHex, frac))
+		var hex string
+		if frac <= tailStart {
+			hex = blendHexToward(fromHex, toHex, frac/tailStart) // lighter -> base
+		} else {
+			t := (frac - tailStart) / (1 - tailStart)
+			t = t * t * (3 - 2*t) // smoothstep: ease the darkening in, no seam at the junction
+			hex = blendHexToward(toHex, darkEnd, t) // base -> dark tail
+		}
+		r, g, b := hexToRGB(hex)
 		return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
 	}
 	isTerm := func(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') }
@@ -18678,10 +19126,42 @@ func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width in
 	return b.String()
 }
 
+// readableFg returns a legible foreground colour for text drawn on bg: near-black
+// on light backgrounds, white on dark ones. Used so a bright/light custom tab
+// colour (e.g. a light green) still shows legible tab text instead of white-on-light.
+func readableFg(bg string) string {
+	if colors.IsLightColor(bg) {
+		return "#1a1a1a"
+	}
+	return "#ffffff"
+}
+
+// contrastFg is readableFg but, for a non-active (unfocused) tab, gently softens
+// the text toward its background so unfocused tabs read as de-emphasised while
+// staying legible. Active tabs keep full contrast.
+func contrastFg(bg string, active bool) string {
+	fg := readableFg(bg)
+	if !active {
+		fg = blendHexToward(fg, bg, 0.10)
+	}
+	return fg
+}
+
 // gradientEndColor returns the far end of a header/tab gradient: the base colour
 // nudged toward white. Returns the input unchanged when it isn't a hex colour,
 // which makes applyGradientFill fall back to a solid fill.
 func gradientEndColor(bg string) string { return lightenHex(bg, 0.22) }
+
+// gradientTailColor returns the DARK end of a header/tab gradient: the base colour
+// pushed toward black. applyGradientFill deepens the last ~15% of a row to this,
+// and the menu-button fill reuses it so a row's right edge continues the shadow
+// instead of snapping back to the base colour.
+func gradientTailColor(bg string) string {
+	if len(bg) != 7 || bg[0] != '#' {
+		return bg
+	}
+	return blendHexToward(bg, "#000000", 0.22)
+}
 
 func fixHeaderHeightsInWindow(paneID string) {
 	// Get window ID and width so we use per-window width, not global profile
@@ -19019,18 +19499,23 @@ func (c *Coordinator) GetHeaderColorsForPane(paneID string) HeaderColors {
 		} else {
 			bgColor = grouping.ShadeColorByIndex(customColor, 1)
 		}
-		fgColor = "#ffffff"
+		fgColor = contrastFg(bgColor, isWindowActive)
 	} else if isWindowActive {
 		bgColor = theme.ActiveBg
 		if bgColor == "" {
 			bgColor = theme.Bg
 		}
-		// Use base group fg for consistency — active/inactive distinction
-		// comes from bg color + bold, not text color flipping white↔black
-		fgColor = theme.Fg
+		// Match the sidebar TAB's active fg exactly (theme.ActiveFg -> theme.Fg),
+		// so the titlebar text colour tracks the tab rather than a fixed white.
+		fgColor = theme.ActiveFg
+		if fgColor == "" {
+			fgColor = theme.Fg
+		}
 	} else {
 		bgColor = theme.Bg
-		fgColor = theme.Fg
+		// Match the sidebar TAB's inactive fg (config inactive_fg with fallback) so
+		// an inactive titlebar reads the same as its inactive tab row.
+		fgColor = c.getInactiveTextColorWithFallback(c.config.Sidebar.Colors.InactiveFg)
 	}
 
 	if bgColor == "" {

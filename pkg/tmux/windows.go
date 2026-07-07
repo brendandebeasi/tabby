@@ -354,6 +354,13 @@ type Window struct {
 	// this window (set via @tabby_color_seeded). Window-lifetime, so it survives
 	// a daemon reload — a cleared color must NOT come back on the next refresh.
 	AppearanceSeeded bool
+
+	// AppearanceKey is the per-directory windowNameKey whose remembered color/marker
+	// is currently applied to this window (set via @tabby_appearance_key). It is the
+	// sentinel for detecting a cd/ssh TRANSITION: when the window's live key differs
+	// from this, the window moved into a new directory and its remembered appearance
+	// is re-applied once. Empty until the window has been seeded.
+	AppearanceKey string
 }
 
 func ListWindows() ([]Window, error) {
@@ -365,7 +372,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}", "#{@tabby_ai_title}", "#{@tabby_color_seeded}"}, tmuxFieldSep))
+		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}", "#{@tabby_ai_title}", "#{@tabby_color_seeded}", "#{@tabby_appearance_key}"}, tmuxFieldSep))
 	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -483,6 +490,11 @@ func ListWindows() ([]Window, error) {
 			seededVal := strings.TrimSpace(parts[24])
 			appearanceSeeded = seededVal == "1" || seededVal == "true"
 		}
+		// Applied-appearance key from @tabby_appearance_key option.
+		appearanceKey := ""
+		if len(parts) >= 26 {
+			appearanceKey = strings.TrimSpace(parts[25])
+		}
 		// Session ID safety net: skip windows that belong to a different session.
 		// tmux list-windows -t $SESSION can transiently return wrong-session windows.
 		if sessionTarget != "" && len(parts) >= 19 {
@@ -520,6 +532,7 @@ func ListWindows() ([]Window, error) {
 			AITitle:          aiTitle,
 			Layout:           layout,
 			AppearanceSeeded: appearanceSeeded,
+			AppearanceKey:    appearanceKey,
 		})
 	}
 
