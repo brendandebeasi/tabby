@@ -423,6 +423,7 @@ type SidebarColors struct {
 	HeaderFg              string   `yaml:"header_fg"`            // Group header text (default: #000000)
 	ActiveFg              string   `yaml:"active_fg"`            // Active tab text (default: #ffffff)
 	InactiveFg            string   `yaml:"inactive_fg"`          // Inactive tab text (default: #f2f2ee)
+	InactiveLighten       float64  `yaml:"inactive_lighten"`     // How much lighter inactive tab/titlebar text is vs active, 0.0-1.0 (default 0.15). Higher = more de-emphasised.
 	PaneFg                string   `yaml:"pane_fg"`              // Pane text in tree (default: same as inactive_fg)
 	DisclosureFg          string   `yaml:"disclosure_fg"`        // Disclosure icon color (default: #000000)
 	DisclosureExpanded    string   `yaml:"disclosure_expanded"`  // Expanded state icon (default: ⊟)

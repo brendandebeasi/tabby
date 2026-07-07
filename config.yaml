@@ -101,6 +101,9 @@ sidebar:
     # Colors below are only needed to override the theme preset.
     # Most theme colors are derived automatically — only set values here
     # when you want to deviate from the chosen theme.
+    # How much lighter inactive tab/titlebar text is vs active (0.0-1.0).
+    # 0.0 = identical to active; higher = more de-emphasised. Default 0.15.
+    inactive_lighten: 0.2
     disclosure_expanded: "⊟"        # Expanded state icon (boxed minus)
     disclosure_collapsed: "⊞"       # Collapsed state icon (boxed plus)
     active_indicator_frames: ["▶", "▶", "▶", "▶", "▶", " "]

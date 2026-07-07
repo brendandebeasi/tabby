@@ -1420,6 +1420,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 	if err != nil {
 		cfg = config.DefaultConfig()
 	}
+	applyContrastConfig(cfg)
 
 	// Set up debug logging from config if enabled
 	if cfg.Sidebar.Debug {
@@ -3841,6 +3842,7 @@ func (c *Coordinator) RefreshWindows() {
 
 	if newCfg != nil {
 		c.config = newCfg
+		applyContrastConfig(newCfg)
 	}
 
 	// Note: collapsed groups state is managed in-memory and synced to tmux options
@@ -17750,6 +17752,7 @@ func (c *Coordinator) setGroupMarkerExact(groupName, marker string) bool {
 
 	c.stateMu.Lock()
 	c.config = cfg
+	applyContrastConfig(cfg)
 	c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 	c.stateMu.Unlock()
 	return true
@@ -18688,6 +18691,7 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			activeWindowID := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 			c.stateMu.Lock()
 			c.config = cfg
+			applyContrastConfig(cfg)
 			c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 			c.computeVisualPositions()
 			moves := c.syncWindowIndices()
@@ -19144,16 +19148,32 @@ func readableFg(bg string) string {
 	return "#ffffff"
 }
 
+// contrastInactiveLighten is how much lighter inactive text is than active (see
+// contrastFg). Tunable via sidebar.colors.inactive_lighten; applyContrastConfig
+// updates it on config load. Default 0.15.
+var contrastInactiveLighten = 0.15
+
+// applyContrastConfig refreshes contrastInactiveLighten from config. Called
+// wherever c.config is (re)assigned so a live config reload retunes the contrast.
+func applyContrastConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if v := cfg.Sidebar.Colors.InactiveLighten; v > 0 {
+		contrastInactiveLighten = v
+	}
+}
+
 // contrastFg is readableFg but, for a non-active (unfocused) tab, makes the text
-// just 10% LIGHTER than the active colour — so active and inactive read as mostly
-// the same, with inactive only slightly de-emphasised, rather than washing the
-// text toward the background (which hurt legibility). Active tabs keep full
-// contrast. On a dark bg the active colour is already white, so inactive stays
-// effectively identical.
+// slightly LIGHTER than the active colour (by contrastInactiveLighten) — so active
+// and inactive read as mostly the same, with inactive only de-emphasised, rather
+// than washing the text toward the background (which hurt legibility). Active tabs
+// keep full contrast. On a dark bg the active colour is already white, so inactive
+// stays effectively identical.
 func contrastFg(bg string, active bool) string {
 	fg := readableFg(bg)
 	if !active {
-		fg = lightenHex(fg, 0.10)
+		fg = lightenHex(fg, contrastInactiveLighten)
 	}
 	return fg
 }
