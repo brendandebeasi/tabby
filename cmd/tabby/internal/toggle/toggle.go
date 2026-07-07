@@ -8,6 +8,7 @@
 package toggle
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -88,7 +89,7 @@ func Run(args []string) int {
 	run("tmux", "set", "-g", "mouse", "on")
 
 	// Refresh all clients
-	out, _ := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output()
+	out := tmuxOut("list-clients", "-F", "#{client_tty}")
 	for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if tty != "" {
 			run("tmux", "refresh-client", "-t", tty, "-S")
@@ -238,7 +239,7 @@ func enable(sessionID, exe, pidFile, sockPath, watchdogPidFile, stateFile string
 
 	// Wait for renderers
 	for i := 0; i < 10; i++ {
-		out, _ := exec.Command("tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{pane_start_command}").Output()
+		out := tmuxOut("list-panes", "-s", "-F", "#{pane_current_command}|#{pane_start_command}")
 		count := 0
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.Contains(line, "sidebar-renderer") || strings.Contains(line, "sidebar") {
@@ -280,17 +281,35 @@ func enable(sessionID, exe, pidFile, sockPath, watchdogPidFile, stateFile string
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
+// cmdTimeout bounds every tmux invocation below. Without it a single blocked
+// tmux call (server momentarily busy, mosh latency) would hang until toggle's
+// 30s global watchdog fired os.Exit(1) — a wedged toggle that left the sidebar
+// half-torn-down (visible bg remnant) and skipped the deferred lock cleanup.
+const cmdTimeout = 5 * time.Second
+
 func run(args ...string) {
-	exec.Command(args[0], args[1:]...).Run()
+	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+	defer cancel()
+	exec.CommandContext(ctx, args[0], args[1:]...).Run()
 }
 
 func tmuxGetValue(args ...string) string {
-	out, _ := exec.Command("tmux", args...).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, "tmux", args...).Output()
 	return strings.TrimSpace(string(out))
 }
 
+// tmuxOut runs a tmux query with the same bounded timeout as run/tmuxGetValue.
+func tmuxOut(args ...string) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, "tmux", args...).Output()
+	return out
+}
+
 func listWindowIDs() []string {
-	out, _ := exec.Command("tmux", "list-windows", "-F", "#{window_id}").Output()
+	out := tmuxOut("list-windows", "-F", "#{window_id}")
 	var ids []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line != "" {
@@ -312,7 +331,7 @@ func killFromPidFile(pidFile string) {
 }
 
 func killAuxPanes() {
-	out, _ := exec.Command("tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{pane_id}").Output()
+	out := tmuxOut("list-panes", "-s", "-F", "#{pane_current_command}|#{pane_id}")
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.SplitN(line, "|", 2)
 		if len(parts) != 2 {
@@ -326,7 +345,7 @@ func killAuxPanes() {
 }
 
 func gracefulKillAuxPanes() {
-	out, _ := exec.Command("tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{pane_id}|#{pane_pid}").Output()
+	out := tmuxOut("list-panes", "-s", "-F", "#{pane_current_command}|#{pane_id}|#{pane_pid}")
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.SplitN(line, "|", 3)
 		if len(parts) != 3 {
@@ -343,7 +362,7 @@ func gracefulKillAuxPanes() {
 }
 
 func resetMouseEscapeSequences() {
-	out, _ := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output()
+	out := tmuxOut("list-clients", "-F", "#{client_tty}")
 	resetSeq := "\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1006l\033[?1015l"
 	for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if tty == "" {
