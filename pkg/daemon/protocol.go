@@ -46,6 +46,7 @@ const (
 	TargetSidebar      TargetKind = "sidebar"
 	TargetWindowHeader TargetKind = "window-header"
 	TargetPaneHeader   TargetKind = "pane-header"
+	TargetPaneBorder   TargetKind = "pane-border" // one edge of a pane's custom box (see Edge)
 	TargetSidebarPopup TargetKind = "sidebar-popup"
 	TargetHook         TargetKind = "hook"
 )
@@ -61,6 +62,7 @@ type RenderTarget struct {
 	WindowID string     `json:"window,omitempty"` // "@1"
 	PaneID   string     `json:"pane,omitempty"`   // "%5"
 	Instance string     `json:"instance,omitempty"`
+	Edge     string     `json:"edge,omitempty"` // pane-border only: "top"|"bottom"|"left"|"right"
 }
 
 // Key returns the canonical string form used as a map key by the server.
@@ -86,6 +88,8 @@ func (t RenderTarget) Key() string {
 		return "window-header:" + t.WindowID
 	case TargetPaneHeader:
 		return "header:" + t.PaneID
+	case TargetPaneBorder:
+		return "border:" + t.Edge + ":" + t.PaneID
 	case TargetSidebarPopup:
 		if t.Instance != "" {
 			return "sidebar-popup:" + t.Instance
@@ -111,6 +115,15 @@ func (t RenderTarget) Valid() error {
 	case TargetPaneHeader:
 		if t.PaneID == "" {
 			return fmt.Errorf("pane-header target missing pane")
+		}
+	case TargetPaneBorder:
+		if t.PaneID == "" {
+			return fmt.Errorf("pane-border target missing pane")
+		}
+		switch t.Edge {
+		case "top", "bottom", "left", "right":
+		default:
+			return fmt.Errorf("pane-border target has invalid edge %q", t.Edge)
 		}
 	case TargetSidebarPopup, TargetHook:
 		// These can be instance-only.
@@ -148,6 +161,14 @@ func ParseLegacyKey(s string) (RenderTarget, error) {
 	}
 	if strings.HasPrefix(s, "header:") {
 		return RenderTarget{Kind: TargetPaneHeader, PaneID: strings.TrimPrefix(s, "header:")}, nil
+	}
+	if strings.HasPrefix(s, "border:") {
+		// "border:<edge>:<paneID>"
+		rest := strings.TrimPrefix(s, "border:")
+		if i := strings.Index(rest, ":"); i >= 0 {
+			return RenderTarget{Kind: TargetPaneBorder, Edge: rest[:i], PaneID: rest[i+1:]}, nil
+		}
+		return RenderTarget{}, fmt.Errorf("malformed pane-border key %q", s)
 	}
 	if strings.HasPrefix(s, "sidebar-popup") {
 		inst := strings.TrimPrefix(s, "sidebar-popup")
