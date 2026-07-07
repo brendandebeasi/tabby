@@ -3881,7 +3881,18 @@ func (c *Coordinator) RefreshWindows() {
 	// session, invisible to native nav, but must still render in the sidebar's
 	// Minimized section). They carry Minimized=true so everything downstream
 	// (grouping, sidebarRenderGroups, the nav skip filter) treats them correctly.
-	windows = append(windows, c.listParkedMinimizedWindows()...)
+	// Dedup against the live list: a window mid-peek can momentarily appear in
+	// BOTH the live snapshot and the parked snapshot (the two tmux queries race
+	// with the surface/park move), which would render it twice for a frame.
+	liveIDs := make(map[string]bool, len(windows))
+	for _, w := range windows {
+		liveIDs[w.ID] = true
+	}
+	for _, pw := range c.listParkedMinimizedWindows() {
+		if !liveIDs[pw.ID] {
+			windows = append(windows, pw)
+		}
+	}
 
 	c.applyCWDIdentityMappings(windows)
 
