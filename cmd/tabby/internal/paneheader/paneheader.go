@@ -32,6 +32,10 @@ var (
 	sessionID *string
 	paneID    *string
 	debugMode *bool
+	// edge is empty for the classic top pane-header, or one of
+	// top|bottom|left|right when this renderer is one EDGE of a pane's full
+	// custom box (subscribes as TargetPaneBorder instead of TargetPaneHeader).
+	edge *string
 )
 
 // Initialize the flag pointers at package load time so tests that exercise
@@ -41,9 +45,11 @@ func init() {
 	empty := ""
 	paneEmpty := ""
 	falseVal := false
+	edgeEmpty := ""
 	sessionID = &empty
 	paneID = &paneEmpty
 	debugMode = &falseVal
+	edge = &edgeEmpty
 }
 
 var debugLog *log.Logger
@@ -186,6 +192,9 @@ func connectCmd() tea.Cmd {
 			return disconnectedMsg{}
 		}
 		target := daemon.RenderTarget{Kind: daemon.TargetPaneHeader, PaneID: paneIDStr}
+		if edge != nil && *edge != "" {
+			target = daemon.RenderTarget{Kind: daemon.TargetPaneBorder, PaneID: paneIDStr, Edge: *edge}
+		}
 
 		return connectedMsg{conn: conn, target: target}
 	}
@@ -645,6 +654,7 @@ func Run(args []string) int {
 	sessionID = fs.String("session", "", "tmux session ID")
 	paneID = fs.String("pane", "", "tmux pane ID this renderer is for")
 	debugMode = fs.Bool("debug", false, "Enable debug logging")
+	edge = fs.String("edge", "", "pane-border edge: top|bottom|left|right (empty = classic pane-header)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

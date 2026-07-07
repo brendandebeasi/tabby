@@ -2459,6 +2459,10 @@ func Run(args []string) int {
 		if daemon.KindOf(clientID) == daemon.TargetPaneHeader {
 			return coordinator.RenderPaneHeaderForClient(clientID, width, height)
 		}
+		// Route pane-border edge clients (border:<edge>:%<paneID>) to the box-edge renderer.
+		if daemon.KindOf(clientID) == daemon.TargetPaneBorder {
+			return coordinator.RenderPaneBorderForClient(clientID, width, height)
+		}
 		renderClientID := clientID
 		if idx := strings.Index(clientID, "#web-"); idx > 0 {
 			renderClientID = clientID[:idx]

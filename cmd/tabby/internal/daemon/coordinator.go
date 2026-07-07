@@ -10183,6 +10183,91 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 }
 
 // RenderPaneHeaderForClient renders a 1-row title strip for a specific content pane.
+// borderGlyphs returns the (top-left, top-right, bottom-left, bottom-right,
+// horizontal, vertical) glyphs for the configured border style.
+func borderGlyphs(style string) (tl, tr, bl, br, h, v string) {
+	switch style {
+	case "single":
+		return "┌", "┐", "└", "┘", "─", "│"
+	case "double":
+		return "╔", "╗", "╚", "╝", "═", "║"
+	case "heavy":
+		return "┏", "┓", "┗", "┛", "━", "┃"
+	default: // rounded
+		return "╭", "╮", "╰", "╯", "─", "│"
+	}
+}
+
+// RenderPaneBorderForClient renders ONE edge of a pane's custom box. clientID is
+// "border:<edge>:%<paneID>". Top/bottom are full-width horizontal bars that own
+// the rounded corners; left/right are single-column vertical runs. Every edge is
+// drawn in the pane's effective tab colour (gradient-filled) so the four edges
+// read as one coloured frame around the content. Phase 1: plain frame; the label
+// + buttons on the top edge come next.
+func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height int) *daemon.RenderPayload {
+	t, err := daemon.ParseLegacyKey(clientID)
+	if err != nil || t.Kind != daemon.TargetPaneBorder {
+		return nil
+	}
+	edge, paneID := t.Edge, t.PaneID
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+
+	c.stateMu.RLock()
+	hc := c.GetHeaderColorsForPane(paneID)
+	style := c.config.PaneHeader.Border.Style
+	c.stateMu.RUnlock()
+
+	bg := hc.Bg
+	fg := hc.Fg
+	if bg == "" {
+		bg = c.getPaneHeaderActiveBg()
+	}
+	tl, tr, bl, br, hLine, vLine := borderGlyphs(style)
+
+	switch edge {
+	case "left", "right":
+		// Vertical single-column run, one glyph per row, in the border colour.
+		cellStyle := lipgloss.NewStyle()
+		if fg != "" {
+			cellStyle = cellStyle.Foreground(lipgloss.Color(fg))
+		}
+		if bg != "" {
+			cellStyle = cellStyle.Background(lipgloss.Color(bg))
+		}
+		cell := cellStyle.Render(vLine)
+		lines := make([]string, height)
+		for i := range lines {
+			lines[i] = cell
+		}
+		return &daemon.RenderPayload{Content: strings.Join(lines, "\n"), Width: width, Height: height, TotalLines: height}
+	case "top", "bottom":
+		lc, rc := tl, tr
+		if edge == "bottom" {
+			lc, rc = bl, br
+		}
+		mid := width - 2
+		if mid < 0 {
+			mid = 0
+		}
+		line := lc + strings.Repeat(hLine, mid) + rc
+		lineStyle := lipgloss.NewStyle()
+		if fg != "" {
+			lineStyle = lineStyle.Foreground(lipgloss.Color(fg))
+		}
+		rendered := lineStyle.Render(line)
+		if bg != "" {
+			rendered = c.applyGradientFill(rendered, gradientEndColor(bg), bg, width)
+		}
+		return &daemon.RenderPayload{Content: rendered, Width: width, Height: 1, TotalLines: 1}
+	}
+	return &daemon.RenderPayload{Content: strings.Repeat(" ", width), Width: width, Height: 1, TotalLines: 1}
+}
+
 // Each content pane has its own header showing that pane's label and action buttons.
 // clientID format: "header:%123" where %123 is the pane ID the header sits above.
 // On phone profile, this still renders as a single row — buttons are on window-header.

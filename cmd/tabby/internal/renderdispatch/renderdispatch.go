@@ -28,6 +28,10 @@ func Run(args []string) int {
 		return windowheader.Run(rest)
 	case "pane-header":
 		return paneheader.Run(rest)
+	case "pane-border":
+		// Reuses the pane-header renderer; the -edge flag switches it to subscribe
+		// as a TargetPaneBorder edge instead of the classic top header.
+		return paneheader.Run(rest)
 	case "sidebar-popup":
 		return sidebarpopup.Run(rest)
 	case "pet-qa-popup":
