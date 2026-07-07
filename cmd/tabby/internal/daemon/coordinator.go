@@ -19206,17 +19206,27 @@ func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width in
 	// blends IN gradually (no visible slope seam at the junction). darkEnd is the
 	// base pushed toward black — also reused for the menu-button fill so the row's
 	// right edge doesn't pop back to the base colour.
+	const headEnd = 0.15  // leading-edge highlight zone (mirrors the dark tail)
 	const tailStart = 0.85
 	darkEnd := gradientTailColor(toHex)
+	lightHead := blendHexToward(fromHex, "#ffffff", 0.18) // extra-light left edge
 	bgAt := func(x int) string {
 		frac := 0.0
 		if width > 1 {
 			frac = float64(x) / float64(width-1)
 		}
 		var hex string
-		if frac <= tailStart {
-			hex = blendHexToward(fromHex, toHex, frac/tailStart) // lighter -> base
-		} else {
+		switch {
+		case frac <= headEnd:
+			// Leading edge: ease from a bright highlight into the normal light start,
+			// symmetric to the dark tail so the left gets a slight sheen.
+			t := frac / headEnd
+			t = t * t * (3 - 2*t) // smoothstep
+			hex = blendHexToward(lightHead, fromHex, t)
+		case frac <= tailStart:
+			t := (frac - headEnd) / (tailStart - headEnd)
+			hex = blendHexToward(fromHex, toHex, t) // light -> base
+		default:
 			t := (frac - tailStart) / (1 - tailStart)
 			t = t * t * (3 - 2*t) // smoothstep: ease the darkening in, no seam at the junction
 			hex = blendHexToward(toHex, darkEnd, t) // base -> dark tail
