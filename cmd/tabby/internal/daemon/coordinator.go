@@ -11389,7 +11389,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				// the base colour.
 				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
 				if bg != "" {
-					menuBtn = c.applyBackgroundFill(menuBtn, gradientTailColor(bg), menuBtnW)
+					menuBtn = c.applyBackgroundFill(menuBtn, gradientHeadColor(bg), menuBtnW)
 				}
 				s.WriteString(prefix + iconAndText + menuBtn + "\n")
 			} else {
@@ -11428,7 +11428,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				// the base colour.
 				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
 				if bg != "" {
-					menuBtn = c.applyBackgroundFill(menuBtn, gradientTailColor(bg), menuBtnW)
+					menuBtn = c.applyBackgroundFill(menuBtn, gradientHeadColor(bg), menuBtnW)
 				}
 				s.WriteString(prefix + iconAndText + menuBtn + "\n")
 			}
@@ -11755,7 +11755,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					// direction as live ones (the reverse-for-minimized scheme was
 					// dropped); the Minimized section's muted colour still sets it apart.
 					fromBg, toBg := gradientEndColor(bgColor), bgColor
-					rowEndBg = gradientTailColor(bgColor) // dark tail, so the menu button continues the shadow
+					rowEndBg = gradientHeadColor(bgColor) // bright right edge, so the menu button continues the highlight
 					contentRendered = c.applyGradientFill(contentRendered, fromBg, toBg, contentWidth)
 				}
 
@@ -19206,10 +19206,14 @@ func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width in
 	// blends IN gradually (no visible slope seam at the junction). darkEnd is the
 	// base pushed toward black — also reused for the menu-button fill so the row's
 	// right edge doesn't pop back to the base colour.
-	const headEnd = 0.15  // leading-edge highlight zone (mirrors the dark tail)
+	// Direction: DARK on the LEFT, LIGHTER toward the RIGHT. The leading edge eases
+	// from a dark shadow into the base; the trailing edge eases up to a bright
+	// highlight. lightEnd (the right extreme) is reused for the menu-button fill so
+	// the row's right edge continues the highlight instead of snapping to base.
+	const headEnd = 0.15
 	const tailStart = 0.85
-	darkEnd := gradientTailColor(toHex)
-	lightHead := blendHexToward(fromHex, "#ffffff", 0.18) // extra-light left edge
+	darkStart := gradientTailColor(toHex)                  // dark left extreme
+	lightEnd := blendHexToward(fromHex, "#ffffff", 0.18)   // bright right extreme
 	bgAt := func(x int) string {
 		frac := 0.0
 		if width > 1 {
@@ -19218,18 +19222,18 @@ func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width in
 		var hex string
 		switch {
 		case frac <= headEnd:
-			// Leading edge: ease from a bright highlight into the normal light start,
-			// symmetric to the dark tail so the left gets a slight sheen.
+			// Leading edge: ease from the dark shadow up into the base colour.
 			t := frac / headEnd
 			t = t * t * (3 - 2*t) // smoothstep
-			hex = blendHexToward(lightHead, fromHex, t)
+			hex = blendHexToward(darkStart, toHex, t)
 		case frac <= tailStart:
 			t := (frac - headEnd) / (tailStart - headEnd)
-			hex = blendHexToward(fromHex, toHex, t) // light -> base
+			hex = blendHexToward(toHex, fromHex, t) // base -> light
 		default:
+			// Trailing edge: ease from the light start up to a bright highlight.
 			t := (frac - tailStart) / (1 - tailStart)
-			t = t * t * (3 - 2*t) // smoothstep: ease the darkening in, no seam at the junction
-			hex = blendHexToward(toHex, darkEnd, t) // base -> dark tail
+			t = t * t * (3 - 2*t) // smoothstep
+			hex = blendHexToward(fromHex, lightEnd, t) // light -> bright
 		}
 		r, g, b := hexToRGB(hex)
 		return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
@@ -19336,6 +19340,17 @@ func gradientTailColor(bg string) string {
 		return bg
 	}
 	return blendHexToward(bg, "#000000", 0.22)
+}
+
+// gradientHeadColor returns the BRIGHT end of a header/tab gradient — the base
+// nudged lighter and then toward white — matching applyGradientFill's right-edge
+// highlight (gradient runs dark-left -> light-right). The menu-button fill reuses
+// it so a row's right edge continues the highlight instead of snapping to base.
+func gradientHeadColor(bg string) string {
+	if len(bg) != 7 || bg[0] != '#' {
+		return bg
+	}
+	return blendHexToward(gradientEndColor(bg), "#ffffff", 0.18)
 }
 
 func fixHeaderHeightsInWindow(paneID string) {
