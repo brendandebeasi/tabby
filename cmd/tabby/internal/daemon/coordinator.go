@@ -844,12 +844,25 @@ type Coordinator struct {
 	dashboardOrigins    map[string]dashWindowSnapshot // origin window_id -> snapshot for recreation
 	dashboardOrder      []string                      // origin window ids, original index order
 	dashboardReturnPane string                        // pane_id to refocus on exit
+	// peekedWindowID is the minimized window currently SURFACED for peeking (moved
+	// out of the holding session back into the user session while it is focused).
+	// It re-parks into the holding session as soon as focus moves elsewhere, so at
+	// most one minimized window is ever in-session at a time. Guarded by peekMu.
+	peekMu         sync.Mutex
+	peekedWindowID string
 	// nativeBorderSig caches the last-applied border signature per window so
 	// applyNativeBorders can skip its 5-set-option batch when nothing changed.
 	// Cleared via InvalidateNativeBorderCache when something outside the
 	// function could clobber the per-window options.
 	nativeBorderMu  sync.Mutex
 	nativeBorderSig map[string]string
+	// dashboardBorderSig caches the last-applied dashboard border signature so
+	// applyDashboardBorders can skip its per-refresh set-option burst when the
+	// tile set / colors haven't changed. Without this the function re-issues
+	// window- and pane-level border options every refresh, and each set forces a
+	// tmux border redraw — visible flicker once tiles carry distinct colors.
+	// Reset to "" on dashboard enter/exit so the next apply always re-asserts.
+	dashboardBorderSig string
 	// layoutCache stores the last layout string written to tmux per window
 	// (via @tabby_layout_<wid>). SaveWindowLayouts skips the tmux set-option
 	// round trip when the cached value matches — layouts change only on
@@ -1564,7 +1577,42 @@ func NewCoordinator(sessionID string) *Coordinator {
 	// immediately removed from native window cycling).
 	parkExistingStashWindows()
 
+	// Park any window still sitting in THIS session flagged @tabby_minimized (a
+	// leftover from the old in-session minimize model, or a peeked window that was
+	// surfaced when a prior daemon died), so a restart immediately removes it from
+	// native window cycling and re-establishes the parked state.
+	c.parkExistingMinimizedWindows()
+
 	return c
+}
+
+// parkExistingMinimizedWindows parks any window in the daemon's own session that
+// carries @tabby_minimized=1 into the holding session. Idempotent; runs move-window
+// only for windows that need relocating.
+func (c *Coordinator) parkExistingMinimizedWindows() {
+	sess := c.dashboardSession()
+	if sess == "" {
+		return
+	}
+	out, err := exec.Command("tmux", "list-windows", "-t", sess, "-F",
+		"#{window_id}\t#{@tabby_minimized}").Output()
+	if err != nil {
+		return
+	}
+	moved := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.SplitN(strings.TrimSpace(line), "\t", 2)
+		if len(f) < 2 || strings.TrimSpace(f[1]) != "1" {
+			continue
+		}
+		if c.parkWindow(strings.TrimSpace(f[0]), true) {
+			moved++
+		}
+	}
+	if moved > 0 {
+		logEvent("MINIMIZED_MIGRATE moved=%d -> %s", moved, minimizedHoldingSession)
+	}
+	cleanupMinimizedSessionIfEmpty()
 }
 
 // parkExistingStashWindows migrates any stash windows that live OUTSIDE the
@@ -2328,6 +2376,10 @@ func (c *Coordinator) SelectWindow(targetWindowID, reason, source string) error 
 	}
 	defer c.CompleteTransition()
 
+	// Peek model: surface a parked minimized target (move it back into the session
+	// so select-window can reach it) before selecting.
+	c.surfaceForActivate(targetWindowID)
+
 	if err := tmuxRun("select-window", "-t", targetWindowID); err != nil {
 		if reason == "" {
 			reason = "unspecified"
@@ -2341,6 +2393,8 @@ func (c *Coordinator) SelectWindow(targetWindowID, reason, source string) error 
 	c.SetActiveWindowOptimistic(targetWindowID)
 	c.TrackWindowHistory(targetWindowID)
 	c.HandleWindowSelect(targetWindowID)
+	// Re-park the previously-peeked window now that the client has moved off it.
+	c.settlePeek(targetWindowID)
 	return nil
 }
 
@@ -3630,6 +3684,11 @@ func (c *Coordinator) RefreshWindows() {
 
 	newCfg := c.loadConfigCached()
 
+	// Peek catch-all: re-park a surfaced minimized window that lost focus via a
+	// path that bypassed settlePeek (direct pane click, external select-window).
+	// Runs before listing so a just-re-parked window shows up in the merge below.
+	c.maybeReparkPeeked()
+
 	windows, err := tmux.ListWindowsWithPanes()
 	if err != nil {
 		logEvent("REFRESH_WINDOWS_ERROR err=%v", err)
@@ -3652,6 +3711,12 @@ func (c *Coordinator) RefreshWindows() {
 		}
 		windows = filtered
 	}
+
+	// Merge in this session's PARKED minimized windows (they live in the holding
+	// session, invisible to native nav, but must still render in the sidebar's
+	// Minimized section). They carry Minimized=true so everything downstream
+	// (grouping, sidebarRenderGroups, the nav skip filter) treats them correctly.
+	windows = append(windows, c.listParkedMinimizedWindows()...)
 
 	c.applyCWDIdentityMappings(windows)
 
@@ -4254,10 +4319,26 @@ func (pt *processTree) treeCPU(pid int) float64 {
 func (c *Coordinator) computeVisualPositions() {
 	pos := make(map[string]int)
 	n := c.baseIndex
+	// Real (non-minimized) windows first, contiguous — these drive tmux index sync
+	// (syncWindowIndices) and prefix+N selection.
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
+			if win.Minimized {
+				continue
+			}
 			pos[win.ID] = n
 			n++
+		}
+	}
+	// Minimized windows are numbered AFTER the real ones: they still get a sidebar
+	// "N." but never shift real-window numbering or tmux indices (they live in the
+	// holding session and must not be renumbered/moved).
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.Minimized {
+				pos[win.ID] = n
+				n++
+			}
 		}
 	}
 	// While the dashboard is active the sidebar renders the remembered origin
@@ -4451,6 +4532,12 @@ func (c *Coordinator) syncWindowIndices() []tmuxWindowMove {
 	allMatch := true
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
+			// Never renumber/move minimized windows: parked ones live in the holding
+			// session (a move-window would relocate them), and a peeked one is only
+			// transiently in-session. They're excluded from prefix+N indexing.
+			if win.Minimized {
+				continue
+			}
 			desired := c.windowVisualPos[win.ID]
 			mappings = append(mappings, winMapping{
 				id:           win.ID,
@@ -6966,6 +7053,266 @@ func cleanupLimboSessionIfEmpty() {
 	}
 }
 
+// minimizedHoldingSession is a dedicated DETACHED session that holds MINIMIZED
+// windows (the whole window, panes intact). Because every native window-cycling
+// path — next-window, previous-window, prefix-n/p, choose-tree -w — is
+// session-scoped, a window parked here is unreachable from ALL of them, for any
+// caller (a rebound key, a script, an external `tmux next-window`). This is the
+// only mechanism tmux offers: there is no per-window "skip/hidden" flag. Mirrors
+// sidebarLimboSession. Parked windows are tagged @tabby_min_origin (which user
+// session to restore into) and @tabby_min_dir (working dir, for the sidebar label
+// — other @tabby_* display options travel with move-window automatically).
+const minimizedHoldingSession = "_tabby_minimized"
+
+// ensureMinimizedSession creates the detached holding session on demand, pinning
+// destroy-unattached off so tmux never reaps it while it holds parked windows.
+func ensureMinimizedSession() {
+	if err := exec.Command("tmux", "has-session", "-t", minimizedHoldingSession).Run(); err == nil {
+		return
+	}
+	if err := exec.Command("tmux", "new-session", "-d", "-s", minimizedHoldingSession, "-x", "80", "-y", "24").Run(); err != nil {
+		coordinatorDebugLog.Printf("ensureMinimizedSession: new-session failed: %v", err)
+		return
+	}
+	exec.Command("tmux", "set-option", "-t", minimizedHoldingSession, "destroy-unattached", "off").Run()
+	coordinatorDebugLog.Printf("ensureMinimizedSession: created %s", minimizedHoldingSession)
+}
+
+// minimizedSessionHasParkedWindows reports whether any parked window (one tagged
+// @tabby_min_origin — i.e. not the new-session placeholder) remains in the
+// holding session, across all origin sessions.
+func minimizedSessionHasParkedWindows() bool {
+	out, err := exec.Command("tmux", "list-windows", "-t", minimizedHoldingSession, "-F",
+		"#{@tabby_min_origin}").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanupMinimizedSessionIfEmpty kills the holding session once no parked windows
+// remain anywhere (also removing the new-session placeholder window).
+func cleanupMinimizedSessionIfEmpty() {
+	if minimizedSessionHasParkedWindows() {
+		return
+	}
+	if err := exec.Command("tmux", "has-session", "-t", minimizedHoldingSession).Run(); err == nil {
+		exec.Command("tmux", "kill-session", "-t", minimizedHoldingSession).Run()
+		coordinatorDebugLog.Printf("cleanupMinimizedSessionIfEmpty: killed %s", minimizedHoldingSession)
+	}
+}
+
+// isParkedWindow reports whether the window currently lives in the holding
+// session (i.e. it is minimized-and-parked, not surfaced for peeking).
+func isParkedWindow(windowID string) bool {
+	windowID = strings.TrimSpace(windowID)
+	if windowID == "" {
+		return false
+	}
+	return tmuxOutputTrimmed("display-message", "-p", "-t", windowID, "#{session_name}") == minimizedHoldingSession
+}
+
+// parkWindow moves windowID OUT of the user session into the holding session and
+// tags it, so native navigation can no longer reach it. Idempotent-ish: a window
+// already parked is left alone. captureFlags controls whether to (re)assert the
+// @tabby_minimized flag + origin (true on minimize, false on a plain re-park where
+// the markers are already present).
+func (c *Coordinator) parkWindow(windowID string, setFlag bool) bool {
+	windowID = strings.TrimSpace(windowID)
+	if windowID == "" || isParkedWindow(windowID) {
+		return false
+	}
+	ensureMinimizedSession()
+	// Capture the active pane's dir so the merged sidebar row can rebuild its
+	// label (panes are detached in the holding session).
+	if dir := tmuxOutputTrimmed("display-message", "-p", "-t", windowID, "#{pane_current_path}"); dir != "" {
+		exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_min_dir", dir).Run()
+	}
+	if setFlag {
+		exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_minimized", "1").Run()
+		exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_min_origin", c.dashboardSession()).Run()
+	}
+	if err := exec.Command("tmux", "move-window", "-d", "-s", windowID, "-t", minimizedHoldingSession+":").Run(); err != nil {
+		coordinatorDebugLog.Printf("parkWindow: move-window failed for %s: %v", windowID, err)
+		return false
+	}
+	coordinatorDebugLog.Printf("parkWindow: parked %s", windowID)
+	return true
+}
+
+// surfaceWindow moves a parked window back into its origin session WITHOUT
+// clearing @tabby_minimized — it stays flagged so it still shows in the Minimized
+// section and re-parks on blur (peek). No-op if not parked.
+func (c *Coordinator) surfaceWindow(windowID string) bool {
+	windowID = strings.TrimSpace(windowID)
+	if windowID == "" || !isParkedWindow(windowID) {
+		return false
+	}
+	origin := tmuxOutputTrimmed("display-message", "-p", "-t", windowID, "#{@tabby_min_origin}")
+	if origin == "" {
+		origin = c.dashboardSession()
+	}
+	if err := exec.Command("tmux", "move-window", "-d", "-s", windowID, "-t", origin+":").Run(); err != nil {
+		coordinatorDebugLog.Printf("surfaceWindow: move-window failed for %s: %v", windowID, err)
+		return false
+	}
+	coordinatorDebugLog.Printf("surfaceWindow: surfaced %s -> %s", windowID, origin)
+	return true
+}
+
+// unparkWindow fully un-minimizes: moves the window back to its origin session
+// (if parked) and clears every parked marker. Safe to call whether parked or
+// surfaced-but-flagged.
+func (c *Coordinator) unparkWindow(windowID string) {
+	windowID = strings.TrimSpace(windowID)
+	if windowID == "" {
+		return
+	}
+	if isParkedWindow(windowID) {
+		origin := tmuxOutputTrimmed("display-message", "-p", "-t", windowID, "#{@tabby_min_origin}")
+		if origin == "" {
+			origin = c.dashboardSession()
+		}
+		if err := exec.Command("tmux", "move-window", "-d", "-s", windowID, "-t", origin+":").Run(); err != nil {
+			coordinatorDebugLog.Printf("unparkWindow: move-window failed for %s: %v", windowID, err)
+		}
+	}
+	exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_minimized").Run()
+	exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_min_origin").Run()
+	exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_min_dir").Run()
+	cleanupMinimizedSessionIfEmpty()
+	coordinatorDebugLog.Printf("unparkWindow: unminimized %s", windowID)
+}
+
+// clearPeekIf drops the peek tracking when windowID is the currently-peeked
+// window — called when it is explicitly unminimized, so the blur handler won't
+// try to re-park a window that is no longer minimized.
+func (c *Coordinator) clearPeekIf(windowID string) {
+	windowID = strings.TrimSpace(windowID)
+	c.peekMu.Lock()
+	if c.peekedWindowID == windowID {
+		c.peekedWindowID = ""
+	}
+	c.peekMu.Unlock()
+}
+
+// surfaceForActivate runs JUST BEFORE a window is made active: if the target is a
+// parked minimized window, move it back into the session so select-window can
+// reach it. No-op for normal (already in-session) windows.
+func (c *Coordinator) surfaceForActivate(targetID string) {
+	targetID = strings.TrimSpace(targetID)
+	if targetID != "" && isParkedWindow(targetID) {
+		c.surfaceWindow(targetID)
+	}
+}
+
+// settlePeek runs AFTER the target window is active (client already moved). It
+// re-parks a previously-peeked window that just lost focus, and records the new
+// peek when the now-active target is itself a still-minimized (surfaced) window.
+// Doing the re-park after the switch avoids dragging a client along with the
+// window as it moves to the holding session.
+func (c *Coordinator) settlePeek(targetID string) {
+	targetID = strings.TrimSpace(targetID)
+	newPeek := ""
+	if targetID != "" && tmuxOutputTrimmed("show-window-option", "-v", "-t", targetID, "@tabby_minimized") == "1" {
+		newPeek = targetID
+	}
+	c.peekMu.Lock()
+	prev := c.peekedWindowID
+	c.peekMu.Unlock()
+
+	if prev != "" && prev != targetID {
+		// Re-hide the window we just left — but only if it is still flagged
+		// minimized (an explicit unminimize clears the flag).
+		if tmuxOutputTrimmed("show-window-option", "-v", "-t", prev, "@tabby_minimized") == "1" {
+			c.parkWindow(prev, false)
+		}
+	}
+	c.peekMu.Lock()
+	c.peekedWindowID = newPeek
+	c.peekMu.Unlock()
+}
+
+// maybeReparkPeeked is the polling catch-all: if the peeked window is no longer
+// the active window (focus changed by a path that bypassed beforeActivate — a
+// direct pane click, an external select-window), re-park it. Called from the
+// window-refresh tick.
+func (c *Coordinator) maybeReparkPeeked() {
+	c.peekMu.Lock()
+	prev := c.peekedWindowID
+	c.peekMu.Unlock()
+	if prev == "" {
+		return
+	}
+	active := tmuxOutputTrimmed("display-message", "-p", "-t", c.dashboardSession(), "#{window_id}")
+	if active == prev {
+		return
+	}
+	if tmuxOutputTrimmed("show-window-option", "-v", "-t", prev, "@tabby_minimized") == "1" {
+		c.parkWindow(prev, false)
+	}
+	c.peekMu.Lock()
+	if c.peekedWindowID == prev {
+		c.peekedWindowID = ""
+	}
+	c.peekMu.Unlock()
+}
+
+// listParkedMinimizedWindows returns synthetic Window entries for THIS session's
+// windows currently parked in the holding session, so the sidebar's "Minimized"
+// section still shows them even though they've left the user session. Display
+// fields come from the @tabby_* options that travel with move-window; the working
+// dir (captured as @tabby_min_dir at park time) is attached via a synthetic
+// content pane so windowDirCode/firstPaneCWD can rebuild the tab label.
+func (c *Coordinator) listParkedMinimizedWindows() []tmux.Window {
+	if err := exec.Command("tmux", "has-session", "-t", minimizedHoldingSession).Run(); err != nil {
+		return nil
+	}
+	origin := c.dashboardSession()
+	out, err := exec.Command("tmux", "list-windows", "-t", minimizedHoldingSession, "-F",
+		strings.Join([]string{
+			"#{window_id}", "#{window_index}", "#{window_name}", "#{@tabby_min_origin}",
+			"#{@tabby_color}", "#{@tabby_group}", "#{@tabby_icon}", "#{@tabby_ai_title}", "#{@tabby_min_dir}",
+		}, "\t")).Output()
+	if err != nil {
+		return nil
+	}
+	var parked []tmux.Window
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) < 9 {
+			continue
+		}
+		if strings.TrimSpace(f[3]) != origin {
+			continue // parked by a different user session — not ours to show
+		}
+		idx, _ := strconv.Atoi(strings.TrimSpace(f[1]))
+		w := tmux.Window{
+			ID:          strings.TrimSpace(f[0]),
+			Index:       idx,
+			Name:        f[2],
+			CustomColor: strings.TrimSpace(f[4]),
+			Group:       strings.TrimSpace(f[5]),
+			Icon:        strings.TrimSpace(f[6]),
+			AITitle:     strings.TrimSpace(f[7]),
+			Minimized:   true,
+		}
+		if dir := strings.TrimSpace(f[8]); dir != "" {
+			w.Panes = []tmux.Pane{{ID: "%parked", Command: "bash", CurrentPath: dir}}
+		}
+		parked = append(parked, w)
+	}
+	return parked
+}
+
 func stashNameForWindow(windowID string) string {
 	return sidebarStashWindowPrefix + strings.TrimPrefix(windowID, "@")
 }
@@ -7472,6 +7819,9 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 		// signal_refresh → updateActiveWindow round trip (~300ms) before the
 		// sidebar highlights the new tab.
 		c.SetActiveWindowOptimistic(target)
+		// Re-park the window we navigated away from if it was a peeked minimized
+		// one (target is never a parked window here — wins excludes minimized).
+		c.settlePeek(target)
 	}
 	return len(switched) > 0
 }
@@ -8427,7 +8777,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	topWidgetLines := strings.Count(topWidgets, "\n")
 	bottomWidgetLines := strings.Count(bottomWidgets, "\n")
 
-	mainContent, mainRegions := c.generateMainContent(clientID, width, height)
+	mainContent, mainRegions, floatLine := c.generateMainContent(clientID, width, height)
 	mainContentLines := strings.Count(mainContent, "\n")
 
 	maxMainLines := height - headerLines - topWidgetLines - bottomWidgetLines
@@ -8464,9 +8814,40 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	mainContent, mainRegions = trimContentAndRegions(mainContent, mainRegions, maxMainLines)
 	mainLines := strings.Count(mainContent, "\n")
 
-	// Pad main content to pin bottom widgets to the viewport bottom
+	// Pad main content to pin bottom widgets to the viewport bottom. When there's
+	// a floated "Minimized" section, insert the gap BEFORE it (pushing it to the
+	// bottom of the tab area) and shift its rows' click regions down to match;
+	// otherwise append the gap at the end as usual.
 	if mainLines < maxMainLines {
-		mainContent += strings.Repeat("\n", maxMainLines-mainLines)
+		pad := maxMainLines - mainLines
+		if floatLine >= 0 && floatLine <= mainLines {
+			lines := strings.Split(mainContent, "\n")
+			hadTrailing := strings.HasSuffix(mainContent, "\n")
+			if hadTrailing && len(lines) > 0 {
+				lines = lines[:len(lines)-1]
+			}
+			if floatLine <= len(lines) {
+				gap := make([]string, pad)
+				newLines := make([]string, 0, len(lines)+pad)
+				newLines = append(newLines, lines[:floatLine]...)
+				newLines = append(newLines, gap...)
+				newLines = append(newLines, lines[floatLine:]...)
+				mainContent = strings.Join(newLines, "\n")
+				if hadTrailing {
+					mainContent += "\n"
+				}
+				for i := range mainRegions {
+					if mainRegions[i].StartLine >= floatLine {
+						mainRegions[i].StartLine += pad
+						mainRegions[i].EndLine += pad
+					}
+				}
+			} else {
+				mainContent += strings.Repeat("\n", pad)
+			}
+		} else {
+			mainContent += strings.Repeat("\n", pad)
+		}
 		mainLines = maxMainLines
 	}
 
@@ -8980,7 +9361,9 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	// Ensure the final rendered line has the correct background applied everywhere
 	if headerBg != "" {
-		line = c.applyBackgroundFill(line, headerBg, width)
+		// Gradient the header top-border strip (lighter -> base) to match the live
+		// sidebar tab/header surface.
+		line = c.applyGradientFill(line, gradientEndColor(headerBg), headerBg, width)
 	} else {
 		line = fullLineStyle.Render(line)
 	}
@@ -9661,7 +10044,9 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 		btnStyle2.Render(buttonsStr)
 
 	if headerBg != "" {
-		line = c.applyBackgroundFill(line, headerBg, width)
+		// Gradient the header top-border strip (lighter -> base) to match the live
+		// sidebar tab/header surface.
+		line = c.applyGradientFill(line, gradientEndColor(headerBg), headerBg, width)
 	} else {
 		line = fullLineStyle.Render(line)
 	}
@@ -10188,30 +10573,36 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 		textRow = headerHeight / 2
 	}
 
-	// Render header rows
+	// Header text style WITHOUT a background: on the gradient path the per-cell
+	// gradient supplies the bg, so a style bg would paint over it.
+	headerTextStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(fgColor)).Bold(bold)
+	_ = rowStyle // retained for the transparent (no-bg) path below
+
+	// Render header rows. When the header has a bg colour, fill each row with the
+	// same lighter -> base gradient the live tab rows use so the TABBY header reads
+	// as part of the same surface; otherwise keep the flat/transparent layout.
 	for line := 0; line < headerHeight; line++ {
+		// Build the row's text portion (may carry fg ANSI); the fill pads the rest.
+		rowContent := ""
 		if line == textRow {
 			if centered {
-				// Horizontal centering
 				leftPad := (width - nameWidth) / 2
 				if leftPad < 0 {
 					leftPad = 0
 				}
-				rightPad := width - leftPad - nameWidth
-				if rightPad < 0 {
-					rightPad = 0
-				}
-				s.WriteString(rowStyle.Render(strings.Repeat(" ", leftPad)) + headerStyle.Render(headerText) + rowStyle.Render(strings.Repeat(" ", rightPad)) + "\n")
+				rowContent = strings.Repeat(" ", leftPad) + headerTextStyle.Render(headerText)
 			} else {
-				// Left-aligned (legacy layout)
-				spacerWidth := width - 1 - nameWidth
-				if spacerWidth < 0 {
-					spacerWidth = 0
-				}
-				s.WriteString(rowStyle.Render(" ") + headerStyle.Render(headerText) + rowStyle.Render(strings.Repeat(" ", spacerWidth)) + "\n")
+				rowContent = " " + headerTextStyle.Render(headerText)
 			}
+		}
+		if bgColor != "" {
+			s.WriteString(c.applyGradientFill(rowContent, gradientEndColor(bgColor), bgColor, width) + "\n")
 		} else {
-			s.WriteString(rowStyle.Render(strings.Repeat(" ", width)) + "\n")
+			plainW := uniseg.StringWidth(stripAnsi(rowContent))
+			if plainW < width {
+				rowContent += strings.Repeat(" ", width-plainW)
+			}
+			s.WriteString(rowContent + "\n")
 		}
 	}
 
@@ -10246,6 +10637,54 @@ func (c *Coordinator) dashboardRenderGroups() []grouping.GroupedWindows {
 	return grouping.GroupWindowsWithOptions(synth, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 }
 
+// sidebarRenderGroups returns the group list for the sidebar tab area with every
+// minimized window pulled out of its group into a single synthetic "Minimized"
+// group rendered at the very bottom — visually separating de-prioritised tabs
+// from the active ones (they read as a distinct, muted section below the real
+// groups). Display-only: c.grouped (which drives borders, next/prev cycling, the
+// dashboard, etc.) is untouched, and when nothing is minimized the result is
+// identical to dashboardRenderGroups.
+func (c *Coordinator) sidebarRenderGroups() []grouping.GroupedWindows {
+	base := c.dashboardRenderGroups()
+	var minimized []tmux.Window
+	out := make([]grouping.GroupedWindows, 0, len(base)+1)
+	for _, g := range base {
+		kept := make([]tmux.Window, 0, len(g.Windows))
+		for _, w := range g.Windows {
+			if w.Minimized {
+				minimized = append(minimized, w)
+			} else {
+				kept = append(kept, w)
+			}
+		}
+		// Drop a group that became empty ONLY because all its windows were
+		// minimized (they now live in the Minimized section). Genuinely-empty
+		// groups the base list chose to show (ShowEmptyGroups) pass through so
+		// that behaviour is unchanged. kept is a fresh slice, so c.grouped's
+		// backing arrays are never mutated.
+		if len(kept) == 0 && len(g.Windows) > 0 {
+			continue
+		}
+		g.Windows = kept
+		out = append(out, g)
+	}
+	if len(minimized) > 0 {
+		sort.SliceStable(minimized, func(i, j int) bool {
+			return minimized[i].Index < minimized[j].Index
+		})
+		// Muted header so the section reads as set-aside, not a live coloured group.
+		out = append(out, grouping.GroupedWindows{
+			Name: "Minimized",
+			Theme: config.Theme{
+				Bg: "#6e6a86", Fg: "#faf4ed",
+				ActiveBg: "#6e6a86", ActiveFg: "#faf4ed",
+			},
+			Windows: minimized,
+		})
+	}
+	return out
+}
+
 // appendDashboardRow renders the persistent, clickable "0. Dashboard" entry at
 // the top of the sidebar (above the first group) and registers its click region
 // (action dashboard_toggle). It is highlighted while the dashboard is active.
@@ -10273,8 +10712,13 @@ func (c *Coordinator) appendDashboardRow(s *strings.Builder, regions *[]daemon.C
 
 // generateMainContent creates the main scrollable area with window list
 // clientID is the window ID that this content is being rendered for
-func (c *Coordinator) generateMainContent(clientID string, width, height int) (string, []daemon.ClickableRegion) {
+// The returned floatLine is the 0-based line index of the synthetic "Minimized"
+// group header, or -1 when there is no such section. RenderForClient inserts its
+// bottom-padding gap at this line so the Minimized section floats to the bottom of
+// the tab area instead of hugging the last real group.
+func (c *Coordinator) generateMainContent(clientID string, width, height int) (string, []daemon.ClickableRegion, int) {
 	var s strings.Builder
+	floatLine := -1
 	var regions []daemon.ClickableRegion
 
 	currentLine := 0
@@ -10342,14 +10786,16 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	activeIndBgConfig := c.config.Sidebar.Colors.ActiveIndicatorBg
 
 	if c.config.Sidebar.PrefixMode {
-		return c.generatePrefixModeContent(clientID, width, height, treeBranchChar, treeBranchLastChar, treeContinueChar, treeConnectorChar, expandedIcon, collapsedIcon, treeStyle, disclosureColor, activeIndicator, activeIndFgConfig, activeIndBgConfig)
+		pc, pr := c.generatePrefixModeContent(clientID, width, height, treeBranchChar, treeBranchLastChar, treeContinueChar, treeConnectorChar, expandedIcon, collapsedIcon, treeStyle, disclosureColor, activeIndicator, activeIndFgConfig, activeIndBgConfig)
+		return pc, pr, -1
 	}
 
 	// Persistent "0. Dashboard" entry above the first group.
 	c.appendDashboardRow(&s, &regions, &currentLine, width, inactiveFg, activeIndicator)
 
-	// Iterate over grouped windows (synthetic remembered list while gathered).
-	grouped := c.dashboardRenderGroups()
+	// Iterate over grouped windows (synthetic remembered list while gathered),
+	// with minimized tabs collected into a muted "Minimized" group at the bottom.
+	grouped := c.sidebarRenderGroups()
 	numGroups := len(grouped)
 	for gi, group := range grouped {
 		isLastGroup := gi == numGroups-1
@@ -10398,6 +10844,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		groupStartLine := currentLine
 		hasWindows := len(group.Windows) > 0
 
+		// Remember where the synthetic Minimized section begins so RenderForClient
+		// can float it to the bottom of the tab area (see sidebarRenderGroups).
+		if group.Name == "Minimized" {
+			floatLine = currentLine
+		}
+
 		// Render group header
 		{
 			bg := theme.Bg
@@ -10434,12 +10886,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					iconAndText = renderedIcon + headerStyle.Render(headerText)
 				}
 				if bg != "" {
-					iconAndText = c.applyBackgroundFill(iconAndText, bg, restW)
+					iconAndText = c.applyGradientFill(iconAndText, gradientEndColor(bg), bg, restW)
 				} else {
 					iconAndText = lipgloss.NewStyle().Width(restW).Render(iconAndText)
 				}
 
-				// Render hamburger menu button with matching background
+				// Render hamburger menu button with matching background (gradient end
+				// colour so it continues seamlessly from the header body).
 				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
 				if bg != "" {
 					menuBtn = c.applyBackgroundFill(menuBtn, bg, menuBtnW)
@@ -10473,10 +10926,11 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					iconAndText = renderedIcon + headerStyle.Render(headerText)
 				}
 				if bg != "" {
-					iconAndText = c.applyBackgroundFill(iconAndText, bg, restW)
+					iconAndText = c.applyGradientFill(iconAndText, gradientEndColor(bg), bg, restW)
 				}
 
-				// Render hamburger menu button with matching background
+				// Render hamburger menu button with matching background (gradient end
+				// colour so it continues seamlessly from the header body).
 				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
 				if bg != "" {
 					menuBtn = c.applyBackgroundFill(menuBtn, bg, menuBtnW)
@@ -10581,11 +11035,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				bgColor = theme.Bg
 				fgColor = inactiveFg
 			}
-			// Minimized windows read as dimmed regardless of active state.
-			// Blend the fg ~50% toward the row bg so the dim is visible even
-			// on terminals that collapse Bold+Faint into Bold (macOS Terminal
-			// and others). Falls back to plain inactiveFg if we can't blend.
-			if win.Minimized {
+			// Minimized windows read as dimmed — but NOT when they're the active
+			// (selected) window, so a selected minimized tab still shows its active
+			// state like any other tab. Blend the fg ~50% toward the row bg so the
+			// dim is visible even on terminals that collapse Bold+Faint into Bold
+			// (macOS Terminal and others). Falls back to plain inactiveFg.
+			if win.Minimized && !isActive {
 				blendBg := bgColor
 				if blendBg == "" {
 					blendBg = theme.Bg
@@ -10602,10 +11057,10 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				style = style.Foreground(lipgloss.Color(fgColor))
 			}
 
-			if isActive && !win.Minimized {
+			if isActive {
 				style = style.Bold(true)
 			}
-			if win.Minimized {
+			if win.Minimized && !isActive {
 				style = style.Faint(true)
 			}
 
@@ -10798,25 +11253,22 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 
 				contentRendered := style.Render(content)
+				// rowEndBg is the gradient's right-edge colour, reused to fill the
+				// menu button so it continues the gradient without a seam.
+				rowEndBg := ""
 				if bgColor != "" {
-					r, g, b := hexToRGB(bgColor)
-					bgEsc := fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
-					resetEsc := "\x1b[0m"
-					// Re-inject bg after any ANSI resets so bg persists through style changes
-					contentRendered = strings.ReplaceAll(contentRendered, resetEsc, resetEsc+bgEsc)
-					contentPlain := stripAnsi(contentRendered)
-					contentVisualWidth := uniseg.StringWidth(contentPlain)
-					pad := contentWidth - contentVisualWidth
-					if pad < 0 {
-						pad = 0
-					}
-					contentRendered = bgEsc + contentRendered + strings.Repeat(" ", pad) + resetEsc
+					// All tabs gradient lighter -> base — minimized rows use the same
+					// direction as live ones (the reverse-for-minimized scheme was
+					// dropped); the Minimized section's muted colour still sets it apart.
+					fromBg, toBg := gradientEndColor(bgColor), bgColor
+					rowEndBg = toBg
+					contentRendered = c.applyGradientFill(contentRendered, fromBg, toBg, contentWidth)
 				}
 
 				// Render hamburger menu button with matching background
 				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
 				if bgColor != "" {
-					menuBtn = c.applyBackgroundFill(menuBtn, bgColor, menuBtnW)
+					menuBtn = c.applyBackgroundFill(menuBtn, rowEndBg, menuBtnW)
 				}
 				s.WriteString(prefix + contentRendered + menuBtn + "\n")
 				currentLine++
@@ -11052,25 +11504,20 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						paneContentW = 0
 					}
 
+					// Pane rows get the same gradient as their window's tab row
+					// (lighter -> base), minimized windows included.
+					paneRowEndBg := ""
 					if paneLineBg != "" {
-						r, g, b := hexToRGB(paneLineBg)
-						bgEsc := fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
-						resetEsc := "\x1b[0m"
-						paneContent = strings.ReplaceAll(paneContent, resetEsc, resetEsc+bgEsc)
-						paneContentPlain := stripAnsi(paneContent)
-						paneContentVisualW := uniseg.StringWidth(paneContentPlain)
-						panePad := paneContentW - paneContentVisualW
-						if panePad < 0 {
-							panePad = 0
-						}
-						paneContent = bgEsc + paneContent + strings.Repeat(" ", panePad) + resetEsc
+						fromBg, toBg := gradientEndColor(paneLineBg), paneLineBg
+						paneRowEndBg = toBg
+						paneContent = c.applyGradientFill(paneContent, fromBg, toBg, paneContentW)
 					}
 
 					var paneBtns string
 					menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
 					paneBtns = menuBtn
 					if paneLineBg != "" {
-						paneBtns = c.applyBackgroundFill(paneBtns, paneLineBg, paneMenuW)
+						paneBtns = c.applyBackgroundFill(paneBtns, paneRowEndBg, paneMenuW)
 					}
 					s.WriteString(panePrefix + paneContent + paneBtns + "\n")
 					currentLine++
@@ -11103,7 +11550,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		}
 	}
 
-	return s.String(), regions
+	return s.String(), regions, floatLine
 }
 
 // generatePrefixModeContent creates a flat window list with group prefixes (e.g., "SD| WindowName")
@@ -11193,11 +11640,12 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			fgColor = inactiveFg
 		}
 
-		// Minimized windows read as dimmed regardless of active state.
-		// Blend the fg ~50% toward the row bg so the dim is visible even
-		// on terminals that collapse Bold+Faint into Bold (macOS Terminal
-		// and others). Falls back to plain inactiveFg if we can't blend.
-		if win.Minimized {
+		// Minimized windows read as dimmed — but NOT when they're the active
+		// (selected) window, so a selected minimized tab still shows its active
+		// state like any other tab. Blend the fg ~50% toward the row bg so the dim
+		// is visible even on terminals that collapse Bold+Faint into Bold (macOS
+		// Terminal and others). Falls back to plain inactiveFg if we can't blend.
+		if win.Minimized && !isActive {
 			blendBg := bgColor
 			if blendBg == "" {
 				blendBg = theme.Bg
@@ -11214,10 +11662,10 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			style = style.Foreground(lipgloss.Color(fgColor))
 		}
 
-		if isActive && !win.Minimized {
+		if isActive {
 			style = style.Bold(true)
 		}
-		if win.Minimized {
+		if win.Minimized && !isActive {
 			style = style.Faint(true)
 		}
 
@@ -14836,10 +15284,16 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 
 		if suppress {
-			logEvent("NAV_KEY_SUPPRESSED action=%s reason=%s target=%s invoking=%s",
+			// Previously phone clients DROPPED key-nav entirely — a guard against
+			// iOS touch gestures synthesizing spurious M-]/M-[ bursts. That source
+			// was fixed (commit 2d9026b), and native window nav now skips minimized
+			// windows on its own (they're parked in a holding session), so there's no
+			// longer a reason to disable phone nav. Fall through to the normal
+			// per-client path below so the phone's keys navigate (moving only the
+			// phone client) and still skip minimized windows.
+			logEvent("NAV_KEY_PHONE_FALLTHROUGH action=%s reason=%s target=%s invoking=%s",
 				input.ResolvedAction, reason, strings.TrimSpace(input.ResolvedTarget), invokingTTY)
-			navtrace.Write("OUTCOME navid=%s result=suppressed reason=%s", navID, reason)
-			return false
+			navtrace.Write("RECV navid=%s note=phone_fallthrough reason=%s", navID, reason)
 		}
 
 		delta := -1
@@ -15013,27 +15467,35 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return false
 
 	case "toggle_minimize_window":
-		// Flip @tabby_minimized for the target window. Target may be a window
-		// index ("3"), a pane ID ("%7"), or empty (current window).
+		// Minimize -> PARK the window into the holding session (so native tmux
+		// next/previous-window skip it for every caller); unminimize -> restore it.
+		// Target may be a window id ("@5"), index ("3"), pane id ("%7"), or empty
+		// (current window). Resolve to a stable window id for the park helpers.
 		target := strings.TrimSpace(input.ResolvedTarget)
-		winIdx := ""
-		if target == "" {
-			out, _ := exec.Command("tmux", "display-message", "-p", "#{window_index}").Output()
-			winIdx = strings.TrimSpace(string(out))
-		} else if strings.HasPrefix(target, "%") {
-			out, _ := exec.Command("tmux", "display-message", "-t", target, "-p", "#{window_index}").Output()
-			winIdx = strings.TrimSpace(string(out))
-		} else {
-			winIdx = target
+		winID := ""
+		switch {
+		case target == "":
+			winID = tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+		case strings.HasPrefix(target, "@"):
+			winID = target
+		case strings.HasPrefix(target, "%"):
+			winID = tmuxOutputTrimmed("display-message", "-t", target, "-p", "#{window_id}")
+		default: // window index
+			winID = tmuxOutputTrimmed("display-message", "-t", ":"+target, "-p", "#{window_id}")
 		}
-		if winIdx == "" {
+		if winID == "" {
 			return false
 		}
-		out, err := exec.Command("tmux", "show-window-option", "-v", "-t", ":"+winIdx, "@tabby_minimized").Output()
-		if err == nil && strings.TrimSpace(string(out)) == "1" {
-			exec.Command("tmux", "set-window-option", "-t", ":"+winIdx, "-u", "@tabby_minimized").Run()
+		if tmuxOutputTrimmed("show-window-option", "-v", "-t", winID, "@tabby_minimized") == "1" {
+			c.clearPeekIf(winID)
+			c.unparkWindow(winID)
 		} else {
-			exec.Command("tmux", "set-window-option", "-t", ":"+winIdx, "@tabby_minimized", "1").Run()
+			// Don't park the focused window out from under the user: move focus to a
+			// neighbor first when minimizing the active window.
+			if tmuxOutputTrimmed("display-message", "-p", "#{window_id}") == winID {
+				c.selectNeighborWindowFrom(winID, +1, "minimize")
+			}
+			c.parkWindow(winID, true)
 		}
 		return true
 
@@ -17040,13 +17502,13 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		args = append(args, "Pin to Top", "p", pinCmd)
 	}
 
-	// Minimize/Unminimize — minimized windows are skipped by cmd+]/cmd+[ cycling
+	// Minimize/Unminimize — route through the tabby hook so the window is PARKED
+	// into the holding session (skipped by all native window nav), not just flagged.
+	toggleMinCmd := fmt.Sprintf("run-shell '%s toggle-minimize-window -t %s'", c.getHookPath(), wid)
 	if win.Minimized {
-		unminCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_minimized", wid)
-		args = append(args, "Unminimize", "m", unminCmd)
+		args = append(args, "Unminimize", "m", toggleMinCmd)
 	} else {
-		minCmd := fmt.Sprintf("set-window-option -t %s @tabby_minimized 1", wid)
-		args = append(args, "Minimize", "m", minCmd)
+		args = append(args, "Minimize", "m", toggleMinCmd)
 	}
 
 	// --- Window actions section ---
@@ -18131,6 +18593,95 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 
 	return strings.Join(lines, "\n")
 }
+
+// applyGradientFill is applyBackgroundFill with a subtle left-to-right horizontal
+// background gradient (fromHex -> toHex) instead of a flat fill, so tab rows and
+// group headers get a gentle sheen rather than reading as flat colour blocks. It
+// preserves any foreground ANSI already in content (copying escape sequences
+// through verbatim) and pads the remainder with gradient-coloured spaces. Per-cell
+// backgrounds use TrueColor escapes directly (cheap — one Sprintf per column),
+// matching the raw bg escapes the tab-row renderer already emits. Falls back to a
+// solid fromHex fill for any edge case (non-hex colours, empty width, multi-line
+// content), so it can never render worse than applyBackgroundFill.
+func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width int) string {
+	if width < 1 || strings.Contains(content, "\n") ||
+		len(fromHex) != 7 || fromHex[0] != '#' || len(toHex) != 7 || toHex[0] != '#' {
+		return c.applyBackgroundFill(content, fromHex, width)
+	}
+	// Band the gradient into a handful of steps instead of a distinct colour per
+	// column. A "slight" gradient over ~25 cells changes by ~1/channel per cell, so
+	// a per-cell escape would bloat every row ~25x; banding emits an escape only
+	// when the band (hence colour) changes — a few per row — while still reading as
+	// a smooth sheen.
+	const numBands = 8
+	bands := numBands
+	if bands > width {
+		bands = width
+	}
+	bgAt := func(x int) string {
+		band := 0
+		if width > 1 && bands > 1 {
+			band = x * (bands - 1) / (width - 1)
+		}
+		frac := 0.0
+		if bands > 1 {
+			frac = float64(band) / float64(bands-1)
+		}
+		r, g, b := hexToRGB(blendHexToward(fromHex, toHex, frac))
+		return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+	}
+	isTerm := func(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') }
+	reset := "\x1b[0m"
+	var b strings.Builder
+	col := 0
+	lastEsc := ""
+	emit := func() {
+		if col >= width {
+			return
+		}
+		if e := bgAt(col); e != lastEsc {
+			b.WriteString(e)
+			lastEsc = e
+		}
+	}
+	rs := []rune(content)
+	for i := 0; i < len(rs); {
+		if rs[i] == '\x1b' {
+			// Copy a whole escape sequence (up to and including its final letter)
+			// through untouched so embedded fg/bold styling survives. A reset clears
+			// our bg, so force the next cell to re-emit it.
+			j := i + 1
+			for j < len(rs) && !isTerm(rs[j]) {
+				j++
+			}
+			if j < len(rs) {
+				j++
+			}
+			seq := string(rs[i:j])
+			b.WriteString(seq)
+			if strings.Contains(seq, "\x1b[0m") || seq == "\x1b[m" {
+				lastEsc = ""
+			}
+			i = j
+			continue
+		}
+		emit()
+		b.WriteRune(rs[i])
+		col += uniseg.StringWidth(string(rs[i]))
+		i++
+	}
+	for ; col < width; col++ {
+		emit()
+		b.WriteString(" ")
+	}
+	b.WriteString(reset)
+	return b.String()
+}
+
+// gradientEndColor returns the far end of a header/tab gradient: the base colour
+// nudged toward white. Returns the input unchanged when it isn't a hex colour,
+// which makes applyGradientFill fall back to a solid fill.
+func gradientEndColor(bg string) string { return lightenHex(bg, 0.22) }
 
 func fixHeaderHeightsInWindow(paneID string) {
 	// Get window ID and width so we use per-window width, not global profile

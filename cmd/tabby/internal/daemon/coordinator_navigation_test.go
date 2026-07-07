@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestHandleInput_NavigationSuppression_GlobalActive(t *testing.T) {
+func TestHandleInput_PhoneNavigationFallsThrough(t *testing.T) {
 	c := newTestCoordinator(t)
 	clientID := "tabby-hook"
 
@@ -20,9 +20,12 @@ func TestHandleInput_NavigationSuppression_GlobalActive(t *testing.T) {
 		ResolvedTarget: "@1",
 	}
 
-	// Should be suppressed due to global phone profile
+	// Phone clients used to DROP key-nav (guard against iOS touch-synthesized
+	// M-]/M-[). That source was fixed and native nav now skips minimized windows
+	// on its own, so phone nav now falls through to the normal path and proceeds
+	// (returns true) instead of being suppressed.
 	res := c.HandleInput(clientID, input)
-	assert.False(t, res, "Expected navigation to be suppressed when global profile is phone")
+	assert.True(t, res, "Expected phone navigation to fall through and proceed")
 }
 
 func TestHandleInput_NavigationSuppression_InvokingTTY(t *testing.T) {

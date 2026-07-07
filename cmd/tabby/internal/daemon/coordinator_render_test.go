@@ -75,7 +75,7 @@ func TestRenderForClient_ContentContainsWindowNames(t *testing.T) {
 	assert.NotNil(t, payload)
 	// Tab labels show the auto-derived abbreviation of the window name:
 	// "mywindow" -> "MYW".
-	assert.Contains(t, payload.Content, "MYW")
+	assert.Contains(t, stripAnsi(payload.Content), "MYW")
 }
 
 func TestRenderHeaderForClient_EmptyClientID(t *testing.T) {
@@ -155,7 +155,7 @@ func TestGenerateSidebarHeader_WithActiveWindow(t *testing.T) {
 
 func TestGenerateMainContent_EmptyGrouped(t *testing.T) {
 	c := newRenderCoordinator(t)
-	content, regions := c.generateMainContent("test-client", 30, 24)
+	content, regions, _ := c.generateMainContent("test-client", 30, 24)
 	_ = content
 	_ = regions
 }
@@ -173,7 +173,7 @@ func TestGenerateMainContent_WithWindows(t *testing.T) {
 		Windows: c.windows,
 	}}
 	c.stateMu.Unlock()
-	content, regions := c.generateMainContent("test-client", 30, 24)
+	content, regions, _ := c.generateMainContent("test-client", 30, 24)
 	assert.NotEmpty(t, content)
 	assert.NotEmpty(t, regions)
 }
@@ -188,7 +188,8 @@ func TestGenerateMainContent_ActiveWindowMatchesClient(t *testing.T) {
 		Windows: c.windows,
 	}}
 	c.stateMu.Unlock()
-	content, _ := c.generateMainContent("@active-win", 30, 24)
+	content, _, _ := c.generateMainContent("@active-win", 30, 24)
+	content = stripAnsi(content)
 	// "active-win" abbreviates to "AW" (initials of the two segments).
 	assert.Contains(t, content, "AW")
 }
@@ -211,7 +212,7 @@ func TestGenerateMainContent_WithPanes(t *testing.T) {
 		Windows: c.windows,
 	}}
 	c.stateMu.Unlock()
-	content, _ := c.generateMainContent("test-client", 30, 24)
+	content, _, _ := c.generateMainContent("test-client", 30, 24)
 	assert.NotEmpty(t, content)
 }
 
@@ -465,6 +466,9 @@ func TestRenderForClient_MultipleGroups(t *testing.T) {
 	payload := c.RenderForClient("test-client", 30, 24)
 	assert.NotNil(t, payload)
 	// Names render abbreviated: "group1-win" -> "GW", "group2-box" -> "GB".
-	assert.Contains(t, payload.Content, "GW")
-	assert.Contains(t, payload.Content, "GB")
+	// Strip ANSI first: the header/tab gradient interleaves per-band background
+	// escapes between glyphs, so the visible text is only contiguous once decoded.
+	plain := stripAnsi(payload.Content)
+	assert.Contains(t, plain, "GW")
+	assert.Contains(t, plain, "GB")
 }

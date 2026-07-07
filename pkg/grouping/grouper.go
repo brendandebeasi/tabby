@@ -76,8 +76,12 @@ func GroupWindowsWithOptions(windows []tmux.Window, groups []config.Group, inclu
 		}
 	}
 
-	// Sort pinned windows by index
+	// Sort pinned windows: non-minimized first (by index), minimized sink to the
+	// bottom (still by index among themselves).
 	sort.Slice(pinnedGroup.Windows, func(i, j int) bool {
+		if pinnedGroup.Windows[i].Minimized != pinnedGroup.Windows[j].Minimized {
+			return !pinnedGroup.Windows[i].Minimized
+		}
 		return pinnedGroup.Windows[i].Index < pinnedGroup.Windows[j].Index
 	})
 
@@ -86,8 +90,12 @@ func GroupWindowsWithOptions(windows []tmux.Window, groups []config.Group, inclu
 	var otherGroups []GroupedWindows
 
 	for _, group := range result {
-		// Sort windows by index within each group
+		// Sort windows within each group: non-minimized first (by index),
+		// minimized tabs sink to the bottom of the group (still by index).
 		sort.Slice(group.Windows, func(i, j int) bool {
+			if group.Windows[i].Minimized != group.Windows[j].Minimized {
+				return !group.Windows[i].Minimized
+			}
 			return group.Windows[i].Index < group.Windows[j].Index
 		})
 

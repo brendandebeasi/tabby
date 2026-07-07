@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -326,7 +327,19 @@ func responsiveSidebarWidth(windowID string, globalWidth int) int {
 // Returns true if any renderer was spawned (caller should restore focus afterward).
 // The coordinator is used to compute the bounded sidebar width, ensuring the spawn
 // uses the same width calculation as RunWidthSync (prevents resize churn on startup).
+// spawnRenderersMu serializes spawnRenderersForNewWindows. Three tickers call it
+// (windowCheckTicker, and two refresh paths in loop.go), so without this lock two
+// passes can both read hasRenderer=false for the same freshly-recreated window and
+// each split-window a sidebar into it — a duplicate that renders as a second
+// "Loading..." strip. This is especially likely right after a dashboard exit,
+// which recreates every origin window in one burst. Holding the lock across the
+// whole body means the second caller's live list-panes check sees the pane the
+// first caller just created (split-window is synchronous) and skips it.
+var spawnRenderersMu sync.Mutex
+
 func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window, coordinator *Coordinator) bool {
+	spawnRenderersMu.Lock()
+	defer spawnRenderersMu.Unlock()
 	if coordinator.sidebarHidden {
 		logEvent("SPAWN_SKIP reason=sidebar_hidden")
 		return false
@@ -576,6 +589,10 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 
 		hasSidebar := false
 		nonSystemLive := 0
+		// Live sidebar panes (correct `-window` arg, not dead) in this window,
+		// collected so we can reap duplicates below — two sidebars in one window
+		// render as a stray second "Loading..." strip.
+		var liveSidebars []string
 		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
 			if line == "" {
 				continue
@@ -605,12 +622,30 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 					_ = exec.Command("tmux", "kill-pane", "-t", paneID).Run()
 					continue
 				}
+				if !dead {
+					liveSidebars = append(liveSidebars, paneID)
+				}
 			}
 			if dead {
 				continue
 			}
 			if !paneIsSystemPane(cmd, startCmd) {
 				nonSystemLive++
+			}
+		}
+
+		// Reap duplicate sidebars: a correctly-targeted window should hold exactly
+		// one. Keep the lowest pane id (the earliest/original) and kill the rest —
+		// the survivor is the one already registered as this window's client, so
+		// the extra "Loading..." strip disappears without a respawn. Defense in
+		// depth behind spawnRenderersMu: catches any duplicate that a spawn race
+		// (or an external tmux action) still slips through.
+		if len(liveSidebars) > 1 {
+			sort.Strings(liveSidebars)
+			for _, id := range liveSidebars[1:] {
+				logEvent("CLEANUP_DUPLICATE_SIDEBAR window=%s pane=%s keep=%s", windowID, id, liveSidebars[0])
+				markSkipPreserveForWindow(id)
+				_ = exec.Command("tmux", "kill-pane", "-t", id).Run()
 			}
 		}
 
@@ -653,6 +688,12 @@ func startOSCPipes(windows []tmux.Window) {
 	}
 	cmd := fmt.Sprintf("'%s' hook osc-handler", tabbyBin)
 	for _, win := range windows {
+		// Minimized windows are either parked in the holding session (their entries
+		// here are synthetic, with a placeholder pane id) or transiently peeked;
+		// skip them so we don't fire pipe-pane at a non-existent/off-session pane.
+		if win.Minimized {
+			continue
+		}
 		for _, p := range win.Panes {
 			if paneIsSystemPane(p.Command, p.StartCommand) {
 				continue

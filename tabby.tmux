@@ -664,6 +664,11 @@ tmux bind-key k confirm-before -p 'Close window? (y/n)' "run-shell '$KILL_WINDOW
 tmux bind-key 0 run-shell -b "$CURRENT_DIR/bin/tabby dashboard"
 tmux bind-key g run-shell -b "$CURRENT_DIR/bin/tabby dashboard"
 
+# Override prefix+n / prefix+p (tmux's default next-window/previous-window) to go
+# through the tabby hook so minimized windows are skipped, same as Option+[/].
+tmux bind-key n run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN next-window"
+tmux bind-key p run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
+
 # Direct window access with prefix + number (match tmux window indexes)
 tmux bind-key 1 select-window -t :1
 tmux bind-key 2 select-window -t :2
@@ -675,9 +680,11 @@ tmux bind-key 7 select-window -t :7
 tmux bind-key 8 select-window -t :8
 tmux bind-key 9 select-window -t :9
 
-# Legacy Alt-key shortcuts kept for fast navigation
-tmux bind-key -n M-h previous-window
-tmux bind-key -n M-l next-window
+# Legacy Alt-key shortcuts kept for fast navigation. Route through the tabby hook
+# (not raw previous-window/next-window) so minimized windows are skipped, matching
+# Option+[/] — native tmux window nav can't skip windows.
+tmux bind-key -n M-h run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
+tmux bind-key -n M-l run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN next-window"
 tmux bind-key -n M-n run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux bind-key -n M-N run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux unbind-key -n M-x 2>/dev/null || true

@@ -51,7 +51,11 @@ func paneBorderFormat() string {
 	// mirrors the tab's marker — same as the sidebar row and TABBY header. The
 	// #{!=…,} empty-check matches the origin-name pattern below; the trailing
 	// space in the "then" branch separates the marker from the name.
-	const content = " #{?#{!=:#{@tabby_icon},},#{@tabby_icon} ,}#{?#{!=:#{@tabby_dash_origin_name},},#{@tabby_dash_origin_name},#{window_name}} #[fg=default] | #[fg=default]" +
+	// Marker: prefer the pane-local @tabby_dash_origin_icon (set on gathered
+	// dashboard tiles, whose window-scoped @tabby_icon no longer reflects their
+	// origin tab) and fall back to the window's own @tabby_icon on normal windows.
+	const marker = "#{?#{!=:#{@tabby_dash_origin_icon},},#{@tabby_dash_origin_icon},#{@tabby_icon}}"
+	const content = " #{?#{!=:" + marker + ",}," + marker + " ,}#{?#{!=:#{@tabby_dash_origin_name},},#{@tabby_dash_origin_name},#{window_name}} #[fg=default] | #[fg=default]" +
 		"#{?#{&&:#{!=:#{pane_title},}," +
 		"#{&&:#{!=:#{pane_title},#{host_short}}," +
 		"#{!=:#{m:*#{host_short}*,#{pane_title}},1}}}," +
@@ -64,6 +68,26 @@ func paneBorderFormat() string {
 		"#{m:*sidebar*,#{pane_start_command}}," +
 		"#{m:*header*,#{pane_start_command}}}"
 	return "#{?" + chromeMatch + "," + chrome + "," + content + "}"
+}
+
+// dashboardPaneBorderFormat wraps the shared pane-border label so EVERY dashboard
+// tile paints its OWN border colour — including the focused one. tmux has no
+// per-pane active-border-style (that option is window-scoped), so we can't colour
+// the active tile via set-option. Instead the format itself, evaluated per pane,
+// picks the tile's colour from pane-local options set at apply time: the saturated
+// tab colour when the pane is active, the lightened one when it isn't.
+//
+// We set BOTH `bg` and `fill` to that colour. `bg` paints the background of the
+// rendered label text; `fill` paints the EMPTY space after it (tmux's align gap /
+// trailing padding). With `fill` alone only the padding got coloured — the label
+// text kept the default bg, which read as a stray "partial" colour on one edge.
+// Together they paint the whole border line. The choice is atomic with the label
+// render — no per-focus tmux writes, no flicker. fg is baked in (uniform across
+// tiles) since the label already resets to default mid-string.
+func dashboardPaneBorderFormat(activeFg, inactiveFg string) string {
+	color := "#{?pane_active,#{@tabby_dash_bg_active},#{@tabby_dash_bg_inactive}}"
+	style := "#[bg=" + color + "#,fill=" + color + "#,fg=#{?pane_active," + activeFg + "," + inactiveFg + "}]"
+	return style + paneBorderFormat()
 }
 
 // lightenHex returns a hex colour blended `frac` of the way toward white. Used
@@ -245,8 +269,36 @@ func (c *Coordinator) enterDashboard() {
 	// of space.
 	for _, p := range content {
 		_ = tmuxRun("set-option", "-p", "-t", p.pane, "@tabby_dash_origin", p.win)
-		if s, ok := snaps[p.win]; ok && s.Name != "" {
-			_ = tmuxRun("set-option", "-p", "-t", p.pane, "@tabby_dash_origin_name", s.Name)
+		if s, ok := snaps[p.win]; ok {
+			// Tag the origin tab's name, marker, and colour onto the pane itself.
+			// These window-scoped @tabby_* options don't travel with join-pane (the
+			// panes now live in the single dashboard window), so without pane-local
+			// copies the border format would resolve #{@tabby_icon}/colour against
+			// the dashboard window and every tile would render marker-less and in a
+			// single uniform colour. The format + per-tile style read these back.
+			if s.Name != "" {
+				_ = tmuxRun("set-option", "-p", "-t", p.pane, "@tabby_dash_origin_name", s.Name)
+			}
+			if s.Icon != "" {
+				_ = tmuxRun("set-option", "-p", "-t", p.pane, "@tabby_dash_origin_icon", s.Icon)
+			}
+			// Tag the tab's EFFECTIVE colour: a custom @tabby_color wins, else the
+			// window's group theme colour — same precedence the sidebar and native
+			// borders use. Capturing only the custom colour left grouped tabs (e.g.
+			// Gunpowder/StudioDome) with no per-tile colour, so only windows with an
+			// explicit @tabby_color painted. Windows with neither stay uncoloured.
+			effColor := s.Color
+			if effColor == "" && s.Group != "" {
+				for _, g := range c.grouped {
+					if g.Name == s.Group && g.Theme.Bg != "" {
+						effColor = g.Theme.Bg
+						break
+					}
+				}
+			}
+			if effColor != "" {
+				_ = tmuxRun("set-option", "-p", "-t", p.pane, "@tabby_dash_origin_color", effColor)
+			}
 		}
 		if err := tmuxRun("join-pane", "-d", "-h", "-s", p.pane, "-t", placeholder); err != nil {
 			_ = tmuxRun("join-pane", "-d", "-s", p.pane, "-t", placeholder)
@@ -281,6 +333,9 @@ func (c *Coordinator) enterDashboard() {
 		_ = tmuxRun("set-option", "-p", "-t", p.pane, "-u", "pane-border-style")
 	}
 	c.dashboardWindowID = dashID
+	c.nativeBorderMu.Lock()
+	c.dashboardBorderSig = "" // force the first border apply for this dashboard
+	c.nativeBorderMu.Unlock()
 	c.applyDashboardBorders()
 
 	c.dashboardOrigins = snaps
@@ -311,6 +366,32 @@ func (c *Coordinator) exitDashboard() map[string]string {
 	}
 	if dashID == "" {
 		return restored
+	}
+
+	// Capture the tile the user has focused WITHIN the dashboard grid right now.
+	// Its pane_id survives the join-pane round trip, so on exit we refocus the
+	// window it lands in — the user's last-focused tile becomes the active window,
+	// which is what they expect when toggling the dashboard off. Falls back to the
+	// pre-entry pane (dashboardReturnPane) when the active pane is aux/sidebar.
+	inDashActivePane := ""
+	if out := tmuxOutputTrimmed("list-panes", "-t", dashID, "-F",
+		"#{pane_active}\t#{pane_id}\t#{pane_current_command}\t#{pane_start_command}"); out != "" {
+		for _, line := range dashLines(out) {
+			parts := strings.SplitN(line, "\t", 4)
+			if len(parts) < 3 || parts[0] != "1" {
+				continue
+			}
+			cur := parts[2]
+			start := ""
+			if len(parts) == 4 {
+				start = parts[3]
+			}
+			if isAuxiliaryPaneCommand(cur) || isSidebarPaneCommand(cur, start) {
+				continue
+			}
+			inDashActivePane = parts[1]
+			break
+		}
 	}
 
 	// Group the dashboard's content panes by their recorded origin window.
@@ -377,6 +458,10 @@ func (c *Coordinator) exitDashboard() map[string]string {
 		for _, p := range groups[origin] {
 			_ = tmuxRun("set-option", "-p", "-t", p, "-u", "@tabby_dash_origin")
 			_ = tmuxRun("set-option", "-p", "-t", p, "-u", "@tabby_dash_origin_name")
+			_ = tmuxRun("set-option", "-p", "-t", p, "-u", "@tabby_dash_origin_icon")
+			_ = tmuxRun("set-option", "-p", "-t", p, "-u", "@tabby_dash_origin_color")
+			_ = tmuxRun("set-option", "-p", "-t", p, "-u", "@tabby_dash_bg_active")
+			_ = tmuxRun("set-option", "-p", "-t", p, "-u", "@tabby_dash_bg_inactive")
 			if err := tmuxRun("join-pane", "-d", "-h", "-s", p, "-t", ph); err != nil {
 				_ = tmuxRun("join-pane", "-d", "-s", p, "-t", ph)
 			}
@@ -418,11 +503,16 @@ func (c *Coordinator) exitDashboard() map[string]string {
 
 	_ = tmuxRun("kill-window", "-t", dashID)
 
-	// Restore focus to the pre-dashboard pane (its id survived the round trip).
-	if c.dashboardReturnPane != "" {
-		if win := tmuxOutputTrimmed("display-message", "-p", "-t", c.dashboardReturnPane, "#{window_id}"); win != "" {
+	// Restore focus: prefer the tile the user had focused inside the dashboard
+	// (its id survived the round trip), falling back to the pre-dashboard pane.
+	focusPane := c.dashboardReturnPane
+	if inDashActivePane != "" {
+		focusPane = inDashActivePane
+	}
+	if focusPane != "" {
+		if win := tmuxOutputTrimmed("display-message", "-p", "-t", focusPane, "#{window_id}"); win != "" {
 			_ = tmuxRun("select-window", "-t", win)
-			_ = tmuxRun("select-pane", "-t", c.dashboardReturnPane)
+			_ = tmuxRun("select-pane", "-t", focusPane)
 		}
 	}
 
@@ -430,6 +520,9 @@ func (c *Coordinator) exitDashboard() map[string]string {
 	c.dashboardOrigins = nil
 	c.dashboardOrder = nil
 	c.dashboardReturnPane = ""
+	c.nativeBorderMu.Lock()
+	c.dashboardBorderSig = "" // next dashboard starts with a clean signature
+	c.nativeBorderMu.Unlock()
 	coordinatorDebugLog.Printf("exitDashboard: restored %d origin windows", len(origins))
 	return restored
 }
@@ -498,6 +591,12 @@ func (c *Coordinator) dashboardCyclePane(delta int) {
 	}
 	target := content[((active+delta)%len(content)+len(content))%len(content)]
 	_ = tmuxRun("select-pane", "-t", target)
+	// Re-point the active-border edge colour at the newly focused tile. Keyboard
+	// cycling sets dashboardSkipBroadcast, so the input loop returns before the
+	// refresh path that would otherwise call applyDashboardBorders — do it here so
+	// the focused tile's side edges update immediately. It's signature-gated, so
+	// this is a no-op unless the active colour actually changed.
+	c.applyDashboardBorders()
 }
 
 // applyDashboardBorders (re)asserts native pane-border labels on the dashboard
@@ -512,11 +611,6 @@ func (c *Coordinator) applyDashboardBorders() {
 	if dash == "" {
 		return
 	}
-	_ = tmuxRun("set-window-option", "-t", dash, "pane-border-lines", "single")
-	// Shared format with applyNativeBorders (non-dashboard windows) so the
-	// border label is identical across views: chrome panes blank, content
-	// panes show window-name | pane-title (or command + folder fallback).
-	_ = tmuxRun("set-window-option", "-t", dash, "pane-border-format", paneBorderFormat())
 	// Match the regular tabby pane-header colors: dark-blue bg (Default group's
 	// tab color, or pane_header.active_bg fallback) + white text.
 	activeFg := c.config.PaneHeader.ActiveFg
@@ -554,37 +648,111 @@ func (c *Coordinator) applyDashboardBorders() {
 	// treatment. Adjacent edges between active + inactive tiles will show a
 	// brief half/half stripe, which doubles as a focus cue.
 	inactiveBg := lightenHex(activeBg, 0.60)
+
+	// Build the per-tile plan from a single list-panes query. Each content tile
+	// gets pane-border-status=top (a PANE-LOCAL option — window-level inherits
+	// tabby's global 'off') plus its OWN colour, taken from the origin tab's
+	// custom colour when it has one and the neutral default otherwise. We store
+	// TWO colours per tile — bgActive (saturated) and bgInactive (lightened) — as
+	// pane-local options; the pane-border-format's `fill` reads them via
+	// #{?pane_active,…} so EVERY tile's top label bar paints its own colour.
+	//
+	// The side/bottom edges are the pane's border LINES, which `fill` can't reach.
+	// For inactive tiles we colour them via a per-pane pane-border-style whose fg
+	// AND bg are the tile colour (a solid colour edge matching the top bar). The
+	// ACTIVE tile's edges come from the window-scoped pane-active-border-style —
+	// there's no per-pane override — so we point it at whichever tile is currently
+	// focused (activeColor below) and re-apply when focus moves. Aux panes stay bare.
+	type tilePlan struct{ id, status, style, bgActive, bgInactive string }
+	var plan []tilePlan
+	activeColor := activeBg // pane-active-border-style bg: the focused tile's colour
+	out := tmuxOutputTrimmed("list-panes", "-t", dash, "-F",
+		"#{pane_id}\t#{@tabby_dash_origin_color}\t#{pane_active}\t#{pane_current_command}\t#{pane_start_command}")
+	for _, line := range dashLines(out) {
+		parts := strings.SplitN(line, "\t", 5)
+		if len(parts) < 4 {
+			continue
+		}
+		id, originColor, paneActive, cur := parts[0], strings.TrimSpace(parts[1]), parts[2], parts[3]
+		start := ""
+		if len(parts) == 5 {
+			start = parts[4]
+		}
+		if isAuxiliaryPaneCommand(cur) || isSidebarPaneCommand(cur, start) {
+			plan = append(plan, tilePlan{id: id, status: "off"})
+			continue
+		}
+		bgA, bgI := activeBg, inactiveBg
+		if originColor != "" && originColor != "transparent" {
+			bgA = originColor
+			// Dim inactive coloured tiles only gently (15% toward white) so the
+			// tab's colour stays clearly recognisable and light-on-colour label
+			// text stays legible — a 60% lighten washed the colour out to near
+			// white on light terminals, reading as "no colour applied".
+			bgI = lightenHex(originColor, 0.15)
+		}
+		if paneActive == "1" {
+			activeColor = bgA
+		}
+		plan = append(plan, tilePlan{
+			id:     id,
+			status: "top",
+			// Solid colour edge: fg == bg so the whole 1-cell border line reads as
+			// the tile colour, matching its top label bar.
+			style:      "fg=" + bgI + ",bg=" + bgI,
+			bgActive:   bgA,
+			bgInactive: bgI,
+		})
+	}
+
+	// Signature-skip: every set-window-option / set-option below forces a tmux
+	// border redraw, so re-issuing identical values on each refresh flickers
+	// (very visibly once tiles carry distinct colours). Nothing external clobbers
+	// the dashboard window's border options in steady state — the chrome passes
+	// (spawnPaneHeaders/spawnWindowHeaders/buildPaneHeaderColorArgs) all skip the
+	// dashboard window — so caching is safe. activeColor is in the signature so a
+	// focus change (which moves the active edge colour) re-applies, but an ordinary
+	// refresh with unchanged focus collapses to zero tmux calls. Reset to "" on
+	// dashboard enter/exit so the next apply re-asserts.
+	var sb strings.Builder
+	sb.WriteString(dash)
+	sb.WriteString("|" + activeFg + "," + inactiveFg + "," + activeBg + "," + inactiveBg + "," + activeColor)
+	for _, t := range plan {
+		sb.WriteString("|" + t.id + ":" + t.status + ":" + t.style + ":" + t.bgActive + ":" + t.bgInactive)
+	}
+	sig := sb.String()
+	c.nativeBorderMu.Lock()
+	unchanged := sig == c.dashboardBorderSig
+	if !unchanged {
+		c.dashboardBorderSig = sig
+	}
+	c.nativeBorderMu.Unlock()
+	if unchanged {
+		return
+	}
+
+	// Window-level styling. The dashboard uses its own format (per-tile `fill`)
+	// while sharing the label body with applyNativeBorders: chrome panes blank,
+	// content panes show window-name | pane-title (or command + folder fallback).
+	// The active-border-style bg is the focused tile's own colour (solid edge).
+	_ = tmuxRun("set-window-option", "-t", dash, "pane-border-lines", "single")
+	_ = tmuxRun("set-window-option", "-t", dash, "pane-border-format", dashboardPaneBorderFormat(activeFg, inactiveFg))
 	_ = tmuxRun("set-window-option", "-t", dash, "pane-active-border-style",
-		"fg="+activeFg+",bg="+activeBg)
+		"fg="+activeColor+",bg="+activeColor)
 	_ = tmuxRun("set-window-option", "-t", dash, "pane-border-style",
 		"fg="+inactiveFg+",bg="+inactiveBg)
-	tileStyle := "fg=" + inactiveFg + ",bg=" + inactiveBg
-	// Per content tile: set pane-border-status=top as a PANE-LOCAL option. Window-
-	// level didn't hold (it inherits tabby's global 'off'); pane-local is the
-	// highest-precedence scope and can't be overridden by the global. Clearing the
-	// pane-local style lets the label inherit the visible global border color
-	// (gathered panes carried a hidden fg=bg style from their origin windows).
-	// Aux panes (sidebar) keep their borderless state.
-	out := tmuxOutputTrimmed("list-panes", "-t", dash, "-F",
-		"#{pane_id}\t#{pane_current_command}\t#{pane_start_command}")
-	for _, line := range dashLines(out) {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) < 2 {
+
+	// Per-tile styling: the pane-local colours the format's `fill` reads, plus the
+	// solid colour edge style and the border-status row.
+	for _, t := range plan {
+		if t.status == "off" {
+			_ = tmuxRun("set-option", "-p", "-t", t.id, "pane-border-status", "off")
 			continue
 		}
-		id, cur := parts[0], parts[1]
-		start := ""
-		if len(parts) == 3 {
-			start = parts[2]
-		}
-		isAux := isAuxiliaryPaneCommand(cur) || isSidebarPaneCommand(cur, start)
-		if isAux {
-			// Keep the sidebar/aux panes borderless — no label strip on them.
-			_ = tmuxRun("set-option", "-p", "-t", id, "pane-border-status", "off")
-			continue
-		}
-		_ = tmuxRun("set-option", "-p", "-t", id, "pane-border-status", "top")
-		_ = tmuxRun("set-option", "-p", "-t", id, "pane-border-style", tileStyle)
+		_ = tmuxRun("set-option", "-p", "-t", t.id, "@tabby_dash_bg_active", t.bgActive)
+		_ = tmuxRun("set-option", "-p", "-t", t.id, "@tabby_dash_bg_inactive", t.bgInactive)
+		_ = tmuxRun("set-option", "-p", "-t", t.id, "pane-border-status", "top")
+		_ = tmuxRun("set-option", "-p", "-t", t.id, "pane-border-style", t.style)
 	}
 }
 
