@@ -603,7 +603,12 @@ func (l *Loop) doPaneLayoutOps() {
 	windows := l.coord.GetWindows()
 	spawnWindowHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredWindowHeaderHeight(), windows, l.coord)
 	if !nativeBorders {
-		spawnPaneHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredPaneHeaderHeight(), windows)
+		if isFullBox(cfg) {
+			// Full custom box (top/bottom/left/right) around single-pane windows.
+			spawnPaneBorders(l.deps.SessionID, windows, l.coord)
+		} else {
+			spawnPaneHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredPaneHeaderHeight(), windows)
+		}
 	}
 	// Re-assert native pane-border labels on the dashboard window (the chrome
 	// passes above reset pane-border-status/style each cycle). No-op when inactive.

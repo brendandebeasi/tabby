@@ -22,6 +22,7 @@ import (
 
 	zone "github.com/lrstanley/bubblezone"
 
+	"github.com/brendandebeasi/tabby/pkg/config"
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
@@ -1119,6 +1120,115 @@ func killLeftoverPaneHeaders() {
 			continue
 		}
 		_ = exec.Command("tmux", "kill-pane", "-t", id).Run()
+	}
+}
+
+// isFullBox reports whether the config requests all four custom border edges
+// (the full-box feature) — only meaningful when Native is false.
+func isFullBox(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.PaneHeader.Native != nil && *cfg.PaneHeader.Native {
+		return false
+	}
+	edges := map[string]bool{}
+	for _, e := range cfg.PaneHeader.Border.Edges {
+		edges[strings.ToLower(strings.TrimSpace(e))] = true
+	}
+	return edges["top"] && edges["bottom"] && edges["left"] && edges["right"]
+}
+
+// startCmdFlag extracts a "-flag 'value'" (or "-flag value") value from a pane's
+// start command string.
+func startCmdFlag(cmd, flag string) string {
+	i := strings.Index(cmd, flag+" ")
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(cmd[i+len(flag)+1:])
+	if strings.HasPrefix(rest, "'") {
+		if j := strings.Index(rest[1:], "'"); j >= 0 {
+			return rest[1 : 1+j]
+		}
+		return ""
+	}
+	return strings.Fields(rest)[0]
+}
+
+// spawnPaneBorders draws a full custom box (top/bottom full-width bars + left/right
+// single-column runs) around each SINGLE-content-pane window, then styles the tmux
+// pane separators to the terminal background so only tabby's border glyphs show
+// (approach A). Idempotent per content pane + edge. Multi-pane windows are skipped
+// (Phase 1 scope — they keep the top-bar-only pane-header).
+func spawnPaneBorders(sessionID string, windows []tmux.Window, c *Coordinator) {
+	prefix := rendererExecPrefix("pane-border", "pane-border")
+	if prefix == "" {
+		return
+	}
+	// Which edges already exist per content pane, so we never double-spawn.
+	have := map[string]map[string]bool{}
+	if out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}|||#{pane_start_command}").Output(); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			parts := strings.SplitN(line, "|||", 2)
+			if len(parts) < 2 || !strings.Contains(parts[1], "render pane-border") {
+				continue
+			}
+			cp := startCmdFlag(parts[1], "-pane")
+			ed := startCmdFlag(parts[1], "-edge")
+			if cp == "" {
+				continue
+			}
+			if have[cp] == nil {
+				have[cp] = map[string]bool{}
+			}
+			have[cp][ed] = true
+		}
+	}
+
+	tbg := c.GetTerminalBg()
+	if tbg == "" {
+		tbg = "#000000"
+	}
+
+	for _, win := range windows {
+		if win.Minimized {
+			continue
+		}
+		var content []tmux.Pane
+		for _, p := range win.Panes {
+			if !isAuxiliaryPane(p) {
+				content = append(content, p)
+			}
+		}
+		if len(content) != 1 { // Phase 1: single-content-pane box only
+			continue
+		}
+		cp := content[0]
+		if cp.Height < 3 || cp.Width < 4 {
+			continue
+		}
+		edges := have[cp.ID]
+		spawn := func(edge, flags string) {
+			if edges[edge] {
+				return
+			}
+			cmd := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -pane '%s' -edge '%s'",
+				prefix, sessionID, cp.ID, edge)
+			args := append(append([]string{"split-window", "-d", "-t", cp.ID}, strings.Fields(flags)...), cmd)
+			if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+				debugLog.Printf("spawnPaneBorders %s edge=%s failed: %v %s", cp.ID, edge, err, out)
+			}
+		}
+		// Bars first (full width while content spans the window), then side columns.
+		spawn("top", "-v -b -l 1")
+		spawn("bottom", "-v -f -l 1")
+		spawn("left", "-h -b -l 1")
+		spawn("right", "-h -l 1")
+		// Hide the tmux separators so only tabby's glyphs show.
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "pane-border-status", "off").Run()
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "pane-border-style", "fg="+tbg+",bg="+tbg).Run()
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "pane-active-border-style", "fg="+tbg+",bg="+tbg).Run()
 	}
 }
 
