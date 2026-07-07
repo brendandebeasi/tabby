@@ -11140,12 +11140,33 @@ func (c *Coordinator) sidebarRenderGroups() []grouping.GroupedWindows {
 		sort.SliceStable(minimized, func(i, j int) bool {
 			return minimized[i].Index < minimized[j].Index
 		})
+		const minimizedBg = "#6e6a86"
+		// Give each minimized tab a DESATURATED version of the colour it would have
+		// unminimized (its custom colour, else its original group's bg), blended
+		// toward the muted section bg — so a minimized tab keeps a hint of its
+		// identity (a muted rose for StudioDome, etc.) instead of a uniform grey.
+		groupBg := make(map[string]string, len(base))
+		for _, g := range base {
+			if g.Theme.Bg != "" {
+				groupBg[g.Name] = g.Theme.Bg
+			}
+		}
+		for i := range minimized {
+			real := strings.TrimSpace(minimized[i].CustomColor)
+			if real == "" || real == "transparent" {
+				real = groupBg[minimized[i].Group]
+			}
+			if len(real) == 7 && real[0] == '#' {
+				// 40% toward the real colour: still clearly "minimized", but tinted.
+				minimized[i].CustomColor = blendHexToward(minimizedBg, real, 0.4)
+			}
+		}
 		// Muted header so the section reads as set-aside, not a live coloured group.
 		out = append(out, grouping.GroupedWindows{
 			Name: "Minimized",
 			Theme: config.Theme{
-				Bg: "#6e6a86", Fg: "#faf4ed",
-				ActiveBg: "#6e6a86", ActiveFg: "#faf4ed",
+				Bg: minimizedBg, Fg: "#faf4ed",
+				ActiveBg: minimizedBg, ActiveFg: "#faf4ed",
 			},
 			Windows: minimized,
 		})

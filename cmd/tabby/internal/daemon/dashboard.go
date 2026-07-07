@@ -829,6 +829,17 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	}
 	inactiveBg := lightenHex(activeBg, 0.60)
 
+	// Make the border TEXT contrast-aware against its own border bg, so the pane
+	// titlebar reads the same as the sidebar tab (dark text on a light tab colour,
+	// white on a dark one) instead of a fixed white. Only override the plain
+	// white/grey defaults — an explicit custom active_fg/inactive_fg still wins.
+	if activeFg == "" || strings.EqualFold(activeFg, "#ffffff") {
+		activeFg = contrastFg(activeBg, true)
+	}
+	if inactiveFg == "" || strings.EqualFold(inactiveFg, "#bbbbbb") || strings.EqualFold(inactiveFg, "#ffffff") {
+		inactiveFg = contrastFg(inactiveBg, false)
+	}
+
 	// Cache the per-window signature so we don't re-issue 5 set-window-option
 	// calls every refresh — these were a big chunk of the tab-switch latency
 	// (5 windows × 5 options ≈ 25 tmux execs per layout pass). The signature
