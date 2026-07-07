@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/brendandebeasi/tabby/pkg/colors"
 	"github.com/brendandebeasi/tabby/pkg/config"
@@ -14,6 +15,31 @@ type GroupedWindows struct {
 	Name    string
 	Theme   config.Theme
 	Windows []tmux.Window
+}
+
+// windowIDNum parses the numeric part of a tmux window ID ("@12" -> 12). Window
+// IDs are assigned monotonically at creation and never change, so they give a
+// STABLE ordering — unlike window_index, which is session-relative and shifts
+// when a minimized window is parked into / surfaced out of the holding session.
+func windowIDNum(id string) int {
+	n, _ := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(id), "@"))
+	return n
+}
+
+// minimizedAwareLess orders non-minimized windows first (by session index), then
+// minimized windows below them ordered by STABLE window ID. Sorting minimized
+// windows by their volatile session index made the whole Minimized subsection
+// reshuffle whenever one was peeked (its index jumps to the origin session's
+// namespace and collides with others) — the "switching to a minimized window
+// changes which windows show" bug.
+func minimizedAwareLess(a, b tmux.Window) bool {
+	if a.Minimized != b.Minimized {
+		return !a.Minimized // non-minimized first
+	}
+	if a.Minimized {
+		return windowIDNum(a.ID) < windowIDNum(b.ID)
+	}
+	return a.Index < b.Index
 }
 
 // GroupWindows organizes windows into groups based on the @tabby_group window option.
@@ -77,12 +103,9 @@ func GroupWindowsWithOptions(windows []tmux.Window, groups []config.Group, inclu
 	}
 
 	// Sort pinned windows: non-minimized first (by index), minimized sink to the
-	// bottom (still by index among themselves).
+	// bottom — ordered among themselves by STABLE window ID (see minimizedLess).
 	sort.Slice(pinnedGroup.Windows, func(i, j int) bool {
-		if pinnedGroup.Windows[i].Minimized != pinnedGroup.Windows[j].Minimized {
-			return !pinnedGroup.Windows[i].Minimized
-		}
-		return pinnedGroup.Windows[i].Index < pinnedGroup.Windows[j].Index
+		return minimizedAwareLess(pinnedGroup.Windows[i], pinnedGroup.Windows[j])
 	})
 
 	// Collect groups: Default first, then others alphabetically
@@ -91,12 +114,9 @@ func GroupWindowsWithOptions(windows []tmux.Window, groups []config.Group, inclu
 
 	for _, group := range result {
 		// Sort windows within each group: non-minimized first (by index),
-		// minimized tabs sink to the bottom of the group (still by index).
+		// minimized tabs sink to the bottom — ordered by STABLE window ID.
 		sort.Slice(group.Windows, func(i, j int) bool {
-			if group.Windows[i].Minimized != group.Windows[j].Minimized {
-				return !group.Windows[i].Minimized
-			}
-			return group.Windows[i].Index < group.Windows[j].Index
+			return minimizedAwareLess(group.Windows[i], group.Windows[j])
 		})
 
 		// Include group if it has windows OR if includeEmpty is true
