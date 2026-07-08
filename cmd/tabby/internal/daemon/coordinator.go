@@ -10295,20 +10295,43 @@ func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height i
 		if mid < 0 {
 			mid = 0
 		}
-		line := lc + strings.Repeat(hLine, mid) + rc
-		// Top edge: embed the window label — "╭─ label ──…──╮".
-		if edge == "top" && topLabel != "" && mid > 4 {
-			lbl := " " + topLabel + " "
+		var regions []daemon.ClickableRegion
+		// Interior between the two corners: "─ label ──…── | - x ─".
+		interior := strings.Repeat(hLine, mid)
+		if edge == "top" && mid > 4 {
 			const lead = 1 // one hLine between the corner and the label
-			if lipgloss.Width(lbl) > mid-lead {
-				lbl = runewidth.Truncate(lbl, mid-lead, "~")
+			lbl := ""
+			if topLabel != "" {
+				lbl = " " + topLabel + " "
+				if lipgloss.Width(lbl) > mid-lead {
+					lbl = runewidth.Truncate(lbl, mid-lead, "~")
+				}
 			}
-			fill := mid - lead - lipgloss.Width(lbl)
+			lblW := lipgloss.Width(lbl)
+			// Action buttons occupy a fixed 7-col block just inside the right
+			// corner: [sp]|[sp]-[sp]x[sp]  (split-h / split-v / close), added only
+			// when there's room for label + a gap + the block.
+			btnW := 0
+			if mid >= lead+lblW+9 {
+				btnW = 7
+			}
+			fill := mid - lead - lblW - btnW
 			if fill < 0 {
 				fill = 0
 			}
-			line = lc + strings.Repeat(hLine, lead) + lbl + strings.Repeat(hLine, fill) + rc
+			interior = strings.Repeat(hLine, lead) + lbl + strings.Repeat(hLine, fill)
+			if btnW > 0 {
+				interior += " | - x "
+				// Column of the first interior cell is 1 (col 0 is the corner lc).
+				base := 1 + lead + lblW + fill
+				regions = append(regions,
+					daemon.ClickableRegion{StartLine: 0, EndLine: 0, StartCol: base + 1, EndCol: base + 2, Action: "header_split_h", Target: paneID},
+					daemon.ClickableRegion{StartLine: 0, EndLine: 0, StartCol: base + 3, EndCol: base + 4, Action: "header_split_v", Target: paneID},
+					daemon.ClickableRegion{StartLine: 0, EndLine: 0, StartCol: base + 5, EndCol: base + 6, Action: "header_close", Target: paneID},
+				)
+			}
 		}
+		line := lc + interior + rc
 		lineStyle := lipgloss.NewStyle()
 		if fg != "" {
 			lineStyle = lineStyle.Foreground(lipgloss.Color(fg))
@@ -10317,7 +10340,7 @@ func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height i
 		if bg != "" {
 			rendered = c.applyGradientFill(rendered, gradientEndColor(bg), bg, width)
 		}
-		return &daemon.RenderPayload{Content: rendered, Width: width, Height: 1, TotalLines: 1}
+		return &daemon.RenderPayload{Content: rendered, Width: width, Height: 1, TotalLines: 1, Regions: regions}
 	}
 	return &daemon.RenderPayload{Content: strings.Repeat(" ", width), Width: width, Height: 1, TotalLines: 1}
 }
