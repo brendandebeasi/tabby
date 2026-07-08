@@ -10312,6 +10312,16 @@ func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height i
 		}
 		return &daemon.RenderPayload{Content: strings.Join(lines, "\n"), Width: width, Height: height, TotalLines: height}
 	case "top", "bottom":
+		// Experimental: graphics in the top edge. When @tabby_border_sixel is on,
+		// replace the top glyph bar with a sixel gradient strip, wrapped in tmux
+		// passthrough so it reaches the outer terminal even without native sixel
+		// support. Falls back to glyphs when off / unsupported (terminal just
+		// ignores the passthrough). Needs `set -g allow-passthrough on`.
+		if edge == "top" && bg != "" && borderSixelEnabled() {
+			px := width * 7 // ~7px per cell
+			sx := tmuxPassthrough(sixelGradientBar(gradientEndColor(bg), bg, px, 12))
+			return &daemon.RenderPayload{Content: sx, Width: width, Height: 1, TotalLines: 1}
+		}
 		lc, rc := tl, tr
 		if edge == "bottom" {
 			lc, rc = bl, br

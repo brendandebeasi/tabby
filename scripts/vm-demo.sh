@@ -42,20 +42,29 @@ up)
 	tmux -L $L new-window -t demo -n logs
 	tmux -L $L select-window -t demo:0
 	# Long-lived keep-alive client so the daemon never idle-quits between toggles.
-	setsid python3 -c "
-import pty,os,time
+	# nohup+setsid+disown so it survives this shell (and the orb invocation) exiting.
+	cat > /tmp/vm-demo-keepalive.py <<'PY'
+import pty,os,time,sys
+L=sys.argv[1]
 pid,fd=pty.fork()
 if pid==0:
     os.environ.pop('TMUX',None)
-    os.execvp('tmux',['tmux','-L','$L','attach','-t','demo'])
+    os.execvp('tmux',['tmux','-L',L,'attach','-t','demo'])
 time.sleep(36000)
-" >/dev/null 2>&1 &
+PY
+	nohup setsid python3 /tmp/vm-demo-keepalive.py "$L" >/dev/null 2>&1 < /dev/null &
+	disown -a 2>/dev/null || true
 	sleep 1.5
 	tmux -L $L run-shell -b "$WT/tabby.tmux"
 	sleep 8
 	tmux -L $L set-option -g @tabby_custom_borders on
-	nudge
+	# Nudge until the box spawns (daemon may still be warming up).
+	for _ in 1 2 3 4 5; do
+		nudge
+		[ "$(borders_count)" -gt 0 ] && break
+	done
 	echo "demo up. border panes: $(borders_count)"
+	echo "keep-alive client: $(pgrep -f vm-demo-keepalive | head -1)"
 	echo "ATTACH from a real terminal to see it:"
 	echo "    orb -m tabby-dev tmux -L $L attach -t demo"
 	;;
@@ -64,7 +73,9 @@ borders)
 	echo "borders=$v  ->  border panes: $(borders_count)  (0 = native)"
 	;;
 sixel)
-	v="${2:-on}"; tmux -L $L set-option -g @tabby_border_sixel "$v"; nudge
+	v="${2:-on}"
+	tmux -L $L set-option -g allow-passthrough on
+	tmux -L $L set-option -g @tabby_border_sixel "$v"; nudge
 	echo "sixel=$v  (graphics in top edge; needs a sixel-capable terminal)"
 	;;
 status)

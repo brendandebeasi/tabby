@@ -1142,6 +1142,19 @@ func customBordersOverride() int {
 	return -1
 }
 
+// borderSixelEnabled reads the runtime @tabby_border_sixel toggle UNCACHED.
+func borderSixelEnabled() bool {
+	out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_border_sixel").Output()
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(string(out))) {
+	case "on", "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
 // killLeftoverPaneBorders removes every custom box edge pane (render pane-border).
 // Used when switching out of box mode (native/off) so no orphan edges remain.
 func killLeftoverPaneBorders() {
