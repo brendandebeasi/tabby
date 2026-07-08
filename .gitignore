@@ -94,3 +94,4 @@ scripts/apply_new_window_group.sh
 
 # Demo capture artifacts
 tests/demos/out/
+scripts/shots/
