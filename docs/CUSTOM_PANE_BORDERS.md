@@ -60,18 +60,24 @@ IMAGE instead of the glyph bar, in the chosen protocol. Both are generated in Go
 tmux set-option -g allow-passthrough on
 ```
 
-Whether pixels actually render depends on the ATTACHED terminal:
+**KNOWN LIMITATION — bitmap graphics do NOT render in the tmux border pane yet.**
+Established with screenshots under Xvfb (scripts/vm_shot_box.sh):
 
-| Protocol | Terminals that render it |
-|----------|--------------------------|
-| `sixel`  | iTerm2, Ghostty, WezTerm |
-| `kitty`  | kitty, Ghostty, WezTerm  |
+- A raw sixel renders fine in xterm DIRECTLY (no tmux).
+- Through tmux `allow-passthrough`, tmux redraws over the image (it doesn't track
+  the pixels), so the top edge stays blank — even outside the bubbletea renderer.
+- tmux built with `--enable-sixel` renders sixel natively BUT rejects the box's
+  1-cell border-pane splits, so the box won't spawn. Bitmap graphics and 1-cell
+  edges are mutually exclusive on current tmux.
+- kitty graphics need the Unicode-placeholder protocol to survive tmux (not yet
+  implemented); plain passthrough is redrawn over the same way.
 
-**IMPORTANT: this does NOT work over mosh** — mosh strips both sixel and kitty
-graphics. Attach from a local terminal (or plain ssh) that supports the protocol.
-If the terminal can't show it you'll see a blank top edge; toggle it back off.
-The generators are unit-tested and the sixel is verified decodable to a correct
-gradient PNG.
+So `@tabby_border_graphics sixel|kitty` currently switches the render path (the
+glyph bar is replaced) but the image does not display inside tmux. The generators
+ARE correct (sixel decodes to a 60x12 gradient PNG via sixel2png; the kitty payload
+base64-decodes to the same gradient) — they're kept for a future native path. For
+graphics that DO render in tmux today, a truecolor half-block strip (normal cells)
+is the viable route. mosh strips graphics entirely regardless.
 
 ## Trying it on the dev VM
 

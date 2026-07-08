@@ -19,6 +19,18 @@ func TestSixelDump(t *testing.T) {
 	}
 }
 
+// TestKittyDump writes a generated kitty graphics sequence to $TABBY_KITTY_DUMP
+// so it can be decoded externally (parse _G chunks, base64-decode -> raw RGB).
+func TestKittyDump(t *testing.T) {
+	p := os.Getenv("TABBY_KITTY_DUMP")
+	if p == "" {
+		t.Skip("set TABBY_KITTY_DUMP to write the kitty sequence")
+	}
+	if err := os.WriteFile(p, []byte(kittyGradientBar("#204060", "#c0d0e0", 60, 12)), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSixelGradientBarStructure(t *testing.T) {
 	s := sixelGradientBar("#000000", "#ffffff", 20, 12)
 	if !strings.HasPrefix(s, "\x1bPq") {
