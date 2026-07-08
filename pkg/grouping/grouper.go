@@ -22,6 +22,13 @@ type GroupedWindows struct {
 // STABLE ordering — unlike window_index, which is session-relative and shifts
 // when a minimized window is parked into / surfaced out of the holding session.
 func windowIDNum(id string) int {
+	return WindowIDNum(id)
+}
+
+// WindowIDNum is the exported form of windowIDNum for callers outside this
+// package that need the same stable-order key (e.g. the sidebar's synthetic
+// Minimized section).
+func WindowIDNum(id string) int {
 	n, _ := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(id), "@"))
 	return n
 }

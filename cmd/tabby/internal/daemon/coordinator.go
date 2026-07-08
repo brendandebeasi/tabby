@@ -7394,9 +7394,32 @@ func (c *Coordinator) parkWindow(windowID string, setFlag bool) bool {
 	if dir := tmuxOutputTrimmed("display-message", "-p", "-t", windowID, "#{pane_current_path}"); dir != "" {
 		exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_min_dir", dir).Run()
 	}
+	// Capture the ssh/remote host too, so a parked ssh window keeps its ssh marker
+	// in the sidebar (the detached holding pane can't be probed for ssh state).
+	if win, ok := c.getWindowByID(windowID); ok && strings.TrimSpace(win.RemoteHost) != "" {
+		exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_min_host", win.RemoteHost).Run()
+	}
 	if setFlag {
 		exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_minimized", "1").Run()
 		exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_min_origin", c.dashboardSession()).Run()
+	}
+	// Root prevention for #23: if a client is attached to this window, move-window
+	// would drag it INTO the holding session (where it'd sit on only-minimized
+	// windows). Switch any such client back to the origin session's current window
+	// FIRST so no client follows the window into _tabby_minimized.
+	origin := c.dashboardSession()
+	if origin != "" {
+		out, _ := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|#{client_session}|#{session_id}").Output()
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			parts := strings.Split(line, "|")
+			if len(parts) < 3 {
+				continue
+			}
+			// A client whose current window IS the one we're about to park.
+			if cw := tmuxOutputTrimmed("display-message", "-p", "-t", parts[0], "#{window_id}"); cw == windowID {
+				exec.Command("tmux", "switch-client", "-c", parts[0], "-t", origin).Run()
+			}
+		}
 	}
 	if err := exec.Command("tmux", "move-window", "-d", "-s", windowID, "-t", minimizedHoldingSession+":").Run(); err != nil {
 		coordinatorDebugLog.Printf("parkWindow: move-window failed for %s: %v", windowID, err)
@@ -7538,7 +7561,7 @@ func (c *Coordinator) listParkedMinimizedWindows() []tmux.Window {
 	out, err := exec.Command("tmux", "list-windows", "-t", minimizedHoldingSession, "-F",
 		strings.Join([]string{
 			"#{window_id}", "#{window_index}", "#{window_name}", "#{@tabby_min_origin}",
-			"#{@tabby_color}", "#{@tabby_group}", "#{@tabby_icon}", "#{@tabby_ai_title}", "#{@tabby_min_dir}",
+			"#{@tabby_color}", "#{@tabby_group}", "#{@tabby_icon}", "#{@tabby_ai_title}", "#{@tabby_min_dir}", "#{@tabby_min_host}",
 		}, "\t")).Output()
 	if err != nil {
 		return nil
@@ -7566,8 +7589,16 @@ func (c *Coordinator) listParkedMinimizedWindows() []tmux.Window {
 			AITitle:     strings.TrimSpace(f[7]),
 			Minimized:   true,
 		}
+		// Restore the captured ssh host so a parked ssh window keeps its ssh marker.
+		if len(f) >= 10 {
+			w.RemoteHost = strings.TrimSpace(f[9])
+		}
+		cmd := "bash"
+		if w.RemoteHost != "" {
+			cmd = "ssh"
+		}
 		if dir := strings.TrimSpace(f[8]); dir != "" {
-			w.Panes = []tmux.Pane{{ID: "%parked", Command: "bash", CurrentPath: dir}}
+			w.Panes = []tmux.Pane{{ID: "%parked", Command: cmd, CurrentPath: dir, Remote: w.RemoteHost != ""}}
 		}
 		parked = append(parked, w)
 	}
@@ -11130,8 +11161,12 @@ func (c *Coordinator) sidebarRenderGroups() []grouping.GroupedWindows {
 		out = append(out, g)
 	}
 	if len(minimized) > 0 {
+		// Order by STABLE window ID, not the holding-session window_index — a
+		// parked/re-parked window's index jumps every move-window, so an Index sort
+		// reshuffled the whole Minimized section on any window switch (settlePeek
+		// re-parks even when switching to a normal window). Window IDs never change.
 		sort.SliceStable(minimized, func(i, j int) bool {
-			return minimized[i].Index < minimized[j].Index
+			return grouping.WindowIDNum(minimized[i].ID) < grouping.WindowIDNum(minimized[j].ID)
 		})
 		const minimizedBg = "#6e6a86"
 		// Give each minimized tab a DESATURATED version of the colour it would have
