@@ -137,6 +137,11 @@ func (m popupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if m.connected && msg.Action == tea.MouseActionPress {
+			// Tap on the bottom close bar dismisses the popup (mobile-friendly).
+			if msg.Y >= m.height-1 {
+				m.sendUnsubscribe()
+				return m, tea.Quit
+			}
 			m.sendInput(&daemon.InputPayload{
 				SequenceNum: m.sequenceNum,
 				Type:        "mouse",
@@ -178,17 +183,40 @@ func mouseButton(b tea.MouseButton) string {
 
 func (m popupModel) View() string {
 	if !m.connected || m.content == "" {
+		// Even before the first render, paint the whole surface in the sidebar bg
+		// so no dark tmux-default flashes through.
+		if m.sidebarBg != "" && m.width > 0 && m.height > 0 {
+			blank := m.bgStyle().Render(strings.Repeat(" ", m.width))
+			rows := make([]string, m.height)
+			for i := range rows {
+				rows[i] = blank
+			}
+			return strings.Join(rows, "\n")
+		}
 		return ""
 	}
 
-	lines := strings.Split(m.content, "\n")
-	// Clamp to visible height
-	visibleLines := m.height - m.pinnedHeight
-	if visibleLines < 0 {
-		visibleLines = 0
+	bgStyle := m.bgStyle()
+	// bgPad returns s padded to the full width with bg-coloured spaces (so the
+	// right-hand gap never shows the dark popup default).
+	bgPad := func(s string) string {
+		lw := runewidth.StringWidth(stripAnsi(s))
+		if lw < m.width {
+			return s + bgStyle.Render(strings.Repeat(" ", m.width-lw))
+		}
+		return s
+	}
+	blankRow := bgStyle.Render(strings.Repeat(" ", max0(m.width)))
+
+	// Reserve the LAST row for a tap-to-close button (mobile-friendly: Esc is
+	// awkward on a phone). Content keeps rows 0..height-2, so click coordinates
+	// for the list are unchanged.
+	visibleLines := m.height - m.pinnedHeight - 1
+	if visibleLines < 1 {
+		visibleLines = 1
 	}
 
-	// Apply viewport offset
+	lines := strings.Split(m.content, "\n")
 	start := m.viewportOffset
 	if start > len(lines)-visibleLines {
 		start = len(lines) - visibleLines
@@ -202,21 +230,55 @@ func (m popupModel) View() string {
 	}
 	visible := lines[start:end]
 
-	// Pad short lines
-	for i, l := range visible {
-		lw := runewidth.StringWidth(stripAnsi(l))
-		if lw < m.width {
-			visible[i] = l + strings.Repeat(" ", m.width-lw)
-		}
+	out := make([]string, 0, m.height)
+	for _, l := range visible {
+		out = append(out, bgPad(l))
+	}
+	// Fill any remaining content rows so the surface is fully painted.
+	for len(out) < visibleLines {
+		out = append(out, blankRow)
 	}
 
-	result := strings.Join(visible, "\n")
-
-	// Append pinned content below scrollable area
+	result := strings.Join(out, "\n")
 	if m.pinnedContent != "" {
 		result += "\n" + m.pinnedContent
 	}
+	result += "\n" + m.closeButtonRow()
 	return result
+}
+
+// bgStyle is the lipgloss style that paints a cell in the sidebar background.
+func (m popupModel) bgStyle() lipgloss.Style {
+	s := lipgloss.NewStyle()
+	if m.sidebarBg != "" {
+		s = s.Background(lipgloss.Color(m.sidebarBg))
+	}
+	return s
+}
+
+// closeButtonRow renders the full-width bottom bar that dismisses the popup on
+// tap. The whole row is the hit target (see the MouseMsg handler).
+func (m popupModel) closeButtonRow() string {
+	label := "  ✕  Close  "
+	// Reverse (no explicit colours) inverts the terminal default, giving a
+	// high-contrast bar on both light and dark themes.
+	st := lipgloss.NewStyle().Bold(true).Reverse(true)
+	lw := runewidth.StringWidth(label)
+	pad := m.width - lw
+	if pad < 0 {
+		pad = 0
+	}
+	left := pad / 2
+	right := pad - left
+	bar := strings.Repeat(" ", left) + label + strings.Repeat(" ", right)
+	return st.Render(bar)
+}
+
+func max0(x int) int {
+	if x < 0 {
+		return 0
+	}
+	return x
 }
 
 func stripAnsi(s string) string {

@@ -16157,7 +16157,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				// (see launchQuestionPopup).
 				escSess := strings.ReplaceAll(sessID, "'", `'\''`)
 				popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
-				args := []string{"display-popup", "-E", "-w", "100%", "-h", "100%"}
+				// -B: no popup border. -s bg=<sidebarBg>: paint the popup SURFACE with
+				// the sidebar background so no dark tmux-default shows through before/
+				// around the renderer's own fill (the popup was rendering on a dark bg).
+				args := []string{"display-popup", "-E", "-B", "-w", "100%", "-h", "100%"}
+				if sbBg := c.GetSidebarBg(); sbBg != "" {
+					args = append(args, "-s", fmt.Sprintf("bg=%s", sbBg))
+				}
 				if userTTY != "" {
 					args = append(args, "-c", userTTY)
 				}
