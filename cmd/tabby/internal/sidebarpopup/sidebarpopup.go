@@ -137,8 +137,8 @@ func (m popupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if m.connected && msg.Action == tea.MouseActionPress {
-			// Tap on the bottom close bar dismisses the popup (mobile-friendly).
-			if msg.Y >= m.height-1 {
+			// Tap anywhere on the big bottom close button dismisses the popup.
+			if msg.Y >= m.height-closeButtonHeight {
 				m.sendUnsubscribe()
 				return m, tea.Quit
 			}
@@ -208,10 +208,10 @@ func (m popupModel) View() string {
 	}
 	blankRow := bgStyle.Render(strings.Repeat(" ", max0(m.width)))
 
-	// Reserve the LAST row for a tap-to-close button (mobile-friendly: Esc is
-	// awkward on a phone). Content keeps rows 0..height-2, so click coordinates
-	// for the list are unchanged.
-	visibleLines := m.height - m.pinnedHeight - 1
+	// Reserve the last closeButtonHeight rows for a big tap-to-close button
+	// (mobile-friendly: Esc is awkward on a phone). Content keeps the rows above
+	// it, so list click coordinates are unchanged.
+	visibleLines := m.height - m.pinnedHeight - closeButtonHeight
 	if visibleLines < 1 {
 		visibleLines = 1
 	}
@@ -243,7 +243,7 @@ func (m popupModel) View() string {
 	if m.pinnedContent != "" {
 		result += "\n" + m.pinnedContent
 	}
-	result += "\n" + m.closeButtonRow()
+	result += "\n" + m.closeButtonRows()
 	return result
 }
 
@@ -256,13 +256,24 @@ func (m popupModel) bgStyle() lipgloss.Style {
 	return s
 }
 
-// closeButtonRow renders the full-width bottom bar that dismisses the popup on
-// tap. The whole row is the hit target (see the MouseMsg handler).
-func (m popupModel) closeButtonRow() string {
-	label := "  ✕  Close  "
-	// Reverse (no explicit colours) inverts the terminal default, giving a
-	// high-contrast bar on both light and dark themes.
-	st := lipgloss.NewStyle().Bold(true).Reverse(true)
+// closeButtonHeight is how many rows the big bottom close button occupies.
+const closeButtonHeight = 3
+
+// closeButtonRows renders the full-width, multi-row GRAY button block that
+// dismisses the popup on tap. The whole block is the hit target (see the
+// MouseMsg handler). Explicit gray bg + white fg so it renders identically on
+// any theme/terminal (the earlier reverse-video bar was invisible on some).
+func (m popupModel) closeButtonRows() string {
+	const (
+		grayBg  = "#5c5c5c"
+		whiteFg = "#ffffff"
+	)
+	st := lipgloss.NewStyle().Bold(true).
+		Foreground(lipgloss.Color(whiteFg)).
+		Background(lipgloss.Color(grayBg))
+	blank := st.Render(strings.Repeat(" ", max0(m.width)))
+
+	label := "☰  Close" // hamburger, echoing the button that opened it
 	lw := runewidth.StringWidth(label)
 	pad := m.width - lw
 	if pad < 0 {
@@ -270,8 +281,17 @@ func (m popupModel) closeButtonRow() string {
 	}
 	left := pad / 2
 	right := pad - left
-	bar := strings.Repeat(" ", left) + label + strings.Repeat(" ", right)
-	return st.Render(bar)
+	labelRow := st.Render(strings.Repeat(" ", left) + label + strings.Repeat(" ", right))
+
+	rows := make([]string, 0, closeButtonHeight)
+	for len(rows) < closeButtonHeight {
+		if len(rows) == closeButtonHeight/2 {
+			rows = append(rows, labelRow)
+		} else {
+			rows = append(rows, blank)
+		}
+	}
+	return strings.Join(rows, "\n")
 }
 
 func max0(x int) int {
@@ -334,8 +354,8 @@ func (m *popupModel) sendMessage(msg daemon.Message) {
 
 func (m *popupModel) sendSubscribe() {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgSubscribe,
-		Target:   m.target,
+		Type:   daemon.MsgSubscribe,
+		Target: m.target,
 		Payload: daemon.ResizePayload{
 			Width:        m.width,
 			Height:       m.height,
@@ -346,15 +366,15 @@ func (m *popupModel) sendSubscribe() {
 
 func (m *popupModel) sendUnsubscribe() {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgUnsubscribe,
-		Target:   m.target,
+		Type:   daemon.MsgUnsubscribe,
+		Target: m.target,
 	})
 }
 
 func (m *popupModel) sendResize() {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgResize,
-		Target:   m.target,
+		Type:   daemon.MsgResize,
+		Target: m.target,
 		Payload: daemon.ResizePayload{
 			Width:  m.width,
 			Height: m.height,
@@ -364,9 +384,9 @@ func (m *popupModel) sendResize() {
 
 func (m *popupModel) sendInput(input *daemon.InputPayload) {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgInput,
-		Target:   m.target,
-		Payload:  input,
+		Type:    daemon.MsgInput,
+		Target:  m.target,
+		Payload: input,
 	})
 }
 
