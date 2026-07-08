@@ -1,11 +1,73 @@
 package daemon
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 )
 
 // (hexToRGB lives in coordinator.go)
+
+// gradientRGB builds raw 24-bit RGB pixel bytes for a left->right gradient bar,
+// `width` px wide and `heightPx` tall (every row identical).
+func gradientRGB(fromHex, toHex string, width, heightPx int) []byte {
+	fr, fg, fb := hexToRGB(fromHex)
+	tr, tg, tb := hexToRGB(toHex)
+	d := width - 1
+	if d < 1 {
+		d = 1
+	}
+	row := make([]byte, 0, width*3)
+	for x := 0; x < width; x++ {
+		row = append(row,
+			byte((fr*(d-x)+tr*x)/d),
+			byte((fg*(d-x)+tg*x)/d),
+			byte((fb*(d-x)+tb*x)/d),
+		)
+	}
+	raw := make([]byte, 0, width*heightPx*3)
+	for y := 0; y < heightPx; y++ {
+		raw = append(raw, row...)
+	}
+	return raw
+}
+
+// kittyGradientBar returns a raw kitty graphics protocol sequence (APC _G ... ST)
+// that transmits and displays a left->right gradient bar of `width`x`heightPx`
+// pixels (24-bit RGB, f=24, a=T). The base64 payload is chunked at 4096 bytes with
+// the m=1/m=0 continuation flag per the protocol. Wrap in tmuxPassthrough to send
+// it through tmux to the terminal.
+func kittyGradientBar(fromHex, toHex string, width, heightPx int) string {
+	if width < 1 {
+		width = 1
+	}
+	if heightPx < 1 {
+		heightPx = 1
+	}
+	b64 := base64.StdEncoding.EncodeToString(gradientRGB(fromHex, toHex, width, heightPx))
+	const chunk = 4096
+	var out strings.Builder
+	first := true
+	for len(b64) > 0 {
+		n := chunk
+		if n > len(b64) {
+			n = len(b64)
+		}
+		piece := b64[:n]
+		b64 = b64[n:]
+		more := 0
+		if len(b64) > 0 {
+			more = 1
+		}
+		if first {
+			out.WriteString(fmt.Sprintf("\x1b_Gf=24,s=%d,v=%d,a=T,m=%d;%s\x1b\\", width, heightPx, more, piece))
+			first = false
+		} else {
+			out.WriteString(fmt.Sprintf("\x1b_Gm=%d;%s\x1b\\", more, piece))
+		}
+	}
+	return out.String()
+}
 
 // sixelGradientBar returns a raw sixel image (DCS q … ST) of a left->right
 // gradient between two hex colours, `width` pixels wide and `heightPx` tall.

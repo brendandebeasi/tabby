@@ -1142,17 +1142,27 @@ func customBordersOverride() int {
 	return -1
 }
 
-// borderSixelEnabled reads the runtime @tabby_border_sixel toggle UNCACHED.
-func borderSixelEnabled() bool {
-	out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_border_sixel").Output()
-	if err != nil {
-		return false
+// borderGraphicsMode reads the runtime graphics toggle UNCACHED and returns
+// "sixel", "kitty", or "" (off). @tabby_border_graphics = sixel|kitty|off is the
+// canonical option; @tabby_border_sixel=on is kept as a back-compat alias for sixel.
+func borderGraphicsMode() string {
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_border_graphics").Output(); err == nil {
+		switch strings.ToLower(strings.TrimSpace(string(out))) {
+		case "sixel":
+			return "sixel"
+		case "kitty":
+			return "kitty"
+		}
 	}
-	switch strings.ToLower(strings.TrimSpace(string(out))) {
-	case "on", "1", "true", "yes":
-		return true
+	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_border_sixel").Output(); err == nil {
+		switch strings.ToLower(strings.TrimSpace(string(out))) {
+		case "on", "1", "true", "yes", "sixel":
+			return "sixel"
+		case "kitty":
+			return "kitty"
+		}
 	}
-	return false
+	return ""
 }
 
 // killLeftoverPaneBorders removes every custom box edge pane (render pane-border).

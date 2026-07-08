@@ -78,8 +78,25 @@ sixel)
 	tmux -L $L set-option -g @tabby_border_sixel "$v"; nudge
 	echo "sixel=$v  (graphics in top edge; needs a sixel-capable terminal)"
 	;;
+graphics)
+	# graphics sixel | kitty | off
+	v="${2:-off}"
+	tmux -L $L set-option -g allow-passthrough on
+	tmux -L $L set-option -g @tabby_border_graphics "$v"
+	tmux -L $L set-option -gu @tabby_border_sixel 2>/dev/null
+	nudge
+	echo "graphics=$v  (top-edge image; needs a $v-capable terminal, NOT over mosh)"
+	;;
+kitty)
+	v="${2:-on}"
+	tmux -L $L set-option -g allow-passthrough on
+	if [ "$v" = "off" ]; then tmux -L $L set-option -g @tabby_border_graphics off; else tmux -L $L set-option -g @tabby_border_graphics kitty; fi
+	nudge
+	echo "kitty=$v  (top-edge image via kitty graphics protocol; needs kitty/Ghostty/WezTerm, NOT over mosh)"
+	;;
 status)
 	echo "custom_borders = $(tmux -L $L show-option -gqv @tabby_custom_borders)"
+	echo "border_graphics= $(tmux -L $L show-option -gqv @tabby_border_graphics)"
 	echo "border_sixel   = $(tmux -L $L show-option -gqv @tabby_border_sixel)"
 	echo "border panes   = $(borders_count)"
 	echo "daemon pid     = $(dpid)"
@@ -94,6 +111,6 @@ down)
 	echo "demo down."
 	;;
 *)
-	echo "usage: vm-demo.sh {up|borders on|off|sixel on|off|status|attach|down}"
+	echo "usage: vm-demo.sh {up|borders on|off|sixel on|off|kitty on|off|graphics sixel|kitty|off|status|attach|down}"
 	;;
 esac

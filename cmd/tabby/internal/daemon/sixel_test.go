@@ -39,6 +39,28 @@ func TestSixelGradientBarStructure(t *testing.T) {
 	}
 }
 
+func TestKittyGradientBarStructure(t *testing.T) {
+	// Small image fits in one chunk (m=0).
+	s := kittyGradientBar("#000000", "#ffffff", 8, 4)
+	if !strings.HasPrefix(s, "\x1b_Gf=24,s=8,v=4,a=T,m=0;") {
+		t.Fatalf("bad kitty header: %q", s[:40])
+	}
+	if !strings.HasSuffix(s, "\x1b\\") {
+		t.Fatalf("missing ST terminator")
+	}
+	// Large image must chunk: first has m=1, and a continuation "\x1b_Gm=" appears.
+	big := kittyGradientBar("#000000", "#ffffff", 600, 12)
+	if !strings.Contains(big, ",m=1;") {
+		t.Fatalf("expected first chunk m=1 for a large image")
+	}
+	if !strings.Contains(big, "\x1b_Gm=") {
+		t.Fatalf("expected a continuation chunk (\\x1b_Gm=...)")
+	}
+	if !strings.Contains(big, "m=0;") {
+		t.Fatalf("expected a final chunk m=0")
+	}
+}
+
 func TestTmuxPassthroughDoublesEsc(t *testing.T) {
 	got := tmuxPassthrough("\x1bPq\x1b\\")
 	if !strings.HasPrefix(got, "\x1bPtmux;") || !strings.HasSuffix(got, "\x1b\\") {
