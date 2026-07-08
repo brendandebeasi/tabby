@@ -10251,6 +10251,16 @@ func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height i
 	c.stateMu.RLock()
 	hc := c.GetHeaderColorsForPane(paneID)
 	style := c.config.PaneHeader.Border.Style
+	topLabel := ""
+	if edge == "top" {
+		for i := range c.windows {
+			for j := range c.windows[i].Panes {
+				if c.windows[i].Panes[j].ID == paneID {
+					topLabel = strings.TrimSpace(c.composeTabBaseName(c.windows[i]))
+				}
+			}
+		}
+	}
 	c.stateMu.RUnlock()
 
 	bg := hc.Bg
@@ -10286,6 +10296,19 @@ func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height i
 			mid = 0
 		}
 		line := lc + strings.Repeat(hLine, mid) + rc
+		// Top edge: embed the window label — "╭─ label ──…──╮".
+		if edge == "top" && topLabel != "" && mid > 4 {
+			lbl := " " + topLabel + " "
+			const lead = 1 // one hLine between the corner and the label
+			if lipgloss.Width(lbl) > mid-lead {
+				lbl = runewidth.Truncate(lbl, mid-lead, "~")
+			}
+			fill := mid - lead - lipgloss.Width(lbl)
+			if fill < 0 {
+				fill = 0
+			}
+			line = lc + strings.Repeat(hLine, lead) + lbl + strings.Repeat(hLine, fill) + rc
+		}
 		lineStyle := lipgloss.NewStyle()
 		if fg != "" {
 			lineStyle = lineStyle.Foreground(lipgloss.Color(fg))
