@@ -1167,7 +1167,7 @@ func spawnPaneBorders(sessionID string, windows []tmux.Window, c *Coordinator) {
 		return
 	}
 	// Which edges already exist per content pane, so we never double-spawn.
-	have := map[string]map[string]bool{}
+	have := map[string]map[string]string{} // content pane -> edge -> border pane id
 	if out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}|||#{pane_start_command}").Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.SplitN(line, "|||", 2)
@@ -1180,9 +1180,9 @@ func spawnPaneBorders(sessionID string, windows []tmux.Window, c *Coordinator) {
 				continue
 			}
 			if have[cp] == nil {
-				have[cp] = map[string]bool{}
+				have[cp] = map[string]string{}
 			}
-			have[cp][ed] = true
+			have[cp][ed] = parts[0] // border pane id
 		}
 	}
 
@@ -1209,10 +1209,14 @@ func spawnPaneBorders(sessionID string, windows []tmux.Window, c *Coordinator) {
 			continue
 		}
 		edges := have[cp.ID]
-		// spawn splits an edge pane off the content and returns its new pane id.
+		if edges == nil {
+			edges = map[string]string{}
+		}
+		// spawn splits an edge pane off the content and returns its (new) pane id;
+		// returns the existing id if that edge already exists.
 		spawn := func(edge, flags string) string {
-			if edges[edge] {
-				return ""
+			if id := edges[edge]; id != "" {
+				return id
 			}
 			cmd := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -pane '%s' -edge '%s'",
 				prefix, sessionID, cp.ID, edge)
@@ -1232,8 +1236,10 @@ func spawnPaneBorders(sessionID string, windows []tmux.Window, c *Coordinator) {
 		bottom := spawn("bottom", "-v -l 1")
 		left := spawn("left", "-h -b -l 1")
 		right := spawn("right", "-h -l 1")
-		// Pin the edges to exactly 1 cell thick — tmux's split -l 1 gets widened by
-		// its layout redistribution when the window already has other panes.
+		// RE-PIN every edge to 1 cell EVERY pass (not just on spawn). Any window/
+		// sidebar resize makes tmux redistribute the box's panes proportionally,
+		// growing the 1-col edges — so, like the sidebar width sync, we re-assert
+		// the border thickness on each layout pass.
 		for _, id := range []string{top, bottom} {
 			if id != "" {
 				exec.Command("tmux", "resize-pane", "-t", id, "-y", "1").Run()
@@ -1248,6 +1254,33 @@ func spawnPaneBorders(sessionID string, windows []tmux.Window, c *Coordinator) {
 		exec.Command("tmux", "set-window-option", "-t", win.ID, "pane-border-status", "off").Run()
 		exec.Command("tmux", "set-window-option", "-t", win.ID, "pane-border-style", "fg="+tbg+",bg="+tbg).Run()
 		exec.Command("tmux", "set-window-option", "-t", win.ID, "pane-active-border-style", "fg="+tbg+",bg="+tbg).Run()
+	}
+}
+
+// repinPaneBorders re-asserts every custom border pane's 1-cell thickness. A
+// resize-window / select-layout during reconcile redistributes the box's panes
+// proportionally, growing the 1-col edges — so this runs AFTER reconcile to snap
+// them back. Cheap: a single list-panes + a resize per border pane.
+func repinPaneBorders() {
+	out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}|||#{pane_start_command}|||#{pane_width}|||#{pane_height}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "|||", 4)
+		if len(parts) < 4 || !strings.Contains(parts[1], "render pane-border") {
+			continue
+		}
+		switch startCmdFlag(parts[1], "-edge") {
+		case "top", "bottom":
+			if parts[3] != "1" {
+				exec.Command("tmux", "resize-pane", "-t", parts[0], "-y", "1").Run()
+			}
+		case "left", "right":
+			if parts[2] != "1" {
+				exec.Command("tmux", "resize-pane", "-t", parts[0], "-x", "1").Run()
+			}
+		}
 	}
 }
 

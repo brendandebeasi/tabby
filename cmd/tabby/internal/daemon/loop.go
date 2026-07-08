@@ -698,6 +698,11 @@ func (l *Loop) handleWindowCheckTick() {
 			logEvent("WIDTH_SYNC_SKIP trigger=window_check reason=stable_context key=%s", syncKey)
 		}
 	})
+	// After all spawn + reconcile (which redistributes panes on resize), snap the
+	// custom border edges back to 1 cell. Runs last so the box thickness survives.
+	if isFullBox(l.coord.GetConfig()) {
+		repinPaneBorders()
+	}
 }
 
 // ReconcileOpts controls a single reconcile cycle. Reason is recorded in
@@ -780,9 +785,14 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 			// the target width. The single chained tmux command then runs
 			// `resize-window @1 ; select-layout @1 "..." ; resize-window @2 ; ...`
 			// — one invocation, one SIGWINCH cascade, proportional restore.
+			// In full-box mode the pane-border feature owns each single-pane
+			// window's geometry (the 4 edge panes); replaying a cached layout via
+			// select-layout would redistribute and re-widen those 1-col edges. Skip
+			// the layout restore so the box stays intact.
+			fullBox := isFullBox(l.coord.GetConfig())
 			for _, op := range windowOpsList {
 				ops = append(ops, op)
-				if op.Kind != OpResizeWindow {
+				if op.Kind != OpResizeWindow || fullBox {
 					continue
 				}
 				cached := l.coord.GetWindowLayout(op.Target, lockedWidth)
