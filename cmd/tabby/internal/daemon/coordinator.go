@@ -16402,13 +16402,46 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// the source window afterward. activeClientGeometry resolves via the
 		// ClientElector that was just pinned by the input handler.
 		_, _, userTTY, _, _ := activeClientGeometry()
-		// NOTE: the phone FULL-WIDTH sidebar mode is DISABLED for safety. It could
-		// strand and then KILL content panes: keyboard/other nav paths bypassed the
-		// carousel's close-first guard, leaving the window in full-width with its
-		// content stashed in _tabby_limbo, after which the orphan-cleanup reaped the
-		// emptied window (and its stashed content) during multi-client churn. Until
-		// it's redesigned so content can never be lost, the hamburger falls back to
-		// the legacy stash/restore of the inline sidebar (no content stashing).
+		// On a PHONE, the hamburger opens the full-width sidebar as a display-popup
+		// OVERLAY (the sidebar-popup renderer at 100%x100%). This is the SAFE
+		// re-enable of the old full-width mode: an overlay never break-panes content
+		// out to _tabby_limbo, so the content-loss bug that got the previous
+		// full-width mode disabled (nav bypassing the close-first guard -> emptied
+		// window reaped with its stashed content) simply cannot happen — the content
+		// panes sit untouched behind the popup, which closes on tab-select / Esc.
+		// Targeted at the exact phone client (-c <tty>) so it lands on the right
+		// screen in a multi-client setup. Desktop keeps the inline hide/show below.
+		if c.ActiveClientProfile() == "phone" {
+			sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+			sessID := strings.TrimSpace(string(sessIDOut))
+			if sessID == "" {
+				sessID = c.sessionID
+			}
+			popupBin := getPopupBin()
+			if popupBin != "" && sessID != "" {
+				// display-popup's shell-command must be ONE argv string, or tmux
+				// execs it as a literal program name and the popup flashes shut
+				// (see launchQuestionPopup).
+				escSess := strings.ReplaceAll(sessID, "'", `'\''`)
+				popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
+				// -B: no popup border. -s bg=<sidebarBg>: paint the popup SURFACE with
+				// the sidebar background so no dark tmux-default shows through before/
+				// around the renderer's own fill (the popup was rendering on a dark bg).
+				args := []string{"display-popup", "-E", "-B", "-w", "100%", "-h", "100%"}
+				if sbBg := c.GetSidebarBg(); sbBg != "" {
+					args = append(args, "-s", fmt.Sprintf("bg=%s", sbBg))
+				}
+				if userTTY != "" {
+					args = append(args, "-c", userTTY)
+				}
+				args = append(args, "--", popupCmd)
+				go exec.Command("tmux", args...).Run()
+				logEvent("HAMBURGER_FULLWIDTH_POPUP session=%s tty=%s", sessID, userTTY)
+			}
+			return false
+		}
+		// Desktop: hide/show the inline sidebar by break-pane'ing it out to a stash
+		// window (renderer stays alive) and join-pane'ing it back on the next tap.
 		if sidebarIsStashed() {
 			c.sidebarHidden = false
 			c.restoreSidebarPanes()
@@ -19400,7 +19433,14 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 	if width <= leadingW+1 {
 		return
 	}
-	avail := width - leadingW
+	// Reserve the same 2-col menu-button area the tab (line 1) reserves, and
+	// gradient over the SAME width, so the wrapped row's gradient lines up
+	// column-for-column with line 1 instead of stretching 2 cols wider.
+	const menuBtnW = 2 // " ⋮"
+	avail := width - leadingW - menuBtnW
+	if avail < 1 {
+		avail = 1
+	}
 	chipText := " " + name // 1 col of bg-only padding before the name (tight, for narrow sidebars)
 	if lipgloss.Width(chipText) > avail {
 		truncated := ""
@@ -19428,8 +19468,14 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 	if bgColor != "" {
 		// Gradient-fill the continuation row (not a flat solid) so a wrapped tab's
 		// second row carries the same light->base->dark sheen as its first row —
-		// otherwise the gradient appears to "stop" at the wrap.
+		// otherwise the gradient appears to "stop" at the wrap. Same from/to/width
+		// as line 1 so the shade at every column matches vertically.
 		chip = c.applyGradientFill(chip, gradientEndColor(bgColor), bgColor, avail)
+		// Fill the reserved menu column with the dark tail, exactly like line 1's
+		// menu button, so the right edge continues the shadow (and stays aligned).
+		tail := c.applyBackgroundFill(strings.Repeat(" ", menuBtnW), gradientTailColor(bgColor), menuBtnW)
+		s.WriteString(leadingRendered + chip + tail + "\n")
+		return
 	}
 	s.WriteString(leadingRendered + chip + "\n")
 }

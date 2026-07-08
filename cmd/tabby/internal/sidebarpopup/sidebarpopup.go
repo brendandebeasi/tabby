@@ -137,6 +137,11 @@ func (m popupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if m.connected && msg.Action == tea.MouseActionPress {
+			// Tap anywhere on the big bottom close button dismisses the popup.
+			if msg.Y >= m.height-closeButtonHeight {
+				m.sendUnsubscribe()
+				return m, tea.Quit
+			}
 			m.sendInput(&daemon.InputPayload{
 				SequenceNum: m.sequenceNum,
 				Type:        "mouse",
@@ -178,17 +183,40 @@ func mouseButton(b tea.MouseButton) string {
 
 func (m popupModel) View() string {
 	if !m.connected || m.content == "" {
+		// Even before the first render, paint the whole surface in the sidebar bg
+		// so no dark tmux-default flashes through.
+		if m.sidebarBg != "" && m.width > 0 && m.height > 0 {
+			blank := m.bgStyle().Render(strings.Repeat(" ", m.width))
+			rows := make([]string, m.height)
+			for i := range rows {
+				rows[i] = blank
+			}
+			return strings.Join(rows, "\n")
+		}
 		return ""
 	}
 
-	lines := strings.Split(m.content, "\n")
-	// Clamp to visible height
-	visibleLines := m.height - m.pinnedHeight
-	if visibleLines < 0 {
-		visibleLines = 0
+	bgStyle := m.bgStyle()
+	// bgPad returns s padded to the full width with bg-coloured spaces (so the
+	// right-hand gap never shows the dark popup default).
+	bgPad := func(s string) string {
+		lw := runewidth.StringWidth(stripAnsi(s))
+		if lw < m.width {
+			return s + bgStyle.Render(strings.Repeat(" ", m.width-lw))
+		}
+		return s
+	}
+	blankRow := bgStyle.Render(strings.Repeat(" ", max0(m.width)))
+
+	// Reserve the last closeButtonHeight rows for a big tap-to-close button
+	// (mobile-friendly: Esc is awkward on a phone). Content keeps the rows above
+	// it, so list click coordinates are unchanged.
+	visibleLines := m.height - m.pinnedHeight - closeButtonHeight
+	if visibleLines < 1 {
+		visibleLines = 1
 	}
 
-	// Apply viewport offset
+	lines := strings.Split(m.content, "\n")
 	start := m.viewportOffset
 	if start > len(lines)-visibleLines {
 		start = len(lines) - visibleLines
@@ -202,21 +230,75 @@ func (m popupModel) View() string {
 	}
 	visible := lines[start:end]
 
-	// Pad short lines
-	for i, l := range visible {
-		lw := runewidth.StringWidth(stripAnsi(l))
-		if lw < m.width {
-			visible[i] = l + strings.Repeat(" ", m.width-lw)
-		}
+	out := make([]string, 0, m.height)
+	for _, l := range visible {
+		out = append(out, bgPad(l))
+	}
+	// Fill any remaining content rows so the surface is fully painted.
+	for len(out) < visibleLines {
+		out = append(out, blankRow)
 	}
 
-	result := strings.Join(visible, "\n")
-
-	// Append pinned content below scrollable area
+	result := strings.Join(out, "\n")
 	if m.pinnedContent != "" {
 		result += "\n" + m.pinnedContent
 	}
+	result += "\n" + m.closeButtonRows()
 	return result
+}
+
+// bgStyle is the lipgloss style that paints a cell in the sidebar background.
+func (m popupModel) bgStyle() lipgloss.Style {
+	s := lipgloss.NewStyle()
+	if m.sidebarBg != "" {
+		s = s.Background(lipgloss.Color(m.sidebarBg))
+	}
+	return s
+}
+
+// closeButtonHeight is how many rows the big bottom close button occupies.
+const closeButtonHeight = 3
+
+// closeButtonRows renders the full-width, multi-row GRAY button block that
+// dismisses the popup on tap. The whole block is the hit target (see the
+// MouseMsg handler). Explicit gray bg + white fg so it renders identically on
+// any theme/terminal (the earlier reverse-video bar was invisible on some).
+func (m popupModel) closeButtonRows() string {
+	const (
+		grayBg  = "#5c5c5c"
+		whiteFg = "#ffffff"
+	)
+	st := lipgloss.NewStyle().Bold(true).
+		Foreground(lipgloss.Color(whiteFg)).
+		Background(lipgloss.Color(grayBg))
+	blank := st.Render(strings.Repeat(" ", max0(m.width)))
+
+	label := "☰  Close" // hamburger, echoing the button that opened it
+	lw := runewidth.StringWidth(label)
+	pad := m.width - lw
+	if pad < 0 {
+		pad = 0
+	}
+	left := pad / 2
+	right := pad - left
+	labelRow := st.Render(strings.Repeat(" ", left) + label + strings.Repeat(" ", right))
+
+	rows := make([]string, 0, closeButtonHeight)
+	for len(rows) < closeButtonHeight {
+		if len(rows) == closeButtonHeight/2 {
+			rows = append(rows, labelRow)
+		} else {
+			rows = append(rows, blank)
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+func max0(x int) int {
+	if x < 0 {
+		return 0
+	}
+	return x
 }
 
 func stripAnsi(s string) string {
@@ -272,8 +354,8 @@ func (m *popupModel) sendMessage(msg daemon.Message) {
 
 func (m *popupModel) sendSubscribe() {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgSubscribe,
-		Target:   m.target,
+		Type:   daemon.MsgSubscribe,
+		Target: m.target,
 		Payload: daemon.ResizePayload{
 			Width:        m.width,
 			Height:       m.height,
@@ -284,15 +366,15 @@ func (m *popupModel) sendSubscribe() {
 
 func (m *popupModel) sendUnsubscribe() {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgUnsubscribe,
-		Target:   m.target,
+		Type:   daemon.MsgUnsubscribe,
+		Target: m.target,
 	})
 }
 
 func (m *popupModel) sendResize() {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgResize,
-		Target:   m.target,
+		Type:   daemon.MsgResize,
+		Target: m.target,
 		Payload: daemon.ResizePayload{
 			Width:  m.width,
 			Height: m.height,
@@ -302,9 +384,9 @@ func (m *popupModel) sendResize() {
 
 func (m *popupModel) sendInput(input *daemon.InputPayload) {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgInput,
-		Target:   m.target,
-		Payload:  input,
+		Type:    daemon.MsgInput,
+		Target:  m.target,
+		Payload: input,
 	})
 }
 
