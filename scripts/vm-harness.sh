@@ -50,7 +50,7 @@ else
   shot 01_phone_initial
   WIN0=$(tmux -L $L display -p -t t "#{window_id}")
   SOCK="/tmp/tabby-daemon-${SID}.sock"
-  python3 "$WT/scripts/inject_action.py" "$SOCK" window-header "$WIN0" window_header:hamburger; sleep 3
+  python3 "$WT/scripts/inject_action.py" "$SOCK" window-header "$WIN0" window_header:hamburger; sleep 7
   shot 02_hamburger_popup
   echo "  popup proc: $(pgrep -af sidebar-popup | head -1)"
   LOG=$(ls -t /tmp/tabby-daemon-*-events.log 2>/dev/null|head -1); echo "  --- log ---"; grep -hiE "HAMBURGER|WINDOW_HEADER_ACTION|hamburger" "$LOG" 2>/dev/null | tail -4; echo "  active clients:"; tmux -L $L list-clients -F "    #{client_tty} #{client_width}x#{client_height}"
