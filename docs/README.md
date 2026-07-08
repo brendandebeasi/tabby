@@ -35,6 +35,10 @@ This directory is organized by intent. If you only read one file first, read `do
 - `docs/WIDGETS.md`  
   Widget behavior and extension notes.
 
+- `docs/CUSTOM_PANE_BORDERS.md`  
+  Tabby-drawn pane borders: full box, gradients, buttons, drag-resize, sixel,
+  and the runtime toggles (`@tabby_custom_borders`, `@tabby_border_sixel`).
+
 - `docs/AI_TOOL_HOOKS.md`  
   Integrating AI tool hooks with Tabby indicators.
 
