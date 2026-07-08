@@ -538,6 +538,20 @@ func (m rendererModel) View() string {
 		return row0 + "\n" + row1
 	}
 
+	// Pane-border edge: render EVERY line of the payload. Vertical edges
+	// (left/right) are a column of glyphs — one per row — so the single-row
+	// truncation below would collapse the whole column to one cell.
+	if edge != nil && *edge != "" {
+		lines := strings.Split(m.content, "\n")
+		for i, l := range lines {
+			w := runewidth.StringWidth(stripAnsi(l))
+			if w < m.width {
+				lines[i] = l + strings.Repeat(" ", m.width-w)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+
 	// Single-row default behavior
 	line := m.content
 	if idx := strings.IndexByte(line, '\n'); idx >= 0 {

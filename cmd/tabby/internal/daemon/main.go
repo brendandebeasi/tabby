@@ -1220,9 +1220,12 @@ func spawnPaneBorders(sessionID string, windows []tmux.Window, c *Coordinator) {
 				debugLog.Printf("spawnPaneBorders %s edge=%s failed: %v %s", cp.ID, edge, err, out)
 			}
 		}
-		// Bars first (full width while content spans the window), then side columns.
+		// Bars first (spanning the CONTENT pane's width, not -f full-window, so
+		// they don't overshoot a sidebar), then the side columns. Order matters:
+		// the bars capture the content width before left/right shrink it by 1 each,
+		// so the bars end up = content + 2 side cols = the full box width.
 		spawn("top", "-v -b -l 1")
-		spawn("bottom", "-v -f -l 1")
+		spawn("bottom", "-v -l 1")
 		spawn("left", "-h -b -l 1")
 		spawn("right", "-h -l 1")
 		// Hide the tmux separators so only tabby's glyphs show.
