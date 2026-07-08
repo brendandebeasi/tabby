@@ -37,7 +37,8 @@ These flip live without a config reload (read uncached on the next refresh):
 | Option | Values | Effect |
 |--------|--------|--------|
 | `@tabby_custom_borders` | `on` / `off` | Force the box on, or fall back to native borders. Overrides config. |
-| `@tabby_border_sixel` | `on` / `off` | Replace the top edge with a sixel gradient strip (see below). |
+| `@tabby_border_graphics` | `sixel` / `kitty` / `off` | Replace the top edge with a gradient image in the chosen protocol (see below). |
+| `@tabby_border_sixel` | `on` / `off` | Legacy alias for `@tabby_border_graphics sixel`. |
 | `@tabby_border_enable` (pane-local) | `0` | Opt a single pane out of the box. Set with `set-option -p`. |
 
 Example:
@@ -49,19 +50,28 @@ tmux set-option -p @tabby_border_enable 0   # this pane only, no box
 
 A refresh (any layout change, or `scripts/signal-daemon.sh`) applies the change.
 
-## Sixel graphics (experimental)
+## Sixel / kitty graphics (experimental)
 
-`@tabby_border_sixel on` makes the top edge emit a sixel gradient image instead
-of the glyph bar. It is wrapped in tmux passthrough, so it needs:
+`@tabby_border_graphics sixel` (or `kitty`) makes the top edge emit a gradient
+IMAGE instead of the glyph bar, in the chosen protocol. Both are generated in Go
+(no external encoder) and wrapped in tmux passthrough, so they need:
 
 ```sh
 tmux set-option -g allow-passthrough on
 ```
 
-Whether pixels actually render depends on the ATTACHED terminal supporting sixel
-through tmux (iTerm2, Ghostty, WezTerm, etc.). The generated sixel is verified
-valid/decodable; if your terminal can't show it you'll see a blank top edge, so
-toggle it back off.
+Whether pixels actually render depends on the ATTACHED terminal:
+
+| Protocol | Terminals that render it |
+|----------|--------------------------|
+| `sixel`  | iTerm2, Ghostty, WezTerm |
+| `kitty`  | kitty, Ghostty, WezTerm  |
+
+**IMPORTANT: this does NOT work over mosh** — mosh strips both sixel and kitty
+graphics. Attach from a local terminal (or plain ssh) that supports the protocol.
+If the terminal can't show it you'll see a blank top edge; toggle it back off.
+The generators are unit-tested and the sixel is verified decodable to a correct
+gradient PNG.
 
 ## Trying it on the dev VM
 
