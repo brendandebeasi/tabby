@@ -53,5 +53,6 @@ else
   python3 "$WT/scripts/inject_action.py" "$SOCK" window-header "$WIN0" window_header:hamburger; sleep 3
   shot 02_hamburger_popup
   echo "  popup proc: $(pgrep -af sidebar-popup | head -1)"
+  LOG=$(ls -t /tmp/tabby-daemon-*-events.log 2>/dev/null|head -1); echo "  --- log ---"; grep -hiE "HAMBURGER|WINDOW_HEADER_ACTION|hamburger" "$LOG" 2>/dev/null | tail -4; echo "  active clients:"; tmux -L $L list-clients -F "    #{client_tty} #{client_width}x#{client_height}"
 fi
 kill $XTERM $XVFB 2>/dev/null; tmux -L $L kill-server 2>/dev/null; echo DONE

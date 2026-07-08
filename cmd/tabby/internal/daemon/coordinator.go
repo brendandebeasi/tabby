@@ -15331,9 +15331,38 @@ func (c *Coordinator) SetClientProfile(clientID string, profile string) {
 	c.clientProfileMu.Unlock()
 }
 
-// ActiveClientProfile returns the profile of the active client.
-// It computes the profile directly from the active terminal width.
+// profileElect caches a fresh active-client election for a short TTL so
+// ActiveClientProfile is both correct and cheap. The bare activeClientWidth
+// atomic can be stale (e.g. a transient 80-col pty cached before TIOCSWINSZ
+// resized it, then never re-observed because the geom-tick deduped) which made
+// the box randomly fail to spawn and the phone hamburger take the wrong path.
+var (
+	profileElectMu sync.Mutex
+	profileElectW  int
+	profileElectAt time.Time
+)
+
+func freshActiveClientWidth() int {
+	profileElectMu.Lock()
+	defer profileElectMu.Unlock()
+	if profileElectW > 0 && time.Since(profileElectAt) < 300*time.Millisecond {
+		return profileElectW
+	}
+	if w, _, _, _, ok := activeClientGeometry(); ok && w > 0 {
+		profileElectW = w
+		profileElectAt = time.Now()
+		return w
+	}
+	return 0
+}
+
+// ActiveClientProfile returns the profile of the active client, computed from a
+// FRESH election (TTL-cached) so a stale cached width can't misclassify the
+// client; falls back to the cached width only when no client can be elected.
 func (c *Coordinator) ActiveClientProfile() string {
+	if w := freshActiveClientWidth(); w > 0 {
+		return c.computeProfile(w)
+	}
 	acw := int(c.activeClientWidth.Load())
 	if acw <= 0 {
 		return "desktop"
