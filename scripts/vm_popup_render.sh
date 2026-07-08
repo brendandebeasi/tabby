@@ -36,8 +36,8 @@ echo "=== rendered (with ANSI, cat -v on first+last rows) ==="
 tmux -L $L capture-pane -p -e -t "$POP" 2>/dev/null | sed -n '1p;$p' | cat -v | cut -c1-160
 echo "=== plain last 2 rows (close bar?) ==="
 tmux -L $L capture-pane -p -t "$POP" 2>/dev/null | tail -2
-echo "=== does last row contain Close? ==="
-tmux -L $L capture-pane -p -t "$POP" 2>/dev/null | tail -1 | grep -q "Close" && echo "CLOSE BAR: yes" || echo "CLOSE BAR: MISSING"
+echo "=== close button present (bottom block)? ==="
+tmux -L $L capture-pane -p -t "$POP" 2>/dev/null | tail -4 | grep -q "Close" && echo "CLOSE BAR: yes" || echo "CLOSE BAR: MISSING"
 echo "=== any bg color escape present (48;2 / 48;5)? ==="
 tmux -L $L capture-pane -p -e -t "$POP" 2>/dev/null | grep -qE '\[48[;:]' && echo "BG FILL: yes" || echo "BG FILL: none"
 
