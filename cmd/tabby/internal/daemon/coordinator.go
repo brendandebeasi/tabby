@@ -19615,6 +19615,13 @@ func isAuxiliaryPaneCommand(cmd string) bool {
 	if strings.Contains(lower, "pane-header") || strings.Contains(lower, "pane header") || strings.Contains(lower, "pane_header") {
 		return true
 	}
+	// Custom box edge panes (render pane-border). MUST be treated as auxiliary or
+	// spawnPaneBorders counts them as content and spawns a box around each one every
+	// layout pass -> runaway stacking of "CPB" edge panes. NOTE: keep this check
+	// before window-header since "pane-border" also contains no "header" substring.
+	if strings.Contains(lower, "pane-border") || strings.Contains(lower, "pane_border") {
+		return true
+	}
 	if strings.Contains(lower, "window-header") || strings.Contains(lower, "window_header") {
 		return true
 	}
