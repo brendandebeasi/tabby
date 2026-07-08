@@ -16135,13 +16135,40 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// the source window afterward. activeClientGeometry resolves via the
 		// ClientElector that was just pinned by the input handler.
 		_, _, userTTY, _, _ := activeClientGeometry()
-		// NOTE: the phone FULL-WIDTH sidebar mode is DISABLED for safety. It could
-		// strand and then KILL content panes: keyboard/other nav paths bypassed the
-		// carousel's close-first guard, leaving the window in full-width with its
-		// content stashed in _tabby_limbo, after which the orphan-cleanup reaped the
-		// emptied window (and its stashed content) during multi-client churn. Until
-		// it's redesigned so content can never be lost, the hamburger falls back to
-		// the legacy stash/restore of the inline sidebar (no content stashing).
+		// On a PHONE, the hamburger opens the full-width sidebar as a display-popup
+		// OVERLAY (the sidebar-popup renderer at 100%x100%). This is the SAFE
+		// re-enable of the old full-width mode: an overlay never break-panes content
+		// out to _tabby_limbo, so the content-loss bug that got the previous
+		// full-width mode disabled (nav bypassing the close-first guard -> emptied
+		// window reaped with its stashed content) simply cannot happen — the content
+		// panes sit untouched behind the popup, which closes on tab-select / Esc.
+		// Targeted at the exact phone client (-c <tty>) so it lands on the right
+		// screen in a multi-client setup. Desktop keeps the inline hide/show below.
+		if c.ActiveClientProfile() == "phone" {
+			sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+			sessID := strings.TrimSpace(string(sessIDOut))
+			if sessID == "" {
+				sessID = c.sessionID
+			}
+			popupBin := getPopupBin()
+			if popupBin != "" && sessID != "" {
+				// display-popup's shell-command must be ONE argv string, or tmux
+				// execs it as a literal program name and the popup flashes shut
+				// (see launchQuestionPopup).
+				escSess := strings.ReplaceAll(sessID, "'", `'\''`)
+				popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
+				args := []string{"display-popup", "-E", "-w", "100%", "-h", "100%"}
+				if userTTY != "" {
+					args = append(args, "-c", userTTY)
+				}
+				args = append(args, "--", popupCmd)
+				go exec.Command("tmux", args...).Run()
+				logEvent("HAMBURGER_FULLWIDTH_POPUP session=%s tty=%s", sessID, userTTY)
+			}
+			return false
+		}
+		// Desktop: hide/show the inline sidebar by break-pane'ing it out to a stash
+		// window (renderer stays alive) and join-pane'ing it back on the next tap.
 		if sidebarIsStashed() {
 			c.sidebarHidden = false
 			c.restoreSidebarPanes()
