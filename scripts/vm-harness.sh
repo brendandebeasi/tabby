@@ -23,7 +23,7 @@ echo "client width=$(tmux -L $L display -p -t t '#{client_width}')"
 tmux -L $L run-shell -b "$WT/tabby.tmux"; sleep 10
 SID=$(tmux -L $L display -p -t t "#{session_id}")
 DP=$(ps -o pid=,command= -ax | grep -F "tabby daemon -session $SID" | grep -v grep | awk '{print $1}' | head -1)
-for i in 1 2 3 4 5; do kill -USR1 $DP 2>/dev/null; sleep 2; done
+for i in $(seq 1 12); do tmux -L $L refresh-client 2>/dev/null; kill -USR1 $DP 2>/dev/null; sleep 2; [ "$(tmux -L $L list-panes -t t -F '#{pane_start_command}' | grep -c 'render pane-border')" -gt 0 ] && break; done
 LOG=$(ls -t /tmp/tabby-daemon-*-events.log 2>/dev/null|head -1)
 echo "edges=$(tmux -L $L list-panes -t t -F '#{pane_start_command}' | grep -c 'render pane-border') daemon=$DP"
 grep -hE "PANE_LAYOUT_START" "$LOG" 2>/dev/null | tail -2
