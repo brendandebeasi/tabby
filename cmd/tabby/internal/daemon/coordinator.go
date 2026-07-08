@@ -10287,18 +10287,28 @@ func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height i
 
 	switch edge {
 	case "left", "right":
-		// Vertical single-column run, one glyph per row, in the border colour.
-		cellStyle := lipgloss.NewStyle()
-		if fg != "" {
-			cellStyle = cellStyle.Foreground(lipgloss.Color(fg))
-		}
+		// Vertical single-column run, one glyph per row. Blend the row bg from a
+		// light head at the top down to the base bg at the bottom, matching the top
+		// bar's light->base gradient so the box reads as one cohesive surface.
+		head := bg
 		if bg != "" {
-			cellStyle = cellStyle.Background(lipgloss.Color(bg))
+			head = gradientEndColor(bg)
 		}
-		cell := cellStyle.Render(vLine)
+		denom := height - 1
+		if denom < 1 {
+			denom = 1
+		}
 		lines := make([]string, height)
 		for i := range lines {
-			lines[i] = cell
+			cellStyle := lipgloss.NewStyle()
+			if fg != "" {
+				cellStyle = cellStyle.Foreground(lipgloss.Color(fg))
+			}
+			if bg != "" {
+				rowBg := blendHexToward(head, bg, float64(i)/float64(denom))
+				cellStyle = cellStyle.Background(lipgloss.Color(rowBg))
+			}
+			lines[i] = cellStyle.Render(vLine)
 		}
 		return &daemon.RenderPayload{Content: strings.Join(lines, "\n"), Width: width, Height: height, TotalLines: height}
 	case "top", "bottom":
