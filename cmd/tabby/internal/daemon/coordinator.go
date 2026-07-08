@@ -10312,21 +10312,42 @@ func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height i
 		}
 		return &daemon.RenderPayload{Content: strings.Join(lines, "\n"), Width: width, Height: height, TotalLines: height}
 	case "top", "bottom":
-		// Experimental: graphics in the top edge. @tabby_border_graphics = sixel|kitty
-		// (or legacy @tabby_border_sixel=on) replaces the top glyph bar with a gradient
-		// image strip in the requested protocol, wrapped in tmux passthrough so it
-		// reaches the outer terminal even without native tmux graphics support. Falls
-		// back to glyphs when off/unsupported (terminal ignores the passthrough).
-		// Needs `set -g allow-passthrough on`.
+		// Graphics in the top edge (@tabby_border_graphics).
+		//   blocks       -> truecolor half-block gradient strip. These are NORMAL
+		//                   cells, so they render in ANY terminal through tmux (the
+		//                   only bitmap-free approach that survives tmux redraws).
+		//   sixel|kitty  -> a real bitmap image via tmux passthrough. NOTE: current
+		//                   tmux redraws over passthrough graphics, so these do not
+		//                   display inside tmux yet (kept for a future native path);
+		//                   see docs/CUSTOM_PANE_BORDERS.md.
 		if edge == "top" && bg != "" {
-			if mode := borderGraphicsMode(); mode != "" {
-				px := width * 7 // ~7px per cell
-				var img string
-				if mode == "kitty" {
-					img = tmuxPassthrough(kittyGradientBar(gradientEndColor(bg), bg, px, 12))
-				} else {
-					img = tmuxPassthrough(sixelGradientBar(gradientEndColor(bg), bg, px, 12))
+			switch borderGraphicsMode() {
+			case "blocks":
+				head := gradientEndColor(bg)
+				denom := width - 1
+				if denom < 1 {
+					denom = 1
 				}
+				var b strings.Builder
+				for x := 0; x < width; x++ {
+					// Upper-half block: top pixel = light head, bottom pixel = base,
+					// both shifted along the horizontal gradient -> a beveled strip.
+					r := float64(x) / float64(denom)
+					top := blendHexToward(head, bg, r)
+					bot := blendHexToward(bg, gradientTailColor(bg), r)
+					b.WriteString(lipgloss.NewStyle().
+						Foreground(lipgloss.Color(top)).
+						Background(lipgloss.Color(bot)).
+						Render("▀"))
+				}
+				return &daemon.RenderPayload{Content: b.String(), Width: width, Height: 1, TotalLines: 1}
+			case "kitty":
+				px := width * 7
+				img := tmuxPassthrough(kittyGradientBar(gradientEndColor(bg), bg, px, 12))
+				return &daemon.RenderPayload{Content: img, Width: width, Height: 1, TotalLines: 1}
+			case "sixel":
+				px := width * 7
+				img := tmuxPassthrough(sixelGradientBar(gradientEndColor(bg), bg, px, 12))
 				return &daemon.RenderPayload{Content: img, Width: width, Height: 1, TotalLines: 1}
 			}
 		}

@@ -1152,6 +1152,8 @@ func borderGraphicsMode() string {
 			return "sixel"
 		case "kitty":
 			return "kitty"
+		case "blocks":
+			return "blocks"
 		}
 	}
 	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_border_sixel").Output(); err == nil {

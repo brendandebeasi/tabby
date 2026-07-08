@@ -92,7 +92,13 @@ kitty)
 	tmux -L $L set-option -g allow-passthrough on
 	if [ "$v" = "off" ]; then tmux -L $L set-option -g @tabby_border_graphics off; else tmux -L $L set-option -g @tabby_border_graphics kitty; fi
 	nudge
-	echo "kitty=$v  (top-edge image via kitty graphics protocol; needs kitty/Ghostty/WezTerm, NOT over mosh)"
+	echo "kitty=$v  (bitmap via passthrough; NOTE: current tmux redraws over it -> use 'blocks')"
+	;;
+blocks)
+	v="${2:-on}"
+	if [ "$v" = "off" ]; then tmux -L $L set-option -g @tabby_border_graphics off; else tmux -L $L set-option -g @tabby_border_graphics blocks; fi
+	nudge
+	echo "blocks=$v  (truecolor half-block gradient strip; renders in ANY terminal, incl. mosh)"
 	;;
 status)
 	echo "custom_borders = $(tmux -L $L show-option -gqv @tabby_custom_borders)"

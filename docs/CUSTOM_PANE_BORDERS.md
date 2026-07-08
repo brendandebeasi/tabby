@@ -37,7 +37,7 @@ These flip live without a config reload (read uncached on the next refresh):
 | Option | Values | Effect |
 |--------|--------|--------|
 | `@tabby_custom_borders` | `on` / `off` | Force the box on, or fall back to native borders. Overrides config. |
-| `@tabby_border_graphics` | `sixel` / `kitty` / `off` | Replace the top edge with a gradient image in the chosen protocol (see below). |
+| `@tabby_border_graphics` | `blocks` / `sixel` / `kitty` / `off` | Replace the top edge with a graphic strip. `blocks` (truecolor half-blocks) actually renders in tmux; `sixel`/`kitty` are bitmap-via-passthrough and currently don't (see below). |
 | `@tabby_border_sixel` | `on` / `off` | Legacy alias for `@tabby_border_graphics sixel`. |
 | `@tabby_border_enable` (pane-local) | `0` | Opt a single pane out of the box. Set with `set-option -p`. |
 
@@ -49,6 +49,13 @@ tmux set-option -p @tabby_border_enable 0   # this pane only, no box
 ```
 
 A refresh (any layout change, or `scripts/signal-daemon.sh`) applies the change.
+
+## Graphics in the top edge
+
+`@tabby_border_graphics blocks` replaces the top glyph bar with a **truecolor
+half-block gradient strip**. These are ordinary terminal cells, so they render in
+ANY terminal through tmux (including mosh) — this is the graphics mode that works
+today. Screenshot-verified: the top edge shows a smooth colored gradient bar.
 
 ## Sixel / kitty graphics (experimental)
 
