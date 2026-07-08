@@ -1201,53 +1201,60 @@ func spawnPaneBorders(sessionID string, windows []tmux.Window, c *Coordinator) {
 				content = append(content, p)
 			}
 		}
-		if len(content) != 1 { // Phase 1: single-content-pane box only
+		if len(content) == 0 {
 			continue
 		}
-		cp := content[0]
-		if cp.Height < 3 || cp.Width < 4 {
-			continue
-		}
-		edges := have[cp.ID]
-		if edges == nil {
-			edges = map[string]string{}
-		}
-		// spawn splits an edge pane off the content and returns its (new) pane id;
-		// returns the existing id if that edge already exists.
-		spawn := func(edge, flags string) string {
-			if id := edges[edge]; id != "" {
-				return id
+		// Single-content-pane windows get the FULL box; multi-pane windows degrade
+		// to a labeled top edge per content pane (the full box's side/bottom panes
+		// can't be expressed cleanly around several tiled content panes).
+		fullBoxWin := len(content) == 1
+		for _, cp := range content {
+			if cp.Height < 3 || cp.Width < 4 {
+				continue
 			}
-			cmd := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -pane '%s' -edge '%s'",
-				prefix, sessionID, cp.ID, edge)
-			args := append(append([]string{"split-window", "-d", "-P", "-F", "#{pane_id}", "-t", cp.ID}, strings.Fields(flags)...), cmd)
-			out, err := exec.Command("tmux", args...).Output()
-			if err != nil {
-				debugLog.Printf("spawnPaneBorders %s edge=%s failed: %v", cp.ID, edge, err)
-				return ""
+			cpID := cp.ID
+			edges := have[cpID]
+			if edges == nil {
+				edges = map[string]string{}
 			}
-			return strings.TrimSpace(string(out))
-		}
-		// Bars first (spanning the CONTENT pane's width, not -f full-window, so
-		// they don't overshoot a sidebar), then the side columns. Order matters:
-		// the bars capture the content width before left/right shrink it by 1 each,
-		// so the bars end up = content + 2 side cols = the full box width.
-		top := spawn("top", "-v -b -l 1")
-		bottom := spawn("bottom", "-v -l 1")
-		left := spawn("left", "-h -b -l 1")
-		right := spawn("right", "-h -l 1")
-		// RE-PIN every edge to 1 cell EVERY pass (not just on spawn). Any window/
-		// sidebar resize makes tmux redistribute the box's panes proportionally,
-		// growing the 1-col edges — so, like the sidebar width sync, we re-assert
-		// the border thickness on each layout pass.
-		for _, id := range []string{top, bottom} {
-			if id != "" {
-				exec.Command("tmux", "resize-pane", "-t", id, "-y", "1").Run()
+			// spawn splits an edge pane off the content and returns its (new or
+			// existing) pane id.
+			spawn := func(edge, flags string) string {
+				if id := edges[edge]; id != "" {
+					return id
+				}
+				cmd := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -pane '%s' -edge '%s'",
+					prefix, sessionID, cpID, edge)
+				args := append(append([]string{"split-window", "-d", "-P", "-F", "#{pane_id}", "-t", cpID}, strings.Fields(flags)...), cmd)
+				out, err := exec.Command("tmux", args...).Output()
+				if err != nil {
+					debugLog.Printf("spawnPaneBorders %s edge=%s failed: %v", cpID, edge, err)
+					return ""
+				}
+				return strings.TrimSpace(string(out))
 			}
-		}
-		for _, id := range []string{left, right} {
-			if id != "" {
-				exec.Command("tmux", "resize-pane", "-t", id, "-x", "1").Run()
+			// Top bar always; the rest only for a single-pane window's full box.
+			// Order matters: bars capture the content width before left/right shrink
+			// it by 1 each, so the bars end up = content + 2 side cols = box width.
+			top := spawn("top", "-v -b -l 1")
+			var bottom, left, right string
+			if fullBoxWin {
+				bottom = spawn("bottom", "-v -l 1")
+				left = spawn("left", "-h -b -l 1")
+				right = spawn("right", "-h -l 1")
+			}
+			// RE-PIN every edge to 1 cell EVERY pass — any window/sidebar resize makes
+			// tmux redistribute the box's panes proportionally, growing the 1-col
+			// edges, so we re-assert thickness like the sidebar width sync does.
+			for _, id := range []string{top, bottom} {
+				if id != "" {
+					exec.Command("tmux", "resize-pane", "-t", id, "-y", "1").Run()
+				}
+			}
+			for _, id := range []string{left, right} {
+				if id != "" {
+					exec.Command("tmux", "resize-pane", "-t", id, "-x", "1").Run()
+				}
 			}
 		}
 		// Hide the tmux separators so only tabby's glyphs show.
