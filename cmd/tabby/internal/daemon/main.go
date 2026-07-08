@@ -2421,6 +2421,9 @@ func Run(args []string) int {
 	if out, err := exec.Command("tmux", "display-message", "-p", "-t", *sessionID, "#{session_name}").Output(); err == nil {
 		if name := strings.TrimSpace(string(out)); strings.HasPrefix(name, "_tabby_") {
 			debugLog.Printf("refusing to start daemon for internal session %s (%s)", *sessionID, name)
+			// Write the clean-stop sentinel so the watchdog does NOT respawn us in a
+			// tight loop (a bare exit reads as a crash).
+			os.WriteFile(fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", *sessionID), []byte("internal-session"), 0644)
 			return 0
 		}
 	}
