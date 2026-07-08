@@ -23,10 +23,21 @@ fi
 # Minimize tmux round-trips for speed. Batch queries where possible.
 # The daemon's width sync will correct the sidebar width on connect.
 if [ "${TABBY_DEFERRED:-}" != "1" ]; then
-    # Single tmux call for session + window + sidebar mode (3 values, 1 round-trip)
-    _TMUX_INFO=$(tmux display-message -p '#{session_id}|#{window_id}' 2>/dev/null || echo "|")
+    # Single tmux call for session + window + name + sidebar mode
+    _TMUX_INFO=$(tmux display-message -p '#{session_id}|#{window_id}|#{session_name}' 2>/dev/null || echo "||")
     _SESSION="${_TMUX_INFO%%|*}"
-    _WINDOW="${_TMUX_INFO#*|}"
+    _REST="${_TMUX_INFO#*|}"
+    _WINDOW="${_REST%%|*}"
+    _SESSION_NAME="${_REST#*|}"
+    # NEVER run tabby for internal holding/stash sessions (_tabby_minimized,
+    # _tabby_limbo, _tabby_stash_*). A peek/re-park can drag a client into the
+    # holding session; without this guard the window-linked hook re-runs tabby.tmux
+    # there and spawns a daemon+sidebar scoped to it — whose sidebar shows ONLY the
+    # minimized windows (the "switching to a minimized window shows only minimized"
+    # bug).
+    case "$_SESSION_NAME" in
+        _tabby_*) return 0 2>/dev/null || exit 0 ;;
+    esac
     _MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
 
     # Default mode is "enabled", so act when enabled OR not yet set

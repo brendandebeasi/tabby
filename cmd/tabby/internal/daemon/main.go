@@ -2542,6 +2542,21 @@ func Run(args []string) int {
 		debugLog = log.New(os.Stderr, "", 0)
 	}
 
+	// Never run a daemon for tabby's internal holding/stash sessions. A peek or
+	// re-park can drag a client into _tabby_minimized; the window-linked hook then
+	// re-runs tabby.tmux there, which would otherwise start a daemon+sidebar scoped
+	// to that session — whose sidebar shows ONLY minimized windows (#23). tabby.tmux
+	// also guards this, but keep the safety net here.
+	if out, err := exec.Command("tmux", "display-message", "-p", "-t", *sessionID, "#{session_name}").Output(); err == nil {
+		if name := strings.TrimSpace(string(out)); strings.HasPrefix(name, "_tabby_") {
+			debugLog.Printf("refusing to start daemon for internal session %s (%s)", *sessionID, name)
+			// Write the clean-stop sentinel so the watchdog does NOT respawn us in a
+			// tight loop (a bare exit reads as a crash).
+			os.WriteFile(fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", *sessionID), []byte("internal-session"), 0644)
+			return 0
+		}
+	}
+
 	debugLog.Printf("Starting daemon for session %s", *sessionID)
 	crashLog.Printf("Daemon started for session %s pid=%d", *sessionID, os.Getpid())
 
