@@ -1,9 +1,23 @@
 package daemon
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+// TestSixelDump writes a generated sixel to $TABBY_SIXEL_DUMP so an external
+// decoder (sixel2png) can confirm it is a valid, decodable image. Skipped in
+// normal runs.
+func TestSixelDump(t *testing.T) {
+	p := os.Getenv("TABBY_SIXEL_DUMP")
+	if p == "" {
+		t.Skip("set TABBY_SIXEL_DUMP to write the sixel")
+	}
+	if err := os.WriteFile(p, []byte(sixelGradientBar("#204060", "#c0d0e0", 60, 12)), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestSixelGradientBarStructure(t *testing.T) {
 	s := sixelGradientBar("#000000", "#ffffff", 20, 12)
