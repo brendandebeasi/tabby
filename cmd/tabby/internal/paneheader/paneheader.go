@@ -144,6 +144,7 @@ type rendererModel struct {
 	// so each frame emits an incremental delta (see InputPayload.DragDX/DY).
 	dragLastPos struct{ X, Y int }
 	dragging    bool
+	dragMoved   bool // true once a drag actually moved (so a plain click still fires)
 
 	// Message sending (thread-safe) — pointer avoids go-vet lock-copy warnings
 	// since BubbleTea passes models by value
@@ -379,6 +380,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			// incremental-delta reference at the press point.
 			if edge != nil && *edge != "" {
 				m.dragging = true
+				m.dragMoved = false
 				m.dragLastPos = struct{ X, Y int }{msg.X, msg.Y}
 			}
 			return m, nil
@@ -404,10 +406,15 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseActionRelease:
 		if m.dragging {
-			// End of a border-edge drag — swallow the release (no click dispatch).
 			m.dragging = false
-			m.mouseDownTime = time.Time{}
-			return m, nil
+			// Only swallow the release if the pointer actually moved (a real drag).
+			// A zero-motion press+release on an edge is a plain click (button!) and
+			// must fall through to processMouseClick.
+			if m.dragMoved {
+				m.dragMoved = false
+				m.mouseDownTime = time.Time{}
+				return m, nil
+			}
 		}
 		if m.skipNextRelease {
 			m.skipNextRelease = false
@@ -436,6 +443,7 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			dx := msg.X - m.dragLastPos.X
 			dy := msg.Y - m.dragLastPos.Y
 			if dx != 0 || dy != 0 {
+				m.dragMoved = true
 				m.dragLastPos = struct{ X, Y int }{msg.X, msg.Y}
 				contentPane := *paneID
 				m.sendInput(&daemon.InputPayload{
