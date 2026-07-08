@@ -1213,6 +1213,18 @@ func spawnPaneBorders(sessionID string, windows []tmux.Window, c *Coordinator) {
 				continue
 			}
 			cpID := cp.ID
+			// Per-pane opt-out: @tabby_border_enable=0/off/false/no on the content
+			// pane skips its box. If it already had edges, tear them down so the
+			// toggle takes effect at runtime, not just on next spawn.
+			if v, err := exec.Command("tmux", "show-options", "-p", "-t", cpID, "-qv", "@tabby_border_enable").Output(); err == nil {
+				switch strings.TrimSpace(string(v)) {
+				case "0", "off", "false", "no":
+					for _, id := range have[cpID] {
+						exec.Command("tmux", "kill-pane", "-t", id).Run()
+					}
+					continue
+				}
+			}
 			edges := have[cpID]
 			if edges == nil {
 				edges = map[string]string{}
