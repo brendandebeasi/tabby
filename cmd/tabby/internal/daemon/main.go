@@ -337,6 +337,23 @@ func responsiveSidebarWidth(windowID string, globalWidth int) int {
 // first caller just created (split-window is synchronous) and skips it.
 var spawnRenderersMu sync.Mutex
 
+// isEffectivelyParked reports whether a minimized window is TRULY parked in the
+// holding session (a synthetic "%parked" entry with no real pane) versus one that
+// has been SURFACED/peeked back into a live session. A surfaced window keeps its
+// @tabby_minimized flag (so it re-parks on blur) but has real panes and is visible
+// — it must still get sidebar/header chrome, otherwise peeking a minimized window
+// shows a full-width, sidebar-less pane.
+func isEffectivelyParked(win tmux.Window) bool {
+	if !win.Minimized {
+		return false
+	}
+	if len(win.Panes) == 0 {
+		return true
+	}
+	p := win.Panes[0].ID
+	return p == "%parked" || p == ""
+}
+
 func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window, coordinator *Coordinator) bool {
 	spawnRenderersMu.Lock()
 	defer spawnRenderersMu.Unlock()
@@ -359,8 +376,8 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 	dashWin := dashboardActiveWindowID(sessionID)
 	allCovered := true
 	for _, win := range windows {
-		if win.ID == "" || win.ID == dashWin || win.Minimized {
-			continue // minimized/parked windows never get a renderer (see spawn loop)
+		if win.ID == "" || win.ID == dashWin || isEffectivelyParked(win) {
+			continue // truly-parked windows never get a renderer (surfaced ones do)
 		}
 		if !connectedClients[win.ID] {
 			allCovered = false
@@ -487,7 +504,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		// synthetic entries (pane "%parked"); there's no real pane to split against,
 		// so skip them — otherwise every refresh fires a failing split-window
 		// ("can't find pane: %parked") that needlessly loads the tmux server.
-		if win.Minimized || firstPane == "%parked" || firstPane == "" {
+		if isEffectivelyParked(win) || firstPane == "%parked" || firstPane == "" {
 			continue
 		}
 
