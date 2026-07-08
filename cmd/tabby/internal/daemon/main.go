@@ -1125,7 +1125,48 @@ func killLeftoverPaneHeaders() {
 
 // isFullBox reports whether the config requests all four custom border edges
 // (the full-box feature) — only meaningful when Native is false.
+// customBordersOverride reads the runtime @tabby_custom_borders toggle UNCACHED
+// (so a live flip takes effect on the next refresh). Returns 1 = force the custom
+// box on, 0 = force it off (native borders), -1 = unset (fall back to config).
+func customBordersOverride() int {
+	out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_custom_borders").Output()
+	if err != nil {
+		return -1
+	}
+	switch strings.ToLower(strings.TrimSpace(string(out))) {
+	case "on", "1", "true", "yes":
+		return 1
+	case "off", "0", "false", "no":
+		return 0
+	}
+	return -1
+}
+
+// killLeftoverPaneBorders removes every custom box edge pane (render pane-border).
+// Used when switching out of box mode (native/off) so no orphan edges remain.
+func killLeftoverPaneBorders() {
+	out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}|||#{pane_start_command}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "|||", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		if strings.Contains(parts[1], "render pane-border") {
+			exec.Command("tmux", "kill-pane", "-t", parts[0]).Run()
+		}
+	}
+}
+
 func isFullBox(cfg *config.Config) bool {
+	switch customBordersOverride() {
+	case 1:
+		return true
+	case 0:
+		return false
+	}
 	if cfg == nil {
 		return false
 	}

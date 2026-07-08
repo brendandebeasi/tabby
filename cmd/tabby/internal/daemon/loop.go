@@ -591,12 +591,20 @@ func (l *Loop) doPaneLayoutOps() {
 	cfg := l.coord.GetConfig()
 	customBorder := cfg.PaneHeader.CustomBorder
 	nativeBorders := cfg.PaneHeader.Native != nil && *cfg.PaneHeader.Native
+	// Runtime toggle: @tabby_custom_borders on -> custom box; off -> native
+	// borders. Overrides config so the box can be flipped live (see vm-demo.sh).
+	switch customBordersOverride() {
+	case 1:
+		nativeBorders = false
+	case 0:
+		nativeBorders = true
+	}
 	if nativeBorders {
-		// Kill any leftover per-content-pane aux header panes from before
-		// native mode was active. Do NOT touch @tabby_pane_headers — that
-		// option also gates spawnWindowHeaders (which renders the phone-mode
-		// bottom navigation bar). Window-headers must keep spawning.
+		// Kill any leftover per-content-pane aux header panes AND custom box edges
+		// from before native mode was active. Do NOT touch @tabby_pane_headers —
+		// that option also gates spawnWindowHeaders (the phone-mode bottom nav bar).
 		killLeftoverPaneHeaders()
+		killLeftoverPaneBorders()
 	}
 	preActive := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
