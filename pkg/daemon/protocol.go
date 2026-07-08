@@ -256,6 +256,14 @@ type InputPayload struct {
 	// Semantic action (resolved by renderer from clickable regions)
 	ResolvedAction string `json:"resolved_action,omitempty"` // "select_window", "select_pane", "toggle_group", "button"
 	ResolvedTarget string `json:"resolved_target,omitempty"` // window index, pane ID, group name, or button action
+	// Drag-to-resize (custom pane borders). When ResolvedAction=="drag_resize",
+	// DragEdge names the box edge being dragged (left/right/top/bottom) and
+	// DragDX/DragDY carry the INCREMENTAL pointer delta in cells since the previous
+	// motion event. The daemon applies each step to the content pane's CURRENT size
+	// (so coalesced/dropped frames never double-count).
+	DragEdge string `json:"drag_edge,omitempty"`
+	DragDX   int    `json:"drag_dx,omitempty"`
+	DragDY   int    `json:"drag_dy,omitempty"`
 	// Context menu control
 	IsSimulatedRightClick bool   `json:"is_simulated_right_click,omitempty"` // True if right-click came from long-press or double-tap
 	PickerAction          string `json:"picker_action,omitempty"`

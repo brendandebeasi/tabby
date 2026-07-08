@@ -140,6 +140,10 @@ type rendererModel struct {
 	skipNextRelease bool
 	lastTapTime     time.Time
 	lastTapPos      struct{ X, Y int }
+	// Border-edge drag-to-resize: pointer position at the previous motion event,
+	// so each frame emits an incremental delta (see InputPayload.DragDX/DY).
+	dragLastPos struct{ X, Y int }
+	dragging    bool
 
 	// Message sending (thread-safe) — pointer avoids go-vet lock-copy warnings
 	// since BubbleTea passes models by value
@@ -371,6 +375,12 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if button == tea.MouseButtonLeft {
 			m.longPressActive = false
 			m.skipNextRelease = false
+			// On a border-edge pane, a left press begins a drag-to-resize; seed the
+			// incremental-delta reference at the press point.
+			if edge != nil && *edge != "" {
+				m.dragging = true
+				m.dragLastPos = struct{ X, Y int }{msg.X, msg.Y}
+			}
 			return m, nil
 		}
 
@@ -393,6 +403,12 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.processMouseClick(msg.X, msg.Y, button, false)
 
 	case tea.MouseActionRelease:
+		if m.dragging {
+			// End of a border-edge drag — swallow the release (no click dispatch).
+			m.dragging = false
+			m.mouseDownTime = time.Time{}
+			return m, nil
+		}
 		if m.skipNextRelease {
 			m.skipNextRelease = false
 			m.longPressActive = false
@@ -414,6 +430,30 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.processMouseClick(m.mouseDownPos.X, m.mouseDownPos.Y, tea.MouseButtonLeft, false)
 
 	case tea.MouseActionMotion:
+		// Border-edge drag-to-resize: stream the incremental pointer delta so the
+		// daemon resizes the content pane one step per frame.
+		if m.dragging && edge != nil && *edge != "" {
+			dx := msg.X - m.dragLastPos.X
+			dy := msg.Y - m.dragLastPos.Y
+			if dx != 0 || dy != 0 {
+				m.dragLastPos = struct{ X, Y int }{msg.X, msg.Y}
+				contentPane := *paneID
+				m.sendInput(&daemon.InputPayload{
+					SequenceNum:    m.sequenceNum,
+					Type:           "action",
+					Action:         "motion",
+					Button:         "left",
+					ResolvedAction: "drag_resize",
+					ResolvedTarget: contentPane,
+					DragEdge:       *edge,
+					DragDX:         dx,
+					DragDY:         dy,
+					PaneID:         contentPane,
+					SourcePaneID:   m.headerPaneID,
+				})
+			}
+			return m, nil
+		}
 		if m.longPressActive {
 			dx := absInt(msg.X - m.mouseDownPos.X)
 			dy := absInt(msg.Y - m.mouseDownPos.Y)

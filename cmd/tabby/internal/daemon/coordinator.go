@@ -16226,6 +16226,49 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath2).Run()
 		return true
 
+	case "drag_resize":
+		// Live drag on a custom border edge. ResolvedTarget is the CONTENT pane;
+		// DragEdge is which edge is being pulled; DragDX/DragDY are the cumulative
+		// pointer delta in cells since the drag began. Convert to an absolute pane
+		// size and resize. Coalesced by tmux itself (one resize-pane per frame the
+		// client sends, and the client only sends on a >=1-cell change).
+		paneID := input.ResolvedTarget
+		if paneID == "" {
+			return true
+		}
+		out, err := exec.Command("tmux", "display-message", "-p", "-t", paneID,
+			"#{pane_width} #{pane_height}").Output()
+		if err != nil {
+			return true
+		}
+		var pw, ph int
+		fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &pw, &ph)
+		switch input.DragEdge {
+		case "left":
+			// Pulling the left edge left (dx<0) widens the pane.
+			nw := pw - input.DragDX
+			if nw >= 3 {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-x", fmt.Sprintf("%d", nw)).Run()
+			}
+		case "right":
+			// Pulling the right edge right (dx>0) widens the pane.
+			nw := pw + input.DragDX
+			if nw >= 3 {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-x", fmt.Sprintf("%d", nw)).Run()
+			}
+		case "top":
+			nh := ph - input.DragDY
+			if nh >= 2 {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-y", fmt.Sprintf("%d", nh)).Run()
+			}
+		case "bottom":
+			nh := ph + input.DragDY
+			if nh >= 2 {
+				exec.Command("tmux", "resize-pane", "-t", paneID, "-y", fmt.Sprintf("%d", nh)).Run()
+			}
+		}
+		return true
+
 	case "kill_pane", "header_close":
 		paneID := input.ResolvedTarget
 		// Count content panes — if only 1, kill the window instead
