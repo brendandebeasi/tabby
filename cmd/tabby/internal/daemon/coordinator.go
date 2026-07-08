@@ -10251,11 +10251,16 @@ func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height i
 	c.stateMu.RLock()
 	hc := c.GetHeaderColorsForPane(paneID)
 	style := c.config.PaneHeader.Border.Style
+	dimInactive := c.config.PaneHeader.DimInactive
+	dimOpacity := c.config.PaneHeader.DimOpacity
+	termBg := c.config.PaneHeader.TerminalBg
 	topLabel := ""
-	if edge == "top" {
-		for i := range c.windows {
-			for j := range c.windows[i].Panes {
-				if c.windows[i].Panes[j].ID == paneID {
+	paneActive := true
+	for i := range c.windows {
+		for j := range c.windows[i].Panes {
+			if c.windows[i].Panes[j].ID == paneID {
+				paneActive = c.windows[i].Panes[j].Active
+				if edge == "top" {
 					topLabel = strings.TrimSpace(c.composeTabBaseName(c.windows[i]))
 				}
 			}
@@ -10267,6 +10272,16 @@ func (c *Coordinator) RenderPaneBorderForClient(clientID string, width, height i
 	fg := hc.Fg
 	if bg == "" {
 		bg = c.getPaneHeaderActiveBg()
+	}
+	// Dim an inactive pane's whole box (fg + bg, which the gradient derives from)
+	// so the active pane's box reads as the focused one.
+	if dimInactive && !paneActive {
+		op := dimOpacity
+		if op <= 0 || op > 1 {
+			op = 0.6
+		}
+		bg = desaturateHex(bg, op, termBg)
+		fg = desaturateHex(fg, op, termBg)
 	}
 	tl, tr, bl, br, hLine, vLine := borderGlyphs(style)
 
