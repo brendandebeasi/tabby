@@ -19166,7 +19166,14 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 	if width <= leadingW+1 {
 		return
 	}
-	avail := width - leadingW
+	// Reserve the same 2-col menu-button area the tab (line 1) reserves, and
+	// gradient over the SAME width, so the wrapped row's gradient lines up
+	// column-for-column with line 1 instead of stretching 2 cols wider.
+	const menuBtnW = 2 // " ⋮"
+	avail := width - leadingW - menuBtnW
+	if avail < 1 {
+		avail = 1
+	}
 	chipText := " " + name // 1 col of bg-only padding before the name (tight, for narrow sidebars)
 	if lipgloss.Width(chipText) > avail {
 		truncated := ""
@@ -19194,8 +19201,14 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 	if bgColor != "" {
 		// Gradient-fill the continuation row (not a flat solid) so a wrapped tab's
 		// second row carries the same light->base->dark sheen as its first row —
-		// otherwise the gradient appears to "stop" at the wrap.
+		// otherwise the gradient appears to "stop" at the wrap. Same from/to/width
+		// as line 1 so the shade at every column matches vertically.
 		chip = c.applyGradientFill(chip, gradientEndColor(bgColor), bgColor, avail)
+		// Fill the reserved menu column with the dark tail, exactly like line 1's
+		// menu button, so the right edge continues the shadow (and stays aligned).
+		tail := c.applyBackgroundFill(strings.Repeat(" ", menuBtnW), gradientTailColor(bgColor), menuBtnW)
+		s.WriteString(leadingRendered + chip + tail + "\n")
+		return
 	}
 	s.WriteString(leadingRendered + chip + "\n")
 }
