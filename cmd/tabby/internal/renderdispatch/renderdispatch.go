@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/closeconfirm"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/degradedmodelspopup"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/paneheader"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/petqapopup"
@@ -34,6 +35,8 @@ func Run(args []string) int {
 		return petqapopup.Run(rest)
 	case "degraded-models-popup":
 		return degradedmodelspopup.Run(rest)
+	case "close-confirm":
+		return closeconfirm.Run(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "tabby render: unknown renderer %q\n", args[0])
 		return 2

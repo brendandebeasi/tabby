@@ -16281,10 +16281,11 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	case "window_header:close_window":
 		logEvent("WINDOW_HEADER_ACTION client=%s action=%s target=%s", clientID, input.ResolvedAction, input.ResolvedTarget)
 		c.recordWindowHeaderPress(strings.TrimPrefix(clientID, "window-header:"), "window_header:close_window")
-		// Show a tap-friendly confirm dialog before killing. `confirm-before`
-		// would work but expects a y/n keypress at the status-line prompt,
-		// which is awkward on touch clients; display-menu gives two tappable
-		// options instead.
+		// Confirm before killing with real tappable buttons. The old
+		// `display-menu` rendered cramped one-line rows; the close-confirm
+		// popup renderer draws two big, full-width Keep/Close buttons (mobile-
+		// friendly touch targets) that also respond to keyboard shortcuts
+		// (y=close, n/Esc=keep, arrows+Enter). See launchCloseConfirmPopup.
 		target := input.ResolvedTarget
 		if target == "" {
 			if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
@@ -16292,13 +16293,8 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			}
 		}
 		if target != "" {
-			exec.Command("tmux", "display-menu",
-				"-T", "Close window?",
-				"-x", "C", "-y", "C",
-				"Cancel", "n", "",
-				"", "", "",
-				"CLOSE", "y", fmt.Sprintf("kill-window -t %s", target),
-			).Run()
+			_, _, userTTY, _, _ := activeClientGeometry()
+			c.launchCloseConfirmPopup(target, userTTY)
 		}
 		return true
 
@@ -17224,6 +17220,34 @@ func (c *Coordinator) launchQuestionPopup(clientID string) {
 	popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
 	go exec.Command("tmux", "display-popup", "-E", "-w", "60%", "-h", "30%",
 		"--", popupCmd).Run()
+}
+
+// launchCloseConfirmPopup spawns the tap-friendly "close this window?" confirm
+// as a display-popup running the close-confirm renderer (two big Keep/Close
+// buttons + keyboard shortcuts). The renderer itself runs `tmux kill-window`
+// on confirm, so this is fire-and-forget. Targeted at the tapping client's TTY
+// (-c) so it lands on the right screen in a multi-client (phone) setup.
+func (c *Coordinator) launchCloseConfirmPopup(target, userTTY string) {
+	popupBin := rendererExecPrefix("tabby-close-confirm", "close-confirm")
+	if popupBin == "" || target == "" {
+		return
+	}
+	// display-popup's shell-command MUST be ONE argv string, or tmux execs it
+	// as a literal program name and the popup flashes shut (see
+	// launchQuestionPopup). Single-quote the target so a window id round-trips.
+	escTarget := strings.ReplaceAll(target, "'", `'\''`)
+	popupCmd := fmt.Sprintf("%s --target '%s'", popupBin, escTarget)
+	// -B: no popup border (the renderer paints its own card). Compact centered
+	// modal — big enough for two chunky buttons, small enough to feel like a
+	// dialog. -s bg matches the renderer's card so nothing dark flashes.
+	args := []string{"display-popup", "-E", "-B", "-w", "70%", "-h", "45%",
+		"-s", "bg=#1e293b"}
+	if userTTY != "" {
+		args = append(args, "-c", userTTY)
+	}
+	args = append(args, "--", popupCmd)
+	go exec.Command("tmux", args...).Run()
+	logEvent("CLOSE_CONFIRM_POPUP target=%s tty=%s", target, userTTY)
 }
 
 // launchDegradedModelsPopup spawns the TeamClaude degraded-models popup via
