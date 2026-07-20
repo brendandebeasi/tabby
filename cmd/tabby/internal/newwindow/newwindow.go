@@ -50,13 +50,13 @@ func Run(args []string) int {
 		return 1
 	}
 
+	// Group is only ever what the caller passed explicitly (-group, e.g. a
+	// group's dedicated "+"). We deliberately do NOT inherit the active window's
+	// @tabby_group here: a plain new tab (sidebar +, prefix-c, M-n) should be
+	// grouped by WHERE it opens, not by which tab launched it. The daemon's
+	// cwd->group preset (presetGroupForWindow) files it under the matching
+	// group's working_dir on the next refresh, or leaves it in Default.
 	group := strings.TrimSpace(cfg.group)
-	if group == "" && strings.TrimSpace(cfg.clientTTY) != "" {
-		group = readTmuxDisplayForClient(cfg, strings.TrimSpace(cfg.clientTTY), "#{@tabby_group}")
-	}
-	if group == "" {
-		group = runTmuxTrimmedOrEmpty(cfg, "show-window-option", "-v", "@tabby_group")
-	}
 
 	windowPath := strings.TrimSpace(cfg.path)
 	if windowPath == "" && strings.TrimSpace(cfg.clientTTY) != "" {

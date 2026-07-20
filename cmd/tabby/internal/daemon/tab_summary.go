@@ -89,6 +89,7 @@ func (c *Coordinator) RefreshTabSummaries() {
 	}
 
 	maxWords := cfg.MaxWords
+	maxChars := cfg.MaxChars
 	windows := c.GetWindows()
 	go func() {
 		defer c.summaryFetching.Store(false)
@@ -157,12 +158,12 @@ func (c *Coordinator) RefreshTabSummaries() {
 			// component/task with no project hint — and the result is never
 			// persisted to disk nor shared across windows.
 			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-			out, err := client.Generate(ctx, gollm.NewPrompt(workPrompt(content)))
+			out, err := client.Generate(ctx, gollm.NewPrompt(workPrompt(content, maxChars)))
 			cancel()
 			if err != nil {
 				continue
 			}
-			summary := truncateSummaryWords(out, maxWords)
+			summary := truncateSummary(out, maxWords, maxChars)
 			if summary == "" {
 				continue
 			}
@@ -234,9 +235,16 @@ const asciiOnlyRules = " OUTPUT LANGUAGE: ENGLISH ONLY. " +
 // project name. The deterministic project prefix is added separately at render
 // time (composeTabBaseName / windowDirCode), so the summary stays a pure,
 // per-window task topic that is never persisted.
-func workPrompt(content string) string {
+func workPrompt(content string, maxChars int) string {
+	lengthRule := "reply with ONLY 2-3 short lowercase words for the "
+	if maxChars > 0 {
+		// A char budget is set: ask the model to fit the sidebar width directly,
+		// so the label rarely needs display-side truncation.
+		lengthRule = fmt.Sprintf("reply with ONLY a short lowercase label of at most %d "+
+			"characters (a couple of words) for the ", maxChars)
+	}
 	return "You are labeling a terminal tab in a narrow sidebar. Based on the recent " +
-		"terminal output below, reply with ONLY 2-3 short lowercase words for the " +
+		"terminal output below, " + lengthRule +
 		"specific component or task being worked on. Do NOT mention the project, repo, " +
 		"or directory name. Abbreviate aggressively (e.g. \"paperclip resend\", " +
 		"\"deploy fix\", \"gh token\")." +
@@ -244,20 +252,40 @@ func workPrompt(content string) string {
 		"\n\n--- terminal output ---\n" + content
 }
 
-// truncateSummaryWords cleans an LLM reply into a short label: strips control
+// truncateSummary cleans an LLM reply into a short label: strips control
 // chars, forces ASCII-only (defense-in-depth against the prompt's
 // English-only constraint occasionally being ignored — Chinese/CJK/Cyrillic
 // would otherwise reach the sidebar and render as boxes or "?"s), strips
-// surrounding quotes and trailing punctuation, and keeps the first n words.
-func truncateSummaryWords(s string, n int) string {
+// surrounding quotes and trailing punctuation, keeps the first maxWords words,
+// then caps the result to maxChars characters. maxWords/maxChars <= 0 disable
+// their respective limit. The char cap drops whole words from the end where it
+// can, only hard-cutting when the very first word already exceeds the budget —
+// the sidebar's display truncation still guarantees the final fit, so this just
+// keeps the stored title tidy and close to the target width.
+func truncateSummary(s string, maxWords, maxChars int) string {
 	s = strings.TrimSpace(stripControl(s))
 	s = stripNonASCIIWord(s)
 	s = strings.Trim(s, "\"'`.,:;!?-")
 	fields := strings.Fields(s)
-	if n > 0 && len(fields) > n {
-		fields = fields[:n]
+	if maxWords > 0 && len(fields) > maxWords {
+		fields = fields[:maxWords]
+	}
+	if maxChars > 0 {
+		fields = capWords(fields, maxChars)
 	}
 	return strings.Join(fields, " ")
+}
+
+// capWords trims trailing words until the joined result fits maxChars. If even
+// the first word is too long, it is hard-cut to maxChars runes.
+func capWords(fields []string, maxChars int) []string {
+	for len(fields) > 1 && len(strings.Join(fields, " ")) > maxChars {
+		fields = fields[:len(fields)-1]
+	}
+	if len(fields) == 1 && len([]rune(fields[0])) > maxChars {
+		fields[0] = string([]rune(fields[0])[:maxChars])
+	}
+	return fields
 }
 
 // stripNonASCIIWord drops any rune that isn't printable ASCII, lowercasing

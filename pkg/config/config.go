@@ -44,14 +44,15 @@ type AIConfig struct {
 // terminal activity using a cheap LLM (Fireworks by default).
 type AITabSummary struct {
 	MaxWords int `yaml:"max_words"` // first N words kept; 0 means no truncation
+	MaxChars int `yaml:"max_chars"` // cap the summary to N characters (asks the LLM to stay under it, then hard-trims); 0 means no char cap
 
 	// AutoGenerate has the daemon periodically summarize each window's recent
 	// pane output via the LLM below and set @tabby_ai_title. Off by default
 	// (sends terminal content to the configured provider on a timer).
-	AutoGenerate    bool   `yaml:"auto_generate"`
-	IntervalSeconds int    `yaml:"interval_seconds"` // refresh cadence (default 60)
-	MaxLines        int    `yaml:"max_lines"`        // wrap the "CODE summary" label across up to N sidebar rows (default 1 = single line)
-	AISummaryOnly   bool   `yaml:"ai_summary_only"`  // for AI-tool windows (e.g. Claude Code), drop the dir code and show only the summary
+	AutoGenerate    bool `yaml:"auto_generate"`
+	IntervalSeconds int  `yaml:"interval_seconds"` // refresh cadence (default 60)
+	MaxLines        int  `yaml:"max_lines"`        // wrap the "CODE summary" label across up to N sidebar rows (default 1 = single line)
+	AISummaryOnly   bool `yaml:"ai_summary_only"`  // for AI-tool windows (e.g. Claude Code), drop the dir code and show only the summary
 
 	// ProjectNames forces an exact project abbreviation prefix on auto-generated
 	// summaries, keyed by working-directory basename. Each entry is "ABBR>dir"
@@ -59,10 +60,10 @@ type AITabSummary struct {
 	// prepended deterministically and the LLM only fills in the task — so similar
 	// dirs (infras, gunpowder-infra, studiodome-infra) stay distinct.
 	ProjectNames []string `yaml:"project_names"`
-	LLMProvider     string `yaml:"llm_provider"`     // fireworks | openrouter | openai-compatible (default fireworks)
-	LLMModel        string `yaml:"llm_model"`        // model id (provider default if empty)
-	LLMAPIKey       string `yaml:"llm_api_key"`      // or env: FIREWORKS_API_KEY / OPENROUTER_API_KEY
-	LLMBaseURL      string `yaml:"llm_base_url"`     // override for openai-compatible providers
+	LLMProvider  string   `yaml:"llm_provider"` // fireworks | openrouter | openai-compatible (default fireworks)
+	LLMModel     string   `yaml:"llm_model"`    // model id (provider default if empty)
+	LLMAPIKey    string   `yaml:"llm_api_key"`  // or env: FIREWORKS_API_KEY / OPENROUTER_API_KEY
+	LLMBaseURL   string   `yaml:"llm_base_url"` // override for openai-compatible providers
 }
 
 // AutoTheme configures automatic theme switching based on time of day or system dark/light mode.
@@ -395,27 +396,40 @@ type SidebarHeader struct {
 }
 
 type Sidebar struct {
-	Position             string        `yaml:"position"`     // "left" (default) or "right"
-	Mode                 string        `yaml:"mode"`         // "full" (default) or "partial"
-	Header               SidebarHeader `yaml:"header"`       // Sidebar header configuration
-	PaneHeaders          bool          `yaml:"pane_headers"` // Enable clickable overlay pane headers
-	NewTabButton         bool          `yaml:"new_tab_button"`
-	CloseButton          bool          `yaml:"close_button"`
-	NewGroupButton       bool          `yaml:"new_group_button"`
-	ShowEmptyGroups      bool          `yaml:"show_empty_groups"`
-	SortBy               string        `yaml:"sort_by"`
-	Debug                bool          `yaml:"debug"`                  // Enable debug logging to /tmp/tabby-debug.log
-	LineHeight           int           `yaml:"line_height"`            // Extra blank lines between items (0=compact, 1+=spaced)
-	ActionZone           string        `yaml:"action_zone"`            // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
-	ActionPriority       int           `yaml:"action_priority"`        // Priority within zone (default: 90)
-	PrefixMode           bool          `yaml:"prefix_mode"`            // Flat window list with group prefixes (SD| NAME) instead of hierarchy
-	Theme                string        `yaml:"theme"`                  // Color theme: rose-pine-dawn, catppuccin-mocha, dracula, nord, etc.
-	ThemeMode            string        `yaml:"theme_mode"`             // Theme detection: "auto" (default), "dark", or "light" (deprecated, use theme)
-	IconStyle            string        `yaml:"icon_style"`             // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
-	Colors               SidebarColors `yaml:"colors"`                 // Manual color overrides (applied on top of theme)
-	HidePredefinedColors bool          `yaml:"hide_predefined_colors"` // Hide predefined color palette in context menus (keep Custom + Reset)
-	ShowSSHHost          bool          `yaml:"show_ssh_host"`          // Show SSH hostname in tab name when pane is connected via SSH
-	SSHIcon              string        `yaml:"ssh_icon"`               // When set, remote tabs render on ONE line prefixed with this glyph instead of a host-name row above the tab name (e.g. a nerdfont ""). Empty = legacy two-line host/name.
+	Position             string           `yaml:"position"`     // "left" (default) or "right"
+	Mode                 string           `yaml:"mode"`         // "full" (default) or "partial"
+	Header               SidebarHeader    `yaml:"header"`       // Sidebar header configuration
+	PaneHeaders          bool             `yaml:"pane_headers"` // Enable clickable overlay pane headers
+	NewTabButton         bool             `yaml:"new_tab_button"`
+	CloseButton          bool             `yaml:"close_button"`
+	NewGroupButton       bool             `yaml:"new_group_button"`
+	ShowEmptyGroups      bool             `yaml:"show_empty_groups"`
+	SortBy               string           `yaml:"sort_by"`
+	Debug                bool             `yaml:"debug"`                  // Enable debug logging to /tmp/tabby-debug.log
+	LineHeight           int              `yaml:"line_height"`            // Extra blank lines between items (0=compact, 1+=spaced)
+	ActionZone           string           `yaml:"action_zone"`            // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
+	ActionPriority       int              `yaml:"action_priority"`        // Priority within zone (default: 90)
+	PrefixMode           bool             `yaml:"prefix_mode"`            // Flat window list with group prefixes (SD| NAME) instead of hierarchy
+	Theme                string           `yaml:"theme"`                  // Color theme: rose-pine-dawn, catppuccin-mocha, dracula, nord, etc.
+	ThemeMode            string           `yaml:"theme_mode"`             // Theme detection: "auto" (default), "dark", or "light" (deprecated, use theme)
+	IconStyle            string           `yaml:"icon_style"`             // Global icon style: "emoji" (default), "nerd", "ascii" - applies to tree, disclosure, indicators
+	Colors               SidebarColors    `yaml:"colors"`                 // Manual color overrides (applied on top of theme)
+	HidePredefinedColors bool             `yaml:"hide_predefined_colors"` // Hide predefined color palette in context menus (keep Custom + Reset)
+	ShowSSHHost          bool             `yaml:"show_ssh_host"`          // Show SSH hostname in tab name when pane is connected via SSH
+	SSHIcon              string           `yaml:"ssh_icon"`               // When set, remote tabs render on ONE line prefixed with this glyph instead of a host-name row above the tab name (e.g. a nerdfont ""). Empty = legacy two-line host/name.
+	RemoteHosts          []RemoteHostRule `yaml:"remote_hosts"`           // Color/icon a tab by its ssh/mosh DESTINATION host — matched locally from the ssh command line, so NO remote-cwd hook is needed on the host. First matching rule wins.
+}
+
+// RemoteHostRule colors/marks a tab based on the ssh (or mosh) destination the
+// tab connected to. The host is detected locally by parsing the ssh command line
+// (see pkg/tmux RemoteHostForPane), so unlike the learned ssh://host/dir mapping
+// this needs nothing installed on the remote box. It acts as a DEFAULT: a color
+// the user set by hand, or a remembered per-host/dir appearance, still wins.
+type RemoteHostRule struct {
+	Match string `yaml:"match"` // glob (filepath.Match) against the ssh destination, case-insensitive, e.g. "client-gunpowder-*" or "*.prod"
+	Color string `yaml:"color"` // tab color: hex (#ff8800) or a named palette color; empty leaves color untouched
+	Icon  string `yaml:"icon"`  // tab icon/marker glyph; empty leaves the icon untouched
+	Group string `yaml:"group"` // group name to file the tab under (must match a groups: entry); empty leaves the group untouched. The cwd->group preset can't see the far end of an ssh, so this is how a remote tab gets its group.
 }
 
 type SidebarColors struct {

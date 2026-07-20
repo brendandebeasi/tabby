@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brendandebeasi/tabby/pkg/config"
 	"github.com/brendandebeasi/tabby/pkg/grouping"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 	"github.com/stretchr/testify/assert"
@@ -337,6 +338,97 @@ func TestSeedAppearancePlan_AlreadySeededOrNoRecordIsNoOp(t *testing.T) {
 	assert.Equal(t, "", icon)
 }
 
+func TestRemoteHostAppearance_GlobMatchFirstWins(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.Sidebar.RemoteHosts = []config.RemoteHostRule{
+		{Match: "client-gunpowder-*", Color: "#ff8800", Icon: "🔥"},
+		{Match: "*", Color: "#333333", Icon: "•"}, // catch-all, must lose to the specific rule above
+	}
+
+	color, icon, _ := c.remoteHostAppearance("client-gunpowder-msg")
+	assert.Equal(t, "#ff8800", color, "first matching rule wins")
+	assert.Equal(t, "🔥", icon)
+
+	// Case-insensitive host matching.
+	color, _, _ = c.remoteHostAppearance("CLIENT-GUNPOWDER-arsenal")
+	assert.Equal(t, "#ff8800", color, "host match is case-insensitive")
+
+	// Falls through to the catch-all.
+	color, icon, _ = c.remoteHostAppearance("random-box")
+	assert.Equal(t, "#333333", color)
+	assert.Equal(t, "•", icon)
+
+	// No rules configured / empty host -> nothing.
+	c.config.Sidebar.RemoteHosts = nil
+	color, icon, _ = c.remoteHostAppearance("client-gunpowder-msg")
+	assert.Equal(t, "", color)
+	assert.Equal(t, "", icon)
+	color, _, _ = c.remoteHostAppearance("")
+	assert.Equal(t, "", color)
+}
+
+func TestAppearanceRecordFor_LearnedWinsRuleFillsBlanks(t *testing.T) {
+	t.Setenv("TABBY_STATE_DIR", t.TempDir())
+	c := newTestCoordinator(t)
+	c.config.Sidebar.RemoteHosts = []config.RemoteHostRule{
+		{Match: "client-gunpowder-*", Color: "#ff8800", Icon: "🔥", Group: "Gunpowder"},
+	}
+	win := tmux.Window{RemoteHost: "client-gunpowder-msg"}
+
+	// No learned mapping: the host rule supplies color, icon, AND group.
+	rec, ok := c.appearanceRecordFor("sshhost://client-gunpowder-msg", win)
+	assert.True(t, ok)
+	assert.Equal(t, "#ff8800", rec.Color)
+	assert.Equal(t, "🔥", rec.Icon)
+	assert.Equal(t, "Gunpowder", rec.Group)
+
+	// A learned color for the hooked key wins; the rule only fills the blanks.
+	seedCWDMapping(t, c, "ssh://gp-msg/root", CWDColorMapping{Color: "#00aaff"})
+	rec, ok = c.appearanceRecordFor("ssh://gp-msg/root", win)
+	assert.True(t, ok)
+	assert.Equal(t, "#00aaff", rec.Color, "learned color beats the config rule default")
+	assert.Equal(t, "🔥", rec.Icon, "rule still fills the field the mapping left empty")
+	assert.Equal(t, "Gunpowder", rec.Group, "rule fills the group when the mapping has none")
+
+	// A learned group wins over the rule's group.
+	seedCWDMapping(t, c, "ssh://gp-grouped/root", CWDColorMapping{Group: "Personal"})
+	rec, ok = c.appearanceRecordFor("ssh://gp-grouped/root", win)
+	assert.True(t, ok)
+	assert.Equal(t, "Personal", rec.Group, "learned group beats the config rule default")
+}
+
+func TestAppearanceKey_GroupOnlyRuleYieldsKey(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.Sidebar.RemoteHosts = []config.RemoteHostRule{
+		{Match: "client-studiodome*", Group: "StudioDome"},
+	}
+	// A rule with only a group (no color/icon) must still produce a synthetic
+	// sshhost:// key so the tab can be filed under its host's group with no hook.
+	win := tmux.Window{ID: "@1", RemoteHost: "client-studiodome"}
+	key, ok := c.appearanceKey(win)
+	assert.True(t, ok, "a group-only host rule still yields an appearance key")
+	assert.Equal(t, "sshhost://client-studiodome", key)
+}
+
+func TestAppearanceKey_HookFreeRemoteFallback(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.config.Sidebar.RemoteHosts = []config.RemoteHostRule{
+		{Match: "client-gunpowder-*", Color: "#ff8800"},
+	}
+
+	// Remote host, no remote-cwd hook reported (no remote pane cwd) -> windowNameKey
+	// fails, but a matching rule yields a synthetic sshhost:// key.
+	win := tmux.Window{ID: "@1", RemoteHost: "client-gunpowder-msg"}
+	key, ok := c.appearanceKey(win)
+	assert.True(t, ok, "a configured host gets an appearance key with no hook")
+	assert.Equal(t, "sshhost://client-gunpowder-msg", key)
+
+	// Remote host with NO matching rule and no hook -> still no key (unchanged behavior).
+	win.RemoteHost = "unconfigured-host"
+	_, ok = c.appearanceKey(win)
+	assert.False(t, ok, "an unconfigured hook-less remote host stays keyless")
+}
+
 // TestCWDColorsMigrate_DropsLegacyNamesKeepsColors verifies the one-time
 // migration strips ONLY the retired per-directory name fields from cwd-colors.json
 // on load. Color/icon are remembered again (as a seed-on-create appearance) and
@@ -510,6 +602,53 @@ func TestComposeTabBaseName(t *testing.T) {
 	})
 }
 
+func TestComposeTabBaseName_RemoteHookless(t *testing.T) {
+	c := newTestCoordinator(t)
+
+	// A hook-less remote tab: RemoteHost set and filed under its remote_hosts
+	// group, but the remote-cwd hook has NOT reported (no RemoteCWD on the pane).
+	// The label must key on the GROUP, not the local launch dir it was fired from,
+	// and show a "new" placeholder until a fresh remote summary lands — never the
+	// stale local "SANE sane check".
+	base := tmux.Window{
+		ID:         "@r",
+		Name:       "sane-check",
+		Group:      "SD",
+		RemoteHost: "client-studiodome",
+		Panes:      []tmux.Pane{{ID: "%1", Command: "ssh", CurrentPath: "/Users/b/git/sane-check", Remote: true}},
+	}
+
+	t.Run("no summary -> group code + new", func(t *testing.T) {
+		w := base
+		assert.Equal(t, "SD new", c.composeTabBaseName(w))
+	})
+
+	t.Run("fresh summary -> group code + summary", func(t *testing.T) {
+		w := base
+		w.AITitle = "docker logs"
+		assert.Equal(t, "SD docker logs", c.composeTabBaseName(w))
+	})
+
+	t.Run("no group falls back to ssh host abbreviation", func(t *testing.T) {
+		w := base
+		w.Group = ""
+		assert.Equal(t, "CS new", c.composeTabBaseName(w))
+	})
+
+	t.Run("hook reported -> normal remote-dir code, not placeholder", func(t *testing.T) {
+		w := base
+		w.Panes = []tmux.Pane{{ID: "%1", Command: "ssh", Remote: true,
+			RemoteCWD: "client-studiodome" + remoteCWDSep + "/srv/imgen"}}
+		// firstPaneRemoteCWD now reports -> windowProjectBasename resolves "imgen".
+		assert.Equal(t, "IMG do thing", c.composeTabBaseName(withAITitle(w, "do thing")))
+	})
+}
+
+func withAITitle(w tmux.Window, title string) tmux.Window {
+	w.AITitle = title
+	return w
+}
+
 func TestComposeTabBaseName_AISummaryOnly(t *testing.T) {
 	t.Run("ai window drops the dir code", func(t *testing.T) {
 		c := newTestCoordinator(t)
@@ -537,22 +676,22 @@ func TestWrapTabLabel(t *testing.T) {
 	// Single line when it fits.
 	assert.Equal(t, []string{"1. TB ok"}, wrapTabLabel("1. TB ok", 20, 20, 2))
 
-	// Wraps at the CHARACTER (not word) across 2 lines; overflow truncates with "~".
+	// Wraps at the CHARACTER (not word) across 2 lines; overflow truncates with "…".
 	got := wrapTabLabel("1. INF setting sidebar", 8, 10, 2)
-	assert.Equal(t, []string{"1. INF s", "etting si~"}, got)
+	assert.Equal(t, []string{"1. INF s", "etting si" + tabOverflowMarker}, got)
 
 	// Char-wrap fills line 0 to its budget, continues on line 1.
 	assert.Equal(t, []string{"1. INF s", "etting"}, wrapTabLabel("1. INF setting", 8, 10, 2))
 
-	// Overflow past maxLines truncates the last line with "~".
+	// Overflow past maxLines truncates the last line with "…".
 	got2 := wrapTabLabel("1. AAA bbb ccc ddd eee", 6, 6, 2)
 	assert.Len(t, got2, 2)
-	assert.Contains(t, got2[1], "~")
+	assert.Contains(t, got2[1], tabOverflowMarker)
 
 	// maxLines=1 behaves like single-line truncation.
 	got3 := wrapTabLabel("1. INF setting sidebar", 8, 8, 1)
 	assert.Len(t, got3, 1)
-	assert.Contains(t, got3[0], "~")
+	assert.Contains(t, got3[0], tabOverflowMarker)
 }
 
 func TestComposeTabBaseName_ConfigOverridesAutoCode(t *testing.T) {

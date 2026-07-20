@@ -7,31 +7,37 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestTruncateSummaryWords(t *testing.T) {
+func TestTruncateSummary(t *testing.T) {
 	cases := []struct {
-		in   string
-		n    int
-		want string
+		in    string
+		n     int
+		chars int
+		want  string
 	}{
-		{"  editing config  ", 3, "editing config"},
-		{"\"running tests\"", 3, "running tests"},
-		{"git rebase interactive now", 3, "git rebase interactive"},
-		{"reading logs.", 3, "reading logs"},
-		{"- fixing bug", 3, "fixing bug"},
-		{"line one\nline two", 3, "line one line"},
-		{"keep all", 0, "keep all"}, // n=0 means no truncation
-		{"", 3, ""},
+		{"  editing config  ", 3, 0, "editing config"},
+		{"\"running tests\"", 3, 0, "running tests"},
+		{"git rebase interactive now", 3, 0, "git rebase interactive"},
+		{"reading logs.", 3, 0, "reading logs"},
+		{"- fixing bug", 3, 0, "fixing bug"},
+		{"line one\nline two", 3, 0, "line one line"},
+		{"keep all", 0, 0, "keep all"}, // n=0 means no word truncation
+		{"", 3, 0, ""},
 		// ASCII-only filter: non-Latin scripts and emoji must be stripped so
 		// they never reach the sidebar (the small LLMs we use sometimes
 		// ignore the prompt's English-only constraint on non-English input).
-		{"deploy 部署 fix", 3, "deploy fix"},
-		{"тест работы", 3, ""},     // pure Cyrillic -> empty (caller skips)
-		{"build 🚀 done", 3, "build done"}, // emoji dropped
-		{"CAFÉ deploy", 3, "caf deploy"},   // é dropped (no transliteration), CAFE lowercased
-		{"UPPER case", 3, "upper case"},    // ASCII uppercase folded to lowercase
+		{"deploy 部署 fix", 3, 0, "deploy fix"},
+		{"тест работы", 3, 0, ""},     // pure Cyrillic -> empty (caller skips)
+		{"build 🚀 done", 3, 0, "build done"}, // emoji dropped
+		{"CAFÉ deploy", 3, 0, "caf deploy"},   // é dropped (no transliteration), CAFE lowercased
+		{"UPPER case", 3, 0, "upper case"},    // ASCII uppercase folded to lowercase
+		// Char cap: drop whole trailing words until it fits.
+		{"deploy the staging fix", 0, 10, "deploy the"}, // "deploy the staging" is 18 > 10
+		{"deploy fix", 0, 20, "deploy fix"},             // already fits, untouched
+		{"supercalifragilistic", 0, 8, "supercal"},      // single over-long word hard-cut
+		{"editing config now", 3, 14, "editing config"}, // word cap then char cap
 	}
 	for _, tc := range cases {
-		assert.Equal(t, tc.want, truncateSummaryWords(tc.in, tc.n), tc.in)
+		assert.Equal(t, tc.want, truncateSummary(tc.in, tc.n, tc.chars), tc.in)
 	}
 }
 
@@ -47,10 +53,14 @@ func TestWorkPrompt(t *testing.T) {
 	// the model NOT to name the project (the deterministic project prefix is added
 	// at render time by composeTabBaseName / windowDirCode), and includes the
 	// captured terminal content.
-	wp := workPrompt("$ kubectl apply")
+	wp := workPrompt("$ kubectl apply", 0)
 	assert.Contains(t, wp, "Do NOT mention the project")
 	assert.Contains(t, wp, "$ kubectl apply")
 	assert.Contains(t, wp, "ENGLISH ONLY") // asciiOnlyRules appended
+
+	// A char budget is surfaced to the model so summaries fit the sidebar width.
+	wpChars := workPrompt("$ kubectl apply", 16)
+	assert.Contains(t, wpChars, "16 characters")
 }
 
 func TestEnsureSummaryClient(t *testing.T) {

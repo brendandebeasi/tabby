@@ -776,9 +776,9 @@ type Coordinator struct {
 	// sidebar" mode). Empty = not active. Mirrors the physical @tabby_fullscreen_sidebar
 	// window-option so it survives a daemon restart.
 	fullscreenSidebarWinID string
-	newWindowMu      sync.RWMutex
-	newWindowStatus  NewWindowStatus
-	windowTransition WindowTransition
+	newWindowMu            sync.RWMutex
+	newWindowStatus        NewWindowStatus
+	windowTransition       WindowTransition
 
 	// Pet widget layout (for custom click detection)
 	petLayout petWidgetLayout
@@ -3249,6 +3249,31 @@ func (c *Coordinator) composeTabBaseName(win tmux.Window) string {
 		return name
 	}
 
+	// A remote (ssh/mosh) tab whose remote-cwd hook hasn't reported yet must NOT
+	// borrow the LOCAL launch dir for its code (windowDirCode would resolve the
+	// directory the ssh was fired from — e.g. "SANE" for a sane-check window),
+	// nor carry a summary generated from that pre-ssh local context. Show a fresh
+	// placeholder keyed on the tab's group/host ("SD new") until the summary
+	// ticker relabels it from the remote session. The stale @tabby_ai_title is
+	// cleared on the ssh transition (restoreAppearanceOnTransition), so `summary`
+	// here is empty right after the ssh and the placeholder shows; once a fresh
+	// remote summary lands it renders "CODE summary" like any other tab.
+	if win.RemoteHost != "" {
+		if _, _, hookOK := firstPaneRemoteCWD(win); !hookOK {
+			code := c.remoteTabPlaceholderCode(win)
+			if summary != "" {
+				if code != "" {
+					return code + " " + summary
+				}
+				return summary
+			}
+			if code != "" {
+				return code + " new"
+			}
+			return "new"
+		}
+	}
+
 	dirCode := c.windowDirCode(win)
 
 	// 2. A live AI work summary is present: it is the per-window task topic.
@@ -3274,6 +3299,25 @@ func (c *Coordinator) composeTabBaseName(win tmux.Window) string {
 	return name
 }
 
+// remoteTabPlaceholderCode returns the short prefix a hook-less remote tab shows
+// before it gets a generated name: the tab's group code (the group it was filed
+// under by its sidebar.remote_hosts rule — e.g. "SD"), else an abbreviation of
+// the ssh destination host. Empty only when neither is known. Group names are run
+// through the same abbreviator as directories, so "StudioDome" and "SD" both
+// collapse to "SD".
+func (c *Coordinator) remoteTabPlaceholderCode(win tmux.Window) string {
+	if g := strings.TrimSpace(win.Group); g != "" && !strings.EqualFold(g, "Default") {
+		if code := c.tabAbbreviation(g); code != "" {
+			return code
+		}
+		return g
+	}
+	if h := strings.TrimSpace(win.RemoteHost); h != "" {
+		return c.tabAbbreviation(h)
+	}
+	return ""
+}
+
 // isAIWindow reports whether any of the window's content panes runs an AI tool
 // (e.g. Claude Code, which IsAITool detects via its semver process name).
 func isAIWindow(win tmux.Window) bool {
@@ -3288,11 +3332,15 @@ func isAIWindow(win tmux.Window) bool {
 	return false
 }
 
+// tabOverflowMarker is appended to a tab label that was truncated because it
+// didn't fit in the allotted line(s): a single-char horizontal ellipsis.
+const tabOverflowMarker = "…"
+
 // wrapTabLabel word-wraps a tab's line-1 text (already including the "N. "
 // prefix and any icon) into up to maxLines display lines: the first sized to
 // line1Width, continuation lines to contWidth. Whole words are kept together;
 // an over-long word is hard-split. If content remains after maxLines, the last
-// line ends with "~". Always returns at least one line.
+// line ends with a single-char ellipsis. Always returns at least one line.
 func wrapTabLabel(text string, line1Width, contWidth, maxLines int) []string {
 	if maxLines < 1 {
 		maxLines = 1
@@ -3336,18 +3384,21 @@ func wrapTabLabel(text string, line1Width, contWidth, maxLines int) []string {
 		return lines
 	}
 
-	// Overflow: keep the first maxLines lines, mark the last with "~".
+	// Overflow: keep the first maxLines lines, mark the last with a single-char
+	// ellipsis. Reserve the marker's real display width (not a hardcoded 1) so a
+	// colored tab never overflows the sidebar and renders blank.
 	kept := lines[:maxLines]
 	last := kept[maxLines-1]
 	b := budgetFor(maxLines - 1)
-	for lipgloss.Width(last) > b-1 {
+	markerW := lipgloss.Width(tabOverflowMarker)
+	for lipgloss.Width(last) > b-markerW {
 		r := []rune(last)
 		if len(r) == 0 {
 			break
 		}
 		last = string(r[:len(r)-1])
 	}
-	kept[maxLines-1] = last + "~"
+	kept[maxLines-1] = last + tabOverflowMarker
 	return kept
 }
 
@@ -3598,39 +3649,117 @@ func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
 			logEvent("IDENTITY_UNLOCK_GENERIC win=%s name=%q", windows[i].ID, windows[i].Name)
 		}
 
-		key, ok := c.windowNameKey(windows[i])
-		if !ok {
+		if key, ok := c.windowNameKey(windows[i]); ok {
+			if windows[i].NameLocked {
+				// A deliberately-named window: keep this project's group/pinned record
+				// in sync. captureCWDIdentity no-ops (no disk write) when unchanged.
+				c.captureCWDIdentity(key, windows[i].Group, windows[i].Pinned)
+			} else if rec, recOK := c.getCWDColorMapping(key); recOK {
+				if g := strings.TrimSpace(rec.Group); g != "" && windows[i].Group != g {
+					exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_group", g).Run()
+					windows[i].Group = g
+				}
+
+				if rec.Pinned && !windows[i].Pinned {
+					exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_pinned", "1").Run()
+					windows[i].Pinned = true
+				}
+			}
+		}
+
+		// Appearance seeding uses appearanceKey, NOT windowNameKey: it also fires
+		// for a remote tab whose ssh destination matches a sidebar.remote_hosts
+		// rule even when the remote-cwd hook never reports (no hook needed). The
+		// group/pinned block above stays gated on the real windowNameKey — those
+		// are local-project concerns.
+		akey, aok := c.appearanceKey(windows[i])
+		if !aok {
 			continue
 		}
 
-		if windows[i].NameLocked {
-			// A deliberately-named window: keep this project's group/pinned record
-			// in sync. captureCWDIdentity no-ops (no disk write) when unchanged.
-			c.captureCWDIdentity(key, windows[i].Group, windows[i].Pinned)
-		} else if rec, recOK := c.getCWDColorMapping(key); recOK {
-			if g := strings.TrimSpace(rec.Group); g != "" && windows[i].Group != g {
-				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_group", g).Run()
-				windows[i].Group = g
-			}
-
-			if rec.Pinned && !windows[i].Pinned {
-				exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "@tabby_pinned", "1").Run()
-				windows[i].Pinned = true
-			}
-		}
-
-		// Seed this window's color/marker from the project's remembered "last
-		// used" appearance — but only ONCE, when the window is brand-new (see
-		// seedWindowAppearance). This is what gives a freshly-opened tab in a
-		// known directory/host its remembered look without repainting existing
-		// siblings every refresh (the bug that retired the old per-dir restore).
-		c.seedWindowAppearance(&windows[i], key)
+		// Seed this window's color/marker from its remembered "last used"
+		// appearance (or configured host rule) — but only ONCE, when the window is
+		// brand-new (see seedWindowAppearance). This is what gives a freshly-opened
+		// tab in a known directory/host its remembered look without repainting
+		// existing siblings every refresh (the bug that retired the old per-dir
+		// restore).
+		c.seedWindowAppearance(&windows[i], akey)
 
 		// After the one-time seed, re-apply the remembered color/marker if this
 		// window has since moved into a DIFFERENT known directory/host (a cd or an
 		// ssh). No-ops in the steady state and for a just-seeded window.
-		c.restoreAppearanceOnTransition(&windows[i], key)
+		c.restoreAppearanceOnTransition(&windows[i], akey)
 	}
+}
+
+// remoteHostAppearance returns the color/icon/group configured for an ssh/mosh
+// destination host via sidebar.remote_hosts, or ("","","") when nothing matches.
+// The host is the LOCALLY-detected ssh destination (win.RemoteHost, parsed from
+// the ssh command line) — so this needs no remote-cwd hook on the host. Matching
+// is a case-insensitive glob (filepath.Match); the first rule to match wins, so
+// list specific patterns before broad ones. Empty fields are honored as "leave
+// untouched". Reads c.config directly like presetGroupForWindow.
+func (c *Coordinator) remoteHostAppearance(host string) (color, icon, group string) {
+	host = strings.TrimSpace(host)
+	if host == "" || c.config == nil {
+		return "", "", ""
+	}
+	lhost := strings.ToLower(host)
+	for _, r := range c.config.Sidebar.RemoteHosts {
+		pat := strings.ToLower(strings.TrimSpace(r.Match))
+		if pat == "" {
+			continue
+		}
+		if ok, _ := filepath.Match(pat, lhost); ok {
+			return strings.TrimSpace(r.Color), strings.TrimSpace(r.Icon), strings.TrimSpace(r.Group)
+		}
+	}
+	return "", "", ""
+}
+
+// appearanceKey returns the key used for one-time appearance seeding and
+// transition detection. It extends windowNameKey with a hook-free fallback: when
+// the remote-cwd hook hasn't reported (so windowNameKey yields no key) but the
+// tab's locally-detected ssh destination matches a sidebar.remote_hosts rule, it
+// keys on "sshhost://<host>" so the tab still gets its configured color/icon with
+// zero remote-side setup. Because the key changes when the tab ssh's to a
+// different host, the existing transition machinery repaints on host change too.
+func (c *Coordinator) appearanceKey(win tmux.Window) (string, bool) {
+	if key, ok := c.windowNameKey(win); ok {
+		return key, true
+	}
+	host := strings.TrimSpace(win.RemoteHost)
+	if host != "" {
+		if color, icon, group := c.remoteHostAppearance(host); color != "" || icon != "" || group != "" {
+			return "sshhost://" + host, true
+		}
+	}
+	return "", false
+}
+
+// appearanceRecordFor returns the color/icon a window should take for the given
+// appearance key. A learned per-key mapping (what the user set on that
+// ssh://host/topmost or local project) is authoritative; a configured
+// sidebar.remote_hosts rule for the window's ssh destination fills any field the
+// learned mapping leaves empty. So a hook-less remote host still gets its
+// configured look, a hooked host can use the rule as a default, and a color the
+// user set by hand (or a remembered per-dir color) always wins.
+func (c *Coordinator) appearanceRecordFor(key string, win tmux.Window) (CWDColorMapping, bool) {
+	rec, recOK := c.getCWDColorMapping(key)
+	color, icon, group := c.remoteHostAppearance(win.RemoteHost)
+	if color != "" && strings.TrimSpace(rec.Color) == "" {
+		rec.Color = color
+		recOK = true
+	}
+	if icon != "" && strings.TrimSpace(rec.Icon) == "" {
+		rec.Icon = icon
+		recOK = true
+	}
+	if group != "" && strings.TrimSpace(rec.Group) == "" {
+		rec.Group = group
+		recOK = true
+	}
+	return rec, recOK
 }
 
 // seedWindowAppearance applies the project's remembered color/marker to a window
@@ -3645,7 +3774,7 @@ func (c *Coordinator) seedWindowAppearance(win *tmux.Window, key string) {
 		return
 	}
 
-	rec, recOK := c.getCWDColorMapping(key)
+	rec, recOK := c.appearanceRecordFor(key, *win)
 	color, icon := seedAppearancePlan(*win, rec, recOK)
 	if color != "" {
 		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_color", color).Run()
@@ -3656,15 +3785,22 @@ func (c *Coordinator) seedWindowAppearance(win *tmux.Window, key string) {
 		win.Icon = icon
 	}
 
-	// Seed the window's GROUP from a configured preset the first (and only) time
-	// we see it: a brand-new tab opened inside a group's working_dir (e.g.
-	// ~/git/gunpowder) joins that group automatically, while a tab opened
-	// anywhere else stays in Default. Only when it doesn't already belong to a
-	// group — a cache-restored or user-set @tabby_group always wins — and, like
-	// the color/marker seed above, exactly once: gated by @tabby_color_seeded so
+	// Seed the window's GROUP the first (and only) time we see it: a brand-new
+	// local tab opened inside a group's working_dir (e.g. ~/git/gunpowder) joins
+	// that group automatically, while a tab opened anywhere else stays in Default.
+	// A remote tab — which presetGroupForWindow skips (working_dir is local) —
+	// instead takes the group from its matching sidebar.remote_hosts rule (folded
+	// into rec by appearanceRecordFor), so ssh'ing to a known host files the tab
+	// under that host's group. Only when it doesn't already belong to a group — a
+	// cache-restored or user-set @tabby_group always wins — and, like the
+	// color/marker seed above, exactly once (gated by @tabby_color_seeded) so
 	// moving the tab out of the group later makes it stay out.
 	if strings.TrimSpace(win.Group) == "" {
-		if g := c.presetGroupForWindow(*win); g != "" {
+		g := c.presetGroupForWindow(*win)
+		if g == "" {
+			g = strings.TrimSpace(rec.Group)
+		}
+		if g != "" {
 			exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_group", g).Run()
 			win.Group = g
 		}
@@ -3690,8 +3826,11 @@ func (c *Coordinator) seedWindowAppearance(win *tmux.Window, key string) {
 // and only then. It is deliberately gated so it is NOT the per-refresh restore that
 // was removed for bleeding siblings: it fires exactly once per transition, on the
 // single window whose live key changed, and never on a window merely sitting in a
-// directory. Group is intentionally not handled here — applyCWDIdentityMappings
-// already keeps @tabby_group in sync every refresh.
+// directory. Local group sync is left to applyCWDIdentityMappings (keyed on the
+// project root every refresh); only a REMOTE tab's group is applied here, from
+// its sidebar.remote_hosts rule, because presetGroupForWindow skips remote tabs
+// and windowNameKey yields no key for a hook-less remote host — so an ssh into a
+// known host would otherwise never pick up that host's group.
 func (c *Coordinator) restoreAppearanceOnTransition(win *tmux.Window, key string) {
 	if !win.AppearanceSeeded {
 		return // a brand-new window is seedWindowAppearance's job, not ours
@@ -3706,7 +3845,18 @@ func (c *Coordinator) restoreAppearanceOnTransition(win *tmux.Window, key string
 	exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_appearance_key", key).Run()
 	win.AppearanceKey = key
 
-	rec, recOK := c.getCWDColorMapping(key)
+	// An ssh into a remote host (or hop to a different one) makes any summary
+	// generated from the PREVIOUS context stale — it described the local dir the
+	// ssh was launched from, not the remote session. Drop it so the tab falls back
+	// to its "CODE new" placeholder until the summary ticker relabels it from the
+	// remote pane's content. Local dir changes keep their summary (it's still the
+	// same machine's work), so this is gated on RemoteHost.
+	if win.RemoteHost != "" && strings.TrimSpace(win.AITitle) != "" {
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_ai_title").Run()
+		win.AITitle = ""
+	}
+
+	rec, recOK := c.appearanceRecordFor(key, *win)
 	if !recOK {
 		return
 	}
@@ -3717,6 +3867,14 @@ func (c *Coordinator) restoreAppearanceOnTransition(win *tmux.Window, key string
 	if icon := strings.TrimSpace(rec.Icon); icon != "" && icon != win.Icon {
 		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_icon", icon).Run()
 		win.Icon = icon
+	}
+	// Remote-only: file the tab under its ssh host's configured group. Local
+	// group sync stays with applyCWDIdentityMappings.
+	if win.RemoteHost != "" {
+		if group := strings.TrimSpace(rec.Group); group != "" && group != win.Group {
+			exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_group", group).Run()
+			win.Group = group
+		}
 	}
 }
 
@@ -3749,7 +3907,15 @@ func (c *Coordinator) presetGroupForWindow(win tmux.Window) string {
 	if win.RemoteHost != "" || hasRemoteContentPane(win) {
 		return ""
 	}
-	cwd := firstPaneCWD(win)
+	return c.presetGroupForCWD(firstPaneCWD(win))
+}
+
+// presetGroupForCWD is the directory core of presetGroupForWindow: the name of
+// the configured group whose working_dir contains cwd (most specific wins), or ""
+// for a home/root/unmapped/empty path. Callers with a bare path (e.g. the
+// new-window spawner deciding a new tab's group from the dir it will open in) use
+// this directly, without synthesizing a tmux.Window.
+func (c *Coordinator) presetGroupForCWD(cwd string) string {
 	if cwd == "" || isHomeDir(cwd) {
 		return ""
 	}
@@ -9530,8 +9696,8 @@ func (c *Coordinator) renderPhoneCarousel(windowID string, width int, headerBg s
 
 	hamburger := "≡"  // ≡
 	prevGlyph := "▲"  // ▲
-	cycleGlyph := "⛶"      // toggle zoom on the active content pane
-	newGlyph := "+"        // new window
+	cycleGlyph := "⛶" // toggle zoom on the active content pane
+	newGlyph := "+"   // new window
 	closeGlyph := "✕" // ✕
 	nextGlyph := "▼"  // ▼
 
@@ -15719,7 +15885,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 	case "button":
 		switch input.ResolvedTarget {
 		case "new_tab":
-			c.createNewWindowInCurrentGroup(clientID)
+			c.createNewWindowDefault(clientID)
 			// Don't call selectContentPaneInActiveWindow() here - the new window only has
 			// one pane (shell) until the daemon spawns the sidebar. Let spawnRenderers
 			// handle focus correctly after creating the sidebar pane.
@@ -15734,7 +15900,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "new_tab":
-		c.createNewWindowInCurrentGroup(clientID)
+		c.createNewWindowDefault(clientID)
 		// Don't call selectContentPaneInActiveWindow() - let spawnRenderers handle focus
 		return true
 
@@ -16275,7 +16441,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// after the spawn switches all clients away from it.
 		c.lastNewWindowAt = time.Now()
 		c.lastNewWindowID = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
-		c.createNewWindowInCurrentGroup(clientID)
+		c.createNewWindowDefault(clientID)
 		return true
 
 	case "window_header:close_window":
@@ -18564,58 +18730,62 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	c.executeOrSendMenu(clientID, args, pos)
 }
 
-// createNewWindowInCurrentGroup creates a new window in the same group as the
-// current window, using the group's configured working_dir if available.
+// createNewWindowDefault creates a plain new window (the sidebar "+", prefix-c,
+// M-n). The new tab opens in the CURRENT pane's directory and is born into the
+// group that DIRECTORY maps to — so a "+" from a tab in ~/git/studiodome lands in
+// the same group as its sibling, because they share a dir. Deriving the group up
+// front (rather than letting the window pop into Default and get re-filed on the
+// next refresh) matters for focus: Default sorts first, so a transient stop there
+// yanks the new tab — and the user's focus — to the top of the sidebar.
+//
+// Group resolution: (1) the configured group whose working_dir contains the
+// starting dir (presetGroupForCWD, most-specific wins); (2) else the current
+// tab's own group, so a same-dir tab still sits with its sibling even when the
+// dir maps to no configured working_dir — but only for a LOCAL current tab, since
+// a remote tab's group reflects an ssh host, not this new local dir; (3) else
+// Default. A group's dedicated "+" is a different path (createNewWindowWithOverrides
+// with an explicit group).
 //
 // Delegates to the bin/new-window binary for atomic creation: the sidebar
 // renderer is spawned BEFORE the user sees the window, eliminating the
 // "spazzing" UX issue caused by the old hook-storm approach.
-func (c *Coordinator) createNewWindowInCurrentGroup(clientID string) {
+func (c *Coordinator) createNewWindowDefault(clientID string) {
 	logEvent("NEW_WINDOW_START client=%s", clientID)
 
-	// Query tmux for active window ID BEFORE acquiring the lock to avoid
-	// holding stateMu during external I/O.
-	windowID := clientID
-	if out, err := tmuxOutputCtx("display-message", "-p", "#{window_id}"); err == nil {
-		if id := strings.TrimSpace(string(out)); id != "" {
-			windowID = id
+	// Resolve the active window (the one the "+"/prefix-c fired from). Query tmux
+	// before taking the lock so stateMu is never held across external I/O.
+	activeID := ""
+	if strings.HasPrefix(clientID, "window-header:") {
+		activeID = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+	}
+	if activeID == "" {
+		if out, err := tmuxOutputCtx("display-message", "-p", "#{window_id}"); err == nil {
+			activeID = strings.TrimSpace(string(out))
 		}
 	}
 
+	var cwd, curGroup string
+	var curRemote bool
 	c.stateMu.RLock()
-
-	var currentGroup string
-	for _, group := range c.grouped {
-		for _, win := range group.Windows {
-			if win.ID == windowID {
-				currentGroup = group.Name
-				break
-			}
-		}
-		if currentGroup != "" {
+	for i := range c.windows {
+		if c.windows[i].ID == activeID {
+			cwd = firstPaneCWD(c.windows[i])
+			curGroup = strings.TrimSpace(c.windows[i].Group)
+			curRemote = c.windows[i].RemoteHost != "" || hasRemoteContentPane(c.windows[i])
 			break
 		}
 	}
-
-	// Look up working directory from config
-	var workingDir string
-	for _, cfgGroup := range c.config.Groups {
-		if cfgGroup.Name == currentGroup && cfgGroup.WorkingDir != "" {
-			workingDir = cfgGroup.WorkingDir
-			break
-		}
-	}
-
+	group := c.presetGroupForCWD(cwd) // dir-driven (config read is safe under RLock)
 	c.stateMu.RUnlock()
 
-	// Resolve working directory (expand ~/)
-	if workingDir != "" && strings.HasPrefix(workingDir, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			workingDir = filepath.Join(home, workingDir[2:])
-		}
+	if group == "" && !curRemote && curGroup != "" && !strings.EqualFold(curGroup, "Default") {
+		group = curGroup
 	}
 
-	c.createNewWindowWithOverrides(clientID, currentGroup, workingDir)
+	// workingDir = the resolved starting dir: the tab opens where the current one
+	// is, and its group matches the exact dir used above. Empty cwd -> the binary
+	// falls back to the firing client's pane path.
+	c.createNewWindowWithOverrides(clientID, group, cwd)
 }
 
 func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, workingDir string) {
@@ -19307,7 +19477,7 @@ func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width in
 	// blends IN gradually (no visible slope seam at the junction). darkEnd is the
 	// base pushed toward black — also reused for the menu-button fill so the row's
 	// right edge doesn't pop back to the base colour.
-	const headEnd = 0.15  // leading-edge highlight zone (mirrors the dark tail)
+	const headEnd = 0.15 // leading-edge highlight zone (mirrors the dark tail)
 	const tailStart = 0.85
 	darkEnd := gradientTailColor(toHex)
 	lightHead := blendHexToward(fromHex, "#ffffff", 0.18) // extra-light left edge
@@ -19329,7 +19499,7 @@ func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width in
 			hex = blendHexToward(fromHex, toHex, t) // light -> base
 		default:
 			t := (frac - tailStart) / (1 - tailStart)
-			t = t * t * (3 - 2*t) // smoothstep: ease the darkening in, no seam at the junction
+			t = t * t * (3 - 2*t)                   // smoothstep: ease the darkening in, no seam at the junction
 			hex = blendHexToward(toHex, darkEnd, t) // base -> dark tail
 		}
 		r, g, b := hexToRGB(hex)

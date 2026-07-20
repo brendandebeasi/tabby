@@ -82,6 +82,21 @@ sidebar:
   # this glyph instead of a host-name row stacked above the tab name. Nerd Font
   # nf-md-ssh is "󰣀". Leave empty for the legacy two-line host/name layout.
   ssh_icon: "󰒋"
+  # remote_hosts: color/mark/group a tab by its ssh/mosh DESTINATION host. The
+  # host is detected locally from the ssh command line, so NO remote-cwd hook is
+  # needed on the box. `match` is a case-insensitive glob; the first matching rule
+  # wins, so list specific patterns before broad ones. `color`, `icon`, and
+  # `group` are each optional (empty = leave untouched); `group` files the tab
+  # under a groups: entry, since the cwd->group preset can't see the far end of an
+  # ssh. A color you set by hand (or a remembered per-host/dir appearance) always
+  # wins over these defaults.
+  # remote_hosts:
+  #   - match: "client-gunpowder-*"
+  #     color: "#ff8800"
+  #     icon: "🔥"
+  #     group: "Gunpowder"
+  #   - match: "*.prod"
+  #     color: "#cc2222"
   debug: false  # Enable debug logging to /tmp/tabby-debug.log
   line_height: 0     # Extra lines between items (0=compact, 1+=spaced)
   mobile_max_percent: 15
