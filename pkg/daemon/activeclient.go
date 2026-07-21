@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"fmt"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,8 +46,23 @@ type ClientElector struct {
 	stickyTTY  string
 	stickyTime time.Time
 
+	// Multi-focus detection: tmux marks a client `focused` from terminal
+	// focus-in events and only clears it on focus-out. A client that
+	// disconnects/dies without sending focus-out keeps a STALE focused flag,
+	// so two clients can report `focused` at once even though only one
+	// terminal really has focus. That phantom is what makes multi-client
+	// focus logic tie-break wrongly. These fields rate-limit the
+	// MULTI_FOCUS_DETECTED log so a persistent anomaly is reported on change
+	// and periodically, not every election tick.
+	lastMultiFocusKey  string
+	lastMultiFocusTime time.Time
+
 	log func(format string, args ...interface{})
 }
+
+// multiFocusReLogInterval bounds how often an unchanged multi-focus condition
+// is re-logged (it is also logged immediately whenever the focused set changes).
+const multiFocusReLogInterval = 30 * time.Second
 
 // NewClientElector builds an elector. `log` is called for CLIENT_* events
 // (pin, pin-expired, selection); pass a no-op func to disable logging.
@@ -108,6 +125,7 @@ func (e *ClientElector) Elect() ElectionResult {
 	}
 
 	var attached []clientInfo
+	var focusedClients []focusedClientRef
 	focusedCount := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
@@ -135,6 +153,7 @@ func (e *ClientElector) Elect() ElectionResult {
 			attached = append(attached, info)
 			if info.focused {
 				focusedCount++
+				focusedClients = append(focusedClients, focusedClientRef{tty: info.tty, activity: info.activity})
 			}
 		}
 	}
@@ -206,6 +225,15 @@ func (e *ClientElector) Elect() ElectionResult {
 	e.log("CLIENT_GEOM_SELECT tty=%s size=%dx%d reason=%s activity=%d attached=%d focused=%d",
 		best.tty, best.width, best.height, reason, best.activity, len(attached), focusedCount)
 
+	// Anomaly detection: only one terminal should hold focus at a time. When
+	// tmux reports >1 focused client, at least one is a stale phantom (a
+	// client that never sent focus-out). Report it — with each focused
+	// client's idle age so the phantom (idle while another is active) is
+	// obvious — rate-limited so a persistent anomaly doesn't spam the log.
+	if focusedCount > 1 {
+		e.reportMultiFocus(focusedClients, best.tty, now)
+	}
+
 	profile := "desktop"
 	if best.width > 0 && best.width < 100 {
 		profile = "phone"
@@ -220,6 +248,59 @@ func (e *ClientElector) Elect() ElectionResult {
 		Activity: best.activity,
 		OK:       true,
 	}
+}
+
+// focusedClientRef is the minimal per-client data reportMultiFocus needs,
+// hoisted to package scope because Elect's clientInfo is a local type.
+type focusedClientRef struct {
+	tty      string
+	activity int64
+}
+
+// reportMultiFocus logs the multi-focused-client anomaly (more than one client
+// carrying tmux's `focused` flag at once). `elected` is the tty the election
+// chose as genuinely active; the rest are stale phantoms. Rate-limited: logged
+// immediately when the focused set changes, then at most once per
+// multiFocusReLogInterval while it persists unchanged.
+func (e *ClientElector) reportMultiFocus(focused []focusedClientRef, elected string, now int64) {
+	if len(focused) < 2 {
+		return
+	}
+	// Stable key = sorted ttys, so the "set changed" check is order-independent.
+	ttys := make([]string, len(focused))
+	for i, f := range focused {
+		ttys[i] = f.tty
+	}
+	sort.Strings(ttys)
+	key := strings.Join(ttys, ",")
+
+	e.mu.Lock()
+	changed := key != e.lastMultiFocusKey
+	stale := time.Since(e.lastMultiFocusTime) >= multiFocusReLogInterval
+	if !changed && !stale {
+		e.mu.Unlock()
+		return
+	}
+	e.lastMultiFocusKey = key
+	e.lastMultiFocusTime = time.Now()
+	e.mu.Unlock()
+
+	// Per-client detail: idle age in seconds and whether it's the elected
+	// (genuine) client. The phantom is the focused client that is NOT elected
+	// and has the largest idle age.
+	var b strings.Builder
+	for i, f := range focused {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		role := "stale"
+		if f.tty == elected {
+			role = "elected"
+		}
+		fmt.Fprintf(&b, "%s(idle=%ds,%s)", f.tty, now-f.activity, role)
+	}
+	e.log("MULTI_FOCUS_DETECTED count=%d elected=%s clients=[%s] reason=stale_focus_flag",
+		len(focused), elected, b.String())
 }
 
 // LatestAttachedTTY returns the tty of the attached client with the most

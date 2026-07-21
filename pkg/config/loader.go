@@ -253,6 +253,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.PaneHeader.DimOpacity == 0 {
 		cfg.PaneHeader.DimOpacity = 0.7
 	}
+	if cfg.Sidebar.NewTabInheritSSH == nil {
+		// Default: a new tab opened from an ssh session re-runs that ssh so it
+		// lands on the same host and inherits the host's group/color.
+		v := true
+		cfg.Sidebar.NewTabInheritSSH = &v
+	}
 	if cfg.PaneHeader.Native == nil {
 		// Default to native tmux border-status chrome. Users can opt back into
 		// the legacy Bubbletea aux-pane chrome by setting native: false.

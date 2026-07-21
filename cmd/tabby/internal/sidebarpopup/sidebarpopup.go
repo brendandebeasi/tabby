@@ -142,14 +142,39 @@ func (m popupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sendUnsubscribe()
 				return m, tea.Quit
 			}
+			// Ignore scroll wheel here; it carries a row coordinate that would
+			// otherwise resolve to whatever tab it lands on and mis-select it.
+			if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+				return m, nil
+			}
+			// The daemon has no raw-"mouse" handler, so (unlike the inline
+			// sidebar) a bare {Type:"mouse"} tap is silently dropped and no tab
+			// is selectable. Resolve the tap against the region table the daemon
+			// sent us — the same client-side hit-test the inline sidebar does —
+			// and forward a pre-resolved semantic action instead.
+			action, target := m.resolveClick(msg.X, msg.Y)
+			if action == "" {
+				return m, nil
+			}
 			m.sendInput(&daemon.InputPayload{
-				SequenceNum: m.sequenceNum,
-				Type:        "mouse",
-				MouseX:      msg.X,
-				MouseY:      msg.Y,
-				Button:      mouseButton(msg.Button),
-				Action:      "press",
+				SequenceNum:    m.sequenceNum,
+				Type:           "action",
+				MouseX:         msg.X,
+				MouseY:         msg.Y,
+				Button:         mouseButton(msg.Button),
+				Action:         "press",
+				ViewportOffset: m.viewportOffset,
+				ResolvedAction: action,
+				ResolvedTarget: target,
 			})
+			// Selecting a window (including a parked/minimized one) should
+			// dismiss the full-screen sidebar and reveal that window, mirroring
+			// the tap-to-close UX. Other actions (toggle panes, open menu)
+			// mutate the list in place, so keep the popup open for those.
+			if action == "select_window" {
+				m.sendUnsubscribe()
+				return m, tea.Quit
+			}
 		}
 		return m, nil
 
@@ -162,6 +187,39 @@ func (m popupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// resolveClick maps a screen tap to a semantic sidebar action by hit-testing
+// the daemon-supplied region table, mirroring sidebar.go's processMouseClick.
+// It uses the SAME clamped viewport start that View() uses to slice the content
+// so the row a region occupies on screen matches the row we test against.
+func (m popupModel) resolveClick(x, y int) (action, target string) {
+	visibleLines := m.height - m.pinnedHeight - closeButtonHeight
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+	lines := strings.Split(m.content, "\n")
+	start := m.viewportOffset
+	if start > len(lines)-visibleLines {
+		start = len(lines) - visibleLines
+	}
+	if start < 0 {
+		start = 0
+	}
+	contentY := y + start
+	for _, r := range m.regions {
+		if contentY < r.StartLine || contentY > r.EndLine {
+			continue
+		}
+		endCol := r.EndCol
+		if endCol == 0 { // 0 means "to the right edge"
+			endCol = m.width
+		}
+		if x >= r.StartCol && x < endCol {
+			return r.Action, r.Target
+		}
+	}
+	return "", ""
 }
 
 func mouseButton(b tea.MouseButton) string {
@@ -352,13 +410,27 @@ func (m *popupModel) sendMessage(msg daemon.Message) {
 	m.conn.Write(append(data, '\n'))
 }
 
+// renderHeight is the height we advertise to the daemon: the popup steals the
+// bottom closeButtonHeight rows for its tap-to-close button, so the daemon must
+// lay out the whole sidebar within the rows ABOVE that button. Reporting the
+// full height made the daemon float the Minimized group into the bottom rows
+// that the popup hides behind the close button, leaving those tabs undrawn and
+// unclickable.
+func (m popupModel) renderHeight() int {
+	h := m.height - closeButtonHeight
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 func (m *popupModel) sendSubscribe() {
 	m.sendMessage(daemon.Message{
 		Type:   daemon.MsgSubscribe,
 		Target: m.target,
 		Payload: daemon.ResizePayload{
 			Width:        m.width,
-			Height:       m.height,
+			Height:       m.renderHeight(),
 			ColorProfile: "TrueColor",
 		},
 	})
@@ -377,7 +449,7 @@ func (m *popupModel) sendResize() {
 		Target: m.target,
 		Payload: daemon.ResizePayload{
 			Width:  m.width,
-			Height: m.height,
+			Height: m.renderHeight(),
 		},
 	})
 }

@@ -5163,11 +5163,21 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 			if baseFg == "" {
 				baseFg = tabBg
 			}
+			// Target by @window_id, NEVER by index. These writes run on every
+			// refresh, including the refresh triggered by closing a window — at
+			// which point tmux has already renumbered the surviving windows'
+			// indexes, so a stale/shifted index would paint this group's color
+			// onto the WRONG window (tabs visibly "jump" groups on close). The
+			// @window_id is stable across renumbering. Skip a window with no id.
+			winTarget := win.ID
+			if winTarget == "" {
+				continue
+			}
 			if len(args) > 0 {
 				args = append(args, ";")
 			}
-			args = append(args, "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_active", tabBg)
-			args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_pane_inactive", tabBg)
+			args = append(args, "set-window-option", "-t", winTarget, "@tabby_pane_active", tabBg)
+			args = append(args, ";", "set-window-option", "-t", winTarget, "@tabby_pane_inactive", tabBg)
 			// Shell prompt integration: store effective icon per window
 			if shellIntegration {
 				effectiveIcon := group.Theme.Icon
@@ -5177,7 +5187,7 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 				if effectiveIcon == "" {
 					effectiveIcon = promptFallbackIcon
 				}
-				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index), "@tabby_prompt_icon", effectiveIcon)
+				args = append(args, ";", "set-window-option", "-t", winTarget, "@tabby_prompt_icon", effectiveIcon)
 			}
 
 			if autoBorder || borderFromTab {
@@ -5198,7 +5208,7 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 				if activeStyle == "" {
 					activeStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
 				}
-				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
+				args = append(args, ";", "set-window-option", "-t", winTarget,
 					"pane-active-border-style", activeStyle)
 
 				// Inactive border: desaturate when dim_inactive is enabled
@@ -5220,7 +5230,7 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 				if inactiveStyle == "" {
 					inactiveStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
 				}
-				args = append(args, ";", "set-window-option", "-t", fmt.Sprintf(":%d", win.Index),
+				args = append(args, ";", "set-window-option", "-t", winTarget,
 					"pane-border-style", inactiveStyle)
 			}
 
@@ -5278,6 +5288,35 @@ func (c *Coordinator) GetWindowsHash() string {
 				break
 			}
 		}
+	}
+	return hash
+}
+
+// GetWindowsStructuralHash is GetWindowsHash without the active-window and
+// active-pane state. It captures only what makes the window layout
+// "structurally" different — window set, order, pane counts, indicators,
+// color, and group — so a bare active-window flip does NOT read as a
+// structure change. Callers use this to gate the heavy resize-all-windows
+// reconcile (LockWindowsToActive); the active-sensitive full hash still
+// drives border/header restyling. Keeping active state out of this hash is
+// what breaks the multi-client focus-cycling cascade (see runHousekeeping).
+func (c *Coordinator) GetWindowsStructuralHash() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	// ONLY layout-affecting fields: the window set/order, pane counts, group,
+	// color, and collapsed state. Deliberately excludes every volatile
+	// render/indicator field — active window, active pane, Busy, Input, Bell,
+	// Activity, Silence, and Last — because those flip on ordinary focus
+	// changes (e.g. tmux re-tags the previous window as "last" and clears the
+	// focused window's Activity on every switch). Including them made a bare
+	// window switch look "structural" and re-fire the resize-all-windows lock,
+	// which, with >1 client attached, kicked tmux's active-window elector and
+	// self-sustained the focus-cycling cascade. Genuine client-geometry
+	// re-locks are handled elsewhere (handleClientGeomTick / handleClientResized).
+	hash := fmt.Sprintf("%d", len(c.windows))
+	for _, w := range c.windows {
+		hash += fmt.Sprintf(":%s:%d:%v:%s:%s",
+			w.ID, len(w.Panes), w.Collapsed, w.CustomColor, w.Group)
 	}
 	return hash
 }
@@ -18041,7 +18080,7 @@ func (c *Coordinator) HandleMenuSelect(clientID string, index int) {
 			groupBytes, gErr := base64.StdEncoding.DecodeString(parts[1])
 			pathBytes, pErr := base64.StdEncoding.DecodeString(parts[2])
 			if gErr == nil && pErr == nil {
-				c.createNewWindowWithOverrides(clientID, string(groupBytes), string(pathBytes))
+				c.createNewWindowWithOverrides(clientID, string(groupBytes), string(pathBytes), "", "", "")
 			}
 		}
 		return
@@ -18764,31 +18803,66 @@ func (c *Coordinator) createNewWindowDefault(clientID string) {
 		}
 	}
 
-	var cwd, curGroup string
+	var cwd, curGroup, curColor, curIcon string
 	var curRemote bool
+	var activePanePID int
 	c.stateMu.RLock()
 	for i := range c.windows {
 		if c.windows[i].ID == activeID {
 			cwd = firstPaneCWD(c.windows[i])
 			curGroup = strings.TrimSpace(c.windows[i].Group)
+			curColor = strings.TrimSpace(c.windows[i].CustomColor)
+			curIcon = strings.TrimSpace(c.windows[i].Icon)
 			curRemote = c.windows[i].RemoteHost != "" || hasRemoteContentPane(c.windows[i])
+			for j := range c.windows[i].Panes {
+				p := c.windows[i].Panes[j]
+				if isAuxiliaryPane(p) {
+					continue
+				}
+				if p.Active {
+					activePanePID = p.PID
+					break
+				}
+				if activePanePID == 0 {
+					activePanePID = p.PID
+				}
+			}
 			break
 		}
 	}
+	inheritSSH := c.config == nil || c.config.Sidebar.NewTabInheritSSH == nil || *c.config.Sidebar.NewTabInheritSSH
 	group := c.presetGroupForCWD(cwd) // dir-driven (config read is safe under RLock)
 	c.stateMu.RUnlock()
 
-	if group == "" && !curRemote && curGroup != "" && !strings.EqualFold(curGroup, "Default") {
+	// A new tab opened from an ssh/mosh session re-runs that connection so it
+	// lands on the SAME host. Give it its parent's group/color/icon up front so
+	// it's born in the right place instead of flickering through the local launch
+	// dir's identity until the daemon detects the ssh and
+	// restoreAppearanceOnTransition repaints it. When re-run is off it falls
+	// through to the local dir-driven grouping below.
+	//
+	// remoteCmd is resolved here (external ps/pgrep I/O, so after RUnlock) for the
+	// legacy fallback path; the bin/new-window spawner self-detects from the
+	// firing pane, so it doesn't need it passed in.
+	color, icon, remoteCmd := "", "", ""
+	if curRemote && inheritSSH {
+		group = curGroup
+		color = curColor
+		icon = curIcon
+		if activePanePID > 0 {
+			remoteCmd = tmux.RemoteCommandForPane(activePanePID)
+		}
+	} else if group == "" && !curRemote && curGroup != "" && !strings.EqualFold(curGroup, "Default") {
 		group = curGroup
 	}
 
 	// workingDir = the resolved starting dir: the tab opens where the current one
 	// is, and its group matches the exact dir used above. Empty cwd -> the binary
 	// falls back to the firing client's pane path.
-	c.createNewWindowWithOverrides(clientID, group, cwd)
+	c.createNewWindowWithOverrides(clientID, group, cwd, color, icon, remoteCmd)
 }
 
-func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, workingDir string) {
+func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, workingDir, color, icon, remoteCmd string) {
 	logEvent("NEW_WINDOW_CREATE client=%s group=%s path=%s", clientID, currentGroup, workingDir)
 
 	// Capture the firing client's TTY: the click came from a window-header
@@ -18827,6 +18901,12 @@ func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, worki
 			if workingDir != "" {
 				args = append(args, "-path", workingDir)
 			}
+			if color != "" {
+				args = append(args, "-color", color)
+			}
+			if icon != "" {
+				args = append(args, "-icon", icon)
+			}
 			if c.sidebarHidden {
 				args = append(args, "-no-sidebar")
 			}
@@ -18854,6 +18934,11 @@ func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, worki
 	// Legacy fallback: create window (focused), assign group, let hook chain handle renderer.
 	// Used when bin/new-window is not built (e.g. fresh clone without install.sh).
 	logEvent("NEW_WINDOW_LEGACY session=%s group=%s", c.sessionID, currentGroup)
+	// The ssh/mosh re-run is send-keys'd into the new tab's interactive shell
+	// below, NOT passed as new-window's shell-command: a "cmd; exec $SHELL" wrapper
+	// runs ssh under a non-interactive shell with no foreground process group of
+	// its own, so tmux reports pane_current_command as the wrapper shell and the
+	// remote detection (which drives the ssh icon/host color) never fires.
 	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
 	if workingDir != "" {
 		args = append(args, "-c", workingDir)
@@ -18865,6 +18950,22 @@ func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, worki
 
 	if newWindowIDLegacy != "" && currentGroup != "" && currentGroup != "Default" {
 		exec.Command("tmux", "set-window-option", "-t", newWindowIDLegacy, "@tabby_group", currentGroup).Run()
+	}
+	if newWindowIDLegacy != "" && color != "" {
+		exec.Command("tmux", "set-window-option", "-t", newWindowIDLegacy, "@tabby_color", color).Run()
+	}
+	if newWindowIDLegacy != "" && icon != "" {
+		exec.Command("tmux", "set-window-option", "-t", newWindowIDLegacy, "@tabby_icon", icon).Run()
+	}
+	if newWindowIDLegacy != "" && remoteCmd != "" {
+		// Type the command into the new window's (only) content pane, as a user
+		// would, so ssh becomes the pane's foreground command and the tab returns
+		// to a shell on disconnect.
+		if cp := strings.TrimSpace(tmuxOutputTrimmed("list-panes", "-t", newWindowIDLegacy, "-F", "#{pane_id}")); cp != "" {
+			pane := strings.SplitN(cp, "\n", 2)[0]
+			exec.Command("tmux", "send-keys", "-t", pane, "-l", remoteCmd).Run()
+			exec.Command("tmux", "send-keys", "-t", pane, "Enter").Run()
+		}
 	}
 
 	if newWindowIDLegacy != "" {

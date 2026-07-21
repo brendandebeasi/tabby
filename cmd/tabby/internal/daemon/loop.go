@@ -152,6 +152,7 @@ type Loop struct {
 	// refresh-loop goroutine in main.go onto the loop itself.
 	activeWindowID     string
 	lastWindowsHash    string
+	lastStructuralHash string
 	lastGitState       string
 	lastAutoTheme      string
 	lastClientGeom     string
@@ -628,8 +629,24 @@ func (l *Loop) doPaneLayoutOps() {
 	if preActive != "" {
 		postActive := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 		if postActive != "" && postActive != preActive {
-			logEvent("PANE_LAYOUT_RESTORE_ACTIVE pre=%s post=%s", preActive, postActive)
-			_ = exec.Command("tmux", "select-window", "-t", preActive).Run()
+			// The current window changed during the bracket. Distinguish two
+			// causes:
+			//  - A SILENT flip from our own kill-pane/split-window churn — tmux
+			//    moved current-window to a sibling the coordinator never chose.
+			//    That is what this restore exists to undo.
+			//  - A DELIBERATE user nav (prev/next-window, select-window) that
+			//    landed mid-bracket. The nav path flips the coordinator's
+			//    in-memory active flag synchronously (SetActiveWindowOptimistic),
+			//    so postActive matching the coordinator's active means the user
+			//    meant to be there — reverting it yanks them back to the old
+			//    window (the "I switch and it switches back" bug).
+			// Only revert when the coordinator does NOT already intend postActive.
+			if postActive == l.coordinatorActiveWindowID() {
+				logEvent("PANE_LAYOUT_ADOPT_ACTIVE pre=%s post=%s reason=coordinator_intends", preActive, postActive)
+			} else {
+				logEvent("PANE_LAYOUT_RESTORE_ACTIVE pre=%s post=%s", preActive, postActive)
+				_ = exec.Command("tmux", "select-window", "-t", preActive).Run()
+			}
 		}
 	}
 	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
@@ -1177,12 +1194,33 @@ func (l *Loop) runHousekeeping(start, t1 time.Time, activeWindowID string, sizes
 		l.coord.ApplyNewWindowGroup()
 		l.coord.PreserveWindowNames()
 
+		// Two distinct triggers off two hashes:
+		//  - The FULL hash (includes each window's active state + colors)
+		//    drives updateHeaderBorderStyles: pane borders / header follow the
+		//    active tab's color, so a mere active-window flip must repaint.
+		//  - The STRUCTURAL hash (window set / names / groups / colors / pane
+		//    counts, but NOT active-window or active-pane state) drives
+		//    structureChanged, which gates the heavy LockWindowsToActive
+		//    reconcile that resizes EVERY window to the elected client.
+		//
+		// Keeping active-window state OUT of structureChanged is what stops
+		// the multi-client focus-cycling loop: with >1 client attached, tmux
+		// 3.x flips the session's active window as the elector churns, and
+		// when active state was in the structural hash each flip re-triggered
+		// the resize-all-windows lock, which kicked the elector again — a
+		// self-sustaining cascade seeded by any window mutation (e.g. ssh-in
+		// renaming/recoloring a tab). Genuine client-geometry width-locks
+		// (phone<->desktop) are already handled, dedup'd on lastResizeKey, by
+		// handleClientGeomTick and handleClientResized — not this path.
 		currentHash := l.coord.GetWindowsHash()
 		if currentHash != l.lastWindowsHash {
 			updateHeaderBorderStyles(l.coord)
 		}
-		structureChanged = spawnedRenderer || currentHash != l.lastWindowsHash
 		l.lastWindowsHash = currentHash
+
+		structHash := l.coord.GetWindowsStructuralHash()
+		structureChanged = spawnedRenderer || structHash != l.lastStructuralHash
+		l.lastStructuralHash = structHash
 		l.lastFullRefresh = time.Now()
 
 		logEvent("PERF_REFRESH refresh_ms=%d spawn_ms=%d cleanup1_ms=%d cleanup2_ms=%d layout_ms=%d total_ms=%d",
@@ -1358,6 +1396,23 @@ func (l *Loop) handleTmuxHook(e TmuxHookEvent) {
 		// fires when the phone client becomes the active one — if a desktop
 		// stays active, the phone would see the dashboard until then.
 		l.coord.maybeExitDashboardForPhone()
+	case "new-window-pending":
+		// A keybinding-spawned new tab (bin/tabby new-window via prefix-c /
+		// M-n) registering its pending status. The daemon "+"-click path sets
+		// this in-process; the keybinding path lives in a SEPARATE process, so
+		// without this hook the daemon never learns the firing client and the
+		// post-reorder focus re-assert (preferredWindowFocusTarget, gated on
+		// State=="ready") is skipped — tmux's fallback election then lands on
+		// the first window (the "new tab cycles to window 1" bug). Registering
+		// here lets restoreWindowFocus re-select the new window after the
+		// move-window renumber shuffle. Idempotent with the in-process set.
+		l.coord.SetNewWindowInFlight(e.Args["group"], e.Args["path"], e.Args["tty"])
+	case "new-window-ready":
+		// Marks the just-created window's id so the focus re-assert can fire.
+		// Sent by bin/new-window right after creation, before it clears
+		// @tabby_spawning (which gates the reorder), so State is "ready" by the
+		// time the renumber refresh runs.
+		l.coord.SetNewWindowReady(e.Args["window"])
 	default:
 		logEvent("HOOK_UNKNOWN_KIND kind=%s", e.Kind)
 	}

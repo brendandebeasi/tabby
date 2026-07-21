@@ -418,6 +418,7 @@ type Sidebar struct {
 	ShowSSHHost          bool             `yaml:"show_ssh_host"`          // Show SSH hostname in tab name when pane is connected via SSH
 	SSHIcon              string           `yaml:"ssh_icon"`               // When set, remote tabs render on ONE line prefixed with this glyph instead of a host-name row above the tab name (e.g. a nerdfont ""). Empty = legacy two-line host/name.
 	RemoteHosts          []RemoteHostRule `yaml:"remote_hosts"`           // Color/icon a tab by its ssh/mosh DESTINATION host — matched locally from the ssh command line, so NO remote-cwd hook is needed on the host. First matching rule wins.
+	NewTabInheritSSH     *bool            `yaml:"new_tab_inherit_ssh"`    // When a new tab is opened from a tab that's currently in an ssh/mosh session, re-run the same connection in the new tab (so it lands on the same host and, via remote_hosts, the same group/color). Default true; set false for a plain local shell.
 }
 
 // RemoteHostRule colors/marks a tab based on the ssh (or mosh) destination the

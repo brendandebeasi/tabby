@@ -200,6 +200,41 @@ func RemoteHostForPane(pid int) string {
 	return parseRemoteHost(strings.TrimSpace(string(out)))
 }
 
+// RemoteCommandForPane returns the full command line of the remote (ssh/mosh)
+// process running in a pane, or "" if the pane isn't in a remote session.
+// Mirrors RemoteHostForPane's child-walk but returns the raw argv string so a
+// new tab can re-run the exact same connection the source tab is holding.
+func RemoteCommandForPane(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	// pane_pid is the shell; the remote process is a child. Walk children first.
+	if out, err := exec.Command("pgrep", "-P", strconv.Itoa(pid)).Output(); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			childPID := strings.TrimSpace(line)
+			if childPID == "" {
+				continue
+			}
+			if argsOut, err2 := exec.Command("ps", "-o", "args=", "-p", childPID).Output(); err2 == nil {
+				cmd := strings.TrimSpace(string(argsOut))
+				if parseRemoteHost(cmd) != "" {
+					return cmd
+				}
+			}
+		}
+	}
+	// Fallback: check the pid itself.
+	out, err := exec.Command("ps", "-o", "args=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	cmd := strings.TrimSpace(string(out))
+	if parseRemoteHost(cmd) != "" {
+		return cmd
+	}
+	return ""
+}
+
 // parseRemoteHost extracts the hostname from an ssh / mosh command line string.
 // Handles ssh, mosh, and mosh-client invocations with the usual flag forms.
 func parseRemoteHost(cmdline string) string {
