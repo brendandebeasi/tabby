@@ -100,6 +100,11 @@ func TestJSONRoundTrip(t *testing.T) {
 			ViewportOffset: 5,
 			SidebarBg:      "#1a1a2e",
 			TerminalBg:     "#0f0f1e",
+			ActiveFg:       "#e0def4",
+			InactiveFg:     "#6e6a86",
+			BorderFg:       "#403d52",
+			DividerFg:      "#26233a",
+			IndicatorBg:    "#eb6f92",
 			Regions: []ClickableRegion{
 				{StartLine: 0, EndLine: 5, StartCol: 0, EndCol: 0, Action: "select_window", Target: "1"},
 				{StartLine: 6, EndLine: 10, StartCol: 0, EndCol: 0, Action: "select_pane", Target: "%1"},
