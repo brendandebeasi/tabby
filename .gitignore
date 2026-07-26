@@ -63,6 +63,7 @@ web/tsconfig.tsbuildinfo
 .omc/
 .claude/*
 !.claude/CLAUDE.md
+!.claude/settings.json
 .claude-flow/
 .mcp.json
 CLAUDE.md

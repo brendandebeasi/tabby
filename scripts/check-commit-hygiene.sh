@@ -14,7 +14,11 @@ staged_files=$(git diff --cached --name-only --diff-filter=ACMR)
 
 blocked_path_regex='^(\.sisyphus/|\.omc/|\.claude/|\.entire/|\.archive/)|(^|/)(tmp|logs?)/|\.log$|\.hup$|(^|/)log\.txt$|(^|/)Untitled$|(^|/)todos\.md$|(^|/)\.DS_Store$|(^|/)\.env($|\.)|(^|/)credentials\.json$|\.(pem|key|p12|pfx|crt|cer)$'
 
-blocked_paths=$(printf '%s\n' "$staged_files" | grep -E "$blocked_path_regex" || true)
+# Shared agent config is tracked on purpose (mirrors the .gitignore whitelist);
+# only local agent state under .claude/ is blocked.
+allowed_path_regex='^\.claude/(CLAUDE\.md|settings\.json)$'
+
+blocked_paths=$(printf '%s\n' "$staged_files" | grep -E "$blocked_path_regex" | grep -Ev "$allowed_path_regex" || true)
 if [ -n "$blocked_paths" ]; then
   echo ""
   echo "Commit blocked: staged files include local/debug/sensitive artifacts:" >&2
