@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-07-27 — Splitting a remote pane stays on the same host
+
+- Splitting a pane that's SSH'd into a box (`prefix-|`/`-` or the header split buttons) re-runs that connection in the new pane, so the split lands on the same host. Scoped to splits — new tabs/windows are unaffected. `split_inherit_ssh` (default on). — bd
+
 ### 2026-07-27 — New tab no longer jumps to another window after ctrl-b c
 
 - Removed the `M-[` / `M-]` (Option+[/]) window-nav bindings: they collided with terminal `ESC[`/`ESC]` control-sequence replies, so a fresh shell's startup reply fired prev/next-window and navigated off the new tab. cmd+[/], `M-h`/`M-l`, and prefix `p`/`n` still switch windows. — bd

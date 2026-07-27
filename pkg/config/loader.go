@@ -259,6 +259,12 @@ func applyDefaults(cfg *Config) {
 		v := true
 		cfg.Sidebar.NewTabInheritSSH = &v
 	}
+	if cfg.Sidebar.SplitInheritSSH == nil {
+		// Default: splitting a pane that's SSH'd into a box re-runs that
+		// connection in the new split pane, so the split lands on the same host.
+		v := true
+		cfg.Sidebar.SplitInheritSSH = &v
+	}
 	if cfg.PaneHeader.Native == nil {
 		// Default to native tmux border-status chrome. Users can opt back into
 		// the legacy Bubbletea aux-pane chrome by setting native: false.

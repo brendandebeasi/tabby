@@ -16305,7 +16305,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if panePath == "" {
 			panePath = "~"
 		}
-		exec.Command("tmux", "split-window", "-v", "-t", input.ResolvedTarget, "-c", panePath).Run()
+		if out, err := exec.Command("tmux", "split-window", "-v", "-t", input.ResolvedTarget, "-c", panePath, "-P", "-F", "#{pane_id}").Output(); err == nil {
+			c.maybeInheritSSHIntoSplit(input.ResolvedTarget, string(out))
+		}
 		return true
 
 	case "header_split_h":
@@ -16315,7 +16317,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if panePath2 == "" {
 			panePath2 = "~"
 		}
-		exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath2).Run()
+		if out, err := exec.Command("tmux", "split-window", "-h", "-t", input.ResolvedTarget, "-c", panePath2, "-P", "-F", "#{pane_id}").Output(); err == nil {
+			c.maybeInheritSSHIntoSplit(input.ResolvedTarget, string(out))
+		}
 		return true
 
 	case "kill_pane", "header_close":
@@ -16724,14 +16728,18 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				sizeFlag = strconv.Itoa(half)
 			}
 		}
-		splitArgs := []string{"split-window", "-" + direction, "-t", paneID}
+		splitArgs := []string{"split-window", "-" + direction, "-t", paneID, "-P", "-F", "#{pane_id}"}
 		if sizeFlag != "" {
 			splitArgs = append(splitArgs, "-l", sizeFlag)
 		}
 		if panePath != "" {
 			splitArgs = append(splitArgs, "-c", panePath)
 		}
-		exec.Command("tmux", splitArgs...).Run()
+		if out, err := exec.Command("tmux", splitArgs...).Output(); err == nil {
+			// If the pane we split from is SSH'd into a box, re-run that same
+			// connection in the new pane so the split lands on the same host.
+			c.maybeInheritSSHIntoSplit(paneID, string(out))
+		}
 		return true
 
 	case "pane_click":
@@ -18878,6 +18886,47 @@ func (c *Coordinator) createNewWindowDefault(clientID string) {
 	// is, and its group matches the exact dir used above. Empty cwd -> the binary
 	// falls back to the firing client's pane path.
 	c.createNewWindowWithOverrides(clientID, group, cwd, color, icon, remoteCmd)
+}
+
+// maybeInheritSSHIntoSplit re-runs the source pane's ssh/mosh connection in a
+// freshly-split pane, so splitting a pane that is SSH'd into a box drops the
+// new pane onto the SAME box. This mirrors the new-tab SSH inheritance but is
+// scoped to pane splits only (prefix-| / prefix-- and the header split
+// buttons) — a plain new tab/window is deliberately left alone. No-op when
+// split_inherit_ssh is disabled or the source pane isn't in a remote session.
+// srcPaneID is the pane being split from; newPaneID is the just-created split.
+func (c *Coordinator) maybeInheritSSHIntoSplit(srcPaneID, newPaneID string) {
+	srcPaneID = strings.TrimSpace(srcPaneID)
+	newPaneID = strings.TrimSpace(newPaneID)
+	if srcPaneID == "" || newPaneID == "" {
+		return
+	}
+	if cfg := c.GetConfig(); cfg != nil && cfg.Sidebar.SplitInheritSSH != nil && !*cfg.Sidebar.SplitInheritSSH {
+		return
+	}
+	// The remote (ssh/mosh) process is a child of the source pane's shell;
+	// RemoteCommandForPane walks the children and returns the exact argv to re-run.
+	pidOut, err := exec.Command("tmux", "display-message", "-t", srcPaneID, "-p", "#{pane_pid}").Output()
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidOut)))
+	if err != nil || pid <= 0 {
+		return
+	}
+	remoteCmd := tmux.RemoteCommandForPane(pid)
+	if remoteCmd == "" {
+		return
+	}
+	// Type the connection into the new pane's interactive shell exactly as a
+	// user would (literal text, then a separate Enter), so ssh becomes the
+	// pane's foreground command — needed for the daemon's remote detection
+	// (ssh icon / host color) — and the pane returns to a local shell on
+	// disconnect. tmux buffers the keys in the pty until the shell prompt is
+	// ready, so this is safe even before rc finishes sourcing.
+	exec.Command("tmux", "send-keys", "-t", newPaneID, "-l", remoteCmd).Run()
+	exec.Command("tmux", "send-keys", "-t", newPaneID, "Enter").Run()
+	logEvent("SPLIT_INHERIT_SSH src=%s new=%s", srcPaneID, newPaneID)
 }
 
 func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, workingDir, color, icon, remoteCmd string) {
