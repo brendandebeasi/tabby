@@ -16029,6 +16029,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return false
 
 	case "close_tab":
+		c.MarkUserWindowAction() // user close moves focus; don't let drift-correction fight it
 		exec.Command("tmux", "kill-window").Run()
 		exec.Command("tmux", "last-window").Run()
 		selectContentPaneInActiveWindow()
@@ -16366,6 +16367,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "kill_pane", "header_close":
+		// A user-initiated close legitimately moves focus to a neighbor; mark it
+		// so the structural-churn drift correction doesn't fight the kill.
+		c.MarkUserWindowAction()
 		paneID := input.ResolvedTarget
 		// Count content panes — if only 1, kill the window instead
 		windowIDOut, _ := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}").Output()
@@ -16625,6 +16629,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "kill_window":
+		c.MarkUserWindowAction() // user close moves focus; don't let drift-correction fight it
 		target := strings.TrimSpace(input.ResolvedTarget)
 		if target == "" {
 			return false

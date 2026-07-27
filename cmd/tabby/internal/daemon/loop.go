@@ -164,6 +164,8 @@ type Loop struct {
 	lastReadyWindowID  string    // last new-window-ready windowID observed (for tmux-active suppression)
 	lastReadyClearedAt time.Time // when the new-window ready state was last cleared
 	lastPaneLayoutOps  time.Time // debounce for the spawn/cleanup heavy path
+	lastReassertAt     time.Time // rate-limit for reassertActiveWindow
+	lastReassertTarget string    // target of the last active-window reassert
 	// housekeepingMu serializes the async housekeeping pass kicked off by
 	// signal_refresh. Held for the duration of one heavy run; TryLock is used
 	// at submit time so a rapid burst of signals skips when a prior pass is
@@ -468,7 +470,33 @@ const (
 	// AND with no user window switch in the same window, we treat it as churn
 	// fallout (tmux re-electing window 1 during a regroup) and put focus back.
 	loopStructuralDriftWindow = 700 * time.Millisecond
+	// loopReassertCooldown rate-limits active-window re-selects so a flapping
+	// multi-client elector can't spin the historical select-window cycle: at
+	// most one correction per target per this interval.
+	loopReassertCooldown = 400 * time.Millisecond
 )
+
+// reassertActiveWindow pulls tmux back onto windowID after our own structural
+// churn drifted the session's active window away from it. Rate-limited per
+// target so a genuinely flapping elector settles into a slow correction rather
+// than a tight select-window loop. No-op (returns false) if the window no
+// longer exists — a closed active window must let the drift through. Returns
+// true when the drift should NOT be accepted by the caller (either we just
+// re-selected, or we corrected this target moments ago and are holding).
+func (l *Loop) reassertActiveWindow(windowID, reason, driftedTo string) bool {
+	if windowID == "" || !l.coord.HasWindow(windowID) {
+		return false
+	}
+	now := time.Now()
+	if l.lastReassertTarget == windowID && now.Sub(l.lastReassertAt) < loopReassertCooldown {
+		return true
+	}
+	l.lastReassertAt = now
+	l.lastReassertTarget = windowID
+	logEvent("ACTIVE_DRIFT_CORRECTED reason=%s tmux_drifted_to=%s restoring=%s", reason, driftedTo, windowID)
+	_ = l.coord.SelectWindow(windowID, "active_drift_"+reason, "update_active_window")
+	return true
+}
 
 // coordinatorActiveWindowID returns the windowID the coordinator currently
 // considers active, or empty when no window is marked active.
@@ -543,6 +571,18 @@ func (l *Loop) updateActiveWindow() {
 				if !l.lastReadyClearedAt.IsZero() && l.lastReadyWindowID != "" {
 					sinceClear := time.Since(l.lastReadyClearedAt)
 					if sinceClear <= loopPostReadyStabilize && l.activeWindowID == l.lastReadyWindowID && newID != l.lastReadyWindowID {
+						// The just-created window lost the active marker to our own
+						// settle churn (e.g. a regroup when ssh connects) within the
+						// post-ready hold. The old behaviour only suppressed the
+						// daemon's bookkeeping and left tmux stranded on window 1 for
+						// the whole hold; instead pull tmux back onto the new window,
+						// unless the user themselves just switched away.
+						userAct := l.coord.LastUserWindowActionAt()
+						if userAct.IsZero() || time.Since(userAct) > loopStructuralDriftWindow {
+							if l.reassertActiveWindow(l.lastReadyWindowID, "post_ready", newID) {
+								return
+							}
+						}
 						logEvent("UPDATE_ACTIVE_WINDOW_TMUX_SUPPRESS old=%s new=%s last_ready=%s since_clear_ms=%d", l.activeWindowID, newID, l.lastReadyWindowID, sinceClear.Milliseconds())
 						return
 					}
@@ -568,15 +608,10 @@ func (l *Loop) updateActiveWindow() {
 					churn := l.coord.LastStructuralChurnAt()
 					userAct := l.coord.LastUserWindowActionAt()
 					if !churn.IsZero() && time.Since(churn) < loopStructuralDriftWindow &&
-						(userAct.IsZero() || time.Since(userAct) > loopStructuralDriftWindow) &&
-						l.coord.HasWindow(l.activeWindowID) {
-						sinceUserMs := int64(-1)
-						if !userAct.IsZero() {
-							sinceUserMs = time.Since(userAct).Milliseconds()
+						(userAct.IsZero() || time.Since(userAct) > loopStructuralDriftWindow) {
+						if l.reassertActiveWindow(l.activeWindowID, "churn", newID) {
+							return
 						}
-						logEvent("ACTIVE_DRIFT_CORRECTED tmux_drifted_to=%s restoring=%s churn_ms=%d since_user_ms=%d", newID, l.activeWindowID, time.Since(churn).Milliseconds(), sinceUserMs)
-						_ = l.coord.SelectWindow(l.activeWindowID, "structural_drift_correct", "update_active_window")
-						return
 					}
 				}
 				logEvent("UPDATE_ACTIVE_WINDOW_TMUX_OBSERVE old=%s new=%s coordinator_active=%s", l.activeWindowID, newID, coordActive)
