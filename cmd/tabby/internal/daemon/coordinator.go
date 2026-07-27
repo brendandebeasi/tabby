@@ -15684,6 +15684,24 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			targetWindow = win.ID
 		}
 
+		// Post-creation phantom-input guard. Right after a new tab is created
+		// (prefix-c / M-n), a synthetic mouse press can land on the freshly
+		// spawned sidebar's window list and select a DIFFERENT window — the
+		// "new tab jumps to window 1" bug (the new tab inserts at index 1 and a
+		// phantom X10/SGR mouse report hits its row ~2s later, while the new
+		// shell is still loading). A real user does not click a sidebar row in
+		// the brief settle window after opening a tab, so drop a select_window
+		// that targets anything other than the just-created window while its
+		// new-window status is still in flight/ready. Clicking the new tab
+		// itself (target == pending) still passes through.
+		if st := c.NewWindowStatus(); (st.State == "ready" || st.State == "inFlight") &&
+			st.WindowID != "" && targetWindow != st.WindowID &&
+			time.Since(st.Created) < loopNewWindowReadyTimeout {
+			logEvent("SELECT_WINDOW_SUPPRESS_NEWTAB client=%s raw=%s target=%s pending=%s state=%s age_ms=%d",
+				clientID, rawTarget, targetWindow, st.WindowID, st.State, time.Since(st.Created).Milliseconds())
+			return false
+		}
+
 		now := time.Now()
 		selectKey := clientID + "|" + targetWindow
 		// Loop-only dedup state (Step 5): HandleInput runs exclusively on the

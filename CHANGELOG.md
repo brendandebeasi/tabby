@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-07-27 — New tab no longer jumps to another window after ctrl-b c
+
+- Removed the `M-[` / `M-]` (Option+[/]) window-nav bindings: they collided with terminal `ESC[`/`ESC]` control-sequence replies, so a fresh shell's startup reply fired prev/next-window and navigated off the new tab. cmd+[/], `M-h`/`M-l`, and prefix `p`/`n` still switch windows. — bd
+- Ignore a sidebar window-list click that targets a different window while a just-created tab is still settling, so a phantom mouse press on the new sidebar can't snap focus to window 1. — bd
+
 ### 2026-07-21 — Switching windows no longer bounces back
 
 - A window switch that lands mid-spawn no longer gets reverted to the old window.
