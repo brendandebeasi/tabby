@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-07-27 — Focus stays put when a tab regroups after ssh
+
+- After `ssh`-ing into a grouped host from a new tab, the tab no longer loses focus to window 1. The daemon's own park/unlink churn during the regroup could make tmux re-elect the first window; focus is now re-asserted unless you actually switched windows yourself. — bd
+
 ### 2026-07-27 — Splitting a remote pane stays on the same host
 
 - Splitting a pane that's SSH'd into a box (`prefix-|`/`-` or the header split buttons) re-runs that connection in the new pane, so the split lands on the same host. Scoped to splits — new tabs/windows are unaffected. `split_inherit_ssh` (default on). — bd

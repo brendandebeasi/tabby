@@ -462,6 +462,12 @@ const (
 	loopPostReadyStabilize    = 2500 * time.Millisecond
 	loopPaneLayoutCooldown    = 150 * time.Millisecond
 	loopFullRefreshCooldown   = 100 * time.Millisecond
+	// loopStructuralDriftWindow bounds the "was this active-window drift caused
+	// by our own park/unlink churn?" test. If tmux's active drifts off the
+	// window the daemon knows is active within this window of structural churn
+	// AND with no user window switch in the same window, we treat it as churn
+	// fallout (tmux re-electing window 1 during a regroup) and put focus back.
+	loopStructuralDriftWindow = 700 * time.Millisecond
 )
 
 // coordinatorActiveWindowID returns the windowID the coordinator currently
@@ -548,6 +554,30 @@ func (l *Loop) updateActiveWindow() {
 						return
 					}
 					logEvent("UPDATE_ACTIVE_WINDOW_TMUX_NAV_CONFIRMED old=%s new=%s settled=%s age_ms=%d", l.activeWindowID, newID, settledWindow, time.Since(navAt).Milliseconds())
+				}
+				// Structural-churn drift correction. Our own park/unlink churn (a
+				// tab regrouping after ssh connects, etc.) can make tmux re-elect
+				// the session's active window onto window 1. When the drift lands
+				// within loopStructuralDriftWindow of that churn AND the user did
+				// not switch windows in the same span AND the window we were on
+				// still exists, put focus back instead of accepting the drift.
+				// This is the "new tab + ssh into a grouped host jumps to window
+				// 1" bug, which the new-window focus guard misses because it has
+				// long since expired by the time ssh connects.
+				if l.activeWindowID != "" {
+					churn := l.coord.LastStructuralChurnAt()
+					userAct := l.coord.LastUserWindowActionAt()
+					if !churn.IsZero() && time.Since(churn) < loopStructuralDriftWindow &&
+						(userAct.IsZero() || time.Since(userAct) > loopStructuralDriftWindow) &&
+						l.coord.HasWindow(l.activeWindowID) {
+						sinceUserMs := int64(-1)
+						if !userAct.IsZero() {
+							sinceUserMs = time.Since(userAct).Milliseconds()
+						}
+						logEvent("ACTIVE_DRIFT_CORRECTED tmux_drifted_to=%s restoring=%s churn_ms=%d since_user_ms=%d", newID, l.activeWindowID, time.Since(churn).Milliseconds(), sinceUserMs)
+						_ = l.coord.SelectWindow(l.activeWindowID, "structural_drift_correct", "update_active_window")
+						return
+					}
 				}
 				logEvent("UPDATE_ACTIVE_WINDOW_TMUX_OBSERVE old=%s new=%s coordinator_active=%s", l.activeWindowID, newID, coordActive)
 			}

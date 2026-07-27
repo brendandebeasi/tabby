@@ -838,6 +838,17 @@ type Coordinator struct {
 	lastWindowByClient map[string]time.Time
 	lastPaneMenuOpen   map[string]time.Time
 
+	// Structural-drift-correction state (loop-only, no mutex — same goroutine as
+	// HandleInput and updateActiveWindow). lastStructuralChurnAt marks when the
+	// daemon last did window-unlink/park/kill churn (proxied by the
+	// exit_if_no_main_windows hook, which tmux fires on window-unlinked /
+	// after-kill-pane); lastUserWindowActionAt marks the last user-initiated
+	// window switch (nav key, sidebar select, pane click). updateActiveWindow
+	// uses these to tell a daemon-churn-induced active drift ("ssh regroup jumps
+	// to window 1") from a real user switch. See loopStructuralDriftWindow.
+	lastStructuralChurnAt  time.Time
+	lastUserWindowActionAt time.Time
+
 	// Diagnostic state for the "+ tap then cycles through other windows" bug.
 	// Loop-only: written and read exclusively from handleSemanticAction on the
 	// loop goroutine, so no mutex is needed. All three are timestamps of the
@@ -964,6 +975,33 @@ func (c *Coordinator) ClearNewWindowStatus() {
 	c.newWindowStatus = NewWindowStatus{State: "none"}
 	c.newWindowMu.Unlock()
 	logEvent("NEW_WINDOW_CLEAR prev_state=%s windowID=%s", prev.State, prev.WindowID)
+}
+
+// MarkStructuralChurn records that the daemon just did window-unlink/park/kill
+// churn (which makes tmux re-elect the active window). Loop-goroutine only.
+func (c *Coordinator) MarkStructuralChurn() { c.lastStructuralChurnAt = time.Now() }
+
+// LastStructuralChurnAt returns when the daemon last did structural churn.
+func (c *Coordinator) LastStructuralChurnAt() time.Time { return c.lastStructuralChurnAt }
+
+// MarkUserWindowAction records a user-initiated window switch (nav key, sidebar
+// select, pane click) so churn-drift correction won't fight it. Loop-only.
+func (c *Coordinator) MarkUserWindowAction() { c.lastUserWindowActionAt = time.Now() }
+
+// LastUserWindowActionAt returns when the user last switched windows.
+func (c *Coordinator) LastUserWindowActionAt() time.Time { return c.lastUserWindowActionAt }
+
+// HasWindow reports whether windowID is a current coordinator window.
+func (c *Coordinator) HasWindow(windowID string) bool {
+	if windowID == "" {
+		return false
+	}
+	for _, w := range c.GetWindows() {
+		if w.ID == windowID {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Coordinator) UpdateClientSizeSnapshot(clientID string, width int, height int) {
@@ -15672,6 +15710,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				target = win.ID
 			}
 			c.closeFullscreenSidebar(c.fullscreenSidebarWinID, false)
+			c.MarkUserWindowAction()
 			if err := c.SelectWindow(target, "fullscreen_select_window", clientID); err != nil {
 				logEvent("FULLSCREEN_SELECT_ERR target=%s err=%v", target, err)
 			}
@@ -15718,6 +15757,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.lastWindowSelect[selectKey] = now
 		logEvent("SELECT_WINDOW client=%s raw=%s target=%s", clientID, rawTarget, targetWindow)
 
+		c.MarkUserWindowAction()
 		if err := c.SelectWindow(targetWindow, "semantic_select_window", clientID); err != nil {
 			logEvent("SELECT_WINDOW_ERR client=%s raw=%s target=%s err=%v", clientID, rawTarget, targetWindow, err)
 			return false
@@ -15995,6 +16035,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		return true
 
 	case "prev_window", "next_window":
+		// A deliberate user window switch — record it so a structural-churn
+		// active drift right after isn't mistaken for daemon churn and reverted.
+		c.MarkUserWindowAction()
 		// Suppress bare M-}/M-{ (the keybind normalized from cmd+]/cmd+[
 		// in tabby.tmux:526-545) when the client that fired the binding
 		// is phone-sized. The iOS terminal app's touch-gesture
@@ -16767,10 +16810,18 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		exec.Command("tmux", "set-option", "-g", "@tabby_last_click_x", strconv.Itoa(localX)).Run()
 		exec.Command("tmux", "set-option", "-g", "@tabby_last_click_y", strconv.Itoa(localY)).Run()
 		exec.Command("tmux", "set-option", "-g", "@tabby_last_click_pane", paneID).Run()
+		c.MarkUserWindowAction() // clicking a pane can switch windows; count it as a user switch
 		exec.Command("tmux", "select-pane", "-t", paneID).Run()
 		return true
 
 	case "exit_if_no_main_windows":
+		// This hook is fired by tmux's window-unlinked / after-kill-pane hooks
+		// (tabby.tmux) — i.e. exactly the structural churn (park/unpark/kill)
+		// during which tmux re-elects the session's active window, sometimes
+		// dropping it onto window 1. Mark it so updateActiveWindow can tell that
+		// drift from a real user switch and put focus back. See
+		// loopStructuralDriftWindow.
+		c.MarkStructuralChurn()
 		sessionIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
 		sessID := strings.TrimSpace(string(sessionIDOut))
 		if sessID == "" {
