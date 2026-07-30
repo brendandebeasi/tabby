@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-07-30 — Sidebar width no longer shrinks when a phone attaches
+
+- Switching from a phone (or any narrow client) to the desktop no longer leaves the sidebar stuck at ~10 columns. A narrow client's transiently-clamped sidebar was being mistaken for a deliberate resize and adopted as the global width for every window; a client-size change is now never adopted as your chosen width. — bd
+
 ### 2026-07-27 — Focus stays put when a tab regroups after ssh
 
 - After `ssh`-ing into a grouped host from a new tab, the tab no longer loses focus to window 1. The daemon's own park/unlink churn during the regroup could make tmux re-elect the first window; focus is now re-asserted unless you actually switched windows yourself. — bd

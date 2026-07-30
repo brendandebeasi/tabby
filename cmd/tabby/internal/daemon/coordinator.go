@@ -716,6 +716,7 @@ type Coordinator struct {
 	globalWidth            int
 	lastWidthSync          time.Time // Last time we synced widths (for debouncing)
 	lastActiveWindowID     string    // Track which window was last active (for detecting window switch)
+	lastSyncClientWidth    int       // Active physical client width seen at the last width sync (detects a client/election flip so we don't adopt a transient clamp as the global)
 	activeWindowChangeTime time.Time // When the active window changed (for grace period)
 	windowHistory          []string  // LIFO stack of recently visited window IDs (most recent first, max 20)
 	widthSyncMu            sync.Mutex
@@ -8796,6 +8797,18 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 		c.lastActiveWindowID = activeWindowID
 	}
 
+	// Detect a change in the elected physical client's width since the last
+	// width sync (a phone<->desktop election flip, a reattach, or a resize).
+	// When the active client just changed, any sidebar sitting at a width
+	// that differs from the global is a TRANSIENT to be restored on this pass
+	// (the per-window loop below grows/shrinks it), NOT a user drag to adopt.
+	// Without this guard, the sequence "phone becomes active -> its window's
+	// sidebar is clamped to ~10 -> desktop becomes active" makes the next pass
+	// read that stale 10-col pane and adopt it as the new global, permanently
+	// shrinking every window's sidebar. See the sidebar-width bug.
+	curSyncClientWidth := int(c.activeClientWidth.Load())
+	clientWidthChanged := curSyncClientWidth > 0 && c.lastSyncClientWidth != 0 && c.lastSyncClientWidth != curSyncClientWidth
+
 	// Debounce: ignore resize events within 500ms of our last sync (unless forced)
 	var sinceLast time.Duration
 	hasLast := !c.lastWidthSync.IsZero()
@@ -8806,6 +8819,13 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 		logEvent("WIDTH_SYNC_SKIP reason=debounce active=%s force=%v since_last_ms=%d", activeWindowID, force, sinceLast.Milliseconds())
 		c.widthSyncMu.Unlock()
 		return nil
+	}
+
+	// Commit the observed client width only once we're past the debounce gate —
+	// a debounced early-return must not consume the change, or the real sync
+	// pass that follows would no longer see the flip.
+	if curSyncClientWidth > 0 {
+		c.lastSyncClientWidth = curSyncClientWidth
 	}
 
 	// Build list of panes to resize (compute under lock, execute after unlock)
@@ -8866,7 +8886,14 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 			// between windows" the moment a narrow client connects.
 			capped := c.capTargetToActiveClient(c.globalWidth)
 			atCap := effectiveActive == capped && capped < c.globalWidth
-			if justBecameActive {
+			if clientWidthChanged {
+				// The elected physical client just changed size (phone<->desktop
+				// flip / reattach). The measured discrepancy is a stale clamp
+				// about to be restored by the per-window loop, not a drag.
+				// Adopting here would let a narrow client permanently shrink the
+				// global sidebar width for every window.
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=client_width_changed active=%s measured=%d global=%d client_width=%d", activeWindowID, effectiveActive, c.globalWidth, curSyncClientWidth)
+			} else if justBecameActive {
 				// First sync tick after a window switch. The discrepancy is a
 				// stale width about to be synced TO this window, not a drag
 				// coming FROM it. Adopting here would flip globalWidth to the
