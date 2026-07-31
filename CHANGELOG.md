@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 2026-07-30 — Un-minimize is safer, and a stale reindex bug is fixed
+
+- Un-minimizing a window now clears its markers only after confirming it actually left the holding session, so a failed restore can't strand it invisibly. — bd
+- Un-minimize also clears a previously-leaked `@tabby_min_host` marker. — bd
+- A new startup sweep rehomes windows stranded in the holding session and adopts ones whose origin session no longer exists. — bd
+- Window reindexing now targets its own session explicitly, fixing windows getting dragged into another session when more than one session is live. — bd
+
 ### 2026-07-30 — Sidebar width no longer shrinks when a phone attaches
 
 - Switching from a phone (or any narrow client) to the desktop no longer leaves the sidebar stuck at ~10 columns. A narrow client's transiently-clamped sidebar was being mistaken for a deliberate resize and adopted as the global width for every window; a client-size change is now never adopted as your chosen width. — bd

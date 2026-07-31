@@ -1635,6 +1635,10 @@ func NewCoordinator(sessionID string) *Coordinator {
 	// native window cycling and re-establishes the parked state.
 	c.parkExistingMinimizedWindows()
 
+	// Sweep the holding session itself for windows a prior daemon stranded there
+	// (a failed unparkWindow, or one tagged to a session that's since gone).
+	c.reconcileOrphanedMinimizedWindows()
+
 	// Re-learn full-width-sidebar mode from tmux (the physical state — content in
 	// limbo, sidebar full-width, @tabby_fullscreen_sidebar set — survives a daemon
 	// restart; we just need the in-memory pointer back).
@@ -4991,31 +4995,39 @@ func (c *Coordinator) syncWindowIndices() []tmuxWindowMove {
 			// reverse moving each window directly to its desired index.
 			// Indices vacate in the right order so each move can succeed
 			// without `-k` (which would destroy a colliding window).
+			//
+			// Every bare ":N" target/source below is explicitly prefixed with
+			// this coordinator's own session id. Without it, tmux resolves an
+			// unscoped ":N" against its own notion of the "current" session,
+			// which with a second live session on the server (e.g. another
+			// unrelated tmux session the user has open) can silently drag
+			// this session's windows into that other session instead of
+			// reindexing them in place.
 			tmp := tempBase + tempCounter
 			tempCounter++
 			pending = append(pending, tmuxWindowMove{
 				src: cycle[0].id,
-				dst: fmt.Sprintf(":%d", tmp),
+				dst: fmt.Sprintf("%s:%d", c.sessionID, tmp),
 			})
 			for i := len(cycle) - 1; i >= 1; i-- {
 				pending = append(pending, tmuxWindowMove{
 					src: cycle[i].id,
-					dst: fmt.Sprintf(":%d", cycle[i].desiredIndex),
+					dst: fmt.Sprintf("%s:%d", c.sessionID, cycle[i].desiredIndex),
 				})
 			}
 			pending = append(pending, tmuxWindowMove{
-				src: fmt.Sprintf(":%d", tmp),
-				dst: fmt.Sprintf(":%d", cycle[0].desiredIndex),
+				src: fmt.Sprintf("%s:%d", c.sessionID, tmp),
+				dst: fmt.Sprintf("%s:%d", c.sessionID, cycle[0].desiredIndex),
 			})
 		} else {
 			// Chain resolution: walk in reverse, moving each window
 			// directly to its desired index. Each step's target was
 			// vacated by the previous step (or was already empty for the
-			// last entry).
+			// last entry). Session-scoped for the same reason as above.
 			for i := len(cycle) - 1; i >= 0; i-- {
 				pending = append(pending, tmuxWindowMove{
 					src: cycle[i].id,
-					dst: fmt.Sprintf(":%d", cycle[i].desiredIndex),
+					dst: fmt.Sprintf("%s:%d", c.sessionID, cycle[i].desiredIndex),
 				})
 			}
 		}
@@ -7580,6 +7592,12 @@ func ensureMinimizedSession() {
 		return
 	}
 	exec.Command("tmux", "set-option", "-t", minimizedHoldingSession, "destroy-unattached", "off").Run()
+	// Tag the lone window new-session just created so reconcileOrphanedMinimizedWindows
+	// can tell it apart from a genuinely stranded parked window — both are otherwise
+	// indistinguishable (untagged @tabby_min_origin).
+	if winID := tmuxOutputTrimmed("display-message", "-p", "-t", minimizedHoldingSession, "#{window_id}"); winID != "" {
+		exec.Command("tmux", "set-window-option", "-t", winID, "@tabby_min_placeholder", "1").Run()
+	}
 	coordinatorDebugLog.Printf("ensureMinimizedSession: created %s", minimizedHoldingSession)
 }
 
@@ -7695,7 +7713,11 @@ func (c *Coordinator) surfaceWindow(windowID string) bool {
 
 // unparkWindow fully un-minimizes: moves the window back to its origin session
 // (if parked) and clears every parked marker. Safe to call whether parked or
-// surfaced-but-flagged.
+// surfaced-but-flagged. The markers are only cleared once the window is
+// confirmed out of the holding session — if move-window fails, every marker is
+// left in place (still parked AND tagged, so it stays visible and recoverable
+// in the Minimized section) rather than stranding an untagged window in
+// _tabby_minimized forever.
 func (c *Coordinator) unparkWindow(windowID string) {
 	windowID = strings.TrimSpace(windowID)
 	if windowID == "" {
@@ -7706,15 +7728,141 @@ func (c *Coordinator) unparkWindow(windowID string) {
 		if origin == "" {
 			origin = c.dashboardSession()
 		}
-		if err := exec.Command("tmux", "move-window", "-d", "-s", windowID, "-t", origin+":").Run(); err != nil {
+		if err := tmuxRun("move-window", "-d", "-s", windowID, "-t", origin+":"); err != nil {
 			coordinatorDebugLog.Printf("unparkWindow: move-window failed for %s: %v", windowID, err)
+			return
 		}
 	}
-	exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_minimized").Run()
-	exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_min_origin").Run()
-	exec.Command("tmux", "set-window-option", "-t", windowID, "-u", "@tabby_min_dir").Run()
+	// Clear every parked marker in one invocation so a death mid-sequence can't
+	// leave the window half-tagged.
+	if err := tmuxRun("set-window-option", "-t", windowID, "-u", "@tabby_minimized", ";",
+		"set-window-option", "-t", windowID, "-u", "@tabby_min_origin", ";",
+		"set-window-option", "-t", windowID, "-u", "@tabby_min_dir", ";",
+		"set-window-option", "-t", windowID, "-u", "@tabby_min_host"); err != nil {
+		coordinatorDebugLog.Printf("unparkWindow: marker clear failed for %s: %v", windowID, err)
+	}
 	cleanupMinimizedSessionIfEmpty()
 	coordinatorDebugLog.Printf("unparkWindow: unminimized %s", windowID)
+}
+
+// reconcileOrphanedMinimizedWindows sweeps the holding session at startup for
+// windows a prior daemon left stranded there: windows with no @tabby_min_origin
+// tag at all (a failed unparkWindow cleared the markers before the move could be
+// confirmed) are rehomed straight into this session and fully un-minimized;
+// windows tagged to a session id that no longer exists are adopted as minimized
+// into this session (retagged, left parked, so they reappear in the Minimized
+// section) rather than surfaced. Windows tagged to a still-live session belong
+// to another daemon and are left alone. The ensureMinimizedSession placeholder
+// window is excluded via @tabby_min_placeholder — except a session founded by a
+// pre-upgrade daemon (before that tag existed) has an untagged placeholder,
+// shape-identical to a stranded orphan. Its one reliable intrinsic property:
+// it's the window `new-session` created when the holding session was founded,
+// so nothing moved in later via move-window can sit at a lower window_index.
+// That fallback only engages when no window carries the explicit tag at all —
+// a session a fixed daemon has already touched never needs the guess.
+func (c *Coordinator) reconcileOrphanedMinimizedWindows() {
+	if err := exec.Command("tmux", "has-session", "-t", minimizedHoldingSession).Run(); err != nil {
+		return
+	}
+	sess := c.dashboardSession()
+	if sess == "" {
+		return
+	}
+	liveOut, err := tmuxOutputCtx("list-sessions", "-F", "#{session_id}")
+	if err != nil {
+		return
+	}
+	live := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(string(liveOut)), "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			live[s] = true
+		}
+	}
+	out, err := tmuxOutputCtx("list-windows", "-t", minimizedHoldingSession, "-F",
+		"#{window_id}\t#{window_index}\t#{@tabby_min_origin}\t#{@tabby_min_placeholder}")
+	if err != nil {
+		return
+	}
+	type minWinRow struct {
+		windowID, origin, placeholder string
+		index                         int
+	}
+	var rows []minWinRow
+	hasExplicitPlaceholder := false
+	// Trim only the trailing newline, not per-line whitespace: a row with
+	// empty trailing columns (e.g. no @tabby_min_origin, no placeholder tag)
+	// has trailing tabs that TrimSpace(line) would strip, collapsing the
+	// field count below 4 and silently dropping the row.
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		f := strings.SplitN(line, "\t", 4)
+		if len(f) < 4 {
+			continue
+		}
+		idx, _ := strconv.Atoi(strings.TrimSpace(f[1]))
+		r := minWinRow{
+			windowID:    strings.TrimSpace(f[0]),
+			index:       idx,
+			origin:      strings.TrimSpace(f[2]),
+			placeholder: strings.TrimSpace(f[3]),
+		}
+		if r.placeholder == "1" {
+			hasExplicitPlaceholder = true
+		}
+		rows = append(rows, r)
+	}
+	legacyPlaceholderID := ""
+	if !hasExplicitPlaceholder {
+		minIdx := -1
+		for _, r := range rows {
+			if r.origin == "" && (minIdx == -1 || r.index < minIdx) {
+				minIdx = r.index
+				legacyPlaceholderID = r.windowID
+			}
+		}
+	}
+	rehomed, adopted := 0, 0
+	for _, r := range rows {
+		windowID, origin := r.windowID, r.origin
+		if r.placeholder == "1" {
+			continue // ensureMinimizedSession's own placeholder, not a stranded window
+		}
+		if windowID == legacyPlaceholderID {
+			// Best-effort identification of a pre-upgrade placeholder — leave it
+			// parked (never rehome) and retag it so future sweeps don't have to
+			// guess again.
+			exec.Command("tmux", "set-window-option", "-t", windowID, "@tabby_min_placeholder", "1").Run()
+			continue
+		}
+		if origin == "" {
+			// No tag at all: a failed unparkWindow cleared the markers before the
+			// move-window could be confirmed. Finish what it was trying to do.
+			if err := tmuxRun("move-window", "-d", "-s", windowID, "-t", sess+":"); err != nil {
+				coordinatorDebugLog.Printf("reconcileOrphanedMinimizedWindows: move-window failed for %s: %v", windowID, err)
+				continue
+			}
+			if err := tmuxRun("set-window-option", "-t", windowID, "-u", "@tabby_minimized", ";",
+				"set-window-option", "-t", windowID, "-u", "@tabby_min_origin", ";",
+				"set-window-option", "-t", windowID, "-u", "@tabby_min_dir", ";",
+				"set-window-option", "-t", windowID, "-u", "@tabby_min_host"); err != nil {
+				coordinatorDebugLog.Printf("reconcileOrphanedMinimizedWindows: marker clear failed for %s: %v", windowID, err)
+			}
+			rehomed++
+			continue
+		}
+		if live[origin] {
+			continue // owned by us already, or a live daemon still owns it
+		}
+		// Tagged to a session that's gone: adopt it as ours, still minimized.
+		if err := tmuxRun("set-window-option", "-t", windowID, "@tabby_min_origin", sess); err != nil {
+			coordinatorDebugLog.Printf("reconcileOrphanedMinimizedWindows: retag failed for %s: %v", windowID, err)
+			continue
+		}
+		adopted++
+	}
+	if rehomed > 0 || adopted > 0 {
+		logEvent("MINIMIZED_MIGRATE rehomed=%d adopted=%d -> %s", rehomed, adopted, sess)
+	}
+	cleanupMinimizedSessionIfEmpty()
 }
 
 // clearPeekIf drops the peek tracking when windowID is the currently-peeked
