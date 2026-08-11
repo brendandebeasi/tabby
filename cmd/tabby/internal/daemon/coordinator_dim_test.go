@@ -127,3 +127,38 @@ func TestIsDimUtility(t *testing.T) {
 		}
 	}
 }
+
+// A daemon must never style panes in another session. The active window id it
+// receives is derived from the most recently active client on the SERVER, so
+// with two sessions each running a daemon, both are handed whichever window the
+// user is focused in. Without this filter the foreign daemon cannot resolve a
+// tint for that window and unsets window-style / @tabby_tint_bg on panes the
+// owning daemon just painted — the background flickers on a ~5s cycle.
+func TestPanesInSession(t *testing.T) {
+	panes := []dimPaneInfo{
+		{id: "%1", sessionID: "$0"},
+		{id: "%2", sessionID: "$23"},
+		{id: "%3", sessionID: ""},
+		{id: "%4", sessionID: "$0"},
+	}
+
+	got := panesInSession(append([]dimPaneInfo(nil), panes...), "$0")
+	var ids []string
+	for _, p := range got {
+		ids = append(ids, p.id)
+	}
+	want := []string{"%1", "%3", "%4"}
+	if len(ids) != len(want) {
+		t.Fatalf("got %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("got %v, want %v", ids, want)
+		}
+	}
+
+	// No session scope => no filtering.
+	if all := panesInSession(append([]dimPaneInfo(nil), panes...), ""); len(all) != 4 {
+		t.Fatalf("unscoped filter dropped panes: got %d, want 4", len(all))
+	}
+}

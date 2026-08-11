@@ -2220,36 +2220,117 @@ type dimPaneInfo struct {
 	command      string // pane_current_command (may be "tabby" post-consolidation)
 	startCommand string // pane_start_command (retains original invocation)
 	left         int
+	// Current PER-PANE style values. These must come from `show-options -p`,
+	// never from a #{window-style} format: a format resolves the INHERITED
+	// value, so a pane with no per-pane option reports the global style and a
+	// comparison against it never matches — which repainted every such pane on
+	// every housekeeping tick. Empty means genuinely unset on the pane.
+	curStyle       string
+	curActiveStyle string
+	curDim         string
+	windowID       string // from the same list-panes call; avoids a per-pane exec
+	sessionID      string // ditto; used to reject panes outside this daemon's session
 }
 
 // listDimPanes queries tmux for panes in the given window, returning info needed for dimming.
 // We check both pane_current_command and pane_start_command because after binary consolidation
 // all subcommand processes show "tabby" as pane_current_command; pane_start_command still
 // contains the original invocation (e.g. "render sidebar", "render pane-header").
+// panesInSession drops panes belonging to another tmux session. A pane with no
+// session id recorded is kept: an unknown origin is treated as ours rather than
+// silently skipping a pane we are responsible for. An empty sessionID (daemon
+// not scoped to a session) disables the filter.
+func panesInSession(panes []dimPaneInfo, sessionID string) []dimPaneInfo {
+	if sessionID == "" {
+		return panes
+	}
+	kept := panes[:0]
+	for _, p := range panes {
+		if p.sessionID == "" || p.sessionID == sessionID {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
 func listDimPanes(windowID string) []dimPaneInfo {
 	out, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
-		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}\t#{pane_start_command}").Output()
+		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}\t#{pane_start_command}\t#{@tabby_pane_dim}\t#{window_id}\t#{session_id}").Output()
 	if err != nil {
 		return nil
 	}
 	var panes []dimPaneInfo
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, "\t", 5)
+	// Trim only the trailing newline, never TrimSpace the whole output: the last
+	// field (@tabby_pane_dim) is frequently empty, and trimming would drop it off
+	// the final row so the pane silently parsed as having fewer fields.
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		parts := strings.SplitN(line, "\t", 8)
 		if len(parts) < 4 {
 			continue
 		}
 		left, _ := strconv.Atoi(parts[3])
-		startCmd := ""
-		if len(parts) >= 5 {
-			startCmd = parts[4]
+		field := func(i int) string {
+			if len(parts) > i {
+				return parts[i]
+			}
+			return ""
 		}
 		panes = append(panes, dimPaneInfo{
 			id:           parts[0],
 			active:       parts[1] == "1",
 			command:      parts[2],
-			startCommand: startCmd,
+			startCommand: field(4),
 			left:         left,
+			curDim:       field(5),
+			windowID:     field(6),
+			sessionID:    field(7),
 		})
+	}
+	// Fill in the true per-pane style values. A #{window-style} format would
+	// report the inherited global for panes that have no per-pane option set,
+	// so the values have to come from show-options -p. Batch every pane into a
+	// single tmux invocation (";"-separated) to keep this one exec per pass
+	// rather than two per pane.
+	if len(panes) > 0 {
+		// Two problems to dodge here. `show-options -qv` prints NOTHING for an
+		// option that is unset, so naive positional pairing misaligns the moment
+		// one pane lacks a style. And a `display-message -t <pane>` marker
+		// BETWEEN the queries perturbs tmux's current-pane resolution, which
+		// silently dropped the following pane's value. So: no marker before the
+		// query, and a one-line "-" sentinel after each query to pad the record
+		// back to a fixed two lines per option.
+		var argv []string
+		for _, p := range panes {
+			if len(argv) > 0 {
+				argv = append(argv, ";")
+			}
+			argv = append(argv,
+				"show-options", "-p", "-t", p.id, "-qv", "window-style",
+				";", "display-message", "-p", "-t", p.id, "-",
+				";", "show-options", "-p", "-t", p.id, "-qv", "window-active-style",
+				";", "display-message", "-p", "-t", p.id, "-")
+		}
+		if out, err := exec.Command("tmux", argv...).Output(); err == nil {
+			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+			// Walk sentinel-delimited records: everything before each "-" is
+			// that option's value ("" when the option is unset).
+			var vals []string
+			cur := ""
+			for _, line := range lines {
+				if line == "-" {
+					vals = append(vals, cur)
+					cur = ""
+					continue
+				}
+				cur = line
+			}
+			if len(vals) == 2*len(panes) {
+				for i := range panes {
+					panes[i].curStyle = vals[2*i]
+					panes[i].curActiveStyle = vals[2*i+1]
+				}
+			}
+		}
 	}
 	return panes
 }
@@ -2277,6 +2358,22 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 		return
 	}
 
+	// Never style panes outside this daemon's session. activeWindowID is
+	// derived from the most recently active client on the SERVER, not on our
+	// session (see Loop.updateActiveWindow, which passes `display-message -c
+	// <tty>` for the elected client). With two sessions each running a daemon,
+	// whichever session the user is focused in hands its active window to BOTH
+	// daemons. The foreign daemon's c.windows/c.grouped do not contain that
+	// window, so tintColorForWindow resolves "" and this pass UNSETS
+	// window-style and @tabby_tint_bg on panes the other daemon just painted --
+	// which then repaints them on its next tick. The user sees the background
+	// flip on and off every few seconds. Filtering here fixes the whole class:
+	// it holds no matter which caller supplies a foreign window id.
+	panes = panesInSession(panes, c.sessionID)
+	if len(panes) == 0 {
+		return
+	}
+
 	// Resolve the tint PER PANE. The pane list spans windows, so a single tint
 	// for the whole pass would paint every pane with the focused window's color
 	// and unset the rest -- leaving window-style and window-active-style set by
@@ -2290,11 +2387,21 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	// cover many panes of the same window.
 	termBG := c.GetTerminalBg()
 	tintByWindow := map[string]string{}
+	// Window id comes from the list-panes call above. Resolving it per pane via
+	// `tmux display-message` forked a process for every pane on every
+	// housekeeping tick, which was the bulk of this pass's cost.
+	winIDOfPane := make(map[string]string, len(panes))
+	for _, p := range panes {
+		winIDOfPane[p.id] = p.windowID
+	}
 	tintForPane := func(paneID string) string {
 		if !cfg.PaneHeader.Tint {
 			return ""
 		}
-		winID := paneWindowID(paneID)
+		winID := winIDOfPane[paneID]
+		if winID == "" {
+			winID = paneWindowID(paneID)
+		}
 		if winID == "" {
 			return ""
 		}
@@ -2312,9 +2419,14 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 		// this it would unset window-style on the pane it focused and drop the
 		// pane back to the plain terminal bg, which reads as a flicker on every
 		// pane switch.
+		// Only write when it actually changes — this ran per window on every
+		// housekeeping tick.
+		cur := tmuxOutputTrimmed("show-window-option", "-v", "-t", winID, "@tabby_tint_bg")
 		if bg != "" {
-			exec.Command("tmux", "set-window-option", "-t", winID, "@tabby_tint_bg", bg).Run()
-		} else {
+			if cur != bg {
+				exec.Command("tmux", "set-window-option", "-t", winID, "@tabby_tint_bg", bg).Run()
+			}
+		} else if cur != "" {
 			exec.Command("tmux", "set-window-option", "-t", winID, "-u", "@tabby_tint_bg").Run()
 		}
 		return bg
@@ -2357,31 +2469,43 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	// from window-style, and ApplyThemeToPane sets both per-pane to the plain
 	// theme bg. Writing only window-style therefore leaves the pane the user is
 	// actually looking at untinted, so both properties must be kept in step.
-	setBase := func(addCmd func(...string), paneID string) {
+	setBase := func(setStyle func(string, string, string), unsetStyle func(string, string), paneID string) {
 		if tintBG := tintForPane(paneID); tintBG != "" {
-			addCmd("set-option", "-p", "-t", paneID, "window-style", styleWithFg(inactiveFg, tintBG))
-			addCmd("set-option", "-p", "-t", paneID, "window-active-style", styleWithFg(baseFg, tintBG))
+			setStyle(paneID, "window-style", styleWithFg(inactiveFg, tintBG))
+			setStyle(paneID, "window-active-style", styleWithFg(baseFg, tintBG))
 		} else {
-			addCmd("set-option", "-p", "-u", "-t", paneID, "window-style")
-			addCmd("set-option", "-p", "-u", "-t", paneID, "window-active-style")
+			unsetStyle(paneID, "window-style")
+			unsetStyle(paneID, "window-active-style")
 		}
 	}
 
 	if !cfg.PaneHeader.DimInactive {
 		// Dim disabled — clear any leftover styles and dim flags
 		for _, p := range panes {
+			// Same no-op guard as the dimming path below: setting an option
+			// repaints the pane even when the value is unchanged, and this runs
+			// on every housekeeping tick.
 			if !isDimSkipPane(p) {
 				// Dimming is off, but the tint (if any) still applies — a blanket
 				// unset here would wipe it every time this ran.
 				if tintBG := tintForPane(p.id); tintBG != "" {
-					exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-style", styleWithFg(baseFg, tintBG)).Run()
-					exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-active-style", styleWithFg(baseFg, tintBG)).Run()
+					want := styleWithFg(baseFg, tintBG)
+					if p.curStyle != want {
+						exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-style", want).Run()
+					}
+					if p.curActiveStyle != want {
+						exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-active-style", want).Run()
+					}
 				} else {
-					exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
-					exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-active-style").Run()
+					if p.curStyle != "" {
+						exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
+					}
+					if p.curActiveStyle != "" {
+						exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-active-style").Run()
+					}
 				}
 			}
-			if !isDimUtilityPane(p) {
+			if !isDimUtilityPane(p) && p.curDim != "" {
 				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "@tabby_pane_dim").Run()
 			}
 		}
@@ -2413,7 +2537,6 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 		return
 	}
 
-
 	// Batch all per-pane set-option calls into a single tmux invocation via
 	// the `;` separator. For a 2-pane window that drops 4 tmux execs (~20ms)
 	// per tab switch down to 1. Skipped panes contribute nothing to the args.
@@ -2423,6 +2546,49 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 			argv = append(argv, ";")
 		}
 		argv = append(argv, c...)
+	}
+	// tmux repaints a pane whenever these options are SET, even to the value it
+	// already holds. This pass runs on every housekeeping tick (~5s) with values
+	// that are usually identical, so writing unconditionally repainted every pane
+	// forever and read as a slow background flicker. Compare against the values
+	// read in listDimPanes and emit only real changes.
+	curOf := make(map[string]dimPaneInfo, len(panes))
+	for _, p := range panes {
+		curOf[p.id] = p
+	}
+	setStyle := func(paneID, prop, val string) {
+		cur := curOf[paneID]
+		switch prop {
+		case "window-style":
+			if cur.curStyle == val {
+				return
+			}
+		case "window-active-style":
+			if cur.curActiveStyle == val {
+				return
+			}
+		}
+		addCmd("set-option", "-p", "-t", paneID, prop, val)
+	}
+	setDim := func(paneID, val string) {
+		if curOf[paneID].curDim == val {
+			return
+		}
+		addCmd("set-option", "-p", "-t", paneID, "@tabby_pane_dim", val)
+	}
+	unsetStyle := func(paneID, prop string) {
+		cur := curOf[paneID]
+		switch prop {
+		case "window-style":
+			if cur.curStyle == "" {
+				return
+			}
+		case "window-active-style":
+			if cur.curActiveStyle == "" {
+				return
+			}
+		}
+		addCmd("set-option", "-p", "-u", "-t", paneID, prop)
 	}
 	for _, p := range panes {
 		if isDimSkipPane(p) {
@@ -2442,8 +2608,8 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 		// undimmed base (tinted when the feature is on); an inactive pane shows
 		// that same base dimmed, so the two effects compose instead of racing.
 		if active {
-			setBase(addCmd, p.id)
-			addCmd("set-option", "-p", "-t", p.id, "@tabby_pane_dim", "0")
+			setBase(setStyle, unsetStyle, p.id)
+			setDim(p.id, "0")
 		} else {
 			// Dim the TINTED base, not the raw terminal bg, so an inactive pane
 			// keeps its session color while still reading as unfocused. Falls back
@@ -2454,16 +2620,16 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 				paneDimTint = computeDimBG(paneTint, opacity)
 			}
 			if paneDimTint != "" {
-				addCmd("set-option", "-p", "-t", p.id, "window-style", styleWithFg(inactiveFg, paneDimTint))
+				setStyle(p.id, "window-style", styleWithFg(inactiveFg, paneDimTint))
 				// Keep the active-style in step with the tint (undimmed): this pane
 				// paints from it the instant it takes focus.
 				if paneTint != "" {
-					addCmd("set-option", "-p", "-t", p.id, "window-active-style", styleWithFg(baseFg, paneTint))
+					setStyle(p.id, "window-active-style", styleWithFg(baseFg, paneTint))
 				}
 			} else {
-				setBase(addCmd, p.id)
+				setBase(setStyle, unsetStyle, p.id)
 			}
-			addCmd("set-option", "-p", "-t", p.id, "@tabby_pane_dim", "1")
+			setDim(p.id, "1")
 		}
 	}
 	if len(argv) > 0 {
@@ -2501,7 +2667,15 @@ func (c *Coordinator) applyBorderDim(opacity float64) {
 
 	termBG := c.GetTerminalBg()
 	dimFg := desaturateHex(fgColor, opacity, termBG)
-	exec.Command("tmux", "set-option", "-g", "pane-border-style", "fg="+dimFg).Run()
+	want := "fg=" + dimFg
+	// Skip the write when the border already carries this style: setting it
+	// repaints every border on each housekeeping tick otherwise.
+	if cur, err := exec.Command("tmux", "show-options", "-gqv", "pane-border-style").Output(); err == nil {
+		if strings.TrimSpace(string(cur)) == want {
+			return
+		}
+	}
+	exec.Command("tmux", "set-option", "-g", "pane-border-style", want).Run()
 }
 
 // PreserveWindowNames locks automatic-rename for windows whose name contains "|"
