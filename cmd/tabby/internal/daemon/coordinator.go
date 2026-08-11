@@ -2235,6 +2235,30 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 		tintByWindow[winID] = bg
 		return bg
 	}
+	opacity := cfg.PaneHeader.DimOpacity
+	if opacity <= 0 || opacity > 1 {
+		opacity = 0.6
+	}
+	dimBG := computeDimBG(termBG, opacity)
+
+	// The global window-style/window-active-style carry a fg= (see ApplyTheme).
+	// A per-pane style that sets only bg= therefore CHANGES the foreground: the
+	// pane's text falls back to the terminal default instead of the global's fg.
+	// Programs that emit no explicit color of their own -- Claude Code among them
+	// -- visibly recolor as the per-pane option is written and unset, which reads
+	// as flicker on every window switch. Mirror the global's fg in every per-pane
+	// write so only the background ever changes.
+	baseFg := c.theme.ActiveFg
+	if baseFg == "" {
+		baseFg = "#ffffff"
+	}
+	inactiveFg := dimColor(baseFg, opacity)
+	styleWithFg := func(fg, bg string) string {
+		if fg == "" {
+			return fmt.Sprintf("bg=%s", bg)
+		}
+		return fmt.Sprintf("fg=%s,bg=%s", fg, bg)
+	}
 	// applyBase sets a pane to the undimmed background: the tint when there is
 	// one, otherwise tmux's inherited default.
 	// tmux paints the FOCUSED pane from window-active-style and every other pane
@@ -2243,8 +2267,8 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	// actually looking at untinted, so both properties must be kept in step.
 	setBase := func(addCmd func(...string), paneID string) {
 		if tintBG := tintForPane(paneID); tintBG != "" {
-			addCmd("set-option", "-p", "-t", paneID, "window-style", fmt.Sprintf("bg=%s", tintBG))
-			addCmd("set-option", "-p", "-t", paneID, "window-active-style", fmt.Sprintf("bg=%s", tintBG))
+			addCmd("set-option", "-p", "-t", paneID, "window-style", styleWithFg(inactiveFg, tintBG))
+			addCmd("set-option", "-p", "-t", paneID, "window-active-style", styleWithFg(baseFg, tintBG))
 		} else {
 			addCmd("set-option", "-p", "-u", "-t", paneID, "window-style")
 			addCmd("set-option", "-p", "-u", "-t", paneID, "window-active-style")
@@ -2258,8 +2282,8 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 				// Dimming is off, but the tint (if any) still applies — a blanket
 				// unset here would wipe it every time this ran.
 				if tintBG := tintForPane(p.id); tintBG != "" {
-					exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-style", fmt.Sprintf("bg=%s", tintBG)).Run()
-					exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-active-style", fmt.Sprintf("bg=%s", tintBG)).Run()
+					exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-style", styleWithFg(baseFg, tintBG)).Run()
+					exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-active-style", styleWithFg(baseFg, tintBG)).Run()
 				} else {
 					exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
 					exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-active-style").Run()
@@ -2297,11 +2321,6 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 		return
 	}
 
-	opacity := cfg.PaneHeader.DimOpacity
-	if opacity <= 0 || opacity > 1 {
-		opacity = 0.6
-	}
-	dimBG := computeDimBG(termBG, opacity)
 
 	// Batch all per-pane set-option calls into a single tmux invocation via
 	// the `;` separator. For a 2-pane window that drops 4 tmux execs (~20ms)
@@ -2343,11 +2362,11 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 				paneDimTint = computeDimBG(paneTint, opacity)
 			}
 			if paneDimTint != "" {
-				addCmd("set-option", "-p", "-t", p.id, "window-style", fmt.Sprintf("bg=%s", paneDimTint))
+				addCmd("set-option", "-p", "-t", p.id, "window-style", styleWithFg(inactiveFg, paneDimTint))
 				// Keep the active-style in step with the tint (undimmed): this pane
 				// paints from it the instant it takes focus.
 				if paneTint != "" {
-					addCmd("set-option", "-p", "-t", p.id, "window-active-style", fmt.Sprintf("bg=%s", paneTint))
+					addCmd("set-option", "-p", "-t", p.id, "window-active-style", styleWithFg(baseFg, paneTint))
 				}
 			} else {
 				setBase(addCmd, p.id)
@@ -5590,7 +5609,14 @@ func (c *Coordinator) ApplyThemeToPane(paneID string) {
 				}
 			}
 		}
-		style := fmt.Sprintf("bg=%s", bg)
+		// Carry the same fg the global style and ApplyPaneDimming use. Writing
+		// bg= alone here would strip the foreground back off on every theme pass,
+		// recoloring the text of programs that emit no color of their own.
+		baseFg := c.theme.ActiveFg
+		if baseFg == "" {
+			baseFg = "#ffffff"
+		}
+		style := fmt.Sprintf("fg=%s,bg=%s", baseFg, bg)
 		exec.Command("tmux", "set-option", "-p", "-t", paneID, "window-style", style).Run()
 		exec.Command("tmux", "set-option", "-p", "-t", paneID, "window-active-style", style).Run()
 	}
