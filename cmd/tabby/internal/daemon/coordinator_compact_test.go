@@ -19,6 +19,10 @@ func TestMain(m *testing.M) {
 	if stateDir != "" {
 		os.Setenv("TABBY_STATE_DIR", stateDir)
 	}
+	// Block tmux UI spawns for the same reason. The test binary inherits $TMUX
+	// from the developer's shell, so a display-popup does not harmlessly fail —
+	// it opens a real popup in the middle of their screen mid-run.
+	os.Setenv("TABBY_NO_UI_SPAWN", "1")
 	zone.NewGlobal()
 	code := m.Run()
 	if stateDir != "" {

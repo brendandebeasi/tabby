@@ -23,11 +23,13 @@
 //  4. Pre-existing click routes (FeedLine, etc.) still work — regression
 //     guard against the new branch swallowing every click.
 //
-// Tests do NOT spawn tmux; the launchQuestionPopup goroutine attempts an
-// exec.Command("tmux", "display-popup", ...) that will simply fail and
-// exit on a system without a daemon-attached session. The tests assert on
-// the synchronous "should this click be handled" return value, which is
-// independent of the goroutine outcome.
+// Tests do NOT spawn tmux: TestMain sets TABBY_NO_UI_SPAWN=1, so
+// launchQuestionPopup returns before exec'ing display-popup. That guard is
+// load-bearing — the earlier assumption that the popup "simply fails" was
+// wrong. The test binary inherits $TMUX from the developer's shell, so the
+// popup opened on their real server, mid-run, in the middle of the screen.
+// The tests assert on the synchronous "should this click be handled" return
+// value, which is independent of the popup either way.
 package daemon
 
 import (
@@ -98,7 +100,7 @@ func TestRenderPetWidget_QuestionTeaser_AbsentWhenNoPending(t *testing.T) {
 	// the teaser without a pending question.
 	for _, frame := range []int{0, 50, 100, 150} {
 		c.pet.AnimFrame = frame
-		out := c.renderPetWidget(30, true)
+		out := c.renderPetWidget("", 30, true)
 		assert.NotContains(t, out, teaserSubstring,
 			"frame=%d should not show teaser when PendingQuestion==nil", frame)
 		assert.Equal(t, -1, c.petLayout.QuestionPromptLine,
@@ -131,7 +133,7 @@ func TestRenderPetWidget_QuestionTeaser_AppearsOnCadence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		c.pet.AnimFrame = tc.frame
-		out := c.renderPetWidget(30, true)
+		out := c.renderPetWidget("", 30, true)
 		if tc.wantOn {
 			assert.Contains(t, out, teaserSubstring,
 				"frame=%d (%s) expected teaser ON", tc.frame, tc.comment)
@@ -157,7 +159,7 @@ func TestRenderPetWidget_QuestionTeaser_OptedOutSuppresses(t *testing.T) {
 	c.pet.QAOptedOut = true
 	c.pet.AnimFrame = 0 // would normally fire
 
-	out := c.renderPetWidget(30, true)
+	out := c.renderPetWidget("", 30, true)
 	assert.NotContains(t, out, teaserSubstring,
 		"teaser must not render when QAOptedOut=true")
 	assert.Equal(t, -1, c.petLayout.QuestionPromptLine,
@@ -174,7 +176,7 @@ func TestRenderPetWidget_QuestionTeaser_DisabledByConfigN0(t *testing.T) {
 
 	for _, frame := range []int{0, 50, 100, 150, 200, 300} {
 		c.pet.AnimFrame = frame
-		out := c.renderPetWidget(30, true)
+		out := c.renderPetWidget("", 30, true)
 		assert.NotContains(t, out, teaserSubstring,
 			"frame=%d should not show teaser when TeaserEveryNThoughts==0", frame)
 		assert.Equal(t, -1, c.petLayout.QuestionPromptLine,
@@ -193,7 +195,7 @@ func TestRenderPetWidget_QuestionTeaser_PromptLineMatchesRow(t *testing.T) {
 	c.pet.PendingQuestion = pendingChoice(petTimeNow)
 	c.pet.AnimFrame = 0 // teaser fires
 
-	out := c.renderPetWidget(30, true)
+	out := c.renderPetWidget("", 30, true)
 	mustOK(t, assert.Contains(t, out, teaserSubstring))
 
 	promptLine := c.petLayout.QuestionPromptLine
@@ -541,7 +543,7 @@ func TestRenderPetWidget_DebugBar_LayoutAssignsDebugLine3(t *testing.T) {
 	c := newPetRenderCoordinator(t)
 	c.config.Widgets.Pet.DebugBar = true
 
-	_ = c.renderPetWidget(40, false)
+	_ = c.renderPetWidget("", 40, false)
 
 	assert.Greater(t, c.petLayout.DebugLine1, 0, "DebugLine1 should be set when debug_bar is enabled")
 	assert.Greater(t, c.petLayout.DebugLine2, c.petLayout.DebugLine1, "DebugLine2 must follow DebugLine1")

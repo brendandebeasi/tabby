@@ -1968,6 +1968,19 @@ func paneWindowID(paneID string) string {
 func (c *Coordinator) tintColorForWindow(windowID string) string {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
+	return c.tintColorForWindowLocked(windowID)
+}
+
+// tintColorForWindowLocked is tintColorForWindow's core, for callers that
+// ALREADY hold stateMu (the RenderForClient family holds it for the whole
+// render). Taking the lock again there would deadlock under a waiting writer.
+func (c *Coordinator) tintColorForWindowLocked(windowID string) string {
+	// A sidebar's client key carries an optional "#instance" suffix (see
+	// RenderTarget.Key) — strip it so a web/popup sidebar tints like the
+	// in-tmux one for the same window.
+	if i := strings.IndexByte(windowID, '#'); i >= 0 {
+		windowID = windowID[:i]
+	}
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
 			if win.ID == windowID {
@@ -1979,6 +1992,52 @@ func (c *Coordinator) tintColorForWindow(windowID string) string {
 		}
 	}
 	return ""
+}
+
+// uiSpawnBlocked reports whether this process may open tmux UI (popups, menus).
+// Under `go test` it may not: the test binary inherits $TMUX from the developer's
+// shell, so a display-popup does NOT harmlessly fail as once assumed — it opens
+// on their real server, in the middle of their screen, mid-run. TestMain sets
+// this; an env var keeps the `testing` package out of the production build.
+func uiSpawnBlocked() bool {
+	return os.Getenv("TABBY_NO_UI_SPAWN") == "1"
+}
+
+// chromeBGForClient is GetTerminalBg tinted for one sidebar's window: the
+// background the sidebar's own cells (tree branches, rows, fills) should paint
+// with. Those cells emit an explicit bg on every character, so they do not
+// inherit the pane tint the way content panes do and have to be tinted at the
+// point they resolve their color.
+//
+// Callers must hold stateMu.
+func (c *Coordinator) chromeBGForClientLocked(clientID string) string {
+	return c.tintedChromeBGLocked(clientID, c.GetTerminalBg())
+}
+
+// tintedChromeBG blends a chrome background (sidebar, headers) toward the
+// window's tab color, matching what the content panes get. Renderers paint
+// these backgrounds EXPLICITLY on every cell, so unlike a content pane they
+// cannot inherit the tint from window-style — an untinted sidebar would sit
+// next to a tinted pane with a visible seam. Returns bg unchanged when the
+// feature is off or the window has no color.
+//
+// Callers must hold stateMu.
+func (c *Coordinator) tintedChromeBGLocked(windowID, bg string) string {
+	if bg == "" || windowID == "" {
+		return bg
+	}
+	cfg := c.GetConfig()
+	if cfg == nil || !cfg.PaneHeader.Tint {
+		return bg
+	}
+	tc := c.tintColorForWindowLocked(windowID)
+	if tc == "" {
+		return bg
+	}
+	if tinted := computeTintBG(bg, tc, cfg.PaneHeader.TintOpacity); tinted != "" {
+		return tinted
+	}
+	return bg
 }
 
 // computeTintBG blends a terminal background toward a window's tab color, so a
@@ -10190,7 +10249,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	headerContent, headerRegions := c.generateSidebarHeader(width, clientID)
 	headerLines := strings.Count(headerContent, "\n")
 
-	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(width, false, false)
+	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(clientID, width, false, false)
 	topWidgetLines := strings.Count(topWidgets, "\n")
 	bottomWidgetLines := strings.Count(bottomWidgets, "\n")
 
@@ -10207,7 +10266,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	// suppressing it often keeps Whiskers visible when tabs are otherwise
 	// just barely overflowing.
 	if maxMainLines < mainContentLines && c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.DebugBar {
-		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(width, false, true)
+		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(clientID, width, false, true)
 		topWidgetLines = strings.Count(topWidgets, "\n")
 		bottomWidgetLines = strings.Count(bottomWidgets, "\n")
 		maxMainLines = height - headerLines - topWidgetLines - bottomWidgetLines
@@ -10219,7 +10278,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	// Auto-hide pet when viewport is too small to show all tabs even after
 	// dropping the debug bar.
 	if maxMainLines < mainContentLines && c.config.Widgets.Pet.Enabled {
-		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(width, true, false)
+		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(clientID, width, true, false)
 		topWidgetLines = strings.Count(topWidgets, "\n")
 		bottomWidgetLines = strings.Count(bottomWidgets, "\n")
 		maxMainLines = height - headerLines - topWidgetLines - bottomWidgetLines
@@ -10316,6 +10375,11 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		sidebarBg = c.theme.SidebarBg
 		terminalBg = c.theme.TerminalBg
 	}
+	// Tint the chrome to match the window's content panes. A sidebar's client
+	// key IS its window id (RenderTarget.Key), so clientID addresses the window
+	// directly here.
+	sidebarBg = c.tintedChromeBGLocked(clientID, sidebarBg)
+	terminalBg = c.tintedChromeBGLocked(clientID, terminalBg)
 
 	return &daemon.RenderPayload{
 		Content:       fullContent,
@@ -11129,6 +11193,8 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		sidebarBg = c.theme.SidebarBg
 		terminalBg = c.theme.TerminalBg
 	}
+	sidebarBg = c.tintedChromeBGLocked(windowID, sidebarBg)
+	terminalBg = c.tintedChromeBGLocked(windowID, terminalBg)
 
 	if c.config.PaneHeader.CustomBorder {
 		return &daemon.RenderPayload{
@@ -11623,6 +11689,12 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 	if c.theme != nil {
 		sidebarBg = c.theme.SidebarBg
 		terminalBg = c.theme.TerminalBg
+	}
+	// foundWindow is the window owning this pane — the header sits directly
+	// above the content pane, so it must carry that pane's tint.
+	if foundWindow != nil {
+		sidebarBg = c.tintedChromeBGLocked(foundWindow.ID, sidebarBg)
+		terminalBg = c.tintedChromeBGLocked(foundWindow.ID, terminalBg)
 	}
 
 	if c.config.PaneHeader.CustomBorder {
@@ -12149,14 +12221,14 @@ func (c *Coordinator) sidebarRenderGroups() []grouping.GroupedWindows {
 // appendDashboardRow renders the persistent, clickable "0. Dashboard" entry at
 // the top of the sidebar (above the first group) and registers its click region
 // (action dashboard_toggle). It is highlighted while the dashboard is active.
-func (c *Coordinator) appendDashboardRow(s *strings.Builder, regions *[]daemon.ClickableRegion, currentLine *int, width int, inactiveFg, activeIndicator string) {
+func (c *Coordinator) appendDashboardRow(s *strings.Builder, regions *[]daemon.ClickableRegion, currentLine *int, clientID string, width int, inactiveFg, activeIndicator string) {
 	active := c.dashboardWindowID != ""
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Bold(true)
 	label := " 0. Dashboard"
 	if active {
 		label = " 0. Dashboard " + activeIndicator
 	}
-	if bg := c.GetTerminalBg(); bg != "" {
+	if bg := c.chromeBGForClientLocked(clientID); bg != "" {
 		style = style.Background(lipgloss.Color(bg))
 	}
 	s.WriteString(style.Render(label) + "\n")
@@ -12229,6 +12301,10 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	if treeBg == "" {
 		treeBg = c.GetTerminalBg()
 	}
+	// Tint the branch glyphs with the rest of the sidebar. They paint an
+	// explicit bg on every cell, so without this they'd stay at the raw theme
+	// color and stripe the tinted background.
+	treeBg = c.tintedChromeBGLocked(clientID, treeBg)
 	if treeBg != "" {
 		treeStyle = treeStyle.Background(lipgloss.Color(treeBg))
 	}
@@ -12252,7 +12328,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	}
 
 	// Persistent "0. Dashboard" entry above the first group.
-	c.appendDashboardRow(&s, &regions, &currentLine, width, inactiveFg, activeIndicator)
+	c.appendDashboardRow(&s, &regions, &currentLine, clientID, width, inactiveFg, activeIndicator)
 
 	// Iterate over grouped windows (synthetic remembered list while gathered),
 	// with minimized tabs collected into a muted "Minimized" group at the bottom.
@@ -13522,7 +13598,7 @@ type widgetEntry struct {
 
 // collectWidgetEntries gathers all enabled widgets and action buttons into
 // a sorted slice of widgetEntry, ready for zone-based rendering.
-func (c *Coordinator) collectWidgetEntries(width int, skipPet, skipDebugBar bool) []widgetEntry {
+func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, skipDebugBar bool) []widgetEntry {
 	var entries []widgetEntry
 
 	// Clock widget
@@ -13535,7 +13611,7 @@ func (c *Coordinator) collectWidgetEntries(width int, skipPet, skipDebugBar bool
 			name:     "clock",
 			zone:     pos,
 			priority: c.config.Widgets.Clock.Priority,
-			content:  constrainWidgetWidth(c.renderClockWidget(width), width),
+			content:  constrainWidgetWidth(c.renderClockWidget(clientID, width), width),
 		})
 	}
 
@@ -13549,7 +13625,7 @@ func (c *Coordinator) collectWidgetEntries(width int, skipPet, skipDebugBar bool
 			name:     "pet",
 			zone:     pos,
 			priority: c.config.Widgets.Pet.Priority,
-			content:  c.renderPetWidget(width, skipDebugBar),
+			content:  c.renderPetWidget(clientID, width, skipDebugBar),
 		})
 	}
 
@@ -13605,7 +13681,7 @@ func (c *Coordinator) collectWidgetEntries(width int, skipPet, skipDebugBar bool
 			name:     "teamclaude",
 			zone:     pos,
 			priority: c.config.Widgets.TeamClaude.Priority,
-			content:  constrainWidgetWidth(c.renderTeamClaudeWidget(width), width),
+			content:  constrainWidgetWidth(c.renderTeamClaudeWidget(clientID, width), width),
 		})
 	}
 
@@ -13714,8 +13790,8 @@ func (c *Coordinator) renderWidgetZone(entries []widgetEntry, width int) (string
 // generateWidgetZones renders all widgets into top and bottom zones,
 // plus resize buttons that always appear at the very bottom.
 // Returns: topContent, topRegions, bottomContent, bottomRegions
-func (c *Coordinator) generateWidgetZones(width int, skipPet, skipDebugBar bool) (string, []daemon.ClickableRegion, string, []daemon.ClickableRegion) {
-	entries := c.collectWidgetEntries(width, skipPet, skipDebugBar)
+func (c *Coordinator) generateWidgetZones(clientID string, width int, skipPet, skipDebugBar bool) (string, []daemon.ClickableRegion, string, []daemon.ClickableRegion) {
+	entries := c.collectWidgetEntries(clientID, width, skipPet, skipDebugBar)
 
 	// Split into top and bottom zones
 	var topEntries, bottomEntries []widgetEntry
@@ -13749,7 +13825,7 @@ func (c *Coordinator) generateWidgetZones(width int, skipPet, skipDebugBar bool)
 }
 
 // renderClockWidget renders the clock/date widget
-func (c *Coordinator) renderClockWidget(width int) string {
+func (c *Coordinator) renderClockWidget(clientID string, width int) string {
 	clock := c.config.Widgets.Clock
 	now := time.Now()
 
@@ -13767,7 +13843,7 @@ func (c *Coordinator) renderClockWidget(width int) string {
 	// Paint bg explicitly so trailing/inter-widget cells don't revert to
 	// terminal default after a theme flip. Uses the coordinator's resolved
 	// terminal bg (config override > theme > detector).
-	if bg := c.GetTerminalBg(); bg != "" {
+	if bg := c.chromeBGForClientLocked(clientID); bg != "" {
 		style = style.Background(lipgloss.Color(bg))
 	}
 
@@ -13776,7 +13852,7 @@ func (c *Coordinator) renderClockWidget(width int) string {
 	if dividerFg != "" {
 		dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
 	}
-	if bg := c.GetTerminalBg(); bg != "" {
+	if bg := c.chromeBGForClientLocked(clientID); bg != "" {
 		dividerStyle = dividerStyle.Background(lipgloss.Color(bg))
 	}
 
@@ -14295,7 +14371,7 @@ func teamClaudeTruncateName(name string, max int) string {
 // renderTeamClaudeWidget renders per-account Claude quota left, from the cached
 // teamclaude proxy status. Data is fetched off the render path by
 // RefreshTeamClaude; here we only read the cache.
-func (c *Coordinator) renderTeamClaudeWidget(width int) string {
+func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string {
 	tcCfg := c.config.Widgets.TeamClaude
 	if !tcCfg.Enabled {
 		return ""
@@ -14424,7 +14500,7 @@ func (c *Coordinator) renderTeamClaudeWidget(width int) string {
 		// the number stays legible on both light and dark terminals. Bars are
 		// sized to width here so the composed line never exceeds `width` and
 		// never hits constrainWidgetWidth's non-ANSI-aware truncation.
-		termBg := c.GetTerminalBg()
+		termBg := c.chromeBGForClientLocked(clientID)
 		barColorFor := func(pct int) string {
 			if tcCfg.BarFg != "" {
 				return tcCfg.BarFg
@@ -14920,7 +14996,7 @@ func buildAirRow(sprites map[int]string, safePlayWidth int) string {
 //   - Play area (3 lines: high air, low air, ground)
 //   - Divider
 //   - Stats: hunger | happiness | life
-func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
+func (c *Coordinator) renderPetWidget(clientID string, width int, skipDebugBar bool) string {
 	petCfg := c.config.Widgets.Pet
 	if !petCfg.Enabled {
 		return ""
@@ -15090,7 +15166,7 @@ func (c *Coordinator) renderPetWidget(width int, skipDebugBar bool) string {
 	// the pet widget painted with the new theme.
 	if petCfg.Bg != "" && !strings.EqualFold(petCfg.Bg, "transparent") {
 		foodStyle = foodStyle.Background(lipgloss.Color(petCfg.Bg))
-	} else if bg := c.GetTerminalBg(); bg != "" {
+	} else if bg := c.chromeBGForClientLocked(clientID); bg != "" {
 		foodStyle = foodStyle.Background(lipgloss.Color(bg))
 	}
 	foodIcon := zone.Mark("pet:drop_food", foodStyle.Render(sprites.Food+" Feed"))
@@ -18180,6 +18256,9 @@ func wrapToWidth(s string, width int) []string {
 // reshaping the call site.
 func (c *Coordinator) launchQuestionPopup(clientID string) {
 	_ = clientID
+	if uiSpawnBlocked() {
+		return
+	}
 	sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
 	sessID := strings.TrimSpace(string(sessIDOut))
 	if sessID == "" {
@@ -18212,6 +18291,9 @@ func (c *Coordinator) launchQuestionPopup(clientID string) {
 // on confirm, so this is fire-and-forget. Targeted at the tapping client's TTY
 // (-c) so it lands on the right screen in a multi-client (phone) setup.
 func (c *Coordinator) launchCloseConfirmPopup(target, userTTY string) {
+	if uiSpawnBlocked() {
+		return
+	}
 	popupBin := rendererExecPrefix("tabby-close-confirm", "close-confirm")
 	if popupBin == "" || target == "" {
 		return
@@ -18243,6 +18325,9 @@ func (c *Coordinator) launchCloseConfirmPopup(target, userTTY string) {
 // We don't block on it — display-popup -E keeps it attached and closes on Esc.
 func (c *Coordinator) launchDegradedModelsPopup(clientID string) {
 	_ = clientID
+	if uiSpawnBlocked() {
+		return
+	}
 	sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
 	sessID := strings.TrimSpace(string(sessIDOut))
 	if sessID == "" {
