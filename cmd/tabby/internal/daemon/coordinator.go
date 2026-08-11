@@ -1951,6 +1951,93 @@ func clampColorByte(v int) int {
 // opacity is the fraction of the original color retained (0.0–1.0); the rest
 // is contributed by white (light themes) or black (dark themes).
 // Returns a hex color string like "#1a1a1a", or "" if terminalBG is empty.
+// paneWindowID resolves the window a pane belongs to, for callers that only have
+// a pane id. Returns "" when tmux cannot resolve it.
+func paneWindowID(paneID string) string {
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{window_id}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// tintColorForWindow returns the color a window's panes should be tinted with:
+// the window's own custom color if it has one, otherwise its group's theme
+// color. Empty means "no tint" — the caller must leave window-style alone.
+// Takes stateMu.RLock, so it must not be called with the lock already held.
+func (c *Coordinator) tintColorForWindow(windowID string) string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	for _, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.ID == windowID {
+				if win.CustomColor != "" {
+					return win.CustomColor
+				}
+				return group.Theme.Bg
+			}
+		}
+	}
+	return ""
+}
+
+// computeTintBG blends a terminal background toward a window's tab color, so a
+// pane carries a faint wash identifying which session it belongs to. Returns ""
+// when either color is missing or malformed — the caller must then leave
+// window-style alone rather than paint an arbitrary background (a window with no
+// tab color is a deliberate no-op, not a blend toward nothing).
+//
+// opacity is the tab color's share of the mix; it is kept low by default because
+// this background sits behind all syntax highlighting.
+func computeTintBG(terminalBG, tabColor string, opacity float64) string {
+	tb, ok := parseHexRGB(terminalBG)
+	if !ok {
+		return ""
+	}
+	tc, ok := parseHexRGB(tabColor)
+	if !ok {
+		return ""
+	}
+	if opacity <= 0 {
+		return ""
+	}
+	if opacity > 1 {
+		opacity = 1
+	}
+	inv := 1.0 - opacity
+	r := int(math.Round(float64(tb[0])*inv + float64(tc[0])*opacity))
+	g := int(math.Round(float64(tb[1])*inv + float64(tc[1])*opacity))
+	b := int(math.Round(float64(tb[2])*inv + float64(tc[2])*opacity))
+	return fmt.Sprintf("#%02x%02x%02x", clamp8(r), clamp8(g), clamp8(b))
+}
+
+// parseHexRGB parses "#rrggbb" (or "rrggbb") into 8-bit components.
+func parseHexRGB(v string) ([3]int, bool) {
+	hex := strings.TrimPrefix(strings.TrimSpace(v), "#")
+	if len(hex) != 6 {
+		return [3]int{}, false
+	}
+	var out [3]int
+	for i := 0; i < 3; i++ {
+		n, err := strconv.ParseInt(hex[i*2:i*2+2], 16, 32)
+		if err != nil {
+			return [3]int{}, false
+		}
+		out[i] = int(n)
+	}
+	return out, true
+}
+
+func clamp8(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return v
+}
+
 func computeDimBG(terminalBG string, opacity float64) string {
 	if terminalBG == "" {
 		return ""
@@ -2117,11 +2204,48 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 		return
 	}
 
+	// Resolve this window's tint ONCE. tintBG is the tinted-but-undimmed
+	// background; "" means no tint (feature off, or the window has no color), in
+	// which case every path below falls back to unsetting window-style exactly as
+	// it did before. Tint and dim both write window-style, so they must COMPOSE
+	// here — dimming blends from the tinted base, not from the raw terminal bg —
+	// otherwise whichever ran last would win and the pane would flicker on every
+	// switch.
+	tintBG := ""
+	if cfg.PaneHeader.Tint {
+		if tc := c.tintColorForWindow(activeWindowID); tc != "" {
+			tintBG = computeTintBG(c.GetTerminalBg(), tc, cfg.PaneHeader.TintOpacity)
+		}
+	}
+	// applyBase sets a pane to the undimmed background: the tint when there is
+	// one, otherwise tmux's inherited default.
+	// tmux paints the FOCUSED pane from window-active-style and every other pane
+	// from window-style, and ApplyThemeToPane sets both per-pane to the plain
+	// theme bg. Writing only window-style therefore leaves the pane the user is
+	// actually looking at untinted, so both properties must be kept in step.
+	setBase := func(addCmd func(...string), paneID string) {
+		if tintBG != "" {
+			addCmd("set-option", "-p", "-t", paneID, "window-style", fmt.Sprintf("bg=%s", tintBG))
+			addCmd("set-option", "-p", "-t", paneID, "window-active-style", fmt.Sprintf("bg=%s", tintBG))
+		} else {
+			addCmd("set-option", "-p", "-u", "-t", paneID, "window-style")
+			addCmd("set-option", "-p", "-u", "-t", paneID, "window-active-style")
+		}
+	}
+
 	if !cfg.PaneHeader.DimInactive {
 		// Dim disabled — clear any leftover styles and dim flags
 		for _, p := range panes {
 			if !isDimSkipPane(p) {
-				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
+				// Dimming is off, but the tint (if any) still applies — a blanket
+				// unset here would wipe it every time this ran.
+				if tintBG != "" {
+					exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-style", fmt.Sprintf("bg=%s", tintBG)).Run()
+					exec.Command("tmux", "set-option", "-p", "-t", p.id, "window-active-style", fmt.Sprintf("bg=%s", tintBG)).Run()
+				} else {
+					exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-style").Run()
+					exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "window-active-style").Run()
+				}
 			}
 			if !isDimUtilityPane(p) {
 				exec.Command("tmux", "set-option", "-p", "-u", "-t", p.id, "@tabby_pane_dim").Run()
@@ -2162,6 +2286,14 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	}
 	dimBG := computeDimBG(termBG, opacity)
 
+	// Dim the TINTED base, not the raw terminal bg, so an inactive pane keeps its
+	// session color while still reading as unfocused. Falls back to the plain dim
+	// when there is no tint.
+	dimTintBG := dimBG
+	if tintBG != "" {
+		dimTintBG = computeDimBG(tintBG, opacity)
+	}
+
 	// Batch all per-pane set-option calls into a single tmux invocation via
 	// the `;` separator. For a 2-pane window that drops 4 tmux execs (~20ms)
 	// per tab switch down to 1. Skipped panes contribute nothing to the args.
@@ -2186,15 +2318,22 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 			// The daemon reads @tabby_pane_dim from the content pane to decide colors.
 			continue
 		}
-		// Content pane: set window-style AND dim flag
+		// Content pane: set window-style AND dim flag. The active pane shows the
+		// undimmed base (tinted when the feature is on); an inactive pane shows
+		// that same base dimmed, so the two effects compose instead of racing.
 		if active {
-			addCmd("set-option", "-p", "-u", "-t", p.id, "window-style")
+			setBase(addCmd, p.id)
 			addCmd("set-option", "-p", "-t", p.id, "@tabby_pane_dim", "0")
 		} else {
-			if dimBG == "" {
-				addCmd("set-option", "-p", "-u", "-t", p.id, "window-style")
+			if dimTintBG != "" {
+				addCmd("set-option", "-p", "-t", p.id, "window-style", fmt.Sprintf("bg=%s", dimTintBG))
+				// Keep the active-style in step with the tint (undimmed): this pane
+				// paints from it the instant it takes focus.
+				if tintBG != "" {
+					addCmd("set-option", "-p", "-t", p.id, "window-active-style", fmt.Sprintf("bg=%s", tintBG))
+				}
 			} else {
-				addCmd("set-option", "-p", "-t", p.id, "window-style", fmt.Sprintf("bg=%s", dimBG))
+				setBase(addCmd, p.id)
 			}
 			addCmd("set-option", "-p", "-t", p.id, "@tabby_pane_dim", "1")
 		}
@@ -5419,7 +5558,21 @@ func (c *Coordinator) ApplyThemeToPane(paneID string) {
 
 	if bg != "" {
 		// Set pane-specific window-style to match the theme background
-		// This makes transparency in renderers work correctly
+		// This makes transparency in renderers work correctly.
+		//
+		// When the tab-color tint is enabled, blend the theme bg toward this
+		// pane's window color first: otherwise this would repaint the plain
+		// theme background over a tint ApplyPaneDimming had just applied, and
+		// the tint would flicker away on every theme pass.
+		if cfg := c.GetConfig(); cfg != nil && cfg.PaneHeader.Tint {
+			if winID := paneWindowID(paneID); winID != "" {
+				if tc := c.tintColorForWindow(winID); tc != "" {
+					if tinted := computeTintBG(bg, tc, cfg.PaneHeader.TintOpacity); tinted != "" {
+						bg = tinted
+					}
+				}
+			}
+		}
 		style := fmt.Sprintf("bg=%s", bg)
 		exec.Command("tmux", "set-option", "-p", "-t", paneID, "window-style", style).Run()
 		exec.Command("tmux", "set-option", "-p", "-t", paneID, "window-active-style", style).Run()

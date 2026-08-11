@@ -253,6 +253,11 @@ func applyDefaults(cfg *Config) {
 	if cfg.PaneHeader.DimOpacity == 0 {
 		cfg.PaneHeader.DimOpacity = 0.7
 	}
+	if cfg.PaneHeader.TintOpacity == 0 {
+		// Deliberately subtle: the terminal bg is the backdrop for all syntax
+		// highlighting, and a heavier wash wrecks contrast on light themes.
+		cfg.PaneHeader.TintOpacity = 0.08
+	}
 	if cfg.Sidebar.NewTabInheritSSH == nil {
 		// Default: a new tab opened from an ssh session re-runs that ssh so it
 		// lands on the same host and inherits the host's group/color.

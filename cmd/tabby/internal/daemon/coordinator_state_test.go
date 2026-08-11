@@ -996,3 +996,65 @@ func TestAppearanceAutoHas(t *testing.T) {
 		t.Fatal("absent provenance must default to user-owned")
 	}
 }
+
+func TestComputeTintBG(t *testing.T) {
+	// Light base (the real observed pane bg) blended toward tabby's green.
+	if got := computeTintBG("#faf4ed", "#bcce5a", 0.08); got != "#f5f1e1" {
+		t.Fatalf("light base: got %s want #f5f1e1", got)
+	}
+	// Dark base: the blend must move toward the tab color, not assume a light bg.
+	if got := computeTintBG("#191724", "#bcce5a", 0.08); got != "#262628" {
+		t.Fatalf("dark base: got %s want #262628", got)
+	}
+	// A window with no tab color is a defined no-op, NOT a blend toward nothing.
+	if got := computeTintBG("#faf4ed", "", 0.08); got != "" {
+		t.Fatalf("no tab color must return empty, got %s", got)
+	}
+	if got := computeTintBG("", "#bcce5a", 0.08); got != "" {
+		t.Fatalf("no terminal bg must return empty, got %s", got)
+	}
+	// Malformed input must not paint an arbitrary background.
+	if got := computeTintBG("#faf4ed", "not-a-color", 0.08); got != "" {
+		t.Fatalf("malformed tab color must return empty, got %s", got)
+	}
+	// Zero/negative opacity disables the tint entirely.
+	if got := computeTintBG("#faf4ed", "#bcce5a", 0); got != "" {
+		t.Fatalf("zero opacity must return empty, got %s", got)
+	}
+	// Opacity 1 is the tab color itself; >1 is clamped rather than overflowing.
+	if got := computeTintBG("#faf4ed", "#bcce5a", 1); got != "#bcce5a" {
+		t.Fatalf("full opacity: got %s want #bcce5a", got)
+	}
+	if got := computeTintBG("#faf4ed", "#bcce5a", 2); got != "#bcce5a" {
+		t.Fatalf("clamped opacity: got %s want #bcce5a", got)
+	}
+}
+
+// Tint and dim both write window-style, so they must compose: an inactive pane
+// shows the TINTED base dimmed, not the raw terminal bg dimmed (which would drop
+// the session color) and not the undimmed tint (which would lose the focus cue).
+func TestTintComposesWithDim(t *testing.T) {
+	const termBG = "#faf4ed"
+	const tab = "#bcce5a"
+
+	tintBG := computeTintBG(termBG, tab, 0.08)
+	if tintBG == "" {
+		t.Fatal("tint should be produced for a valid base and tab color")
+	}
+	plainDim := computeDimBG(termBG, 0.7)
+	tintDim := computeDimBG(tintBG, 0.7)
+
+	if tintDim == "" || plainDim == "" {
+		t.Fatal("dim should be produced for both bases")
+	}
+	// The dimmed tint must differ from the dimmed plain background, or the
+	// session color is invisible on inactive panes.
+	if tintDim == plainDim {
+		t.Fatalf("dimmed tint %s is indistinguishable from dimmed plain %s", tintDim, plainDim)
+	}
+	// It must also differ from the undimmed tint, or inactive panes lose the
+	// focus cue entirely.
+	if tintDim == tintBG {
+		t.Fatalf("dimmed tint %s is indistinguishable from undimmed tint %s", tintDim, tintBG)
+	}
+}

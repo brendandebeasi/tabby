@@ -360,6 +360,12 @@ type PaneHeader struct {
 	ActiveBorderBg string  `yaml:"active_border_bg"` // Active pane border bg (default: same as border_bg)
 	DimInactive    bool    `yaml:"dim_inactive"`     // Enable dimming of inactive panes (default: false)
 	DimOpacity     float64 `yaml:"dim_opacity"`      // Opacity for dimmed panes 0.0-1.0 (default: 0.7)
+	// Tint blends a pane's terminal background toward its window's tab color, so
+	// a session is identifiable at a glance. Works over ssh for free: window-style
+	// is applied by the LOCAL tmux server to the pane, so nothing needs to run on
+	// the remote host. Composes with dimming (tint the base, then dim).
+	Tint        bool    `yaml:"tint"`         // Enable tab-color background tint (default: false)
+	TintOpacity float64 `yaml:"tint_opacity"` // Tint strength 0.0-1.0 (default: 0.08)
 	// Custom border settings - render our own border instead of tmux's
 	CustomBorder               bool   `yaml:"custom_border"` // Enable custom border rendering (default: false)
 	HandleColor                string `yaml:"handle_color"`  // Drag handle color (default: #666666)
