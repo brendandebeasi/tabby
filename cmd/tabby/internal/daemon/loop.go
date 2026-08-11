@@ -1005,7 +1005,7 @@ func (l *Loop) handleAnimationTick() {
 			return
 		}
 		l.lastSlowFrame = slowFrame
-		logEvent("ANIMATION_TICK_RENDER spinner=%v pet=%v indicator=%v frame=%d",
+		logRenderEvent("ANIMATION_TICK_RENDER spinner=%v pet=%v indicator=%v frame=%d",
 			spinnerVisible, petChanged, indicatorAnimated, slowFrame)
 		perf.Log("animationTick (render)")
 		l.server.RenderActiveWindowOnly(l.ActiveWindowID())
@@ -1182,21 +1182,11 @@ func (l *Loop) handleRefreshSignal() {
 		}
 		l.lastWindowCount = currentWindowCount
 
-		// Save window layouts inline (replaces save_pane_layout.sh hook)
-		tA := time.Now()
-		l.coord.SaveWindowLayouts()
-		tB := time.Now()
-
-		// Apply pane dimming inline (replaces cycle-pane --dim-only shell call)
-		l.coord.ApplyPaneDimming(l.activeWindowID)
-		tC := time.Now()
-
-		// Enforce status bar exclusivity (replaces enforce_status_exclusivity.sh)
-		l.coord.EnforceStatusExclusivity(l.deps.SessionID)
-		tD := time.Now()
-		logEvent("PERF_PRE_SPAWN saveLayouts_ms=%d dim_ms=%d statusEx_ms=%d total_ms=%d",
-			tB.Sub(tA).Milliseconds(), tC.Sub(tB).Milliseconds(),
-			tD.Sub(tC).Milliseconds(), tD.Sub(tA).Milliseconds())
+		// SaveWindowLayouts / ApplyPaneDimming / EnforceStatusExclusivity used
+		// to run here, on the loop goroutine, costing ~39ms p50 (p99 78ms) that
+		// every queued keypress waited behind. All three are write-only tmux
+		// side effects — nothing below consumes their results — so they now run
+		// inside runHousekeeping alongside the other heavy work.
 
 		// Heavy ops (spawn/cleanup/layout) only if enough time has
 		// passed since the last full refresh. This breaks the feedback
@@ -1238,6 +1228,17 @@ func (l *Loop) handleRefreshSignal() {
 // passes — rapid-fire signals coalesce into "the in-flight pass + at most one
 // more" rather than queueing arbitrarily.
 func (l *Loop) runHousekeeping(start, t1 time.Time, activeWindowID string, sizesChanged, windowChanged bool) {
+	tA := time.Now()
+	l.coord.SaveWindowLayouts()
+	tB := time.Now()
+	l.coord.ApplyPaneDimming(activeWindowID)
+	tC := time.Now()
+	l.coord.EnforceStatusExclusivity(l.deps.SessionID)
+	tD := time.Now()
+	logEvent("PERF_PRE_SPAWN saveLayouts_ms=%d dim_ms=%d statusEx_ms=%d total_ms=%d",
+		tB.Sub(tA).Milliseconds(), tC.Sub(tB).Milliseconds(),
+		tD.Sub(tC).Milliseconds(), tD.Sub(tA).Milliseconds())
+
 	structureChanged := false
 	if time.Since(l.lastFullRefresh) >= loopFullRefreshCooldown {
 		windows := l.coord.GetWindows()

@@ -4050,6 +4050,7 @@ func (c *Coordinator) loadConfigCached() *config.Config {
 
 // RefreshWindows fetches current window/pane state from tmux
 func (c *Coordinator) RefreshWindows() {
+	rwStart := time.Now()
 	// Do all external I/O (tmux, config, ps) BEFORE acquiring stateMu.
 	// Holding stateMu during slow external calls causes lock contention:
 	// leaked task goroutines that timed out continue holding the lock,
@@ -4068,6 +4069,7 @@ func (c *Coordinator) RefreshWindows() {
 		logEvent("REFRESH_WINDOWS_ERROR err=%v", err)
 		return
 	}
+	rwListed := time.Now()
 	logEvent("REFRESH_WINDOWS_OK count=%d", len(windows))
 
 	// Drop sidebar stash windows from tabby's view entirely. They are holding
@@ -4127,6 +4129,7 @@ func (c *Coordinator) RefreshWindows() {
 		cancel()
 	}
 
+	rwPreLock := time.Now()
 	c.stateMu.Lock()
 
 	if newCfg != nil {
@@ -4162,6 +4165,7 @@ func (c *Coordinator) RefreshWindows() {
 	// slow external calls which causes LOOP_STALL and daemon termination.
 	colorArgs := c.buildPaneHeaderColorArgs()
 	c.stateMu.Unlock()
+	rwUnlocked := time.Now()
 
 	// Run the tmux set-option commands outside the lock with a timeout.
 	if len(colorArgs) > 0 {
@@ -4221,6 +4225,18 @@ func (c *Coordinator) RefreshWindows() {
 			logEvent("RESTORE_WINDOW_FOCUS_SKIP reason=no_pending_moves pending=%s active=%s firing_tty=%s age_ms=%d", status.WindowID, activeWindowID, status.FiringTTY, time.Since(status.Created).Milliseconds())
 		}
 	}
+
+	// REFRESH_WINDOWS_OK is logged ~20 lines in, so the bulk of this function
+	// was invisible to the loop-latency breakdown: the stage from that line to
+	// PERF_PRE_SPAWN measured ~126ms p50 while the timed operations after it
+	// accounted for only ~39ms. These phases attribute the remainder.
+	logEvent("PERF_REFRESH_WINDOWS list_ms=%d merge_ms=%d locked_ms=%d deferred_ms=%d total_ms=%d renames=%d moves=%d",
+		rwListed.Sub(rwStart).Milliseconds(),
+		rwPreLock.Sub(rwListed).Milliseconds(),
+		rwUnlocked.Sub(rwPreLock).Milliseconds(),
+		time.Since(rwUnlocked).Milliseconds(),
+		time.Since(rwStart).Milliseconds(),
+		len(pendingRenames), len(pendingMoves))
 }
 
 // SetActiveWindowOptimistic flips the Active flag on c.windows so the next
