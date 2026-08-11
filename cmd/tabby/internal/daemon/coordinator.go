@@ -8427,6 +8427,14 @@ func (c *Coordinator) clearPeekIf(windowID string) {
 	c.peekMu.Unlock()
 }
 
+// currentPeekedWindow returns the minimized window currently surfaced for
+// peeking, or "" when nothing is peeked.
+func (c *Coordinator) currentPeekedWindow() string {
+	c.peekMu.Lock()
+	defer c.peekMu.Unlock()
+	return c.peekedWindowID
+}
+
 // surfaceForActivate runs JUST BEFORE a window is made active: if the target is a
 // parked minimized window, move it back into the session so select-window can
 // reach it. No-op for normal (already in-session) windows.
@@ -17080,6 +17088,19 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		if winID == "" {
 			return false
+		}
+		// The keybinding resolves to the CURRENT window (the hook passes
+		// $TMUX_PANE). A parked window lives in the holding session where no
+		// client can be focused, so pressing the key while peeking a minimized
+		// window would otherwise re-park the window under the cursor instead of
+		// restoring the one being peeked. Redirect to the peeked window in that
+		// case only: minimizing an ordinary window stays the default action, and
+		// an explicit window/index target (sidebar menu) is honored as-is.
+		if !strings.HasPrefix(target, "@") {
+			if peeked := c.currentPeekedWindow(); peeked != "" &&
+				tmuxOutputTrimmed("show-window-option", "-v", "-t", winID, "@tabby_minimized") != "1" {
+				winID = peeked
+			}
 		}
 		if tmuxOutputTrimmed("show-window-option", "-v", "-t", winID, "@tabby_minimized") == "1" {
 			c.clearPeekIf(winID)

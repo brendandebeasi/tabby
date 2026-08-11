@@ -24,3 +24,25 @@ func TestIsEffectivelyParked(t *testing.T) {
 		}
 	}
 }
+
+// The toggle-minimize keybinding resolves its target from the CURRENT window,
+// which is never the parked window the user wants back. Guard the peek fallback
+// that makes the binding a real toggle instead of a one-way park.
+func TestCurrentPeekedWindow(t *testing.T) {
+	c := &Coordinator{}
+	if got := c.currentPeekedWindow(); got != "" {
+		t.Errorf("no peek: got %q, want empty", got)
+	}
+	c.peekedWindowID = "@42"
+	if got := c.currentPeekedWindow(); got != "@42" {
+		t.Errorf("peeked: got %q, want @42", got)
+	}
+	c.clearPeekIf("@99")
+	if got := c.currentPeekedWindow(); got != "@42" {
+		t.Errorf("clearPeekIf on a different window must not clear: got %q", got)
+	}
+	c.clearPeekIf("@42")
+	if got := c.currentPeekedWindow(); got != "" {
+		t.Errorf("clearPeekIf on the peeked window: got %q, want empty", got)
+	}
+}
