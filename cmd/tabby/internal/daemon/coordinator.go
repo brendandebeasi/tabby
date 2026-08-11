@@ -3691,6 +3691,12 @@ func (c *Coordinator) setWindowIcon(windowID, icon string) {
 // Every tmux exec is guarded on a value diff, so the steady state and
 // already-restored windows do no work.
 func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
+	// The in-flight new window's spawn directory, used to detect a child window
+	// whose shell has not yet cd'd out of its parent's cwd. NewWindowStatus takes
+	// its own lock, so this is safe here (applyCWDIdentityMappings runs before
+	// stateMu is acquired).
+	pending := c.NewWindowStatus()
+
 	for i := range windows {
 		// A generic stub (claude/zsh/bash/~/...) that got hard-locked is almost
 		// always the `r` / right-click rename binding pre-filling the current
@@ -3702,6 +3708,11 @@ func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
 			exec.Command("tmux", "set-window-option", "-t", windows[i].ID, "-u", "@tabby_name_locked").Run()
 			windows[i].NameLocked = false
 			logEvent("IDENTITY_UNLOCK_GENERIC win=%s name=%q", windows[i].ID, windows[i].Name)
+		}
+
+		spawnCWD := ""
+		if pending.WindowID == windows[i].ID {
+			spawnCWD = strings.TrimSpace(pending.WorkingDir)
 		}
 
 		if key, ok := c.windowNameKey(windows[i]); ok {
@@ -3738,7 +3749,18 @@ func (c *Coordinator) applyCWDIdentityMappings(windows []tmux.Window) {
 		// tab in a known directory/host its remembered look without repainting
 		// existing siblings every refresh (the bug that retired the old per-dir
 		// restore).
-		c.seedWindowAppearance(&windows[i], akey)
+		// Hold off seeding a brand-new window that is still sitting in the cwd it
+		// was spawned FROM: its shell has not yet cd'd into its real directory, so
+		// seeding now would latch the PARENT project's color/icon/group on
+		// permanently (the seed is one-shot and never reconsiders). Waiting a
+		// refresh or two costs nothing — the window simply stays unpainted until
+		// its cwd settles. restoreAppearanceOnTransition heals the case where a
+		// window slips through and cd's afterwards.
+		if !windows[i].AppearanceSeeded && !c.windowCWDSettled(windows[i], spawnCWD) {
+			logEvent("APPEARANCE_SEED_DEFER win=%s spawn_cwd=%s", windows[i].ID, spawnCWD)
+		} else {
+			c.seedWindowAppearance(&windows[i], akey)
+		}
 
 		// After the one-time seed, re-apply the remembered color/marker if this
 		// window has since moved into a DIFFERENT known directory/host (a cd or an
@@ -3817,6 +3839,57 @@ func (c *Coordinator) appearanceRecordFor(key string, win tmux.Window) (CWDColor
 	return rec, recOK
 }
 
+// Appearance provenance markers stored in @tabby_appearance_auto. A field listed
+// there was applied by Tabby (seed or preset) and may be auto-cleared when the
+// window moves somewhere with no remembered appearance; anything absent is
+// treated as user-owned and never touched. See tmux.Window.AppearanceAuto.
+const (
+	appearanceAutoColor = "color"
+	appearanceAutoIcon  = "icon"
+	appearanceAutoGroup = "group"
+)
+
+// appearanceAutoHas reports whether Tabby applied the named field itself.
+func appearanceAutoHas(win tmux.Window, field string) bool {
+	for _, f := range strings.Split(win.AppearanceAuto, ",") {
+		if strings.TrimSpace(f) == field {
+			return true
+		}
+	}
+	return false
+}
+
+// setAppearanceAuto persists the provenance set for a window.
+func setAppearanceAuto(win *tmux.Window, fields []string) {
+	val := strings.Join(fields, ",")
+	if val == win.AppearanceAuto {
+		return
+	}
+	if val == "" {
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_appearance_auto").Run()
+	} else {
+		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_appearance_auto", val).Run()
+	}
+	win.AppearanceAuto = val
+}
+
+// windowCWDSettled reports whether a brand-new window's shell has finished
+// starting up in its real directory. A window spawned from another window
+// inherits the PARENT's cwd for the first few hundred ms, so seeding on that
+// cwd latches the parent's color/icon/group onto the child permanently (the
+// one-shot seed never reconsiders). Treat a window as unsettled while it is
+// still both very young AND sitting in the cwd it was spawned from.
+func (c *Coordinator) windowCWDSettled(win tmux.Window, spawnCWD string) bool {
+	if spawnCWD == "" {
+		return true
+	}
+	cwd := firstPaneCWD(win)
+	if cwd == "" {
+		return false
+	}
+	return normalizeCWD(cwd) != normalizeCWD(spawnCWD)
+}
+
 // seedWindowAppearance applies the project's remembered color/marker to a window
 // exactly once in the window's lifetime, then records that the decision was made
 // via the durable @tabby_color_seeded option. "Once" is the whole point: a
@@ -3831,13 +3904,18 @@ func (c *Coordinator) seedWindowAppearance(win *tmux.Window, key string) {
 
 	rec, recOK := c.appearanceRecordFor(key, *win)
 	color, icon := seedAppearancePlan(*win, rec, recOK)
+	// Track which fields WE applied, so a later transition into a directory with
+	// no remembered appearance can clear them without touching user-set values.
+	var auto []string
 	if color != "" {
 		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_color", color).Run()
 		win.CustomColor = color
+		auto = append(auto, appearanceAutoColor)
 	}
 	if icon != "" {
 		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_icon", icon).Run()
 		win.Icon = icon
+		auto = append(auto, appearanceAutoIcon)
 	}
 
 	// Seed the window's GROUP the first (and only) time we see it: a brand-new
@@ -3858,8 +3936,10 @@ func (c *Coordinator) seedWindowAppearance(win *tmux.Window, key string) {
 		if g != "" {
 			exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_group", g).Run()
 			win.Group = g
+			auto = append(auto, appearanceAutoGroup)
 		}
 	}
+	setAppearanceAuto(win, auto)
 
 	// Mark the one-time decision as made REGARDLESS of whether anything was
 	// seeded. If there was no remembered appearance (or the window already had
@@ -3912,16 +3992,64 @@ func (c *Coordinator) restoreAppearanceOnTransition(win *tmux.Window, key string
 	}
 
 	rec, recOK := c.appearanceRecordFor(key, *win)
+
+	// The window moved somewhere with no remembered appearance. Drop whatever
+	// TABBY applied for the OLD directory rather than leaving the previous
+	// project's look latched on (the bug where a tab spawned from another tab
+	// inherits its parent's color/icon and keeps it forever, because the
+	// one-shot seed never reconsiders). Only auto-applied fields are cleared:
+	// a color the user set by hand survives the move, preserving the "a color
+	// the user chose is never taken away" guarantee the one-shot seed protects.
 	if !recOK {
+		var keep []string
+		if win.CustomColor != "" && appearanceAutoHas(*win, appearanceAutoColor) {
+			exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_color").Run()
+			win.CustomColor = ""
+		} else if win.CustomColor != "" {
+			keep = append(keep, appearanceAutoColor)
+		}
+		if win.Icon != "" && appearanceAutoHas(*win, appearanceAutoIcon) {
+			exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_icon").Run()
+			win.Icon = ""
+		} else if win.Icon != "" {
+			keep = append(keep, appearanceAutoIcon)
+		}
+		// The group follows the same rule, but a preset (working_dir) group for
+		// the NEW directory wins over clearing: moving into ~/git/gunpowder files
+		// the tab under Gunpowder even with no per-dir record.
+		if preset := c.presetGroupForWindow(*win); preset != "" {
+			if preset != win.Group {
+				exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_group", preset).Run()
+				win.Group = preset
+			}
+			keep = append(keep, appearanceAutoGroup)
+		} else if win.Group != "" && appearanceAutoHas(*win, appearanceAutoGroup) {
+			exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_group").Run()
+			win.Group = ""
+		} else if win.Group != "" {
+			keep = append(keep, appearanceAutoGroup)
+		}
+		setAppearanceAuto(win, keep)
 		return
 	}
+
+	var auto []string
 	if color := strings.TrimSpace(rec.Color); color != "" && color != win.CustomColor {
 		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_color", color).Run()
 		win.CustomColor = color
+		auto = append(auto, appearanceAutoColor)
+	} else if win.CustomColor != "" && appearanceAutoHas(*win, appearanceAutoColor) {
+		auto = append(auto, appearanceAutoColor)
 	}
 	if icon := strings.TrimSpace(rec.Icon); icon != "" && icon != win.Icon {
 		exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_icon", icon).Run()
 		win.Icon = icon
+		auto = append(auto, appearanceAutoIcon)
+	} else if win.Icon != "" && appearanceAutoHas(*win, appearanceAutoIcon) {
+		auto = append(auto, appearanceAutoIcon)
+	}
+	if win.Group != "" && appearanceAutoHas(*win, appearanceAutoGroup) {
+		auto = append(auto, appearanceAutoGroup)
 	}
 	// Remote-only: file the tab under its ssh host's configured group. Local
 	// group sync stays with applyCWDIdentityMappings.
@@ -3929,8 +4057,12 @@ func (c *Coordinator) restoreAppearanceOnTransition(win *tmux.Window, key string
 		if group := strings.TrimSpace(rec.Group); group != "" && group != win.Group {
 			exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_group", group).Run()
 			win.Group = group
+			if !appearanceAutoHas(*win, appearanceAutoGroup) {
+				auto = append(auto, appearanceAutoGroup)
+			}
 		}
 	}
+	setAppearanceAuto(win, auto)
 }
 
 // seedAppearancePlan decides which color/marker a not-yet-seeded window should

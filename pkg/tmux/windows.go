@@ -455,6 +455,15 @@ type Window struct {
 	// from this, the window moved into a new directory and its remembered appearance
 	// is re-applied once. Empty until the window has been seeded.
 	AppearanceKey string
+
+	// AppearanceAuto records which appearance fields Tabby applied ITSELF (from a
+	// remembered per-dir record or a preset), as a comma-separated set of
+	// "color","icon","group" (set via @tabby_appearance_auto). It is provenance,
+	// not state: a field listed here may be cleared automatically when the window
+	// moves into a directory with no remembered appearance, while a field the USER
+	// set is never touched. Absent for windows seeded before this option existed,
+	// which are therefore treated as user-owned (the safe direction).
+	AppearanceAuto string
 }
 
 func ListWindows() ([]Window, error) {
@@ -466,7 +475,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}", "#{@tabby_ai_title}", "#{@tabby_color_seeded}", "#{@tabby_appearance_key}"}, tmuxFieldSep))
+		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}", "#{@tabby_ai_title}", "#{@tabby_color_seeded}", "#{@tabby_appearance_key}", "#{@tabby_appearance_auto}"}, tmuxFieldSep))
 	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -584,6 +593,12 @@ func ListWindows() ([]Window, error) {
 			seededVal := strings.TrimSpace(parts[24])
 			appearanceSeeded = seededVal == "1" || seededVal == "true"
 		}
+		// Appearance provenance from @tabby_appearance_auto option.
+		appearanceAuto := ""
+		if len(parts) > 26 {
+			appearanceAuto = strings.TrimSpace(parts[26])
+		}
+
 		// Applied-appearance key from @tabby_appearance_key option.
 		appearanceKey := ""
 		if len(parts) >= 26 {
@@ -627,6 +642,7 @@ func ListWindows() ([]Window, error) {
 			Layout:           layout,
 			AppearanceSeeded: appearanceSeeded,
 			AppearanceKey:    appearanceKey,
+			AppearanceAuto:   appearanceAuto,
 		})
 	}
 

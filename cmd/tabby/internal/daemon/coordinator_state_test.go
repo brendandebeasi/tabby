@@ -959,3 +959,40 @@ func TestParkedCache_InFlightQueryDoesNotPublishStale(t *testing.T) {
 
 	assert.NotEqual(t, gen, c.parkedGen, "the in-flight generation no longer matches, so its result is discarded")
 }
+
+// A window spawned from another window keeps the parent's cwd for the first few
+// hundred ms. Seeding then latches the parent's appearance on permanently, so
+// the seed must be deferred until the child's cwd differs from the spawn dir.
+func TestWindowCWDSettled_UnsettledWhileInSpawnDir(t *testing.T) {
+	c := &Coordinator{}
+	win := tmux.Window{ID: "@1", Panes: []tmux.Pane{{CurrentPath: "/Users/b/git/tabby"}}}
+
+	if c.windowCWDSettled(win, "/Users/b/git/tabby") {
+		t.Fatal("window still in its spawn dir must be treated as unsettled")
+	}
+	if !c.windowCWDSettled(win, "/Users/b/git/other") {
+		t.Fatal("window that moved out of the spawn dir must be settled")
+	}
+	if !c.windowCWDSettled(win, "") {
+		t.Fatal("no spawn dir (not a tracked new window) must be settled")
+	}
+}
+
+// Provenance: only fields Tabby applied itself may be auto-cleared.
+func TestAppearanceAutoHas(t *testing.T) {
+	win := tmux.Window{AppearanceAuto: "color,group"}
+	if !appearanceAutoHas(win, appearanceAutoColor) {
+		t.Fatal("color should be marked auto")
+	}
+	if !appearanceAutoHas(win, appearanceAutoGroup) {
+		t.Fatal("group should be marked auto")
+	}
+	if appearanceAutoHas(win, appearanceAutoIcon) {
+		t.Fatal("icon was not auto-applied and must be treated as user-owned")
+	}
+	// A window seeded before the option existed carries no provenance, so every
+	// field must be treated as user-owned (never auto-cleared).
+	if appearanceAutoHas(tmux.Window{}, appearanceAutoColor) {
+		t.Fatal("absent provenance must default to user-owned")
+	}
+}
