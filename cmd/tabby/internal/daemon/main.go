@@ -23,6 +23,7 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/navtrace"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -30,6 +31,21 @@ var crashLog *log.Logger
 var eventLog *log.Logger
 var inputLog *log.Logger
 var daemonStartTime time.Time
+
+// Event-log rotation state. eventLogMu guards swapping eventLog/eventLogFile
+// during a mid-run rotation.
+var (
+	eventLogFile   *os.File
+	eventLogPath   string
+	eventLogMu     sync.Mutex
+	eventLogWrites atomic.Uint64
+)
+
+// var, not const, so rotation tests can shrink the thresholds; not mutated at runtime.
+var (
+	eventLogMaxBytes   int64  = 512 * 1024 * 1024
+	eventLogCheckEvery uint64 = 2048
+)
 
 // rotateLogFile rotates a log file if it exceeds maxBytes.
 // Keeps one .prev backup. Returns nil on success or if file is small enough.
@@ -51,6 +67,7 @@ func rotateLogs(sessionID string) {
 	rotateLogFile(daemon.RuntimePath(sessionID, "-input.log"), 1*1024*1024)  // 1MB
 	rotateLogFile("/tmp/tabby-debug.log", 50*1024*1024)                      // 50MB
 	rotateLogFile("/tmp/tabby-indicator-debug.log", 5*1024*1024)             // 5MB
+	rotateLogFile(navtrace.Path, 64*1024*1024)                               // 64MB
 }
 
 // checkPreviousCrash detects if the previous daemon died abnormally and logs forensics.
@@ -151,19 +168,66 @@ func initCrashLog(sessionID string) {
 }
 
 func initEventLog(sessionID string) {
-	eventLogPath := daemon.RuntimePath(sessionID, "-events.log")
+	eventLogPath = daemon.RuntimePath(sessionID, "-events.log")
 	f, err := os.OpenFile(eventLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		eventLog = log.New(os.Stderr, "[EVENT] ", log.LstdFlags)
 		return
 	}
+	eventLogFile = f
 	eventLog = log.New(f, "[event] ", log.LstdFlags|log.Lmicroseconds)
 }
 
-func logEvent(format string, args ...interface{}) {
-	if eventLog != nil {
-		eventLog.Printf(format, args...)
+// rotateEventLogIfLarge rotates the events log mid-run once it exceeds
+// eventLogMaxBytes. Startup-only rotation left a long-lived daemon's log
+// unbounded (observed: 752MB after ~3 days), so the size is re-checked here.
+// The check is amortized over eventLogCheckEvery writes because Stat on every
+// line would put a syscall on the daemon's hottest path.
+//
+// Rotation must reopen: rotateLogFile renames the path, and the *os.File held
+// by eventLog keeps writing into the renamed inode, so without a fresh open
+// the "rotated" log would keep growing under its .prev name.
+func rotateEventLogIfLarge() {
+	if eventLogPath == "" {
+		return
 	}
+	if n := eventLogWrites.Add(1); n%eventLogCheckEvery != 0 {
+		return
+	}
+	eventLogMu.Lock()
+	defer eventLogMu.Unlock()
+	// Size is checked under the lock: rotation reassigns eventLogFile, so an
+	// unlocked Stat here would race a concurrent rotation's swap. The
+	// eventLogCheckEvery sampling above keeps this off the per-write path.
+	if eventLogFile == nil {
+		return
+	}
+	if info, err := eventLogFile.Stat(); err != nil || info.Size() <= eventLogMaxBytes {
+		return
+	}
+	rotateLogFile(eventLogPath, eventLogMaxBytes)
+	f, err := os.OpenFile(eventLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	old := eventLogFile
+	eventLogFile = f
+	eventLog = log.New(f, "[event] ", log.LstdFlags|log.Lmicroseconds)
+	old.Close()
+}
+
+func logEvent(format string, args ...interface{}) {
+	// eventLog is read under the lock because rotation swaps it mid-run; the
+	// underlying *log.Logger serializes its own writes, but the pointer itself
+	// is not safe to read unsynchronized.
+	eventLogMu.Lock()
+	l := eventLog
+	eventLogMu.Unlock()
+	if l == nil {
+		return
+	}
+	l.Printf(format, args...)
+	rotateEventLogIfLarge()
 }
 
 var inputLogEnabled bool
@@ -198,6 +262,27 @@ func isInputLogEnabled() bool {
 func logInput(format string, args ...interface{}) {
 	if inputLog != nil && isInputLogEnabled() {
 		inputLog.Printf(format, args...)
+	}
+}
+
+// renderTraceEnabled gates the per-frame render/geometry chatter
+// (RENDER_SEND, RENDER_BATCH_FLUSH, ANIMATION_TICK_RENDER, CLIENT_GEOM_SELECT),
+// which measured ~78% of all event-log lines and drove roughly 700MB/day of
+// writes on an idle daemon. Off by default; set TABBY_RENDER_TRACE=1 to restore
+// it when debugging the render pipeline.
+//
+// Resolved once at startup rather than via a tmux option: unlike the input log,
+// these fire on the hot render path, where a periodic `tmux show-options`
+// subprocess would cost more than the logging it gates.
+var renderTraceEnabled = func() bool {
+	v := strings.TrimSpace(os.Getenv("TABBY_RENDER_TRACE"))
+	return v == "1" || v == "on" || v == "true"
+}()
+
+// logRenderEvent is logEvent for high-frequency render-path events.
+func logRenderEvent(format string, args ...interface{}) {
+	if renderTraceEnabled {
+		logEvent(format, args...)
 	}
 }
 
@@ -2463,13 +2548,29 @@ func Run(args []string) int {
 	// Build the shared active-client elector before the server, so every
 	// downstream component (server callbacks, coordinator, hook handlers)
 	// reads from the same elected tty.
-	activeClientElector = daemon.NewClientElector(logEvent, 0)
+	// CLIENT_GEOM_SELECT fires on every geometry tick (~4Hz); route the
+	// elector's chatter through the render-trace gate. Non-selection lines
+	// (pin/expiry) share this logger, so gate on the prefix rather than
+	// silencing the elector entirely.
+	activeClientElector = daemon.NewClientElector(func(format string, args ...interface{}) {
+		if strings.HasPrefix(format, "CLIENT_GEOM_SELECT") {
+			logRenderEvent(format, args...)
+			return
+		}
+		logEvent(format, args...)
+	}, 0)
 
 	// Create server
 	server := daemon.NewServer(*sessionID)
 
-	// Set up debug logging for render diagnostics
+	// Set up debug logging for render diagnostics. Per-frame render chatter is
+	// gated behind TABBY_RENDER_TRACE (see logRenderEvent); everything else on
+	// this channel — subscribe/parse/drop diagnostics — always logs.
 	server.DebugLog = func(format string, args ...interface{}) {
+		if strings.HasPrefix(format, "RENDER_SEND") || strings.HasPrefix(format, "RENDER_BATCH_FLUSH") {
+			logRenderEvent(format, args...)
+			return
+		}
 		logEvent(format, args...)
 	}
 
