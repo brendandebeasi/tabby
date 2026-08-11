@@ -4145,6 +4145,10 @@ func (c *Coordinator) RefreshWindows() {
 		cancel()
 	}
 
+	// Read the active window before taking stateMu: this is a subprocess fork
+	// (~6ms) and RefreshWindows must not hold the lock across external calls.
+	activeWindowID := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+
 	rwPreLock := time.Now()
 	c.stateMu.Lock()
 	rwLockAcquired := time.Now()
@@ -4159,7 +4163,6 @@ func (c *Coordinator) RefreshWindows() {
 
 	c.windows = windows
 
-	activeWindowID := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 	rwActiveQ := time.Now()
 
 	// Auto-sync window names from active pane title, unless name is locked.
