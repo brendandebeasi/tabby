@@ -635,7 +635,7 @@ fi
 # emits an ESC[ reply, tmux reads it as M-[, and the tab navigates away — from
 # every attached client at once. The `extended-keys on` assumption that these
 # are "unique sequences" does not hold for raw replies. Bracket-key navigation
-# is still fully covered by cmd+[/] (M-{ / M-}), M-h / M-l, and prefix p / n.
+# is still fully covered by cmd+[/] (M-{ / M-}), M-k / M-l, and prefix p / n.
 # Also override prefix+o to use the smart cycle binary
 if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key o run-shell "$CYCLE_PANE_BIN"
@@ -696,7 +696,8 @@ tmux bind-key 9 select-window -t :9
 # Legacy Alt-key shortcuts kept for fast navigation. Route through the tabby hook
 # (not raw previous-window/next-window) so minimized windows are skipped, matching
 # Option+[/] — native tmux window nav can't skip windows.
-tmux bind-key -n M-h run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
+tmux unbind-key -n M-h 2>/dev/null || true
+tmux bind-key -n M-k run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
 tmux bind-key -n M-l run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN next-window"
 tmux bind-key -n M-n run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux bind-key -n M-N run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
