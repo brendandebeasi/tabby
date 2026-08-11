@@ -689,6 +689,18 @@ type Coordinator struct {
 	gitTopMu    sync.Mutex
 	gitTopCache map[string]string
 
+	// parkedMu guards the memoized listParkedMinimizedWindows result. That
+	// query is two forks (has-session + list-windows) on every RefreshWindows,
+	// reading state that only changes when a window is parked or surfaced —
+	// so it's invalidated explicitly by those two paths (parkedGen) rather
+	// than expiring on a timer, which would let the sidebar show a stale
+	// Minimized section right after a minimize/restore.
+	parkedMu    sync.Mutex
+	parkedCache []tmux.Window
+	parkedGen   uint64
+	parkedCched uint64
+	parkedValid bool
+
 	// Auto tab-summary generation (ai.tab_summary.auto_generate). The LLM client
 	// is built lazily once; summaryFetching coalesces the periodic background
 	// refresh; summaryHash skips windows whose pane content hasn't changed so
@@ -4135,6 +4147,7 @@ func (c *Coordinator) RefreshWindows() {
 
 	rwPreLock := time.Now()
 	c.stateMu.Lock()
+	rwLockAcquired := time.Now()
 
 	if newCfg != nil {
 		c.config = newCfg
@@ -4147,14 +4160,17 @@ func (c *Coordinator) RefreshWindows() {
 	c.windows = windows
 
 	activeWindowID := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+	rwActiveQ := time.Now()
 
 	// Auto-sync window names from active pane title, unless name is locked.
 	// Collects pending rename ops for execution after unlock.
 	pendingRenames := c.syncWindowNames()
+	rwNames := time.Now()
 
 	// Detect AI tool busy/done/idle states using state transitions.
 	// Collects pending tmux set-option ops for execution after unlock.
 	aiToolOps := c.processAIToolStates(preloadedProcessTree)
+	rwAITools := time.Now()
 
 	c.grouped = grouping.GroupWindowsWithOptions(windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 	c.computeVisualPositions()
@@ -4168,6 +4184,7 @@ func (c *Coordinator) RefreshWindows() {
 	// The actual tmux exec happens AFTER unlock to avoid holding stateMu during
 	// slow external calls which causes LOOP_STALL and daemon termination.
 	colorArgs := c.buildPaneHeaderColorArgs()
+	rwColorArgs := time.Now()
 	c.stateMu.Unlock()
 	rwUnlocked := time.Now()
 
@@ -4248,6 +4265,13 @@ func (c *Coordinator) RefreshWindows() {
 		rwProcTree.Sub(rwIdentity).Milliseconds(),
 		rwPreLock.Sub(rwProcTree).Milliseconds(),
 		preloadedProcessTree != nil)
+	logEvent("PERF_REFRESH_LOCKED wait_ms=%d activeq_ms=%d names_ms=%d aitools_ms=%d group_ms=%d colorargs_ms=%d",
+		rwLockAcquired.Sub(rwPreLock).Milliseconds(),
+		rwActiveQ.Sub(rwLockAcquired).Milliseconds(),
+		rwNames.Sub(rwActiveQ).Milliseconds(),
+		rwAITools.Sub(rwNames).Milliseconds(),
+		rwColorArgs.Sub(rwAITools).Milliseconds(),
+		rwUnlocked.Sub(rwColorArgs).Milliseconds())
 }
 
 // SetActiveWindowOptimistic flips the Active flag on c.windows so the next
@@ -7714,6 +7738,7 @@ func (c *Coordinator) parkWindow(windowID string, setFlag bool) bool {
 		coordinatorDebugLog.Printf("parkWindow: move-window failed for %s: %v", windowID, err)
 		return false
 	}
+	c.invalidateParkedCache()
 	coordinatorDebugLog.Printf("parkWindow: parked %s", windowID)
 	return true
 }
@@ -7734,6 +7759,7 @@ func (c *Coordinator) surfaceWindow(windowID string) bool {
 		coordinatorDebugLog.Printf("surfaceWindow: move-window failed for %s: %v", windowID, err)
 		return false
 	}
+	c.invalidateParkedCache()
 	coordinatorDebugLog.Printf("surfaceWindow: surfaced %s -> %s", windowID, origin)
 	return true
 }
@@ -7768,6 +7794,7 @@ func (c *Coordinator) unparkWindow(windowID string) {
 		"set-window-option", "-t", windowID, "-u", "@tabby_min_host"); err != nil {
 		coordinatorDebugLog.Printf("unparkWindow: marker clear failed for %s: %v", windowID, err)
 	}
+	c.invalidateParkedCache()
 	cleanupMinimizedSessionIfEmpty()
 	coordinatorDebugLog.Printf("unparkWindow: unminimized %s", windowID)
 }
@@ -7887,6 +7914,7 @@ func (c *Coordinator) reconcileOrphanedMinimizedWindows() {
 		adopted++
 	}
 	if rehomed > 0 || adopted > 0 {
+		c.invalidateParkedCache()
 		logEvent("MINIMIZED_MIGRATE rehomed=%d adopted=%d -> %s", rehomed, adopted, sess)
 	}
 	cleanupMinimizedSessionIfEmpty()
@@ -7972,7 +8000,40 @@ func (c *Coordinator) maybeReparkPeeked() {
 // fields come from the @tabby_* options that travel with move-window; the working
 // dir (captured as @tabby_min_dir at park time) is attached via a synthetic
 // content pane so windowDirCode/firstPaneCWD can rebuild the tab label.
+// invalidateParkedCache marks the memoized parked-window list stale. Called by
+// every path that moves a window into or out of the holding session.
+func (c *Coordinator) invalidateParkedCache() {
+	c.parkedMu.Lock()
+	c.parkedGen++
+	c.parkedValid = false
+	c.parkedMu.Unlock()
+}
+
 func (c *Coordinator) listParkedMinimizedWindows() []tmux.Window {
+	c.parkedMu.Lock()
+	if c.parkedValid && c.parkedCched == c.parkedGen {
+		cached := c.parkedCache
+		c.parkedMu.Unlock()
+		return cached
+	}
+	gen := c.parkedGen
+	c.parkedMu.Unlock()
+
+	parked := c.listParkedMinimizedWindowsUncached()
+
+	c.parkedMu.Lock()
+	// Only publish if no park/surface landed while we were querying; otherwise
+	// this result is already stale and the next call should re-query.
+	if gen == c.parkedGen {
+		c.parkedCache = parked
+		c.parkedCched = gen
+		c.parkedValid = true
+	}
+	c.parkedMu.Unlock()
+	return parked
+}
+
+func (c *Coordinator) listParkedMinimizedWindowsUncached() []tmux.Window {
 	if err := exec.Command("tmux", "has-session", "-t", minimizedHoldingSession).Run(); err != nil {
 		return nil
 	}

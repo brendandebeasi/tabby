@@ -931,3 +931,31 @@ func TestSeedAppearancePlan_ParkedWindowCarriesSeededFlag(t *testing.T) {
 	assert.Equal(t, "", color, "an already-seeded parked window does not re-seed its color")
 	assert.Equal(t, "", icon, "an already-seeded parked window does not re-seed its marker")
 }
+
+// The parked-window list is memoized to keep two tmux forks off every
+// RefreshWindows, so a park/surface must invalidate it — otherwise the
+// sidebar's Minimized section shows stale entries until something else
+// happens to re-query.
+func TestInvalidateParkedCache_ForcesRequery(t *testing.T) {
+	c := &Coordinator{}
+	c.parkedCache = []tmux.Window{{ID: "@1", Minimized: true}}
+	c.parkedCched = c.parkedGen
+	c.parkedValid = true
+
+	c.invalidateParkedCache()
+
+	assert.False(t, c.parkedValid, "a park/surface marks the memoized list stale")
+	assert.NotEqual(t, c.parkedCched, c.parkedGen, "the generation moves so an in-flight query can't publish a stale result")
+}
+
+// A query that started before a park/surface must not publish its result: it
+// read the holding session as it was BEFORE the move, so caching it would
+// pin the stale list until the next invalidation.
+func TestParkedCache_InFlightQueryDoesNotPublishStale(t *testing.T) {
+	c := &Coordinator{}
+	gen := c.parkedGen // what an in-flight query would have captured
+
+	c.invalidateParkedCache() // park lands mid-query
+
+	assert.NotEqual(t, gen, c.parkedGen, "the in-flight generation no longer matches, so its result is discarded")
+}
