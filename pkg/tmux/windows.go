@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/perf"
@@ -172,9 +173,67 @@ func SSHHostForPane(pid int) string {
 	return RemoteHostForPane(pid)
 }
 
+// remoteHostCache memoizes RemoteHostForPane by pane PID. Resolution costs one
+// pgrep plus one ps per child (~35ms per remote pane, measured), and it ran on
+// every RefreshWindows for every ssh/mosh pane — 109ms of the refresh on a
+// 5-remote-pane session, serially, to recompute a value that cannot change
+// while the connection lives.
+//
+// Keyed on the pane's shell PID with a TTL: the destination is fixed for the
+// life of that shell, but PIDs are recycled and a user can exit ssh and start a
+// different session in the same pane, so entries expire rather than pin
+// forever.
+var (
+	remoteHostCacheMu  sync.Mutex
+	remoteHostCache    = map[int]remoteHostEntry{}
+	remoteHostCacheTTL = 30 * time.Second
+)
+
+type remoteHostEntry struct {
+	host string
+	at   time.Time
+}
+
+// InvalidateRemoteHostCache drops a pane's memoized remote host, for callers
+// that know the pane's connection just changed (e.g. a fresh ssh split).
+func InvalidateRemoteHostCache(pid int) {
+	remoteHostCacheMu.Lock()
+	delete(remoteHostCache, pid)
+	remoteHostCacheMu.Unlock()
+}
+
 // RemoteHostForPane returns the remote destination hostname for a pane's process.
 // Detects ssh, mosh, and mosh-client. Returns empty if no remote connection found.
+// Results are cached per PID for remoteHostCacheTTL; see remoteHostCache.
 func RemoteHostForPane(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	remoteHostCacheMu.Lock()
+	if e, ok := remoteHostCache[pid]; ok && time.Since(e.at) < remoteHostCacheTTL {
+		remoteHostCacheMu.Unlock()
+		return e.host
+	}
+	remoteHostCacheMu.Unlock()
+
+	host := remoteHostForPaneUncached(pid)
+
+	remoteHostCacheMu.Lock()
+	remoteHostCache[pid] = remoteHostEntry{host: host, at: time.Now()}
+	// Bound the map: panes die and their PIDs never return. Sweep expired
+	// entries whenever it grows past a size no real session reaches.
+	if len(remoteHostCache) > 256 {
+		for k, v := range remoteHostCache {
+			if time.Since(v.at) >= remoteHostCacheTTL {
+				delete(remoteHostCache, k)
+			}
+		}
+	}
+	remoteHostCacheMu.Unlock()
+	return host
+}
+
+func remoteHostForPaneUncached(pid int) string {
 	if pid <= 0 {
 		return ""
 	}
@@ -546,24 +605,24 @@ func ListWindows() ([]Window, error) {
 			continue
 		}
 		windows = append(windows, Window{
-			ID:          parts[0],
-			Index:       index,
-			Name:        stripANSI(parts[2]),
-			Active:      parts[3] == "1",
-			Activity:    activity,
-			Bell:        bell,
-			Silence:     silence,
-			Last:        parts[7] == "1",
-			Busy:        busy,
-			Input:       input,
-			CustomColor: customColor,
-			Group:       group,
-			Collapsed:   collapsed,
-			NameLocked:  nameLocked,
-			SyncWidth:   syncWidth,
-			Pinned:      pinned,
-			Icon:        icon,
-			Minimized:   minimized,
+			ID:               parts[0],
+			Index:            index,
+			Name:             stripANSI(parts[2]),
+			Active:           parts[3] == "1",
+			Activity:         activity,
+			Bell:             bell,
+			Silence:          silence,
+			Last:             parts[7] == "1",
+			Busy:             busy,
+			Input:            input,
+			CustomColor:      customColor,
+			Group:            group,
+			Collapsed:        collapsed,
+			NameLocked:       nameLocked,
+			SyncWidth:        syncWidth,
+			Pinned:           pinned,
+			Icon:             icon,
+			Minimized:        minimized,
 			AITitle:          aiTitle,
 			Layout:           layout,
 			AppearanceSeeded: appearanceSeeded,
