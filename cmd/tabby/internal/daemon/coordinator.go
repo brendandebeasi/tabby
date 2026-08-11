@@ -4099,13 +4099,16 @@ func (c *Coordinator) RefreshWindows() {
 	for _, w := range windows {
 		liveIDs[w.ID] = true
 	}
+	rwFiltered := time.Now()
 	for _, pw := range c.listParkedMinimizedWindows() {
 		if !liveIDs[pw.ID] {
 			windows = append(windows, pw)
 		}
 	}
+	rwParked := time.Now()
 
 	c.applyCWDIdentityMappings(windows)
+	rwIdentity := time.Now()
 
 	// Pre-load process tree BEFORE acquiring stateMu. loadProcessTree runs
 	// ps -A which can be slow; running it inside the lock blocks IncrementSpinner
@@ -4119,6 +4122,7 @@ func (c *Coordinator) RefreshWindows() {
 			preloadedProcessTree = loadProcessTree()
 		}
 	}
+	rwProcTree := time.Now()
 
 	prefixModeRaw := ""
 	{
@@ -4237,6 +4241,13 @@ func (c *Coordinator) RefreshWindows() {
 		time.Since(rwUnlocked).Milliseconds(),
 		time.Since(rwStart).Milliseconds(),
 		len(pendingRenames), len(pendingMoves))
+	logEvent("PERF_REFRESH_MERGE filter_ms=%d parked_ms=%d identity_ms=%d proctree_ms=%d prefixopt_ms=%d proctree_loaded=%v",
+		rwFiltered.Sub(rwListed).Milliseconds(),
+		rwParked.Sub(rwFiltered).Milliseconds(),
+		rwIdentity.Sub(rwParked).Milliseconds(),
+		rwProcTree.Sub(rwIdentity).Milliseconds(),
+		rwPreLock.Sub(rwProcTree).Milliseconds(),
+		preloadedProcessTree != nil)
 }
 
 // SetActiveWindowOptimistic flips the Active flag on c.windows so the next
@@ -7970,6 +7981,7 @@ func (c *Coordinator) listParkedMinimizedWindows() []tmux.Window {
 		strings.Join([]string{
 			"#{window_id}", "#{window_index}", "#{window_name}", "#{@tabby_min_origin}",
 			"#{@tabby_color}", "#{@tabby_group}", "#{@tabby_icon}", "#{@tabby_ai_title}", "#{@tabby_min_dir}", "#{@tabby_min_host}",
+			"#{@tabby_color_seeded}", "#{@tabby_appearance_key}",
 		}, "\t")).Output()
 	if err != nil {
 		return nil
@@ -8000,6 +8012,17 @@ func (c *Coordinator) listParkedMinimizedWindows() []tmux.Window {
 		// Restore the captured ssh host so a parked ssh window keeps its ssh marker.
 		if len(f) >= 10 {
 			w.RemoteHost = strings.TrimSpace(f[9])
+		}
+		// Carry the one-time appearance-seed decision across the park. Without
+		// these, a parked window reads as brand-new on every refresh and
+		// seedWindowAppearance re-runs its four tmux set-window-option forks
+		// forever — ~15ms per parked window per refresh, on the loop goroutine.
+		if len(f) >= 11 {
+			seeded := strings.TrimSpace(f[10])
+			w.AppearanceSeeded = seeded == "1" || seeded == "true"
+		}
+		if len(f) >= 12 {
+			w.AppearanceKey = strings.TrimSpace(f[11])
 		}
 		cmd := "bash"
 		if w.RemoteHost != "" {

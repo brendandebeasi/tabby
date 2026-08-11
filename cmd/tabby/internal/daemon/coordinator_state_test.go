@@ -918,3 +918,16 @@ func TestIsGenericTabName(t *testing.T) {
 		assert.Falsef(t, isGenericTabName(n), "expected %q to be a real name", n)
 	}
 }
+
+// A parked (minimized) window is rebuilt by hand in listParkedMinimizedWindows
+// rather than parsed by ListWindows, so it only carries the appearance-seeded
+// flag if that constructor copies @tabby_color_seeded across. When it didn't,
+// every parked window read as brand-new on each refresh and re-ran the seed's
+// four tmux forks forever (~15ms per parked window, on the loop goroutine).
+func TestSeedAppearancePlan_ParkedWindowCarriesSeededFlag(t *testing.T) {
+	rec := CWDColorMapping{Color: "#123456", Icon: "🚀"}
+	parked := tmux.Window{Minimized: true, AppearanceSeeded: true}
+	color, icon := seedAppearancePlan(parked, rec, true)
+	assert.Equal(t, "", color, "an already-seeded parked window does not re-seed its color")
+	assert.Equal(t, "", icon, "an already-seeded parked window does not re-seed its marker")
+}
