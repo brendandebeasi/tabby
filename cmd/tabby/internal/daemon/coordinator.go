@@ -2233,6 +2233,17 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 			bg = computeTintBG(termBG, tc, cfg.PaneHeader.TintOpacity)
 		}
 		tintByWindow[winID] = bg
+		// Publish the resolved tint so out-of-process writers can honor it.
+		// `tabby cycle-pane` runs as a short-lived process with no access to
+		// c.grouped, so it cannot resolve a window's group theme itself; without
+		// this it would unset window-style on the pane it focused and drop the
+		// pane back to the plain terminal bg, which reads as a flicker on every
+		// pane switch.
+		if bg != "" {
+			exec.Command("tmux", "set-window-option", "-t", winID, "@tabby_tint_bg", bg).Run()
+		} else {
+			exec.Command("tmux", "set-window-option", "-t", winID, "-u", "@tabby_tint_bg").Run()
+		}
 		return bg
 	}
 	opacity := cfg.PaneHeader.DimOpacity
@@ -2253,6 +2264,14 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 		baseFg = "#ffffff"
 	}
 	inactiveFg := dimColor(baseFg, opacity)
+	// Publish the resolved pair for `tabby cycle-pane`, which styles the same
+	// panes from a separate process and has no access to c.theme. Left to its
+	// own devices it derives a different fg from config, and the foreground
+	// then flips between the two values on every pane switch -- the same
+	// flicker the fg mirroring above exists to prevent.
+	exec.Command("tmux",
+		"set-option", "-g", "@tabby_pane_fg", baseFg, ";",
+		"set-option", "-g", "@tabby_pane_fg_dim", inactiveFg).Run()
 	styleWithFg := func(fg, bg string) string {
 		if fg == "" {
 			return fmt.Sprintf("bg=%s", bg)

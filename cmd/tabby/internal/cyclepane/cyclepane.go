@@ -54,16 +54,18 @@ func Run(args []string) int {
 		return 0
 	}
 
+	selected := ""
 	switch {
 	case ensureContent:
 		if len(content) >= 1 && activeIsUtility(panes) {
 			_ = exec.Command("tmux", "select-pane", "-t", content[0].id).Run()
+			selected = content[0].id
 		}
 	case !dimOnly && len(content) >= 2:
-		cyclePane(content)
+		selected = cyclePane(content)
 	}
 
-	applyDim()
+	applyDim(selected)
 	signalDaemon()
 	return 0
 }
@@ -151,7 +153,11 @@ func filterContent(panes []paneInfo) []paneInfo {
 	return out
 }
 
-func cyclePane(content []paneInfo) {
+// cyclePane moves focus to the next content pane and returns its id. The caller
+// passes that id to applyDim: re-reading pane_active straight after select-pane
+// can still report the OLD active pane, which would style the pane the user just
+// focused as the inactive one.
+func cyclePane(content []paneInfo) string {
 	activeIdx := -1
 	for i, p := range content {
 		if p.active {
@@ -163,7 +169,9 @@ func cyclePane(content []paneInfo) {
 		activeIdx = 0
 	}
 	nextIdx := (activeIdx + 1) % len(content)
-	_ = exec.Command("tmux", "select-pane", "-t", content[nextIdx].id).Run()
+	target := content[nextIdx].id
+	_ = exec.Command("tmux", "select-pane", "-t", target).Run()
+	return target
 }
 
 func isSpawning() bool {
@@ -174,7 +182,9 @@ func isSpawning() bool {
 	return strings.TrimSpace(string(out)) == "1"
 }
 
-func applyDim() {
+// applyDim styles every pane in the window. activePaneID, when non-empty,
+// overrides the pane_active tmux reports -- see cyclePane.
+func applyDim(activePaneID string) {
 	if isSpawning() {
 		return
 	}
@@ -186,11 +196,31 @@ func applyDim() {
 	}
 
 	panes := listPanes()
+	if activePaneID != "" {
+		for i := range panes {
+			panes[i].active = panes[i].id == activePaneID
+		}
+	}
+
+	// The daemon resolves each window's tab color (custom color, else group
+	// theme) and publishes the blended background on @tabby_tint_bg. We cannot
+	// recompute it here — that state lives in the daemon's memory — so read it.
+	// Empty means "no tint": either the feature is off or the window has no
+	// color, and in both cases window-style must be left alone.
+	tintBG := windowTintBG()
+	baseFg, inactiveFg := dimFgPair(cfg)
 
 	if !cfg.PaneHeader.DimInactive {
 		for _, p := range panes {
 			if !isSkip(p) {
-				unsetPaneStyle(p.id)
+				// Dimming is off, but the tint (if any) still applies — a blanket
+				// unset here would wipe it every time this ran.
+				if tintBG != "" {
+					s := styleWithFg(baseFg, tintBG)
+					setPaneStyles(p.id, s, s)
+				} else {
+					unsetPaneStyle(p.id)
+				}
 			}
 			if !isUtility(p) {
 				clearPaneDimFlag(p.id)
@@ -219,7 +249,14 @@ func applyDim() {
 		return
 	}
 
-	dimBG := computeDimBG(cfg.PaneHeader.TerminalBg, cfg.PaneHeader.DimOpacity)
+	// Dim the TINTED base, not the raw terminal bg, so an inactive pane keeps
+	// its session color while still reading as unfocused. Matches the daemon's
+	// ApplyPaneDimming so the two writers agree on every pane.
+	dimBase := cfg.PaneHeader.TerminalBg
+	if tintBG != "" {
+		dimBase = tintBG
+	}
+	dimBG := computeDimBG(dimBase, cfg.PaneHeader.DimOpacity)
 
 	for _, p := range panes {
 		if isSkip(p) {
@@ -237,13 +274,27 @@ func applyDim() {
 		}
 
 		if active {
-			unsetPaneStyle(p.id)
+			// The focused pane shows the undimmed base: the tint when there is
+			// one, otherwise tmux's inherited default.
+			if tintBG != "" {
+				setPaneStyles(p.id, styleWithFg(inactiveFg, tintBG), styleWithFg(baseFg, tintBG))
+			} else {
+				unsetPaneStyle(p.id)
+			}
 			setPaneDimFlag(p.id, false)
 		} else {
-			if dimBG == "" {
+			switch {
+			case dimBG == "" && tintBG == "":
 				unsetPaneStyle(p.id)
-			} else {
-				setPaneStyle(p.id, fmt.Sprintf("bg=%s", dimBG))
+			case dimBG == "":
+				s := styleWithFg(baseFg, tintBG)
+				setPaneStyles(p.id, s, s)
+			case tintBG != "":
+				// Keep the active-style on the undimmed tint: this pane paints
+				// from it the instant it takes focus.
+				setPaneStyles(p.id, styleWithFg(inactiveFg, dimBG), styleWithFg(baseFg, tintBG))
+			default:
+				setPaneStyle(p.id, styleWithFg(inactiveFg, dimBG))
 			}
 			setPaneDimFlag(p.id, true)
 		}
@@ -251,12 +302,83 @@ func applyDim() {
 	applyBorderDim(cfg)
 }
 
+// setPaneStyle writes window-style, and keeps window-active-style in step when
+// a tint is in play. tmux paints the FOCUSED pane from window-active-style and
+// every other pane from window-style; writing only the former would leave the
+// pane the user is actually looking at untinted.
 func setPaneStyle(paneID, style string) {
 	_ = exec.Command("tmux", "set-option", "-p", "-t", paneID, "window-style", style).Run()
 }
 
+func setPaneStyles(paneID, inactive, active string) {
+	_ = exec.Command("tmux",
+		"set-option", "-p", "-t", paneID, "window-style", inactive, ";",
+		"set-option", "-p", "-t", paneID, "window-active-style", active).Run()
+}
+
 func unsetPaneStyle(paneID string) {
-	_ = exec.Command("tmux", "set-option", "-p", "-u", "-t", paneID, "window-style").Run()
+	_ = exec.Command("tmux",
+		"set-option", "-p", "-u", "-t", paneID, "window-style", ";",
+		"set-option", "-p", "-u", "-t", paneID, "window-active-style").Run()
+}
+
+// windowTintBG reads the tint background the daemon resolved for the current
+// window. The daemon owns the color/group state, so this is a read-only handoff
+// rather than a second implementation of the same resolution.
+func windowTintBG() string {
+	out, err := exec.Command("tmux", "show-options", "-wqv", "@tabby_tint_bg").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// dimFgPair returns the foreground the undimmed and dimmed styles must carry.
+// The global window-style sets a fg=; a per-pane style that writes only bg=
+// therefore CHANGES the foreground, so programs that emit no color of their own
+// visibly recolor as panes are styled and unstyled. Mirror the fg in every
+// write so only the background ever moves.
+//
+// The values come from the daemon (@tabby_pane_fg/@tabby_pane_fg_dim), which
+// derives them from the active THEME. Deriving them from config here instead
+// would produce a different pair, and the foreground would then flip between
+// the daemon's value and ours on every pane switch. Config is only a fallback
+// for the window where the daemon has not painted yet.
+func dimFgPair(cfg *config.Config) (string, string) {
+	base := strings.TrimSpace(readGlobalOption("@tabby_pane_fg"))
+	dim := strings.TrimSpace(readGlobalOption("@tabby_pane_fg_dim"))
+	if base != "" && dim != "" {
+		return base, dim
+	}
+	if base == "" {
+		base = cfg.PaneHeader.ActiveFg
+	}
+	if base == "" {
+		base = "#ffffff"
+	}
+	opacity := cfg.PaneHeader.DimOpacity
+	if opacity <= 0 || opacity > 1 {
+		opacity = 0.6
+	}
+	if dim == "" {
+		dim = desaturateColor(base, opacity, cfg.PaneHeader.TerminalBg)
+	}
+	return base, dim
+}
+
+func readGlobalOption(name string) string {
+	out, err := exec.Command("tmux", "show-options", "-gqv", name).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func styleWithFg(fg, bg string) string {
+	if fg == "" {
+		return fmt.Sprintf("bg=%s", bg)
+	}
+	return fmt.Sprintf("fg=%s,bg=%s", fg, bg)
 }
 
 func setPaneDimFlag(paneID string, dimmed bool) {
