@@ -4060,8 +4060,41 @@ func (c *Coordinator) loadConfigCached() *config.Config {
 	return newCfg
 }
 
-// RefreshWindows fetches current window/pane state from tmux
+// RefreshWindows fetches current window/pane state from tmux and commits it.
+// Synchronous: fetch then apply, both on the calling goroutine.
 func (c *Coordinator) RefreshWindows() {
+	c.applyRefreshSnapshot(c.fetchRefreshSnapshot())
+}
+
+// refreshSnapshot is the result of the external-I/O half of a refresh: every
+// tmux/config/ps read RefreshWindows needs, gathered without holding stateMu.
+// Splitting fetch from apply keeps the mutation half short and makes it
+// possible to run the I/O off the loop goroutine (see docs/plans PERF-01).
+type refreshSnapshot struct {
+	cfg            *config.Config
+	windows        []tmux.Window
+	processTree    *processTree
+	prefixModeRaw  string
+	activeWindowID string
+	taken          time.Time
+
+	// Timing marks, carried so the perf lines stay byte-identical.
+	start    time.Time
+	listed   time.Time
+	filtered time.Time
+	parked   time.Time
+	identity time.Time
+	procTree time.Time
+	preLock  time.Time
+}
+
+// fetchRefreshSnapshot performs all external I/O for a refresh. It must not
+// hold stateMu: holding it during slow external calls causes lock contention:
+// leaked task goroutines that timed out continue holding the lock,
+// blocking subsequent tasks that need stateMu.RLock() (e.g. handleWidthSync
+// via BroadcastRender), causing LOOP_STALL and daemon termination.
+// Returns nil if the window listing failed.
+func (c *Coordinator) fetchRefreshSnapshot() *refreshSnapshot {
 	rwStart := time.Now()
 	// Do all external I/O (tmux, config, ps) BEFORE acquiring stateMu.
 	// Holding stateMu during slow external calls causes lock contention:
@@ -4079,7 +4112,7 @@ func (c *Coordinator) RefreshWindows() {
 	windows, err := tmux.ListWindowsWithPanes()
 	if err != nil {
 		logEvent("REFRESH_WINDOWS_ERROR err=%v", err)
-		return
+		return nil
 	}
 	rwListed := time.Now()
 	logEvent("REFRESH_WINDOWS_OK count=%d", len(windows))
@@ -4150,6 +4183,45 @@ func (c *Coordinator) RefreshWindows() {
 	activeWindowID := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 
 	rwPreLock := time.Now()
+
+	return &refreshSnapshot{
+		cfg:            newCfg,
+		windows:        windows,
+		processTree:    preloadedProcessTree,
+		prefixModeRaw:  prefixModeRaw,
+		activeWindowID: activeWindowID,
+		taken:          rwPreLock,
+
+		start:    rwStart,
+		listed:   rwListed,
+		filtered: rwFiltered,
+		parked:   rwParked,
+		identity: rwIdentity,
+		procTree: rwProcTree,
+		preLock:  rwPreLock,
+	}
+}
+
+// applyRefreshSnapshot commits a snapshot to coordinator state and runs the
+// deferred tmux writes it implies. The mutation half of a refresh: it takes
+// stateMu, and every external call is deferred until after the unlock.
+func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
+	if snap == nil {
+		return
+	}
+	rwStart := snap.start
+	rwListed := snap.listed
+	rwFiltered := snap.filtered
+	rwParked := snap.parked
+	rwIdentity := snap.identity
+	rwProcTree := snap.procTree
+	rwPreLock := snap.preLock
+	newCfg := snap.cfg
+	windows := snap.windows
+	preloadedProcessTree := snap.processTree
+	prefixModeRaw := snap.prefixModeRaw
+	activeWindowID := snap.activeWindowID
+
 	c.stateMu.Lock()
 	rwLockAcquired := time.Now()
 

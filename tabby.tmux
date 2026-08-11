@@ -635,7 +635,7 @@ fi
 # emits an ESC[ reply, tmux reads it as M-[, and the tab navigates away — from
 # every attached client at once. The `extended-keys on` assumption that these
 # are "unique sequences" does not hold for raw replies. Bracket-key navigation
-# is still fully covered by cmd+[/] (M-{ / M-}), M-; / M-', and prefix p / n.
+# is still fully covered by cmd+[/] (M-{ / M-}), M-l / M-;, and prefix p / n.
 # Also override prefix+o to use the smart cycle binary
 if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key o run-shell "$CYCLE_PANE_BIN"
@@ -698,9 +698,9 @@ tmux bind-key 9 select-window -t :9
 # Option+[/] — native tmux window nav can't skip windows.
 tmux unbind-key -n M-h 2>/dev/null || true
 tmux unbind-key -n M-k 2>/dev/null || true
-tmux unbind-key -n M-l 2>/dev/null || true
-tmux bind-key -n 'M-\;' run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
-tmux bind-key -n "M-'" run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN next-window"
+tmux unbind-key -n "M-'" 2>/dev/null || true
+tmux bind-key -n M-l run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
+tmux bind-key -n 'M-\;' run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN next-window"
 tmux bind-key -n M-n run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux bind-key -n M-N run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux unbind-key -n M-x 2>/dev/null || true
