@@ -1991,6 +1991,20 @@ func (c *Coordinator) tintColorForWindowLocked(windowID string) string {
 			}
 		}
 	}
+	// Not in any group. c.grouped only contains windows that landed in a
+	// CONFIGURED group: GroupWindowsWithOptions funnels an unknown group name
+	// to "Default", and when the user has no Default group configured the
+	// window is dropped from the list entirely. Such a window still has its own
+	// @tabby_color, and resolving "" here made ApplyPaneDimming UNSET
+	// window-style on its panes — dropping them to the plain global background
+	// while grouped windows kept their tint, and flipping back and forth as a
+	// window's group came and went. Fall back to the flat window list so a
+	// custom color tints regardless of grouping.
+	for _, win := range c.windows {
+		if win.ID == windowID {
+			return win.CustomColor
+		}
+	}
 	return ""
 }
 

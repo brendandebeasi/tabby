@@ -1058,3 +1058,33 @@ func TestTintComposesWithDim(t *testing.T) {
 		t.Fatalf("dimmed tint %s is indistinguishable from undimmed tint %s", tintDim, tintBG)
 	}
 }
+
+// A window that is in no configured group is absent from c.grouped entirely
+// (GroupWindowsWithOptions drops it when there is no "Default" group). It must
+// still tint from its own @tabby_color, or ApplyPaneDimming unsets window-style
+// on its panes and they drop to the plain global background.
+func TestTintColorForWindow_UngroupedWindowUsesCustomColor(t *testing.T) {
+	c := newTestCoordinator(t)
+	ungrouped := testWindow("1246", false)
+	ungrouped.CustomColor = "#4ad926"
+	c.windows = []tmux.Window{ungrouped}
+	c.grouped = nil
+
+	assert.Equal(t, "#4ad926", c.tintColorForWindowLocked("@1246"))
+}
+
+func TestTintColorForWindow_GroupedWindowStillPrefersGroupTheme(t *testing.T) {
+	c := newTestCoordinator(t)
+	win := testWindow("1288", false)
+	c.windows = []tmux.Window{win}
+	c.grouped = []grouping.GroupedWindows{
+		{Name: "Gunpowder", Theme: config.Theme{Bg: "#bcce5a"}, Windows: []tmux.Window{win}},
+	}
+
+	assert.Equal(t, "#bcce5a", c.tintColorForWindowLocked("@1288"))
+}
+
+func TestTintColorForWindow_UnknownWindowHasNoTint(t *testing.T) {
+	c := newTestCoordinator(t)
+	assert.Equal(t, "", c.tintColorForWindowLocked("@nope"))
+}
