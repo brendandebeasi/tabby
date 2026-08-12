@@ -2254,8 +2254,24 @@ func panesInSession(panes []dimPaneInfo, sessionID string) []dimPaneInfo {
 }
 
 func listDimPanes(windowID string) []dimPaneInfo {
-	out, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
-		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}\t#{pane_start_command}\t#{@tabby_pane_dim}\t#{window_id}\t#{session_id}").Output()
+	return listDimPanesArgs("-t", windowID)
+}
+
+// listDimPanesSession lists every pane in the session rather than just one
+// window. The per-window form is right for the housekeeping tick, which runs
+// again on each window switch, but a theme flip must repaint all windows at
+// once -- otherwise background windows keep the previous theme's per-pane
+// window-style (which beats the new global) until they next get focus.
+func listDimPanesSession(sessionID string) []dimPaneInfo {
+	return listDimPanesArgs("-s", "-t", sessionID)
+}
+
+func listDimPanesArgs(targetArgs ...string) []dimPaneInfo {
+	args := append([]string{"list-panes"}, targetArgs...)
+	args = append(args, "-F",
+
+		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}\t#{pane_start_command}\t#{@tabby_pane_dim}\t#{window_id}\t#{session_id}")
+	out, err := exec.Command("tmux", args...).Output()
 	if err != nil {
 		return nil
 	}
@@ -2341,6 +2357,12 @@ func listDimPanes(windowID string) []dimPaneInfo {
 //
 // Logic ported from cmd/cycle-pane/main.go applyDim().
 func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
+	c.applyPaneDimming(activeWindowID, false)
+}
+
+// applyPaneDimming repaints per-pane styles. allWindows widens the pass from
+// the active window to every window in the session.
+func (c *Coordinator) applyPaneDimming(activeWindowID string, allWindows bool) {
 	// Check spawning guard — during pane creation, data is stale
 	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
 		if strings.TrimSpace(string(out)) == "1" {
@@ -2354,6 +2376,11 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	}
 
 	panes := listDimPanes(activeWindowID)
+	if allWindows {
+		// A theme flip repaints the whole session at once; see
+		// listDimPanesSession.
+		panes = listDimPanesSession(c.sessionID)
+	}
 	if len(panes) == 0 {
 		return
 	}
@@ -2521,11 +2548,19 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 	}
 
 	// Build map: pane_left → whether the content pane at that column is active
-	colActive := map[int]bool{}
+	// Keyed by window AND column. A session-wide pass (theme flip) spans many
+	// windows, and pane_left is a per-window column index, so keying on the
+	// column alone lets panes in different windows collide -- one window's
+	// active pane then reads as inactive and keeps the previous theme's style.
+	type colKey struct {
+		win  string
+		left int
+	}
+	colActive := map[colKey]bool{}
 	hasActiveContent := false
 	for _, p := range panes {
 		if !isDimUtilityPane(p) {
-			colActive[p.left] = p.active
+			colActive[colKey{p.windowID, p.left}] = p.active
 			if p.active {
 				hasActiveContent = true
 			}
@@ -2597,7 +2632,7 @@ func (c *Coordinator) ApplyPaneDimming(activeWindowID string) {
 		// For headers, use their content pane's active state (matched by pane_left)
 		active := p.active
 		if isDimHeaderPane(p) {
-			active = colActive[p.left]
+			active = colActive[colKey{p.windowID, p.left}]
 		}
 		if isDimHeaderPane(p) {
 			// Headers are rendered by the daemon — don't set window-style.
@@ -4858,9 +4893,13 @@ func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
 		tmuxRun("set-window-option", "-t", op.windowID, "@tabby_name_locked", "0")
 	}
 
-	// Execute deferred window move ops outside the lock.
+	// Execute deferred window move ops outside the lock. -d is load-bearing:
+	// without it move-window SELECTS the window it moves, so renumbering an
+	// unrelated window (e.g. one that just got categorized into a group) steals
+	// focus to it and the restore below has to yank it back — the visible
+	// lose-focus-then-regain flicker.
 	for _, op := range pendingMoves {
-		tmuxRun("move-window", "-s", op.src, "-t", op.dst)
+		tmuxRun("move-window", "-d", "-s", op.src, "-t", op.dst)
 	}
 	// Restore focus to the pending new window ONLY when this RefreshWindows
 	// actually performed window renumbering via move-window — that's the
@@ -13955,6 +13994,7 @@ func (c *Coordinator) renderWidgetZone(entries []widgetEntry, width int) (string
 		// Sidebar zones
 		"sidebar:shrink", "sidebar:grow",
 		"sidebar:prev_window", "sidebar:next_window",
+		"sidebar:toggle_theme",
 	}
 	var regions []daemon.ClickableRegion
 	for _, zoneID := range knownZones {
@@ -16282,7 +16322,51 @@ func (c *Coordinator) renderNavButtons(width int) string {
 
 	navLeft := zone.Mark("sidebar:prev_window", prevBtn)
 	navRight := zone.Mark("sidebar:next_window", nextBtn)
-	return lipgloss.JoinHorizontal(lipgloss.Top, navLeft, navRight) + "\n\n"
+	nav := lipgloss.JoinHorizontal(lipgloss.Top, navLeft, navRight)
+
+	// The theme toggle fills the row that used to be blank padding between
+	// the nav and resize rows, so adding it costs no vertical space.
+	return nav + "\n" + c.renderThemeButton(width) + "\n"
+}
+
+// renderThemeButton renders the light/dark toggle. The label names the theme
+// a click would switch TO, so the button reads as the action it performs
+// rather than as a status line.
+func (c *Coordinator) renderThemeButton(width int) string {
+	if width < 1 {
+		width = 1
+	}
+
+	// Read config directly WITHOUT taking stateMu: the render path
+	// (renderSidebar) already holds c.stateMu.RLock() across widget
+	// rendering, and RWMutex is not reentrant -- a queued writer between
+	// the two RLocks would deadlock the render goroutine.
+	at := c.config.AutoTheme
+
+	// With no light/dark pair configured there is nothing to toggle between.
+	if !at.Enabled || at.Light == "" || at.Dark == "" {
+		return ""
+	}
+
+	var bg, fg string
+	if c.theme != nil {
+		bg = c.getThemeColor(c.theme.ButtonSecondaryBg, "#9b59b6")
+		fg = c.getThemeColor(c.theme.ButtonSecondaryFg, "#ffffff")
+	} else {
+		bg, fg = "#9b59b6", "#ffffff"
+	}
+
+	label := "Dark"
+	if at.Mode == "dark" {
+		label = "Light"
+	}
+	// Narrow sidebars can't fit the word plus its glyph.
+	if width >= 10 {
+		label = "◐ " + label
+	}
+
+	btn := renderSmallButton(width, label, bg, fg)
+	return zone.Mark("sidebar:toggle_theme", btn)
 }
 func (c *Coordinator) getThemeColor(themeColor, fallback string) string {
 	if c.theme != nil && themeColor != "" {
@@ -17210,6 +17294,14 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.stateMu.Unlock()
 		savePetStateData(petSnap)
 		return false // Pet action, no window refresh needed
+
+	case "toggle_theme":
+		resp := c.HandleTheme(&daemon.ThemeRequest{Op: daemon.ThemeOpToggle})
+		if !resp.OK {
+			exec.Command("tmux", "display-message", "Theme toggle failed: "+resp.Error).Run()
+			return false
+		}
+		return true
 
 	case "shrink_sidebar", "shrink":
 		// Shrink sidebar width by 5 columns (min 15)
@@ -19623,7 +19715,7 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	// Find the group this window belongs to and assign it to the new window
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
-			if win.Index == windowIdx && group.Name != "" {
+			if win.ID == window.ID && group.Name != "" {
 				breakCmd += fmt.Sprintf(" ; set-window-option @tabby_group '%s'", group.Name)
 				break
 			}
@@ -19651,7 +19743,7 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	windowGroup := ""
 	for _, group := range c.grouped {
 		for _, win := range group.Windows {
-			if win.Index == windowIdx && group.Name != "" {
+			if win.ID == window.ID && group.Name != "" {
 				windowGroup = group.Name
 				break
 			}
@@ -19917,16 +20009,19 @@ func (c *Coordinator) createNewWindowDefault(clientID string) {
 	// remoteCmd is resolved here (external ps/pgrep I/O, so after RUnlock) for the
 	// legacy fallback path; the bin/new-window spawner self-detects from the
 	// firing pane, so it doesn't need it passed in.
+	// The dir-driven group always wins when the cwd resolves one: inheriting over
+	// it hands the parent's identity to a tab that already knows its own, which
+	// then latches permanently via @tabby_color_seeded.
 	color, icon, remoteCmd := "", "", ""
 	if curRemote && inheritSSH {
-		group = curGroup
+		if group == "" {
+			group = curGroup
+		}
 		color = curColor
 		icon = curIcon
 		if activePanePID > 0 {
 			remoteCmd = tmux.RemoteCommandForPane(activePanePID)
 		}
-	} else if group == "" && !curRemote && curGroup != "" && !strings.EqualFold(curGroup, "Default") {
-		group = curGroup
 	}
 
 	// workingDir = the resolved starting dir: the tab opens where the current one
@@ -20300,9 +20395,10 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			c.computeVisualPositions()
 			moves := c.syncWindowIndices()
 			c.stateMu.Unlock()
-			// Execute deferred window move ops outside the lock.
+			// Execute deferred window move ops outside the lock. -d so the move
+			// doesn't select the window it relocates; see RefreshWindows.
 			for _, op := range moves {
-				tmuxRun("move-window", "-s", op.src, "-t", op.dst)
+				tmuxRun("move-window", "-d", "-s", op.src, "-t", op.dst)
 			}
 			// Mirror the gating in RefreshWindows: only restore focus when
 			// move-window actually renumbered something, since that's the

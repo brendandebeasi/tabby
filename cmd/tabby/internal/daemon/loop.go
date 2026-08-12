@@ -38,7 +38,6 @@ type AnimationTickEvent struct{}
 type RefreshTickEvent struct{}
 type GitTickEvent struct{}
 type TeamClaudeTickEvent struct{}
-type AutoThemeTickEvent struct{}
 type WatchdogTickEvent struct{}
 type IdleTickEvent struct{}
 type SocketCheckTickEvent struct{}
@@ -58,7 +57,6 @@ func (AnimationTickEvent) kind() string   { return "tick:animation" }
 func (RefreshTickEvent) kind() string     { return "tick:refresh" }
 func (GitTickEvent) kind() string         { return "tick:git" }
 func (TeamClaudeTickEvent) kind() string  { return "tick:teamclaude" }
-func (AutoThemeTickEvent) kind() string   { return "tick:auto_theme" }
 func (WatchdogTickEvent) kind() string    { return "tick:watchdog" }
 func (IdleTickEvent) kind() string        { return "tick:idle" }
 func (SocketCheckTickEvent) kind() string { return "tick:socket_check" }
@@ -154,7 +152,6 @@ type Loop struct {
 	lastWindowsHash    string
 	lastStructuralHash string
 	lastGitState       string
-	lastAutoTheme      string
 	lastClientGeom     string
 	lastResizeKey      string
 	lastWindowCheck    string
@@ -228,13 +225,6 @@ func (l *Loop) SetLastWindowCount(n int) {
 // goroutine read; safe without synchronization.
 func (l *Loop) ActiveWindowID() string {
 	return l.activeWindowID
-}
-
-// SetLastAutoTheme primes the auto-theme tracker so the first tick after
-// startup compares against the theme that was active at boot, not the empty
-// string. Called once by main.go before tick goroutines start.
-func (l *Loop) SetLastAutoTheme(name string) {
-	l.lastAutoTheme = name
 }
 
 // Submit enqueues an event for the loop. Priority events (renderer inputs,
@@ -329,8 +319,6 @@ func (l *Loop) dispatch(ev Event) {
 		l.handleGitTick()
 	case TeamClaudeTickEvent:
 		l.handleTeamClaudeTick()
-	case AutoThemeTickEvent:
-		l.handleAutoThemeTick()
 	case WatchdogTickEvent:
 		l.handleWatchdogTick()
 	case IdleTickEvent:
@@ -1043,20 +1031,6 @@ func (l *Loop) handleTeamClaudeTick() {
 func (l *Loop) handleTabSummaryTick() {
 	l.flags.tabSummary.Store(false)
 	l.coord.RefreshTabSummaries()
-}
-
-// handleAutoThemeTick is the migrated body of the autoThemeTicker case.
-func (l *Loop) handleAutoThemeTick() {
-	l.flags.autoTheme.Store(false)
-	l.deps.RunLoopTaskNonFatal("auto_theme_tick", 5*time.Second, func() {
-		want := l.coord.ResolveAutoTheme()
-		if want != "" && want != l.lastAutoTheme {
-			logEvent("AUTO_THEME_SWITCH from=%s to=%s", l.lastAutoTheme, want)
-			l.coord.SetTheme(want)
-			l.server.BroadcastRender()
-			l.lastAutoTheme = want
-		}
-	})
 }
 
 // handleSocketCheckTick is the migrated body of the socketCheckTicker case in

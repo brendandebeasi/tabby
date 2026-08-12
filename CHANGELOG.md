@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- `auto_theme.sync_claude_code` mirrors the light/dark toggle into Claude Code's own theme setting in `~/.claude/settings.json`. Off by default. Preserves the `-ansi` and `-daltonized` variant of whatever theme is already set. Claude Code reloads the file, so running sessions repaint without a restart.
+
+### 2026-08-11 — Light and dark themes now switch on a keypress
+
+- The theme no longer follows your OS appearance setting. Pair a light theme with a dark one in `config.yaml` and switch between them with `prefix + T`, or `tabby theme toggle` from a shell. — bd
+- New `tabby theme` command: no arguments reports the current selection, `toggle` flips it, and `light`/`dark` select one directly. — bd
+- The choice is written back to `config.yaml`, so it survives a daemon restart, and it works the same over SSH without forwarding anything from the machine you connected from. — bd
+- Configs that still say `mode: system` or `mode: time` keep loading; both are read as dark until you toggle. — bd
+- The sidebar has a theme button between the nav arrows and the resize row, filling what was a blank line. It names the theme it will switch to, and is hidden when no light/dark pair is configured. — bd
+
 ### 2026-07-30 — Un-minimize is safer, and a stale reindex bug is fixed
 
 - Un-minimizing a window now clears its markers only after confirming it actually left the holding session, so a failed restore can't strand it invisibly. — bd

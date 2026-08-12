@@ -286,21 +286,19 @@ func applyDefaults(cfg *Config) {
 		cfg.AI.TabSummary.MaxWords = 3
 	}
 
-	// AutoTheme defaults
-	if cfg.AutoTheme.Mode == "" {
-		cfg.AutoTheme.Mode = "system"
+	// AutoTheme defaults. Mode carries the manual light/dark choice; older
+	// configs written before the toggle replaced OS detection may still say
+	// "system" or "time", which are no longer meaningful — treat both as dark.
+	switch cfg.AutoTheme.Mode {
+	case "light", "dark":
+	default:
+		cfg.AutoTheme.Mode = "dark"
 	}
 	if cfg.AutoTheme.Light == "" {
 		cfg.AutoTheme.Light = "rose-pine-dawn"
 	}
 	if cfg.AutoTheme.Dark == "" {
 		cfg.AutoTheme.Dark = "rose-pine"
-	}
-	if cfg.AutoTheme.TimeLight == "" {
-		cfg.AutoTheme.TimeLight = "08:00"
-	}
-	if cfg.AutoTheme.TimeDark == "" {
-		cfg.AutoTheme.TimeDark = "20:00"
 	}
 
 	// Default group: ensure at least one catch-all group exists

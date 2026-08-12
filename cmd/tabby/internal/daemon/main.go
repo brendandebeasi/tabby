@@ -2677,6 +2677,13 @@ func Run(args []string) int {
 		return coordinator.HandlePetQA(req)
 	}
 
+	// OnTheme: `tabby theme` CLI requests, same synchronous contract as
+	// OnPetQA. The handler persists the light/dark choice to config.yaml
+	// and applies it; the server broadcasts a render on success.
+	server.OnTheme = func(req *daemon.ThemeRequest) *daemon.ThemeResponse {
+		return coordinator.HandleTheme(req)
+	}
+
 	// Set up menu send callback for in-renderer context menus
 	coordinator.OnSendMenu = func(clientID string, menu *daemon.MenuPayload) {
 		server.SendMenuToClient(clientID, menu)
@@ -2888,7 +2895,7 @@ func Run(args []string) int {
 			}
 		}
 
-		// Apply auto-theme immediately on startup (don't wait for first tick).
+		// Apply the saved light/dark theme choice on startup.
 		if want := coordinator.ResolveAutoTheme(); want != "" && want != coordinator.ActiveThemeName() {
 			coordinator.SetTheme(want)
 		}
@@ -2897,7 +2904,6 @@ func Run(args []string) int {
 		// lastWindowCount, lastFullRefresh) lives on Loop now. The refresh
 		// body itself runs on the loop goroutine via handleRefreshSignal,
 		// driven by RefreshSignalEvent submitted through SubmitRefresh.
-		loop.SetLastAutoTheme(coordinator.ActiveThemeName())
 
 		// Initial active-window fetch so tick handlers see a non-empty
 		// activeWindowID before the first refresh body runs.
@@ -2961,7 +2967,6 @@ func Run(args []string) int {
 		go runTicker(loopCtx, 5*time.Second, func() { loop.submitCoalesced(&loop.flags.git, GitTickEvent{}) })
 		go runTicker(loopCtx, 15*time.Second, func() { loop.submitCoalesced(&loop.flags.teamClaude, TeamClaudeTickEvent{}) })
 		go runTicker(loopCtx, 5*time.Second, func() { loop.submitCoalesced(&loop.flags.watchdog, WatchdogTickEvent{}) })
-		go runTicker(loopCtx, 60*time.Second, func() { loop.submitCoalesced(&loop.flags.autoTheme, AutoThemeTickEvent{}) })
 		go runTicker(loopCtx, 3*time.Second, func() { loop.submitCoalesced(&loop.flags.socket, SocketCheckTickEvent{}) })
 		go runTicker(loopCtx, 10*time.Second, func() { loop.submitCoalesced(&loop.flags.idle, IdleTickEvent{}) })
 		// Auto tab-summary cadence (ai.tab_summary.interval_seconds, default 180s).

@@ -84,6 +84,12 @@ type Server struct {
 	// /Users/b/.claude/plans/wiggly-discovering-starlight.md.
 	OnPetQA func(req *PetQARequest) *PetQAResponse
 
+	// Callback for `tabby theme` CLI requests. Same contract as OnPetQA:
+	// synchronous, replies on the same un-subscribed connection, nil means
+	// "no handler wired". A successful mutating op triggers a render
+	// broadcast so every attached renderer repaints in the new theme.
+	OnTheme func(req *ThemeRequest) *ThemeResponse
+
 	// Debug logging callback (set by daemon for diagnostics)
 	DebugLog func(format string, args ...interface{})
 }
@@ -515,6 +521,50 @@ func (s *Server) handleClient(conn net.Conn) {
 				resp = &PetQAResponse{OK: false, Error: "pet Q&A not available"}
 			}
 			s.sendMessage(conn, Message{Type: MsgPetQA, Payload: resp})
+
+		case MsgTheme:
+			// MsgTheme carries a `tabby theme` CLI request. Same one-shot
+			// request/response shape as MsgPetQA above.
+			var req ThemeRequest
+			if msg.Payload != nil {
+				payloadBytes, err := json.Marshal(msg.Payload)
+				if err != nil {
+					if s.DebugLog != nil {
+						s.DebugLog("SOCKET_THEME_DROP reason=payload_marshal remote=%s err=%v", remoteAddr, err)
+					}
+					s.sendMessage(conn, Message{Type: MsgTheme, Payload: &ThemeResponse{OK: false, Error: "invalid request payload"}})
+					continue
+				}
+				if err := json.Unmarshal(payloadBytes, &req); err != nil {
+					if s.DebugLog != nil {
+						s.DebugLog("SOCKET_THEME_DROP reason=payload_unmarshal remote=%s bytes=%d err=%v", remoteAddr, len(payloadBytes), err)
+					}
+					s.sendMessage(conn, Message{Type: MsgTheme, Payload: &ThemeResponse{OK: false, Error: "invalid request payload"}})
+					continue
+				}
+			}
+			if s.DebugLog != nil {
+				s.DebugLog("SOCKET_THEME op=%s mode=%s remote=%s", req.Op, req.Mode, remoteAddr)
+			}
+			var resp *ThemeResponse
+			if s.OnTheme != nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Fprintf(os.Stderr, "PANIC in OnTheme (op=%s): %v\n", req.Op, r)
+							resp = &ThemeResponse{OK: false, Error: "internal error"}
+						}
+					}()
+					resp = s.OnTheme(&req)
+				}()
+			}
+			if resp == nil {
+				resp = &ThemeResponse{OK: false, Error: "theme control not available"}
+			}
+			s.sendMessage(conn, Message{Type: MsgTheme, Payload: resp})
+			if resp.OK && req.Op != ThemeOpGet {
+				s.BroadcastRender()
+			}
 		}
 	}
 

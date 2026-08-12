@@ -66,14 +66,20 @@ type AITabSummary struct {
 	LLMBaseURL   string   `yaml:"llm_base_url"` // override for openai-compatible providers
 }
 
-// AutoTheme configures automatic theme switching based on time of day or system dark/light mode.
+// AutoTheme pairs a light and a dark theme and records which of the two is
+// currently selected. The choice is manual: `tabby theme toggle` flips Mode
+// and persists it here. Nothing detects the OS appearance.
 type AutoTheme struct {
-	Enabled   bool   `yaml:"enabled"`
-	Mode      string `yaml:"mode"`       // "system" (follow OS) or "time" (schedule)
-	Light     string `yaml:"light"`      // Theme name for light mode
-	Dark      string `yaml:"dark"`       // Theme name for dark mode
-	TimeLight string `yaml:"time_light"` // "HH:MM" — start of light period (mode: time only)
-	TimeDark  string `yaml:"time_dark"`  // "HH:MM" — start of dark period (mode: time only)
+	Enabled bool   `yaml:"enabled"`
+	Mode    string `yaml:"mode"`  // "light" or "dark" — the currently selected variant
+	Light   string `yaml:"light"` // Theme name for light mode
+	Dark    string `yaml:"dark"`  // Theme name for dark mode
+
+	// SyncClaudeCode mirrors Mode into Claude Code's own theme setting in
+	// ~/.claude/settings.json. Off by default: that file is owned by another
+	// tool and carries unrelated keys (hooks, permissions), so tabby only
+	// touches it on an explicit opt-in.
+	SyncClaudeCode bool `yaml:"sync_claude_code"`
 }
 
 // BusyDetection configures which pane commands trigger the busy indicator.

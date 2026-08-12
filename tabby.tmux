@@ -130,6 +130,9 @@ tmux bind-key '-' run-shell "$SPLIT_PANE_CMD v"
 NEW_WINDOW_BIN="$CURRENT_DIR/bin/tabby new-window"
 tmux bind-key 'c' run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 
+# Toggle between the configured light and dark themes
+tmux bind-key 'T' run-shell "$CURRENT_DIR/bin/tabby theme toggle"
+
 # Enable automatic window renaming by default (shows running command/SSH host)
 # Windows with group prefixes or manual names get locked via @tabby_locked
 tmux set-option -g automatic-rename on
@@ -636,6 +639,12 @@ fi
 # every attached client at once. The `extended-keys on` assumption that these
 # are "unique sequences" does not hold for raw replies. Bracket-key navigation
 # is still fully covered by cmd+[/] (M-{ / M-}), M-; / M-', and prefix p / n.
+#
+# 2026-08-12: re-enabled at the user's request to re-test the above. If tabs
+# start jumping on their own (notably a couple of seconds after opening a new
+# one), this pair is the first thing to remove.
+tmux bind-key -n "M-[" previous-window
+tmux bind-key -n "M-]" next-window
 # Also override prefix+o to use the smart cycle binary
 if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key o run-shell "$CYCLE_PANE_BIN"

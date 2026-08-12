@@ -396,37 +396,32 @@ func pickWidgets(cur widgetChoice) widgetChoice {
 // ── Auto-theme picker ─────────────────────────────────────────────────────────
 
 type autoThemeChoice struct {
-	enabled   bool
-	mode      string // "system" | "time"
-	light     string
-	dark      string
-	timeLight string
-	timeDark  string
+	enabled bool
+	mode    string // "light" | "dark" — which variant is selected
+	light   string
+	dark    string
 }
 
 func pickAutoTheme(cur autoThemeChoice) autoThemeChoice {
-	// Step A: enable?
+	// Step A: use a light/dark pair, or a single fixed theme?
 	modeOpts := []option{
 		{id: "off", label: "Off", desc: "Use a fixed theme (configured in the previous step)"},
-		{id: "system", label: "Follow OS dark/light mode", desc: "macOS: System Preferences → Appearance  |  Linux: GNOME/KDE color scheme"},
-		{id: "time", label: "Schedule by time of day", desc: "Light theme in the morning, dark theme in the evening"},
+		{id: "dark", label: "Light/dark pair, starting dark", desc: "Switch any time with `tabby theme toggle` (prefix + T)"},
+		{id: "light", label: "Light/dark pair, starting light", desc: "Switch any time with `tabby theme toggle` (prefix + T)"},
 	}
 	currentModeIdx := 0
 	if cur.enabled {
-		switch cur.mode {
-		case "system":
-			currentModeIdx = 1
-		case "time":
+		currentModeIdx = 1
+		if cur.mode == "light" {
 			currentModeIdx = 2
 		}
 	}
 
-	modeID, modeIdx := menu(
-		"Auto-switch theme",
-		"Automatically change the sidebar theme based on environment",
+	modeID, _ := menu(
+		"Light/dark themes",
+		"Pair a light and a dark theme, then toggle between them on demand",
 		modeOpts, currentModeIdx,
 	)
-	_ = modeIdx
 	if modeID == "" || modeID == "off" {
 		cur.enabled = false
 		return cur
@@ -438,7 +433,7 @@ func pickAutoTheme(cur autoThemeChoice) autoThemeChoice {
 	if cur.light == "" {
 		cur.light = "rose-pine-dawn"
 	}
-	light := pickThemeForMode("Choose light theme", "Used during the day / when OS is in light mode", cur.light)
+	light := pickThemeForMode("Choose light theme", "Used when toggled to light", cur.light)
 	if light != "" {
 		cur.light = light
 	}
@@ -447,40 +442,9 @@ func pickAutoTheme(cur autoThemeChoice) autoThemeChoice {
 	if cur.dark == "" {
 		cur.dark = "rose-pine"
 	}
-	dark := pickThemeForMode("Choose dark theme", "Used at night / when OS is in dark mode", cur.dark)
+	dark := pickThemeForMode("Choose dark theme", "Used when toggled to dark", cur.dark)
 	if dark != "" {
 		cur.dark = dark
-	}
-
-	// Step D (time mode only): pick transition times
-	if modeID == "time" {
-		if cur.timeLight == "" {
-			cur.timeLight = "08:00"
-		}
-		if cur.timeDark == "" {
-			cur.timeDark = "20:00"
-		}
-		timeOpts := []option{
-			{id: "06:00|22:00", label: "Early bird  (light 6am – 10pm)", desc: ""},
-			{id: "08:00|20:00", label: "Standard    (light 8am – 8pm)", desc: ""},
-			{id: "09:00|18:00", label: "Office hours (light 9am – 6pm)", desc: ""},
-			{id: "07:00|21:00", label: "Flexible    (light 7am – 9pm)", desc: ""},
-		}
-		current := cur.timeLight + "|" + cur.timeDark
-		currentTimeIdx := 1 // default to Standard
-		for i, o := range timeOpts {
-			if o.id == current {
-				currentTimeIdx = i
-			}
-		}
-		timeID, _ := menu("Light/dark schedule", "When does each theme take effect?", timeOpts, currentTimeIdx)
-		if timeID != "" {
-			parts := strings.SplitN(timeID, "|", 2)
-			if len(parts) == 2 {
-				cur.timeLight = parts[0]
-				cur.timeDark = parts[1]
-			}
-		}
 	}
 
 	return cur
@@ -530,11 +494,7 @@ func printSummary(theme, iconStyle string, widgets widgetChoice, at autoThemeCho
 		fmt.Printf("  Theme:       %sauto%s\n", bold, reset)
 		fmt.Printf("    light  →   %s%s%s %s\n", bold, lt.Name, reset, themeSwatchLine(lt))
 		fmt.Printf("    dark   →   %s%s%s %s\n", bold, dt.Name, reset, themeSwatchLine(dt))
-		if at.mode == "time" {
-			fmt.Printf("    schedule:  light from %s, dark from %s\n", at.timeLight, at.timeDark)
-		} else {
-			fmt.Printf("    mode:      follow OS\n")
-		}
+		fmt.Printf("    selected:  %s\n", at.mode)
 	} else {
 		fmt.Printf("  Theme:       %s%s%s %s\n", bold, t.Name, reset, themeSwatchLine(t))
 	}
@@ -641,8 +601,6 @@ func applyChoices(cfg *config.Config, theme, iconStyle string, widgets widgetCho
 		cfg.AutoTheme.Mode = at.mode
 		cfg.AutoTheme.Light = at.light
 		cfg.AutoTheme.Dark = at.dark
-		cfg.AutoTheme.TimeLight = at.timeLight
-		cfg.AutoTheme.TimeDark = at.timeDark
 	}
 }
 
@@ -689,12 +647,10 @@ func Run(args []string) int {
 		teamclaude: cfg.Widgets.TeamClaude.Enabled,
 	}
 	currentAutoTheme := autoThemeChoice{
-		enabled:   cfg.AutoTheme.Enabled,
-		mode:      cfg.AutoTheme.Mode,
-		light:     cfg.AutoTheme.Light,
-		dark:      cfg.AutoTheme.Dark,
-		timeLight: cfg.AutoTheme.TimeLight,
-		timeDark:  cfg.AutoTheme.TimeDark,
+		enabled: cfg.AutoTheme.Enabled,
+		mode:    cfg.AutoTheme.Mode,
+		light:   cfg.AutoTheme.Light,
+		dark:    cfg.AutoTheme.Dark,
 	}
 
 	// ── Welcome ───────────────────────────────────────────────────────────────

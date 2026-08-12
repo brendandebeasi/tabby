@@ -36,7 +36,39 @@ const (
 	// PetQAResponse below. Phase 1 of the Q&A loop; see
 	// /Users/b/.claude/plans/wiggly-discovering-starlight.md.
 	MsgPetQA MessageType = "pet_qa"
+	// MsgTheme is the request-response envelope used by the `tabby theme`
+	// CLI to read or flip the light/dark theme selection owned by the
+	// daemon. Same shape as MsgPetQA: the CLI dials the socket, sends one
+	// request, reads one response, then disconnects.
+	MsgTheme MessageType = "theme"
 )
+
+// ThemeOp is the operation discriminator carried in a ThemeRequest.
+type ThemeOp string
+
+const (
+	ThemeOpGet    ThemeOp = "get"
+	ThemeOpSet    ThemeOp = "set"
+	ThemeOpToggle ThemeOp = "toggle"
+)
+
+// ThemeRequest is the CLI->daemon request envelope for theme selection.
+// Mode is read only for ThemeOpSet and must be "light" or "dark".
+type ThemeRequest struct {
+	Op   ThemeOp `json:"op"`
+	Mode string  `json:"mode,omitempty"`
+}
+
+// ThemeResponse is the daemon->CLI reply. Mode is the light/dark selection
+// in effect after the operation; Theme is the concrete theme name it
+// resolved to (e.g. "rose-pine").
+type ThemeResponse struct {
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+	Theme   string `json:"theme,omitempty"`
+	Enabled bool   `json:"enabled,omitempty"`
+}
 
 // TargetKind identifies what KIND of renderer a message is for or from.
 // It replaces the old stringly-typed prefix scheme ("window-header:@1", "header:%5", etc).
@@ -331,11 +363,11 @@ type PetState struct {
 // PendingQuestion is the question the cat is currently waiting on a
 // response for. At most one is pending at a time per pet.
 type PendingQuestion struct {
-	ID      string    `json:"id"`             // stable seed-bank ID (e.g. "morning_or_night")
-	Text    string    `json:"text"`           // rendered question text
-	Kind    string    `json:"kind"`           // "choice" | "free_text"
+	ID      string    `json:"id"`   // stable seed-bank ID (e.g. "morning_or_night")
+	Text    string    `json:"text"` // rendered question text
+	Kind    string    `json:"kind"` // "choice" | "free_text"
 	Choices []string  `json:"choices,omitempty"`
-	Expires time.Time `json:"expires"`        // after this point pickQuestion may rotate it out
+	Expires time.Time `json:"expires"`          // after this point pickQuestion may rotate it out
 	Source  string    `json:"source,omitempty"` // "bank" (Phase 1) or "llm" (Phase 3)
 }
 
@@ -360,9 +392,9 @@ type AnsweredQuestion struct {
 // the cat's chosen character. Capped at 20 per pet; oldest/lowest
 // confidence dropped first.
 type PersonalityTrait struct {
-	Text       string    `json:"text"`           // e.g. "user is a night owl"
-	Source     string    `json:"source"`         // question ID that produced it
-	Confidence float64   `json:"confidence"`     // 0..1
+	Text       string    `json:"text"`       // e.g. "user is a night owl"
+	Source     string    `json:"source"`     // question ID that produced it
+	Confidence float64   `json:"confidence"` // 0..1
 	AddedAt    time.Time `json:"added_at"`
 }
 
@@ -383,11 +415,11 @@ const (
 //
 //   - get_pending : no other fields used.
 //   - answer      : Answer carries the user's response. The daemon
-//                   rejects non-empty answers that don't match a choice
-//                   for choice-kind questions.
+//     rejects non-empty answers that don't match a choice
+//     for choice-kind questions.
 //   - list_traits : no other fields used.
 //   - forget      : ID is the AnsweredQuestion ID to remove (along
-//                   with any traits derived from it).
+//     with any traits derived from it).
 type PetQARequest struct {
 	Op     PetQAOp `json:"op"`
 	Answer string  `json:"answer,omitempty"`
@@ -400,11 +432,11 @@ type PetQARequest struct {
 //
 //   - get_pending : Pending set if there is one; nil otherwise.
 //   - answer      : NewTrait set if the answer produced a fresh trait
-//                   (consent answers and choices with no TraitFor entry
-//                   leave it nil).
+//     (consent answers and choices with no TraitFor entry
+//     leave it nil).
 //   - list_traits : Traits populated (possibly empty slice).
-//                   RecentAnswers populated so the CLI can show
-//                   "source: <id>" links to recent Q&A history.
+//     RecentAnswers populated so the CLI can show
+//     "source: <id>" links to recent Q&A history.
 //   - forget      : Removed indicates whether the ID matched anything.
 type PetQAResponse struct {
 	OK            bool               `json:"ok"`

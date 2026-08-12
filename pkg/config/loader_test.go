@@ -549,3 +549,24 @@ func TestIconPresets_AsciiHasNonEmptyValues(t *testing.T) {
 	assert.NotEmpty(t, preset.ActivityIcon)
 	assert.NotEmpty(t, preset.TreeBranch)
 }
+
+func TestAutoThemeModeMigration(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", "dark"},
+		{"system", "dark"},
+		{"time", "dark"},
+		{"light", "light"},
+		{"dark", "dark"},
+	}
+	for _, tc := range tests {
+		cfg := &Config{}
+		cfg.AutoTheme.Mode = tc.in
+		applyDefaults(cfg)
+		if cfg.AutoTheme.Mode != tc.want {
+			t.Errorf("mode %q: got %q, want %q", tc.in, cfg.AutoTheme.Mode, tc.want)
+		}
+	}
+}
