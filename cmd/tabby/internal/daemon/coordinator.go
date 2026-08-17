@@ -732,6 +732,7 @@ type Coordinator struct {
 	activeWindowChangeTime time.Time            // When the active window changed (for grace period)
 	windowFirstSeen        map[string]time.Time // When each window was first observed by width sync (a brand-new window's sidebar width is spawn output, never a user drag)
 	windowHistory          []string             // LIFO stack of recently visited window IDs (most recent first, max 20)
+	clientWindowHistory    map[string][]string  // Per-client LIFO stacks, keyed by client tty. Two terminals attached to one session each need their own back-target; a single shared stack restored one client's close to the other client's last window.
 	widthSyncMu            sync.Mutex
 	// Active physical tmux client snapshot. Updated by clientGeometryTicker
 	// via SetActiveClient (which also updates activeClientWidth for the hot
@@ -3040,14 +3041,55 @@ func pickPreviousWindow(history []string, existing map[string]bool) string {
 	return ""
 }
 
+// TrackWindowHistoryForClient records a visit in the per-client stack as well
+// as the shared one. clientTTY may be empty (client unknown), in which case
+// only the shared stack is updated.
+func (c *Coordinator) TrackWindowHistoryForClient(clientTTY, windowID string) {
+	c.TrackWindowHistory(windowID)
+	if clientTTY == "" || windowID == "" {
+		return
+	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.clientWindowHistory == nil {
+		c.clientWindowHistory = make(map[string][]string)
+	}
+	hist := c.clientWindowHistory[clientTTY]
+	filtered := make([]string, 0, len(hist))
+	for _, id := range hist {
+		if id != windowID {
+			filtered = append(filtered, id)
+		}
+	}
+	hist = append([]string{windowID}, filtered...)
+	if len(hist) > 20 {
+		hist = hist[:20]
+	}
+	c.clientWindowHistory[clientTTY] = hist
+}
+
 // SelectPreviousWindow finds the most recently visited window that still exists
 // and selects it. Called when a window is closed to restore focus to the last
 // visited window instead of tmux's default adjacent-window behavior.
 // Replaces scripts/select_previous_window.sh.
 func (c *Coordinator) SelectPreviousWindow() {
+	// Prefer the requesting client's own stack; fall back to the shared one
+	// when the client is unknown or has no surviving entry.
+	activeTTY := ""
+	if _, _, tty, _, ok := activeClientGeometry(); ok {
+		activeTTY = strings.TrimSpace(tty)
+	}
+
 	c.stateMu.RLock()
 	history := make([]string, len(c.windowHistory))
 	copy(history, c.windowHistory)
+	var clientHistory []string
+	if activeTTY != "" {
+		if h, ok := c.clientWindowHistory[activeTTY]; ok {
+			clientHistory = make([]string, len(h))
+			copy(clientHistory, h)
+		}
+	}
 
 	// Build set of existing window IDs
 	existing := make(map[string]bool, len(c.windows))
@@ -3057,7 +3099,12 @@ func (c *Coordinator) SelectPreviousWindow() {
 	c.stateMu.RUnlock()
 
 	// Find first surviving window in history
-	selected := pickPreviousWindow(history, existing)
+	selected := pickPreviousWindow(clientHistory, existing)
+	source := "client"
+	if selected == "" {
+		selected = pickPreviousWindow(history, existing)
+		source = "shared"
+	}
 	if selected != "" {
 		if err := c.SelectWindow(selected, "select_previous_window", "window_close"); err != nil {
 			logEvent("SELECT_PREVIOUS_WINDOW_ERR target=%s err=%v", selected, err)
@@ -3068,7 +3115,7 @@ func (c *Coordinator) SelectPreviousWindow() {
 		// this is indistinguishable from a working restore without it.
 		logEvent("SELECT_PREVIOUS_WINDOW_NONE history=%d existing=%d", len(history), len(existing))
 	} else {
-		logEvent("SELECT_PREVIOUS_WINDOW target=%s history=%d", selected, len(history))
+		logEvent("SELECT_PREVIOUS_WINDOW target=%s source=%s client=%s client_history=%d shared_history=%d", selected, source, activeTTY, len(clientHistory), len(history))
 	}
 
 	// Clean up history: remove dead windows
@@ -3080,7 +3127,44 @@ func (c *Coordinator) SelectPreviousWindow() {
 		}
 	}
 	c.windowHistory = cleaned
+	// Prune the per-client stacks too, and drop stacks for clients that have
+	// detached, so neither can accumulate dead window IDs.
+	if c.clientWindowHistory != nil {
+		liveTTYs := attachedClientTTYs()
+		for tty, hist := range c.clientWindowHistory {
+			if len(liveTTYs) > 0 && !liveTTYs[tty] {
+				delete(c.clientWindowHistory, tty)
+				continue
+			}
+			ch := make([]string, 0, len(hist))
+			for _, id := range hist {
+				if existing[id] {
+					ch = append(ch, id)
+				}
+			}
+			c.clientWindowHistory[tty] = ch
+		}
+	}
 	c.stateMu.Unlock()
+}
+
+// attachedClientTTYs returns the set of currently attached client ttys. An
+// empty result means the query failed and callers should not treat any client
+// as detached.
+func attachedClientTTYs() map[string]bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-clients", "-F", "#{client_tty}").Output()
+	if err != nil {
+		return nil
+	}
+	set := make(map[string]bool, 4)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			set[t] = true
+		}
+	}
+	return set
 }
 
 // GetWindowHistory returns a copy of the current window history (for testing).
@@ -9737,6 +9821,38 @@ func (c *Coordinator) capTargetToActiveClient(target int) int {
 	return target
 }
 
+// distinctClientWidths counts how many different widths the given tmux
+// list-clients output reports. More than one means attached terminals disagree
+// on size, so with window-size latest tmux resizes the window back and forth
+// and no single measured sidebar width can be treated as user intent.
+func distinctClientWidths(listClientsOutput string) int {
+	seen := make(map[int]struct{}, 4)
+	for _, line := range strings.Split(strings.TrimSpace(listClientsOutput), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		w, err := strconv.Atoi(line)
+		if err != nil || w <= 0 {
+			continue
+		}
+		seen[w] = struct{}{}
+	}
+	return len(seen)
+}
+
+// attachedClientWidthSpread reports whether the session currently has
+// attached clients of differing widths.
+func (c *Coordinator) attachedClientWidthSpread() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-clients", "-F", "#{client_width}").Output()
+	if err != nil {
+		return false
+	}
+	return distinctClientWidths(string(out)) > 1
+}
+
 // PlanWidthSync computes the resize ops needed to reconcile every sidebar
 // pane's width with the global target. Returns ops without executing — the
 // caller chooses whether to flush directly (RunWidthSync wrapper) or
@@ -9837,6 +9953,23 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	// shrinking every window's sidebar. See the sidebar-width bug.
 	curSyncClientWidth := int(c.activeClientWidth.Load())
 	clientWidthChanged := curSyncClientWidth > 0 && c.lastSyncClientWidth != 0 && c.lastSyncClientWidth != curSyncClientWidth
+
+	// clientWidthChanged is edge-triggered: it fires on the pass where the
+	// width flips, then lastSyncClientWidth commits and the next pass adopts
+	// freely. With two differently-sized clients attached to one session and
+	// window-size latest, tmux resizes the window to whichever client acted
+	// last, so the flips never stop and adopts slip through between edges --
+	// observed as 32 -> 43 -> 37 -> 43 within two seconds, with
+	// client_width=185 and 164 alternating.
+	//
+	// While such clients are attached, no single measured sidebar width is
+	// authoritative: each is correct for the client that produced it. Adopting
+	// any of them into the global makes every window follow the wrong one.
+	// Hold the global steady and let boundedSidebarWidthForWindow size each
+	// window from its own width -- the same per-window approach
+	// desiredWindowHeaderHeightForWidth already uses to stop header
+	// oscillation from the global client profile.
+	multiClientSizes := c.attachedClientWidthSpread()
 
 	// Debounce: ignore resize events within 500ms of our last sync (unless forced)
 	var sinceLast time.Duration
@@ -9969,6 +10102,8 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=just_became_active active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
 			} else if atCap {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_active_client_cap active=%s measured=%d global=%d cap=%d", activeWindowID, effectiveActive, c.globalWidth, capped)
+			} else if multiClientSizes {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=multi_client_sizes active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
 			} else if measurementsDisagree {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=resize_in_flight active=%s pane_w=%d reported_w=%d global=%d", activeWindowID, effectiveActive, reportedActive, c.globalWidth)
 			} else if windowSettling {

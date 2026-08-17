@@ -541,8 +541,10 @@ func (l *Loop) updateActiveWindow() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	args := []string{"display-message"}
+	activeTTY := ""
 	if _, _, tty, _, ok := activeClientGeometry(); ok && strings.TrimSpace(tty) != "" {
-		args = append(args, "-c", strings.TrimSpace(tty))
+		activeTTY = strings.TrimSpace(tty)
+		args = append(args, "-c", activeTTY)
 	}
 	args = append(args, "-p", "#{window_id}")
 	if out, err := exec.CommandContext(ctx, "tmux", args...).Output(); err == nil {
@@ -610,7 +612,27 @@ func (l *Loop) updateActiveWindow() {
 			// entered the history and SelectPreviousWindow had nothing usable
 			// to restore to on close, silently leaving tmux's choice in place.
 			if newID != "" && newID != l.activeWindowID {
-				l.coord.TrackWindowHistory(newID)
+				// Do not record the focus move that tmux performs as a RESULT
+				// of a window closing. That switch happens before the restore
+				// runs, so recording it put tmux's own adjacent-window pick at
+				// the head of the stack and the restore then "restored" to it
+				// -- chasing its own tail. Only record a switch when the
+				// window we are leaving still exists, i.e. a real navigation.
+				leavingStillExists := l.activeWindowID == ""
+				for _, w := range l.coord.GetWindows() {
+					if w.ID == l.activeWindowID {
+						leavingStillExists = true
+						break
+					}
+				}
+				if leavingStillExists {
+					// Key the history by the client that made the switch. A
+					// single shared stack mixes both clients' navigation when
+					// two terminals are attached to one session.
+					l.coord.TrackWindowHistoryForClient(activeTTY, newID)
+				} else {
+					logEvent("WINDOW_HISTORY_SKIP reason=post_close old=%s new=%s", l.activeWindowID, newID)
+				}
 			}
 			l.SetActiveWindowID(newID)
 		}
