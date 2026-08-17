@@ -274,7 +274,7 @@ tmux set-option -g @tabby_sidebar_width_desktop 25
 
 # Breakpoints
 tmux set-option -g @tabby_sidebar_mobile_max_window_cols 110
-tmux set-option -g @tabby_sidebar_tablet_max_window_cols 170
+tmux set-option -g @tabby_sidebar_tablet_max_window_cols 140
 ```
 
 **Window header (phone only):** narrow clients get a one-row window-header pane above each window with buttons: `◀` previous, `≡` hamburger (hide/show sidebar), `+` new, `×` close, `▶` next.

@@ -9850,6 +9850,16 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 			// between windows" the moment a narrow client connects.
 			capped := c.capTargetToActiveClient(c.globalWidth)
 			atCap := effectiveActive == capped && capped < c.globalWidth
+			// Same reasoning as atCap, but for the responsive profile clamp.
+			// boundedSidebarWidthForWindow caps every target at the window's
+			// profile max (e.g. a 164-col window classified as "tablet" is
+			// pinned to width_tablet). A sidebar sitting AT that clamp is the
+			// clamp working, not a drag. Adopting it would pull globalWidth
+			// down to the clamp, and the panel audit — which fires RunWidthSync
+			// precisely because panes disagree with the global — would then
+			// clobber a legitimate wider width on every drift check.
+			profileClamped := c.boundedSidebarWidthForWindow(activeWindowID, c.globalWidth, clientHeightSnapshot[activeWindowID])
+			atProfileClamp := effectiveActive == profileClamped && profileClamped < c.globalWidth
 			if clientWidthChanged {
 				// The elected physical client just changed size (phone<->desktop
 				// flip / reattach). The measured discrepancy is a stale clamp
@@ -9866,6 +9876,8 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=just_became_active active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
 			} else if atCap {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_active_client_cap active=%s measured=%d global=%d cap=%d", activeWindowID, effectiveActive, c.globalWidth, capped)
+			} else if atProfileClamp {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_profile_clamp active=%s measured=%d global=%d clamp=%d", activeWindowID, effectiveActive, c.globalWidth, profileClamped)
 			} else {
 				coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global",
 					activeWindowID, c.globalWidth, effectiveActive)
