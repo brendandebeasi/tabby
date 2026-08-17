@@ -604,6 +604,14 @@ func (l *Loop) updateActiveWindow() {
 				}
 				logEvent("UPDATE_ACTIVE_WINDOW_TMUX_OBSERVE old=%s new=%s coordinator_active=%s", l.activeWindowID, newID, coordActive)
 			}
+			// Record the visit here, not just in SelectWindow. tmux moves focus
+			// on its own for new-window and its adjacent-window close default,
+			// which never route through SelectWindow -- so those windows never
+			// entered the history and SelectPreviousWindow had nothing usable
+			// to restore to on close, silently leaving tmux's choice in place.
+			if newID != "" && newID != l.activeWindowID {
+				l.coord.TrackWindowHistory(newID)
+			}
 			l.SetActiveWindowID(newID)
 		}
 	} else {

@@ -3028,6 +3028,18 @@ func (c *Coordinator) TrackWindowHistory(windowID string) {
 	}
 }
 
+// pickPreviousWindow returns the most recently visited window that still
+// exists, or "" if the history holds no survivor. Split out from
+// SelectPreviousWindow so the choice is testable without a live tmux server.
+func pickPreviousWindow(history []string, existing map[string]bool) string {
+	for _, id := range history {
+		if existing[id] {
+			return id
+		}
+	}
+	return ""
+}
+
 // SelectPreviousWindow finds the most recently visited window that still exists
 // and selects it. Called when a window is closed to restore focus to the last
 // visited window instead of tmux's default adjacent-window behavior.
@@ -3045,13 +3057,18 @@ func (c *Coordinator) SelectPreviousWindow() {
 	c.stateMu.RUnlock()
 
 	// Find first surviving window in history
-	for _, id := range history {
-		if existing[id] {
-			if err := c.SelectWindow(id, "select_previous_window", "window_close"); err != nil {
-				logEvent("SELECT_PREVIOUS_WINDOW_ERR target=%s err=%v", id, err)
-			}
-			break
+	selected := pickPreviousWindow(history, existing)
+	if selected != "" {
+		if err := c.SelectWindow(selected, "select_previous_window", "window_close"); err != nil {
+			logEvent("SELECT_PREVIOUS_WINDOW_ERR target=%s err=%v", selected, err)
 		}
+	}
+	if selected == "" {
+		// No survivor: tmux's adjacent-window default stands. Worth logging --
+		// this is indistinguishable from a working restore without it.
+		logEvent("SELECT_PREVIOUS_WINDOW_NONE history=%d existing=%d", len(history), len(existing))
+	} else {
+		logEvent("SELECT_PREVIOUS_WINDOW target=%s history=%d", selected, len(history))
 	}
 
 	// Clean up history: remove dead windows
