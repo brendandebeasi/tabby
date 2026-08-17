@@ -75,7 +75,14 @@ if [ "${TABBY_DEFERRED:-}" != "1" ]; then
                 _FIRST_PANE=$(echo "$_PANES" | head -1 | cut -d'|' -f1)
                 if [ -n "$_FIRST_PANE" ] && [ -n "$_WINDOW" ]; then
                     _DBG=""; [ "${TABBY_DEBUG:-}" = "1" ] && _DBG="-debug"
-                    tmux split-window -d -t "$_FIRST_PANE" -h -b -f -l 25 \
+                    # Spawn at the persisted width, not a literal. The daemon
+                    # reconciles to the configured width once it is up, so a
+                    # hardcoded value here makes the sidebar visibly jump from
+                    # that value to the real one on every start. 25 remains the
+                    # fallback for a first run with nothing persisted yet.
+                    _SW=$(tmux show-options -gqv @tabby_sidebar_width 2>/dev/null || echo "")
+                    case "$_SW" in ''|*[!0-9]*) _SW=25 ;; esac
+                    tmux split-window -d -t "$_FIRST_PANE" -h -b -f -l "$_SW" \
                         "printf '\\033[?25l\\033[2J\\033[H' && exec -a sidebar-renderer '$_TABBY_BIN' render sidebar -session '$_SESSION' -window '$_WINDOW' $_DBG"
                 fi
             fi
@@ -388,7 +395,7 @@ SIDEBAR_WIDTH_DESKTOP=$(grep -A40 "^sidebar:" "$CONFIG_FILE" 2>/dev/null | grep 
 SIDEBAR_MOBILE_MAX_PERCENT=${SIDEBAR_MOBILE_MAX_PERCENT:-20}
 SIDEBAR_MOBILE_MIN_CONTENT=${SIDEBAR_MOBILE_MIN_CONTENT:-40}
 SIDEBAR_MOBILE_MAX_WINDOW=${SIDEBAR_MOBILE_MAX_WINDOW:-110}
-SIDEBAR_TABLET_MAX_WINDOW=${SIDEBAR_TABLET_MAX_WINDOW:-170}
+SIDEBAR_TABLET_MAX_WINDOW=${SIDEBAR_TABLET_MAX_WINDOW:-140}
 SIDEBAR_WIDTH_MOBILE=${SIDEBAR_WIDTH_MOBILE:-15}
 SIDEBAR_WIDTH_TABLET=${SIDEBAR_WIDTH_TABLET:-20}
 SIDEBAR_WIDTH_DESKTOP=${SIDEBAR_WIDTH_DESKTOP:-25}
