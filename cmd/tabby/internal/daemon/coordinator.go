@@ -9808,13 +9808,19 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	// widthSyncMu indefinitely.
 	actualPaneWidths := make(map[string]int)
 	sidebarPaneIDs := make(map[string]string)
+	// window_width rides along on the same round-trip so the adopt guard below
+	// can reject a sidebar that currently spans its whole window.
+	windowWidths := make(map[string]int)
 	paneCtx, paneCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	if paneOut, err := exec.CommandContext(paneCtx, "tmux", "list-panes", "-s", "-F", "#{pane_id}|#{pane_current_command}|#{window_id}|#{pane_width}|#{pane_start_command}").Output(); err == nil {
+	if paneOut, err := exec.CommandContext(paneCtx, "tmux", "list-panes", "-s", "-F", "#{pane_id}|#{pane_current_command}|#{window_id}|#{pane_width}|#{window_width}|#{pane_start_command}").Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
-			parts := strings.SplitN(line, "|", 5)
-			if len(parts) == 5 && isSidebarPaneCommand(parts[1], parts[4]) {
+			parts := strings.SplitN(line, "|", 6)
+			if len(parts) == 6 && isSidebarPaneCommand(parts[1], parts[5]) {
 				if w, err := strconv.Atoi(parts[3]); err == nil {
 					actualPaneWidths[parts[2]] = w
+				}
+				if w, err := strconv.Atoi(parts[4]); err == nil {
+					windowWidths[parts[2]] = w
 				}
 				if _, dup := sidebarPaneIDs[parts[2]]; !dup {
 					sidebarPaneIDs[parts[2]] = parts[0]
@@ -9860,6 +9866,16 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 			// clobber a legitimate wider width on every drift check.
 			profileClamped := c.boundedSidebarWidthForWindow(activeWindowID, c.globalWidth, clientHeightSnapshot[activeWindowID])
 			atProfileClamp := effectiveActive == profileClamped && profileClamped < c.globalWidth
+			// A sidebar is never legitimately the full window. A freshly
+			// spawned window is briefly all-sidebar before the content split
+			// lands, and a layout flip leaves it that way; the panel audit
+			// calls exactly this state corrupt (LAYOUT_CORRUPT_SIDEBAR, same
+			// windowWidth-2 threshold) and kills the pane. Measuring that
+			// transient here and adopting it poisons globalWidth with the
+			// window width, which then yanks every other window on each audit
+			// tick. Use the same test so the two checks agree.
+			activeWinWidth := windowWidths[activeWindowID]
+			fullWidth := activeWinWidth > 0 && effectiveActive >= activeWinWidth-2
 			if clientWidthChanged {
 				// The elected physical client just changed size (phone<->desktop
 				// flip / reattach). The measured discrepancy is a stale clamp
@@ -9876,6 +9892,8 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=just_became_active active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
 			} else if atCap {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_active_client_cap active=%s measured=%d global=%d cap=%d", activeWindowID, effectiveActive, c.globalWidth, capped)
+			} else if fullWidth {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=full_window_width active=%s measured=%d global=%d win_w=%d", activeWindowID, effectiveActive, c.globalWidth, activeWinWidth)
 			} else if atProfileClamp {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_profile_clamp active=%s measured=%d global=%d clamp=%d", activeWindowID, effectiveActive, c.globalWidth, profileClamped)
 			} else {
