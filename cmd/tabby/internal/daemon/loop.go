@@ -154,15 +154,18 @@ type Loop struct {
 	lastGitState       string
 	lastClientGeom     string
 	lastResizeKey      string
-	lastWindowCheck    string
-	lastSlowFrame      int
-	lastWindowCount    int       // count of coordinator windows last seen by signal_refresh
-	lastFullRefresh    time.Time // last time signal_refresh ran the heavy spawn/cleanup path
-	lastReadyWindowID  string    // last new-window-ready windowID observed (for tmux-active suppression)
-	lastReadyClearedAt time.Time // when the new-window ready state was last cleared
-	lastPaneLayoutOps  time.Time // debounce for the spawn/cleanup heavy path
-	lastReassertAt     time.Time // rate-limit for reassertActiveWindow
-	lastReassertTarget string    // target of the last active-window reassert
+	// lastStaleClientPrune rate-limits PruneStaleClients; the geometry tick
+	// itself runs far too often to scan clients on every pass.
+	lastStaleClientPrune time.Time
+	lastWindowCheck      string
+	lastSlowFrame        int
+	lastWindowCount      int       // count of coordinator windows last seen by signal_refresh
+	lastFullRefresh      time.Time // last time signal_refresh ran the heavy spawn/cleanup path
+	lastReadyWindowID    string    // last new-window-ready windowID observed (for tmux-active suppression)
+	lastReadyClearedAt   time.Time // when the new-window ready state was last cleared
+	lastPaneLayoutOps    time.Time // debounce for the spawn/cleanup heavy path
+	lastReassertAt       time.Time // rate-limit for reassertActiveWindow
+	lastReassertTarget   string    // target of the last active-window reassert
 	// housekeepingMu serializes the async housekeeping pass kicked off by
 	// signal_refresh. Held for the duration of one heavy run; TryLock is used
 	// at submit time so a rapid burst of signals skips when a prior pass is
@@ -934,10 +937,22 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 	}
 }
 
+// staleClientPruneInterval is how often the geometry tick scans for stale
+// clients. Detaching is user-visible, so this stays deliberately infrequent.
+const staleClientPruneInterval = time.Hour
+
 // handleClientGeomTick is the migrated body of the clientGeometryTicker case.
 func (l *Loop) handleClientGeomTick() {
 	l.flags.geom.Store(false)
 	l.deps.RunLoopTaskNonFatal("client_geometry_tick", 2*time.Second, func() {
+		// Prune before the unchanged-geometry early return below: a stale
+		// client fighting over window size shows up precisely as geometry
+		// that keeps flipping, and we still want it gone during the quiet
+		// stretches in between.
+		if time.Since(l.lastStaleClientPrune) >= staleClientPruneInterval {
+			l.lastStaleClientPrune = time.Now()
+			l.coord.PruneStaleClients()
+		}
 		res := l.elector.Elect()
 		if !res.OK {
 			return
