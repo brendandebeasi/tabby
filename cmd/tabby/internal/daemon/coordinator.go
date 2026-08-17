@@ -726,11 +726,12 @@ type Coordinator struct {
 
 	// Global width for synchronization
 	globalWidth            int
-	lastWidthSync          time.Time // Last time we synced widths (for debouncing)
-	lastActiveWindowID     string    // Track which window was last active (for detecting window switch)
-	lastSyncClientWidth    int       // Active physical client width seen at the last width sync (detects a client/election flip so we don't adopt a transient clamp as the global)
-	activeWindowChangeTime time.Time // When the active window changed (for grace period)
-	windowHistory          []string  // LIFO stack of recently visited window IDs (most recent first, max 20)
+	lastWidthSync          time.Time            // Last time we synced widths (for debouncing)
+	lastActiveWindowID     string               // Track which window was last active (for detecting window switch)
+	lastSyncClientWidth    int                  // Active physical client width seen at the last width sync (detects a client/election flip so we don't adopt a transient clamp as the global)
+	activeWindowChangeTime time.Time            // When the active window changed (for grace period)
+	windowFirstSeen        map[string]time.Time // When each window was first observed by width sync (a brand-new window's sidebar width is spawn output, never a user drag)
+	windowHistory          []string             // LIFO stack of recently visited window IDs (most recent first, max 20)
 	widthSyncMu            sync.Mutex
 	// Active physical tmux client snapshot. Updated by clientGeometryTicker
 	// via SetActiveClient (which also updates activeClientWidth for the hot
@@ -8084,6 +8085,28 @@ var (
 
 const profileTransitionDelay = 750 * time.Millisecond
 
+// How long a newly observed window is considered "settling". Within this
+// window its sidebar width is spawn output rather than a user drag, so
+// PlanWidthSync must not adopt it as the global width. Covers the split and
+// the renderer's first self-reported resize, which arrive a few hundred ms
+// apart.
+const sidebarWindowSettlePeriod = 3 * time.Second
+
+// isWindowSettling reports whether activeWindowID was first observed less than
+// sidebarWindowSettlePeriod ago, meaning its sidebar width is still spawn
+// output rather than a user drag. Split out from PlanWidthSync so the decision
+// is testable without a live tmux server.
+func isWindowSettling(firstSeen map[string]time.Time, activeWindowID string, now time.Time) bool {
+	if activeWindowID == "" {
+		return false
+	}
+	first, ok := firstSeen[activeWindowID]
+	if !ok {
+		return false
+	}
+	return now.Sub(first) < sidebarWindowSettlePeriod
+}
+
 // SetActiveClientWidth records the currently-focused physical tmux client's
 // terminal width (in cols). RunWidthSync caps sidebar targets against this so
 // that we never ask tmux for more cols than the active client can honor.
@@ -9761,6 +9784,31 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 		c.lastActiveWindowID = activeWindowID
 	}
 
+	// Record first sighting of every window we can see, and decide whether the
+	// active one is still settling. justBecameActive alone does not cover a
+	// newly created window: it is one-shot (cleared just above), so the second
+	// sync pass a few hundred ms later -- still mid-spawn, before the content
+	// split has settled -- would adopt the spawn's transient width as global.
+	// That is how a new window pulled every sidebar down to its own width.
+	// A window that has existed for less than the settle period has never been
+	// dragged, so its width carries no user intent and must not be adopted.
+	if c.windowFirstSeen == nil {
+		c.windowFirstSeen = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for clientID := range clientSnapshot {
+		if _, seen := c.windowFirstSeen[clientID]; !seen {
+			c.windowFirstSeen[clientID] = now
+		}
+	}
+	// Forget windows that no longer exist so the map cannot grow unbounded.
+	for winID := range c.windowFirstSeen {
+		if _, alive := clientSnapshot[winID]; !alive {
+			delete(c.windowFirstSeen, winID)
+		}
+	}
+	windowSettling := isWindowSettling(c.windowFirstSeen, activeWindowID, now)
+
 	// Detect a change in the elected physical client's width since the last
 	// width sync (a phone<->desktop election flip, a reattach, or a resize).
 	// When the active client just changed, any sidebar sitting at a width
@@ -9892,6 +9940,8 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=just_became_active active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
 			} else if atCap {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_active_client_cap active=%s measured=%d global=%d cap=%d", activeWindowID, effectiveActive, c.globalWidth, capped)
+			} else if windowSettling {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=window_settling active=%s measured=%d global=%d age_ms=%d", activeWindowID, effectiveActive, c.globalWidth, now.Sub(c.windowFirstSeen[activeWindowID]).Milliseconds())
 			} else if fullWidth {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=full_window_width active=%s measured=%d global=%d win_w=%d", activeWindowID, effectiveActive, c.globalWidth, activeWinWidth)
 			} else if atProfileClamp {
