@@ -220,7 +220,7 @@ func registerHooks(exe string) {
 	type hook struct{ name, cmd string }
 	hooks := []hook{
 		{"after-resize-pane", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{hook_pane}\"'", hookCmd)},
-		{"after-resize-window", fmt.Sprintf("run-shell -b '%s after-resize-pane \"#{hook_pane}\"'", hookCmd)},
+		{"after-resize-window", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{pane_id}\"'", hookCmd)},
 		{"client-resized", fmt.Sprintf("run-shell -b '%s client-resized \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'", hookCmd, hookCmd)},
 		{"after-select-window", fmt.Sprintf("run-shell -b '%s after-select-window \"#{window_id}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --ensure-content'", hookCmd, hookCmd, cycleCmd)},
 		{"after-rename-window", fmt.Sprintf("run-shell -b '%s after-rename-window \"#{window_id}\"'", hookCmd)},

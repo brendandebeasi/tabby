@@ -702,7 +702,18 @@ func doHookAfterRenameWindow(args []string) {
 // doHookAfterResizePane forwards a tmux after-resize-pane hook. The
 // sidebar/header filter still lives in doOnPaneResize on the CLI side; this
 // path is for callers that have already filtered.
+//
+// An empty pane arg means the caller could not identify a pane, so it cannot
+// have applied the sidebar/header filter either. Forwarding it would turn
+// every resize into an unconditional daemon refresh, and since the resulting
+// reconcile resizes panes itself, that refresh re-fires this hook — a
+// self-sustaining storm (observed: 100+ hooks in 3s on window creation, all
+// with an empty pane). Drop it; the pane-scoped after-resize-pane hook still
+// covers real sidebar drags.
 func doHookAfterResizePane(args []string) {
+	if len(args) < 1 || args[0] == "" {
+		return
+	}
 	hookArgs := map[string]string{}
 	if len(args) >= 1 {
 		hookArgs["pane"] = args[0]
