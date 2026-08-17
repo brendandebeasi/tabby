@@ -17391,6 +17391,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			newWidth = 15
 		}
 		// Save to tmux option and sync all sidebar panes
+		// Clamp to the window's responsive profile, exactly as the sync layer
+		// would. Writing an unclamped value here sets a global that
+		// boundedSidebarWidthForWindow immediately overrides, leaving global
+		// and panes permanently disagreeing -- which makes the panel audit
+		// force a RunWidthSync every 5s forever.
+		newWidth = c.boundedSidebarWidthForWindow(clientID, newWidth, 0)
+		logEvent("SIDEBAR_STEP action=shrink client=%s from=%d to=%d", clientID, currentWidth, newWidth)
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
 		c.persistSidebarWidthProfile(clientID, newWidth)
 		go syncAllSidebarWidths(newWidth)
@@ -17407,6 +17414,9 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			newWidth = 50
 		}
 		// Save to tmux option and sync all sidebar panes
+		// Clamp to the window's responsive profile (see shrink above).
+		newWidth = c.boundedSidebarWidthForWindow(clientID, newWidth, 0)
+		logEvent("SIDEBAR_STEP action=grow client=%s from=%d to=%d", clientID, currentWidth, newWidth)
 		exec.Command("tmux", "set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", newWidth)).Run()
 		c.persistSidebarWidthProfile(clientID, newWidth)
 		go syncAllSidebarWidths(newWidth)
