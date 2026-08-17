@@ -9906,9 +9906,21 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	adoptedActiveWidth := 0
 	if activeWindowID != "" {
 		effectiveActive := clientSnapshot[activeWindowID]
+		reportedActive := effectiveActive
+		haveActual := false
 		if w, ok := actualPaneWidths[activeWindowID]; ok {
 			effectiveActive = w
+			haveActual = true
 		}
+		// A client resize (terminal window or font change) makes tmux reflow
+		// every window at once. Mid-reflow the two measurements disagree --
+		// the renderer's self-reported width still holds the old value while
+		// list-panes already returns the new one -- and pane widths sweep
+		// through nonsense values (10, 164) before settling. Adopting from
+		// that moving target propagates a garbage global to every window.
+		// Agreement between the two independent measurements means the layout
+		// has settled, and a real drag reaches agreement within a cycle.
+		measurementsDisagree := haveActual && reportedActive > 0 && reportedActive != effectiveActive
 		if effectiveActive >= 10 && c.globalWidth != 0 && effectiveActive != c.globalWidth && syncSettings[activeWindowID] {
 			// Don't adopt a measured width that's just the active-client cap.
 			// When the active physical client is narrow (phone/touch),
@@ -9957,6 +9969,8 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=just_became_active active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
 			} else if atCap {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_active_client_cap active=%s measured=%d global=%d cap=%d", activeWindowID, effectiveActive, c.globalWidth, capped)
+			} else if measurementsDisagree {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=resize_in_flight active=%s pane_w=%d reported_w=%d global=%d", activeWindowID, effectiveActive, reportedActive, c.globalWidth)
 			} else if windowSettling {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=window_settling active=%s measured=%d global=%d age_ms=%d", activeWindowID, effectiveActive, c.globalWidth, now.Sub(c.windowFirstSeen[activeWindowID]).Milliseconds())
 			} else if fullWidth {

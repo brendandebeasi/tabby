@@ -1147,19 +1147,29 @@ func (l *Loop) handleRefreshSignal() {
 		windowsAfterRefresh := l.coord.GetWindows()
 		currentWindowCount := len(windowsAfterRefresh)
 		if currentWindowCount < l.lastWindowCount && l.lastWindowCount > 0 {
+			// Test the window that was active BEFORE updateActiveWindow() ran
+			// at the top of this body. That call has already re-pointed
+			// l.activeWindowID at whatever tmux focused after the close, so
+			// checking it here always found a live window and the restore
+			// always skipped with reason=active_exists -- the branch was
+			// effectively dead. prevActive is the window that actually closed.
+			closedActive := prevActive
+			if closedActive == "" {
+				closedActive = l.activeWindowID
+			}
 			activeStillExists := false
 			for _, w := range windowsAfterRefresh {
-				if w.ID == l.activeWindowID {
+				if w.ID == closedActive {
 					activeStillExists = true
 					break
 				}
 			}
 			if !activeStillExists {
-				logEvent("WINDOW_CLOSE_RESTORE_TRIGGER active=%s prev_count=%d count=%d", l.activeWindowID, l.lastWindowCount, currentWindowCount)
+				logEvent("WINDOW_CLOSE_RESTORE_TRIGGER active=%s prev_count=%d count=%d", closedActive, l.lastWindowCount, currentWindowCount)
 				l.coord.SelectPreviousWindow()
 				l.updateActiveWindow() // Re-fetch after selecting
 			} else {
-				logEvent("WINDOW_CLOSE_RESTORE_SKIP reason=active_exists active=%s prev_count=%d count=%d", l.activeWindowID, l.lastWindowCount, currentWindowCount)
+				logEvent("WINDOW_CLOSE_RESTORE_SKIP reason=active_exists active=%s prev_count=%d count=%d", closedActive, l.lastWindowCount, currentWindowCount)
 			}
 		}
 		l.lastWindowCount = currentWindowCount
