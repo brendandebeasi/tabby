@@ -640,11 +640,15 @@ fi
 # are "unique sequences" does not hold for raw replies. Bracket-key navigation
 # is still fully covered by cmd+[/] (M-{ / M-}), M-; / M-', and prefix p / n.
 #
-# 2026-08-12: re-enabled at the user's request to re-test the above. If tabs
-# start jumping on their own (notably a couple of seconds after opening a new
-# one), this pair is the first thing to remove.
-tmux bind-key -n "M-[" previous-window
-tmux bind-key -n "M-]" next-window
+# 2026-08-12: re-enabled at the user's request to re-test the above.
+# 2026-08-14: the re-test failed and the pair is removed again. Symptom was
+# opencode windows cycling focus on their own while "?62c" (a DA1 reply) leaked
+# as text into whichever pane the cycle landed on. Daemon logs showed the ring
+# walked in a stable order via WINDOW_STATE_DRIFT source=tmux_query, i.e. tmux's
+# active window moved without the daemon asking. Disabling extended-keys did not
+# help, matching the note above that the "unique sequences" assumption does not
+# hold for raw replies. Do not re-enable without a way to keep tmux from folding
+# a bare ESC[ into M-[.
 # Also override prefix+o to use the smart cycle binary
 if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key o run-shell "$CYCLE_PANE_BIN"

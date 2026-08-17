@@ -207,7 +207,24 @@ func windowExists(win string) bool {
 // If $TMUX is set the sequence is wrapped in a DCS passthrough envelope so it
 // survives any inner tmux session and reaches the outer pane's raw output.
 func emitOSCFallback(indicator, value string) {
-	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	// Target this pane's pty explicitly rather than /dev/tty. /dev/tty is the
+	// controlling terminal of whatever process happens to run the hook, which
+	// under `run-shell` or a detached invocation is not the pane the indicator
+	// describes -- the sequence then surfaces as stray bytes in an unrelated
+	// pane. TMUX_PANE is set for any in-pane invocation; without it there is no
+	// pane to address and the outer handler has nothing to intercept anyway.
+	target := ""
+	if pane := os.Getenv("TMUX_PANE"); pane != "" {
+		out, err := exec.Command("tmux", "display-message", "-t", pane, "-p", "#{pane_tty}").Output()
+		if err == nil {
+			target = strings.TrimSpace(string(out))
+		}
+	}
+	if target == "" {
+		return
+	}
+
+	tty, err := os.OpenFile(target, os.O_WRONLY, 0)
 	if err != nil {
 		return
 	}
