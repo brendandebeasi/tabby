@@ -5022,18 +5022,25 @@ func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
 	// current windows in tmux 3.x — `switch-client -c <tty> -t <window>`
 	// is equivalent to `select-window` for the session — so we cannot
 	// scope the restore to just the firing client to dodge the cycle.
-	if len(pendingMoves) > 0 {
+	//
+	// The renumber must also have moved the pending window itself. A regroup
+	// that relocates some OTHER window — an ssh tab landing in a remote_hosts
+	// group while the spawn bracket is still open — is not the renumber this
+	// restore compensates for, and re-asserting focus there is what pulled the
+	// user off the tab they had just connected on.
+	pendingStatus := c.NewWindowStatus()
+	if movesInclude(pendingMoves, pendingStatus.WindowID) {
 		if focusTarget := preferredWindowFocusTarget(c, activeWindowID); focusTarget != "" {
 			restoreWindowFocus(focusTarget)
 			logEvent("RESTORE_WINDOW_FOCUS target=%s active=%s pending_moves=%d", focusTarget, activeWindowID, len(pendingMoves))
 		}
-	} else {
+	} else if pendingStatus.State == "ready" && pendingStatus.WindowID != "" {
 		// Diagnostic: confirm we're skipping the restore on the cycling path.
-		// Cheap because preferredWindowFocusTarget is only consulted to log.
-		status := c.NewWindowStatus()
-		if status.State == "ready" && status.WindowID != "" {
-			logEvent("RESTORE_WINDOW_FOCUS_SKIP reason=no_pending_moves pending=%s active=%s firing_tty=%s age_ms=%d", status.WindowID, activeWindowID, status.FiringTTY, time.Since(status.Created).Milliseconds())
+		reason := "no_pending_moves"
+		if len(pendingMoves) > 0 {
+			reason = "pending_not_moved"
 		}
+		logEvent("RESTORE_WINDOW_FOCUS_SKIP reason=%s pending=%s active=%s firing_tty=%s moves=%d age_ms=%d", reason, pendingStatus.WindowID, activeWindowID, pendingStatus.FiringTTY, len(pendingMoves), time.Since(pendingStatus.Created).Milliseconds())
 	}
 
 	// REFRESH_WINDOWS_OK is logged ~20 lines in, so the bulk of this function
@@ -5716,6 +5723,28 @@ func shortenPath(p, home string) string {
 type tmuxWindowMove struct {
 	src string // source window ID or :index
 	dst string // destination :index
+	// winID is the real window this op relocates. src can be a temp
+	// "session:index" for a cycle's final hop, so it is not a reliable
+	// identity; focus-restore gating needs to know which windows actually
+	// moved.
+	winID string
+}
+
+// movesInclude reports whether windowID was relocated by this batch. The
+// post-spawn focus restore is only correct for the window the renumber
+// actually displaced; firing it for an unrelated regroup (an ssh tab picking
+// up a remote_hosts group mid-spawn-bracket) yanks the user off the tab they
+// are sitting on.
+func movesInclude(moves []tmuxWindowMove, windowID string) bool {
+	if windowID == "" {
+		return false
+	}
+	for _, op := range moves {
+		if op.winID == windowID {
+			return true
+		}
+	}
+	return false
 }
 
 // positions shown in the sidebar. This ensures prefix+N selects the window
@@ -5846,18 +5875,21 @@ func (c *Coordinator) syncWindowIndices() []tmuxWindowMove {
 			tmp := tempBase + tempCounter
 			tempCounter++
 			pending = append(pending, tmuxWindowMove{
-				src: cycle[0].id,
-				dst: fmt.Sprintf("%s:%d", c.sessionID, tmp),
+				src:   cycle[0].id,
+				dst:   fmt.Sprintf("%s:%d", c.sessionID, tmp),
+				winID: cycle[0].id,
 			})
 			for i := len(cycle) - 1; i >= 1; i-- {
 				pending = append(pending, tmuxWindowMove{
-					src: cycle[i].id,
-					dst: fmt.Sprintf("%s:%d", c.sessionID, cycle[i].desiredIndex),
+					src:   cycle[i].id,
+					dst:   fmt.Sprintf("%s:%d", c.sessionID, cycle[i].desiredIndex),
+					winID: cycle[i].id,
 				})
 			}
 			pending = append(pending, tmuxWindowMove{
-				src: fmt.Sprintf("%s:%d", c.sessionID, tmp),
-				dst: fmt.Sprintf("%s:%d", c.sessionID, cycle[0].desiredIndex),
+				src:   fmt.Sprintf("%s:%d", c.sessionID, tmp),
+				dst:   fmt.Sprintf("%s:%d", c.sessionID, cycle[0].desiredIndex),
+				winID: cycle[0].id,
 			})
 		} else {
 			// Chain resolution: walk in reverse, moving each window
@@ -5866,8 +5898,9 @@ func (c *Coordinator) syncWindowIndices() []tmuxWindowMove {
 			// last entry). Session-scoped for the same reason as above.
 			for i := len(cycle) - 1; i >= 0; i-- {
 				pending = append(pending, tmuxWindowMove{
-					src: cycle[i].id,
-					dst: fmt.Sprintf("%s:%d", c.sessionID, cycle[i].desiredIndex),
+					src:   cycle[i].id,
+					dst:   fmt.Sprintf("%s:%d", c.sessionID, cycle[i].desiredIndex),
+					winID: cycle[i].id,
 				})
 			}
 		}
@@ -20661,7 +20694,7 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			// only case the restore was designed for. See coordinator.go
 			// near the matching block in RefreshWindows for the full
 			// rationale and the post-`+` cycling bug it fixes.
-			if len(moves) > 0 {
+			if movesInclude(moves, c.NewWindowStatus().WindowID) {
 				if focusTarget := preferredWindowFocusTarget(c, activeWindowID); focusTarget != "" {
 					restoreWindowFocus(focusTarget)
 				}

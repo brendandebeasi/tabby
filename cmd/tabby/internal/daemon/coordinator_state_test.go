@@ -1088,3 +1088,26 @@ func TestTintColorForWindow_UnknownWindowHasNoTint(t *testing.T) {
 	c := newTestCoordinator(t)
 	assert.Equal(t, "", c.tintColorForWindowLocked("@nope"))
 }
+
+func TestMovesIncludeGatesFocusRestore(t *testing.T) {
+	moves := []tmuxWindowMove{
+		{src: "@5", dst: "sess:8000", winID: "@5"},
+		{src: "@7", dst: "sess:2", winID: "@7"},
+		{src: "sess:8000", dst: "sess:3", winID: "@5"},
+	}
+	if !movesInclude(moves, "@5") {
+		t.Error("cycle head @5 moved via temp index should count as moved")
+	}
+	if !movesInclude(moves, "@7") {
+		t.Error("@7 was moved directly")
+	}
+	if movesInclude(moves, "@9") {
+		t.Error("@9 was not moved; restore must not fire for it")
+	}
+	if movesInclude(moves, "") {
+		t.Error("empty pending window id must never gate the restore on")
+	}
+	if movesInclude(nil, "@5") {
+		t.Error("no moves means no restore")
+	}
+}
