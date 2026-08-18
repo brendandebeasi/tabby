@@ -35,6 +35,7 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/perf"
 	"github.com/brendandebeasi/tabby/pkg/teamclaude"
+	"github.com/brendandebeasi/tabby/pkg/kimicode"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -658,6 +659,14 @@ type Coordinator struct {
 	// warning glyph. Older servers 404 on this endpoint -> empty map (no warning).
 	teamClaudeModels    teamclaude.Models
 	teamClaudeModelsErr error
+
+	// Kimi for Coding quota state (cached). Same shape as the TeamClaude
+	// state above: fetched off the event loop by RefreshKimi, read under
+	// stateMu by renderKimiWidget.
+	kimiUsages    *kimicode.Usages
+	kimiErr       error
+	kimiFetchedAt time.Time
+	kimiFetching  atomic.Bool
 
 	// Pet state
 	pet petState
@@ -14199,6 +14208,20 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 		})
 	}
 
+	// Kimi for Coding quota widget
+	if c.config.Widgets.Kimi.Enabled {
+		pos := c.config.Widgets.Kimi.Position
+		if pos == "" {
+			pos = "bottom"
+		}
+		entries = append(entries, widgetEntry{
+			name:     "kimi",
+			zone:     pos,
+			priority: c.config.Widgets.Kimi.Priority,
+			content:  constrainWidgetWidth(c.renderKimiWidget(clientID, width), width),
+		})
+	}
+
 	// On phone, the window-header button bar already provides prev/next navigation
 	// (with matching up/down arrows), so the sidebar's dedicated nav buttons would
 	// be redundant.
@@ -14785,6 +14808,134 @@ type quotaCell struct {
 	reset int64
 }
 
+// quotaBarColor picks the bar color for a remaining-percentage: a calm,
+// desaturated gray while headroom is healthy (and when unknown), taking on a
+// warning hue only once it crosses into yellow/red territory. A neutral gray
+// (zero saturation) reads as muted on any theme while keeping enough contrast
+// for the dark in-bar percentage text. override (config bar_fg) wins when set.
+func quotaBarColor(pct int, override string) string {
+	if override != "" {
+		return override
+	}
+	const grayHealthy = "#b9bdc2"
+	switch {
+	case pct < 0:
+		return grayHealthy
+	case pct < 30:
+		return "#ff6b6b" // red — low headroom
+	case pct < 60:
+		return "#ffd93d" // yellow — getting low
+	default:
+		return grayHealthy // plenty left — muted gray, not green
+	}
+}
+
+// renderQuotaBar renders one bar of exactly bw cells with the percentage (and,
+// when it fits, the time until that window resets) centered inside it. The
+// filled fraction is a solid colored block (dark text); the empty track is a
+// faint tint of the same color (saturated text), so the number stays legible
+// on both light and dark terminals.
+func renderQuotaBar(f *float64, resetMs int64, bw int, barFgOverride, labelFg, termBg string) string {
+	if bw < 1 {
+		return ""
+	}
+	pct := -1
+	txt := "--"
+	if f != nil {
+		pct = int(*f*100 + 0.5)
+		txt = fmt.Sprintf("%d%%", pct)
+		// Append reset countdown (e.g. "90% 2h") only if it fits.
+		if d := shortResetDur(resetMs); d != "" {
+			if full := txt + " " + d; runewidth.StringWidth(full) <= bw {
+				txt = full
+			}
+		}
+	}
+	if runewidth.StringWidth(txt) > bw {
+		txt = runewidth.Truncate(txt, bw, "")
+	}
+	// Center the text within the bar width.
+	pad := bw - runewidth.StringWidth(txt)
+	left := pad / 2
+	content := strings.Repeat(" ", left) + txt + strings.Repeat(" ", pad-left)
+	runes := []rune(content)
+
+	filled := 0
+	if pct >= 0 {
+		filled = (pct*bw + 50) / 100
+		if filled > bw {
+			filled = bw
+		}
+	}
+	barColor := quotaBarColor(pct, barFgOverride)
+	filledStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color(barColor)).
+		Foreground(lipgloss.Color("#1c1c1c")).Bold(true)
+	// Track (empty) portion: faint tint of the bar color as the background
+	// so the full bar extent is visible, with the normal label foreground
+	// for the digits — readable on any theme (barColor-on-track can be
+	// low contrast, e.g. yellow text on a pale-yellow track).
+	trackBg := desaturateHex(barColor, 0.28, termBg)
+	emptyStyle := lipgloss.NewStyle()
+	if labelFg != "" {
+		emptyStyle = emptyStyle.Foreground(lipgloss.Color(labelFg))
+	}
+	if trackBg != "" {
+		emptyStyle = emptyStyle.Background(lipgloss.Color(trackBg))
+	}
+	var b strings.Builder
+	if filled > 0 {
+		b.WriteString(filledStyle.Render(string(runes[:filled])))
+	}
+	if filled < len(runes) {
+		b.WriteString(emptyStyle.Render(string(runes[filled:])))
+	}
+	return b.String()
+}
+
+// renderQuotaCells lays out the shown quota windows on one line, sizing each
+// bar to width so the composed line never exceeds `width` and never hits
+// constrainWidgetWidth's non-ANSI-aware truncation. Available bar columns =
+// width - left indent(1) - right pad(1) - joins(n-1); distributed evenly with
+// the remainder going to the leftmost bars.
+func renderQuotaCells(cells []quotaCell, width int, labelStyle lipgloss.Style, inBar func(f *float64, resetMs int64, bw int) string) string {
+	n := len(cells)
+	if n == 0 {
+		return ""
+	}
+	avail := width - 2 - (n - 1)
+	if avail < n { // too narrow for bars: just show percentages
+		var b strings.Builder
+		b.WriteString(labelStyle.Render(" "))
+		for i, c := range cells {
+			if i > 0 {
+				b.WriteString(labelStyle.Render(" "))
+			}
+			if c.frac == nil {
+				b.WriteString(labelStyle.Render("--"))
+			} else {
+				b.WriteString(labelStyle.Render(fmt.Sprintf("%d%%", int(*c.frac*100+0.5))))
+			}
+		}
+		return b.String() + "\n"
+	}
+	base := avail / n
+	rem := avail % n
+	var b strings.Builder
+	b.WriteString(labelStyle.Render(" "))
+	for i, c := range cells {
+		if i > 0 {
+			b.WriteString(labelStyle.Render(" "))
+		}
+		bw := base
+		if i < rem {
+			bw++
+		}
+		b.WriteString(inBar(c.frac, c.reset, bw))
+	}
+	return b.String() + "\n"
+}
+
 // shortResetDur formats the time until an epoch-millisecond reset as a compact
 // string. Returns "" when the time is unknown or already past. Granularity steps
 // down as the remaining time shrinks: 1d3h for >=24h (minutes dropped), 1h30m
@@ -15010,130 +15161,16 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 	default:
 		// Compact layout: the shown quota windows on one line under the account
 		// name, with the percentage drawn INSIDE each bar so the bars can use the
-		// full width. The filled fraction is a solid colored block (dark text);
-		// the empty track is a faint tint of the same color (saturated text), so
-		// the number stays legible on both light and dark terminals. Bars are
-		// sized to width here so the composed line never exceeds `width` and
-		// never hits constrainWidgetWidth's non-ANSI-aware truncation.
+		// full width. Bars are sized to width here so the composed line never
+		// exceeds `width` and never hits constrainWidgetWidth's non-ANSI-aware
+		// truncation. The bar rendering itself is shared with the Kimi widget
+		// (renderQuotaBar/renderQuotaCells).
 		termBg := c.chromeBGForClientLocked(clientID)
-		barColorFor := func(pct int) string {
-			if tcCfg.BarFg != "" {
-				return tcCfg.BarFg
-			}
-			// Healthy headroom (and unknown) stays a calm, desaturated gray; the bar
-			// only takes on a warning hue once it crosses into yellow/red territory.
-			// A neutral gray (zero saturation) reads as muted on any theme while
-			// keeping enough contrast for the dark in-bar percentage text.
-			const grayHealthy = "#b9bdc2"
-			switch {
-			case pct < 0:
-				return grayHealthy
-			case pct < 30:
-				return "#ff6b6b" // red — low headroom
-			case pct < 60:
-				return "#ffd93d" // yellow — getting low
-			default:
-				return grayHealthy // plenty left — muted gray, not green
-			}
-		}
-		// inBar renders one bar of exactly bw cells with the percentage (and,
-		// when it fits, the time until that window resets) centered inside it.
 		inBar := func(f *float64, resetMs int64, bw int) string {
-			if bw < 1 {
-				return ""
-			}
-			pct := -1
-			txt := "--"
-			if f != nil {
-				pct = int(*f*100 + 0.5)
-				txt = fmt.Sprintf("%d%%", pct)
-				// Append reset countdown (e.g. "90% 2h") only if it fits.
-				if d := shortResetDur(resetMs); d != "" {
-					if full := txt + " " + d; runewidth.StringWidth(full) <= bw {
-						txt = full
-					}
-				}
-			}
-			if runewidth.StringWidth(txt) > bw {
-				txt = runewidth.Truncate(txt, bw, "")
-			}
-			// Center the text within the bar width.
-			pad := bw - runewidth.StringWidth(txt)
-			left := pad / 2
-			content := strings.Repeat(" ", left) + txt + strings.Repeat(" ", pad-left)
-			runes := []rune(content)
-
-			filled := 0
-			if pct >= 0 {
-				filled = (pct*bw + 50) / 100
-				if filled > bw {
-					filled = bw
-				}
-			}
-			barColor := barColorFor(pct)
-			filledStyle := lipgloss.NewStyle().
-				Background(lipgloss.Color(barColor)).
-				Foreground(lipgloss.Color("#1c1c1c")).Bold(true)
-			// Track (empty) portion: faint tint of the bar color as the background
-			// so the full bar extent is visible, with the normal label foreground
-			// for the digits — readable on any theme (barColor-on-track can be
-			// low contrast, e.g. yellow text on a pale-yellow track).
-			trackBg := desaturateHex(barColor, 0.28, termBg)
-			emptyStyle := lipgloss.NewStyle()
-			if labelFg != "" {
-				emptyStyle = emptyStyle.Foreground(lipgloss.Color(labelFg))
-			}
-			if trackBg != "" {
-				emptyStyle = emptyStyle.Background(lipgloss.Color(trackBg))
-			}
-			var b strings.Builder
-			if filled > 0 {
-				b.WriteString(filledStyle.Render(string(runes[:filled])))
-			}
-			if filled < len(runes) {
-				b.WriteString(emptyStyle.Render(string(runes[filled:])))
-			}
-			return b.String()
+			return renderQuotaBar(f, resetMs, bw, tcCfg.BarFg, labelFg, termBg)
 		}
 		quotaLine := func(cells []quotaCell) string {
-			n := len(cells)
-			if n == 0 {
-				return ""
-			}
-			// Available bar columns = width - left indent(1) - right pad(1) -
-			// joins(n-1). Distribute evenly, giving the remainder to the leftmost
-			// bars. The right column is left blank so bars don't touch the edge.
-			avail := width - 2 - (n - 1)
-			if avail < n { // too narrow for bars: just show percentages
-				var b strings.Builder
-				b.WriteString(labelStyle.Render(" "))
-				for i, c := range cells {
-					if i > 0 {
-						b.WriteString(labelStyle.Render(" "))
-					}
-					if c.frac == nil {
-						b.WriteString(labelStyle.Render("--"))
-					} else {
-						b.WriteString(labelStyle.Render(fmt.Sprintf("%d%%", int(*c.frac*100+0.5))))
-					}
-				}
-				return b.String() + "\n"
-			}
-			base := avail / n
-			rem := avail % n
-			var b strings.Builder
-			b.WriteString(labelStyle.Render(" "))
-			for i, c := range cells {
-				if i > 0 {
-					b.WriteString(labelStyle.Render(" "))
-				}
-				bw := base
-				if i < rem {
-					bw++
-				}
-				b.WriteString(inBar(c.frac, c.reset, bw))
-			}
-			return b.String() + "\n"
+			return renderQuotaCells(cells, width, labelStyle, inBar)
 		}
 
 		// Detect duplicate accounts (same email surfacing as both a personal and

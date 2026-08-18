@@ -16,6 +16,7 @@ type tickFlags struct {
 	refresh    atomic.Bool
 	git        atomic.Bool
 	teamClaude atomic.Bool
+	kimi       atomic.Bool
 	watchdog   atomic.Bool
 	idle       atomic.Bool
 	socket     atomic.Bool

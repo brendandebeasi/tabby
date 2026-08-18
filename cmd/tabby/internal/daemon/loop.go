@@ -38,6 +38,7 @@ type AnimationTickEvent struct{}
 type RefreshTickEvent struct{}
 type GitTickEvent struct{}
 type TeamClaudeTickEvent struct{}
+type KimiTickEvent struct{}
 type WatchdogTickEvent struct{}
 type IdleTickEvent struct{}
 type SocketCheckTickEvent struct{}
@@ -57,6 +58,7 @@ func (AnimationTickEvent) kind() string   { return "tick:animation" }
 func (RefreshTickEvent) kind() string     { return "tick:refresh" }
 func (GitTickEvent) kind() string         { return "tick:git" }
 func (TeamClaudeTickEvent) kind() string  { return "tick:teamclaude" }
+func (KimiTickEvent) kind() string        { return "tick:kimi" }
 func (WatchdogTickEvent) kind() string    { return "tick:watchdog" }
 func (IdleTickEvent) kind() string        { return "tick:idle" }
 func (SocketCheckTickEvent) kind() string { return "tick:socket_check" }
@@ -322,6 +324,8 @@ func (l *Loop) dispatch(ev Event) {
 		l.handleGitTick()
 	case TeamClaudeTickEvent:
 		l.handleTeamClaudeTick()
+	case KimiTickEvent:
+		l.handleKimiTick()
 	case WatchdogTickEvent:
 		l.handleWatchdogTick()
 	case IdleTickEvent:
@@ -1068,6 +1072,14 @@ func (l *Loop) handleGitTick() {
 func (l *Loop) handleTeamClaudeTick() {
 	l.flags.teamClaude.Store(false)
 	l.coord.RefreshTeamClaude()
+}
+
+// handleKimiTick mirrors handleTeamClaudeTick for the Kimi for Coding quota
+// fetch: RefreshKimi returns immediately and does the HTTP fetch in a detached
+// goroutine, so the loop is never blocked by the network.
+func (l *Loop) handleKimiTick() {
+	l.flags.kimi.Store(false)
+	l.coord.RefreshKimi()
 }
 
 // handleTabSummaryTick triggers auto tab-summary generation. Like the TeamClaude

@@ -2966,6 +2966,7 @@ func Run(args []string) int {
 		go runTicker(loopCtx, 30*time.Second, func() { loop.submitCoalesced(&loop.flags.refresh, RefreshTickEvent{}) })
 		go runTicker(loopCtx, 5*time.Second, func() { loop.submitCoalesced(&loop.flags.git, GitTickEvent{}) })
 		go runTicker(loopCtx, 15*time.Second, func() { loop.submitCoalesced(&loop.flags.teamClaude, TeamClaudeTickEvent{}) })
+		go runTicker(loopCtx, 15*time.Second, func() { loop.submitCoalesced(&loop.flags.kimi, KimiTickEvent{}) })
 		go runTicker(loopCtx, 5*time.Second, func() { loop.submitCoalesced(&loop.flags.watchdog, WatchdogTickEvent{}) })
 		go runTicker(loopCtx, 3*time.Second, func() { loop.submitCoalesced(&loop.flags.socket, SocketCheckTickEvent{}) })
 		go runTicker(loopCtx, 10*time.Second, func() { loop.submitCoalesced(&loop.flags.idle, IdleTickEvent{}) })

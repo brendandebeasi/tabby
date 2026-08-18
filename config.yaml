@@ -309,13 +309,29 @@ widgets:
     style: "nerd"                      # nerd | emoji | ascii
     show_session: true                 # 5h window
     show_weekly: true                  # 7d window
-    show_current_only: false           # only the active account vs all
-    bar_width: 8                       # max bar segments (auto-fit to width)
+    divider: "─"
+    divider_fg: "#444444"
+    margin_top: 0
+    margin_bottom: 0
+    padding_top: 0
+    padding_bottom: 0
+
+  # Kimi for Coding quota — session (5h) and weekly (7d) headroom from the
+  # Kimi coding API's GET <url>/usages endpoint. Off by default. Keep the key
+  # out of version control: prefer $TABBY_KIMI_URL and $TABBY_KIMI_API_KEY
+  # over the url/api_key fields below.
+  kimi:
+    enabled: false
+    # url: ""                          # e.g. https://api.kimi.com/coding/v1
+    # api_key: ""                      # prefer $TABBY_KIMI_API_KEY
+    style: "nerd"                      # nerd | emoji | ascii
+    show_session: true                 # 5h window
+    show_weekly: true                  # 7d window
     update_interval: 60                # seconds between fetches
     position: bottom
     pin: false
-    priority: 60
-    # fg: ""                           # account label color (theme default)
+    priority: 61
+    # fg: ""                           # label color (theme default)
     # bar_fg: ""                       # override bar color (else by headroom)
     divider: "─"
     divider_fg: "#444444"

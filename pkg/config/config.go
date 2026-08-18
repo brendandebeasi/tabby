@@ -105,6 +105,7 @@ type Widgets struct {
 	Claude  ClaudeWidget  `yaml:"claude"`
 
 	TeamClaude TeamClaudeWidget `yaml:"teamclaude"`
+	Kimi       KimiWidget       `yaml:"kimi"`
 }
 
 // StatsWidget shows system stats (CPU, memory, battery)
@@ -178,6 +179,33 @@ type TeamClaudeWidget struct {
 	Pin        bool   `yaml:"pin"`            // Pin to position
 	Priority   int    `yaml:"priority"`       // Order among widgets
 	Fg         string `yaml:"fg"`             // Account name / label color
+	Bg         string `yaml:"bg"`             // Background color
+	BarFg      string `yaml:"bar_fg"`         // Override bar color (else colored by headroom)
+	Divider    string `yaml:"divider"`        // Divider line above widget
+	DividerFg  string `yaml:"divider_fg"`     // Divider color
+	PaddingTop int    `yaml:"padding_top"`    // Blank lines above content
+	PaddingBot int    `yaml:"padding_bottom"` // Blank lines below content
+	MarginTop  int    `yaml:"margin_top"`     // Lines above top divider
+	MarginBot  int    `yaml:"margin_bottom"`  // Lines below bottom divider
+}
+
+// KimiWidget shows Kimi for Coding quota left, pulled from the Kimi coding
+// API's GET <base>/usages endpoint over HTTP. It surfaces session (5h) and
+// weekly (7d) headroom for the single account the API key belongs to.
+type KimiWidget struct {
+	Enabled bool   `yaml:"enabled"`
+	URL     string `yaml:"url"`     // coding API base URL; empty falls back to $TABBY_KIMI_URL
+	APIKey  string `yaml:"api_key"` // Bearer key; empty falls back to $TABBY_KIMI_API_KEY
+
+	Style          string `yaml:"style"`           // nerd | emoji | ascii | minimal
+	ShowSession    bool   `yaml:"show_session"`    // Show 5h session quota bar
+	ShowWeekly     bool   `yaml:"show_weekly"`     // Show 7d weekly quota bar
+	UpdateInterval int    `yaml:"update_interval"` // Seconds between fetches (default 60)
+
+	Position   string `yaml:"position"`       // top | bottom
+	Pin        bool   `yaml:"pin"`            // Pin to position
+	Priority   int    `yaml:"priority"`       // Order among widgets
+	Fg         string `yaml:"fg"`             // Label color
 	Bg         string `yaml:"bg"`             // Background color
 	BarFg      string `yaml:"bar_fg"`         // Override bar color (else colored by headroom)
 	Divider    string `yaml:"divider"`        // Divider line above widget

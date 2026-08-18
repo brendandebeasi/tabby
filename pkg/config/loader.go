@@ -449,6 +449,22 @@ func applyDefaults(cfg *Config) {
 		cfg.Widgets.TeamClaude.ShowSession = true
 		cfg.Widgets.TeamClaude.ShowWeekly = true
 	}
+
+	// Kimi widget defaults (mirrors the TeamClaude defaults above).
+	if cfg.Widgets.Kimi.UpdateInterval == 0 {
+		cfg.Widgets.Kimi.UpdateInterval = 60
+	}
+	if cfg.Widgets.Kimi.Style == "" {
+		cfg.Widgets.Kimi.Style = "nerd"
+	}
+	if cfg.Widgets.Kimi.Position == "" {
+		cfg.Widgets.Kimi.Position = "bottom"
+	}
+	if cfg.Widgets.Kimi.Enabled &&
+		!cfg.Widgets.Kimi.ShowSession && !cfg.Widgets.Kimi.ShowWeekly {
+		cfg.Widgets.Kimi.ShowSession = true
+		cfg.Widgets.Kimi.ShowWeekly = true
+	}
 }
 
 // applyIconStyleDefaults applies icon preset values based on IconStyle setting.
