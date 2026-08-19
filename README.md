@@ -1,13 +1,18 @@
 # Tabby
 
 <p align="center">
-  <img src="./screenshots/desktop.png" width="70%" alt="Tabby desktop view"/>
-  <img src="./screenshots/mobile.PNG" width="25%" alt="Tabby mobile view"/>
+  <img src="./screenshots/main.png" width="70%" alt="Tabby desktop view"/>
+  <img src="./screenshots/mobile.png" width="25%" alt="Tabby mobile view"/>
 </p>
 
 <p align="center">
-  <img src="./screenshots/desktop2.png" width="48%" alt="Tabby sidebar with groups"/>
-  <img src="./screenshots/desktop3.png" width="48%" alt="Tabby context menus"/>
+  <img src="./screenshots/llm_harness_integration.png" width="48%" alt="Tabby LLM harness integration"/>
+  <img src="./screenshots/dark_mode.png" width="48%" alt="Tabby dark mode"/>
+</p>
+
+<p align="center">
+  <img src="./screenshots/dashboard_view.png" width="48%" alt="Tabby dashboard gathering every pane into one tiled window"/>
+  <img src="./screenshots/vertical_horizontal_panes.png" width="48%" alt="Tabby vertical and horizontal pane splits"/>
 </p>
 
 A modern tab manager for tmux with grouping, a clickable vertical sidebar, and deep linking for notifications.
