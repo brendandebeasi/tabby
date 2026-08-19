@@ -15,953 +15,160 @@
   <img src="./screenshots/vertical_horizontal_panes.png" width="48%" alt="Tabby vertical and horizontal pane splits"/>
 </p>
 
-A modern tab manager for tmux with grouping, a clickable vertical sidebar, and deep linking for notifications.
+A tab manager for tmux: a clickable vertical sidebar, colour-coded window
+groups, per-pane headers, and notifications that jump back to the exact pane
+that sent them.
 
-## Table of Contents
+## Install
 
-- [About This Project](#about-this-project)
-- [Key Features](#key-features)
-- [All Features](#all-features)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Tab Grouping](#tab-grouping)
-- [Widgets](#widgets)
-- [Command-Line Reference](#command-line-reference)
-- [Development](#development)
-- [macOS Notifications with Deep Links](#macos-notifications-with-deep-links)
-- [Session Persistence (tmux-resurrect)](#session-persistence-tmux-resurrect)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
+With [TPM](https://github.com/tmux-plugins/tpm), add to `~/.tmux.conf`:
 
-## About This Project
-
-Tabby started as an opinionated solution to a personal problem: managing dozens of tmux windows across multiple projects without losing context. It grew into something others might find useful.
-
-**Design Philosophy:**
-- Customizable - support for Nerd Fonts, emoji, ASCII, and various terminal features
-- Modular - enable only the features you need (sidebar, pane headers, widgets, etc.)
-- Extensible - widget system for adding custom sidebar content (clock, git status, pet, stats, Claude usage)
-- Terminal-agnostic - works with most modern terminals (Ghostty, iTerm, Kitty, Alacritty, etc.)
-
-**Contributing:** PRs are welcome. This is actively developed but cannot promise support for all terminal emulators or use cases. If you find Tabby useful or have ideas, contributions are appreciated.
-
-## Key Features
-
-### Vertical Sidebar
-A persistent, clickable sidebar that works across all your windows. Left-click to switch, right-click for context menus, middle-click to close. Full mouse support that tmux's native status bar can't provide.
-
-### Window Grouping
-Organize windows by project with color-coded groups. Windows are automatically grouped by pattern matching or manually assigned via right-click menu. Each group has its own theme colors and optional icon.
-
-### Deep Links for Notifications
-Click a notification to jump directly to the right tmux session, window, and pane. Perfect for long-running tasks - get notified when done and click to return instantly.
-
-```bash
-# Example: notification that deep-links back to tmux
-terminal-notifier -title "Build Done" -message "Click to return" \
-  -execute "~/.tmux/plugins/tabby/bin/tabby hook focus-pane main:2.1"
-```
-
-## All Features
-
-- **Vertical sidebar** — clickable, persistent across windows; collapse via hamburger, keyboard, or CLI
-- **Window grouping** — color-coded project organization with per-group working directories
-- **Deep link navigation** — click notifications to jump to exact pane
-- **Automatic window naming** — shows running command, locks on manual rename
-- **Activity indicators** — bell, activity, silence, busy, input, and SSH CC hook indicators forwarded via OSC 7700
-- **Mouse support** — click, right-click menus, middle-click close, mouse-drag OSC 52 clipboard copy
-- **Custom tab colors** — per-window color overrides, including transparent mode
-- **Pane headers** — per-pane titles, inactive-pane dimming, border styling
-- **Pane management** — rename with title locking, swap/cycle, smart kill-pane that preserves ratios
-- **Group management** — create, rename, color, collapse, set working directories
-- **Responsive mobile/tablet/desktop profiles** — sidebar adapts per-client width, phone gets a window-header with nav buttons
-- **Cross-window sidebar width sync** — drag in one window, all windows in the same profile follow
-- **Light/dark theme toggle** — pair two themes and switch with `prefix + T`, locally or over SSH
-- **Widgets** — pinnable clock, pet, stats, git, session, and Claude cost widgets
-- **tmux-resurrect integration** — clean save/restore of sidebar state
-- **SSH bell notifications** — auto-enable bells on remote command completion
-- **Keyboard navigation** — intuitive shortcuts for everything
-
-## Installation
-
-### Via TPM (Tmux Plugin Manager)
-Add to your `~/.tmux.conf`:
 ```bash
 set -g @plugin 'brendandebeasi/tabby'
 ```
 
-Then reload tmux and install:
-```bash
-tmux source ~/.tmux.conf
-# Press prefix + I to install plugins
-```
+Reload with `tmux source ~/.tmux.conf`, then press `prefix + I`.
 
-### Manual Installation
+Without TPM:
+
 ```bash
 git clone https://github.com/brendandebeasi/tabby ~/.tmux/plugins/tabby
-cd ~/.tmux/plugins/tabby
-./scripts/install.sh
+cd ~/.tmux/plugins/tabby && ./scripts/install.sh
 ```
 
-Add to your `~/.tmux.conf`:
-```bash
-run-shell ~/.tmux/plugins/tabby/tabby.tmux
-```
+Then add `run-shell ~/.tmux/plugins/tabby/tabby.tmux` to `~/.tmux.conf`.
 
-## Usage
+You need tmux 3.2 or newer, and `set -g mouse on` if you want to click things.
 
-### Keyboard Shortcuts
+## Quick start
 
-Tabby follows standard tmux keybindings. All standard tmux shortcuts work as expected.
+The sidebar appears on the left as soon as the plugin loads. Five things worth
+trying in your first ten minutes:
 
-#### Standard tmux shortcuts (prefix + key)
+**Click a window in the sidebar** to switch to it. Right-click one for rename,
+colour, marker, and move-to-group. Middle-click closes it.
 
-| Key | Action |
-|-----|--------|
-| `prefix + c` | Create new window |
-| `prefix + n` | Next window |
-| `prefix + p` | Previous window |
-| `prefix + x` | Kill current pane |
-| `prefix + q` | Display pane numbers |
-| `prefix + w` | Window list |
-| `prefix + ,` | Rename window |
-| `prefix + "` | Split horizontal |
-| `prefix + %` | Split vertical |
-| `prefix + d` | Detach from session |
-| `prefix + 1-9,0` | Switch to window by number |
-
-#### Tabby-specific shortcuts
-
-| Key | Action |
-|-----|--------|
-| `prefix + Tab` | Toggle vertical sidebar (enable/disable daemon) |
-| `prefix + G` | Create new group |
-| `Cmd + Shift + \` | Hide/show sidebar (stash/restore — requires [terminal config](#sending-cmdshift-to-tmux)) |
-| `Alt + a` | Toggle all-windows overview mode |
-
-When the sidebar is focused, press `m` to open the marker picker for the active window.
-
-### Mouse Support (Vertical Sidebar)
-
-- **Left click**: Switch to window/pane
-- **Click right edge**: Click the divider to collapse sidebar
-- **Middle click**: Close window (with confirmation)
-- **Right click on window**: Context menu with options:
-  - Rename (with title locking)
-  - Unlock Name (restore automatic naming)
-  - Collapse/Expand Panes
-  - Move to Group
-  - Set Marker (searchable emoji picker)
-  - Set Tab Color (including transparent)
-  - Split Horizontal/Vertical
-  - Open in Finder
-  - Kill window
-- **Right click on pane**: Pane-specific options:
-  - Rename pane (with title locking)
-  - Unlock pane name
-  - Split pane
-  - Focus pane
-  - Break to new window
-  - Close pane
-- **Right click on group**: Group management:
-  - New window in group
-  - Collapse/Expand group
-  - Rename group
-  - Change group color
-  - Set Marker (searchable emoji picker)
-  - Set working directory
-  - Delete group
-  - Close all windows in group
-
-### Sidebar Position and Mode
-
-The sidebar can be placed on either side of the window and can span the full height or attach to a single pane.
-
-**Set via tmux options:**
-```bash
-# Position: left (default) or right
-tmux set-option -g @tabby_sidebar_position right
-
-# Mode: full (default, spans full window) or partial (attaches to one pane)
-tmux set-option -g @tabby_sidebar_mode partial
-```
-
-Toggle the sidebar off and on (`prefix + Tab` twice) after changing these options.
-
-### Sidebar Collapse
-
-Hide the sidebar temporarily to reclaim screen space. Collapse is a stash/restore operation (tmux `break-pane` / `join-pane` under the hood), not a shrink — the sidebar-renderer process keeps running in a hidden holding window, so bringing it back is instant.
-
-**How to trigger:**
-- **Mobile**: tap the `≡` (hamburger) button on the window header
-- **Keyboard**: `Cmd + Shift + \` (requires [terminal config](#sending-cmdshift-to-tmux))
-- **Shell**: `tabby hook toggle-collapse-sidebar` — fires the same action the hamburger does
-
-`prefix + Tab` is different — it fully *disables* tabby for the session (stops the daemon, removes hooks). Use the collapse path when you just want to reclaim space temporarily.
-
-#### Sending Cmd+Shift+\ to tmux
-
-`Cmd + Shift + \` is bound in tmux to `tabby hook toggle-collapse-sidebar`, reached via CSI u encoding. tabby.tmux registers the binding automatically; to rebind manually:
+**Group your windows** by naming them with a prefix. Rename two windows to
+`API|server` and `API|logs` and both land under an API group sharing a colour:
 
 ```bash
-bind-key -n 'C-S-\' run-shell -b '/path/to/tabby/bin/tabby hook toggle-collapse-sidebar'
+tmux rename-window 'API|server'
 ```
 
-**Requires `extended-keys`** in your tmux.conf (tmux 3.2+):
-```bash
-set -g extended-keys on
-set -sa terminal-features 'xterm*:extkeys'
-```
+**Gather every pane into one view** with `prefix + 0`. Your panes move into a
+single tiled window, still live and interactive. `prefix + z` zooms into one,
+`prefix + L` picks a different arrangement, `prefix + 0` sends them home.
 
-To use `Cmd+Shift+\` as the trigger, your terminal must send the CSI u sequence `\x1b[92;6u` (which tmux decodes as `Ctrl+Shift+\`). Configuration varies by terminal:
+**Switch themes** with `prefix + T`. Fifteen themes ship, paired light and
+dark.
 
-**Blink Shell** — the recommended mobile terminal for Tabby on iPad/iPhone. See configuration below.
-
-**Ghostty** — add to `~/.config/ghostty/config`:
-```
-keybind = super+shift+backslash=text:\x1b[92;6u
-keybind = cmd+left_bracket=text:\x1b{
-keybind = cmd+right_bracket=text:\x1b}
-keybind = cmd+grave_accent=text:\x1b`
-```
-
-The `cmd+[` / `cmd+]` bindings enable window navigation (`prev_window` / `next_window`). `cmd+shift+[/]` is left free for Ghostty's native tab switching. The `cmd+`` ` `` binding enables pane cycling (`swap_pane`); it overrides macOS's "cycle same-app windows" shortcut within Ghostty.
-
-On macOS, `Cmd+Shift+\` is bound to "Show All Tabs" by default. Disable it:
-```bash
-defaults write com.mitchellh.ghostty NSUserKeyEquivalents -dict-add "Show All Tabs" '\0'
-# Restart Ghostty after running this
-```
-
-**Blink Shell (iPad)** — [https://blink.sh/](https://blink.sh/) — add to your keyboard configuration (`kb.json`):
-```json
-{
-  "keys": "cmd+shift+\\",
-  "action": "hex",
-  "value": "1b5b39323b3675"
-}
-```
-
-The hex value `1b5b39323b3675` is the byte representation of `\x1b[92;6u`.
-
-**iTerm2** — add a key mapping in Preferences → Profiles → Keys:
-- Shortcut: `⌘⇧\`
-- Action: Send Escape Sequence
-- Value: `[92;6u`
-
-**Kitty** — add to `~/.config/kitty/kitty.conf`:
-```
-map cmd+shift+backslash send_text all \x1b[92;6u
-```
-
-**Other terminals** — any terminal that can send arbitrary escape sequences will work. Map `Cmd+Shift+\` (or your preferred shortcut) to send the bytes `\x1b[92;6u` (ESC `[` `9` `2` `;` `6` `u`).
-
-### Mobile / Responsive Profiles
-
-Tabby adapts its chrome to the attached client's dimensions. The same tmux session works on a desktop monitor and a phone attached to the same server without manual reconfig.
-
-**Three profiles, selected by window width:**
-
-| Profile | Window width | Default sidebar width |
-|---------|--------------|----------------------|
-| Mobile  | ≤ 110 cols   | 15 |
-| Tablet  | ≤ 170 cols   | 20 |
-| Desktop | > 170 cols   | 25 |
-
-Override the default widths via tmux options:
+**Deep-link a notification** so clicking it returns you to the pane that fired
+it:
 
 ```bash
-tmux set-option -g @tabby_sidebar_width_mobile  15
-tmux set-option -g @tabby_sidebar_width_tablet  20
-tmux set-option -g @tabby_sidebar_width_desktop 25
-
-# Breakpoints
-tmux set-option -g @tabby_sidebar_mobile_max_window_cols 110
-tmux set-option -g @tabby_sidebar_tablet_max_window_cols 140
+terminal-notifier -title "Build done" -message "Click to return" \
+  -execute "~/.tmux/plugins/tabby/bin/tabby hook focus-pane main:2.1"
 ```
 
-**Window header (phone only):** narrow clients get a one-row window-header pane above each window with buttons: `◀` previous, `≡` hamburger (hide/show sidebar), `+` new, `×` close, `▶` next.
+More in the [Quick Start](docs/wiki/Quick-Start.md) guide.
 
-**Sidebar width sync:** drag the sidebar border in any window and all other windows in the same profile follow on the next signal tick. The new width is also persisted to the active window's `@tabby_sidebar_width_<profile>` so it survives daemon restarts.
+## What it does
 
-**Keyboard clamp:** when a client's height drops below the keyboard threshold (default 38 rows, set via `@tabby_sidebar_mobile_keyboard_rows`), the sidebar clamps to `@tabby_sidebar_width_mobile_keyboard` for ~4 s so the on-screen keyboard doesn't crush the content pane.
-
-### SSH Bell Notifications
-
-Automatically receive bell notifications when commands complete in SSH sessions.
-
-#### Auto-enable for all SSH connections
-
-Add to your `~/.ssh/config`:
-
-```ssh
-Host *
-  RemoteCommand bash -c 'PROMPT_COMMAND="printf \"\a\""; exec bash -l'
-  RequestTTY force
-```
-
-This works by injecting a bell into the remote shell's prompt, so you get a notification after every command.
-
-**Note:** This uses `RemoteCommand` which may interfere with tools like `scp`, `rsync`, and `git` over SSH. If you encounter issues, override for specific hosts:
-
-```ssh
-Host github.com gitlab.com bitbucket.org
-  RemoteCommand none
-  RequestTTY auto
-```
-
-#### Alternative: Add to remote servers
-
-If you control the remote servers, add this to `~/.bashrc` on each server:
-
-```bash
-export PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }printf '\a'"
-```
-
-This approach doesn't require SSH config changes and won't interfere with other tools.
-
-### Light / Dark Theme Toggle
-
-Tabby pairs a light theme with a dark one and lets you switch between them on
-demand. The choice is manual — nothing inspects the OS appearance setting.
-
-Add to `~/.config/tabby/config.yaml`, or run `tabby setup` and pick the
-light/dark pair:
-
-```yaml
-auto_theme:
-    enabled: true
-    mode: dark                     # which variant is selected: "light" or "dark"
-    light: rose-pine-dawn
-    dark: rose-pine
-```
-
-Switch with `prefix + T`, or from a shell in the session:
-
-```sh
-tabby theme          # show the current selection
-tabby theme toggle   # flip between light and dark
-tabby theme light    # select a specific variant
-tabby theme dark
-```
-
-Toggling writes `mode` back to `config.yaml`, so the choice survives a daemon
-restart, and repaints the sidebar, pane borders, and the global tmux
-`window-style` immediately. It works the same over SSH: the daemon owns the
-setting, so a toggle on a remote host needs nothing forwarded from the laptop.
-
-
-## Configuration
-
-### File Locations
-
-| Category | Path | Env Override |
-|----------|------|-------------|
-| Config | `~/.config/tabby/config.yaml` | `TABBY_CONFIG_DIR` |
-| Pet state | `~/.local/state/tabby/pet.json` | `TABBY_STATE_DIR` |
-| Thought cache | `~/.local/state/tabby/thought_buffer.txt` | `TABBY_STATE_DIR` |
-| Runtime | `/tmp/tabby-*` | -- |
-
-
-Edit `~/.config/tabby/config.yaml`:
-
-```yaml
-# Tab grouping rules (first match wins)
-groups:
-  - name: "Frontend"
-    pattern: "^FE|"
-    working_dir: "~/projects/frontend"  # Default dir for new windows
-    theme:
-      bg: "#e74c3c"
-      fg: "#ffffff"
-      active_bg: "#c0392b"
-      active_fg: "#ffffff"
-      icon: ""
-
-  - name: "Backend"
-    pattern: "^BE|"
-    working_dir: "~/projects/backend"
-    theme:
-      bg: "#27ae60"
-      fg: "#ffffff"
-      active_bg: "#1e8449"
-      active_fg: "#ffffff"
-      icon: ""
-
-  - name: "Default"
-    pattern: ".*"
-    theme:
-      bg: "#3498db"
-      fg: "#ffffff"
-      active_bg: "#2980b9"
-      active_fg: "#ffffff"
-
-# Indicators
-indicators:
-  activity:
-    enabled: false
-    icon: "!"
-    color: "#000000"
-  bell:
-    enabled: true
-    icon: "◆"
-    color: "#000000"
-    bg: "#ffff00"  # Yellow background for visibility
-  silence:
-    enabled: true
-    icon: "○"
-    color: "#000000"
-  busy:
-    enabled: true
-    icon: "◐"
-    color: "#ff0000"
-    frames: ["◐", "◓", "◑", "◒"]  # Animation frames
-  input:
-    enabled: true
-    icon: "?"
-    color: "#ffffff"
-    bg: "#9b59b6"  # Purple - needs attention
-    frames: ["?", "?"]  # Can add blinking: ["?", " "]
-
-# Vertical sidebar settings
-sidebar:
-  position: left      # "left" or "right"
-  mode: full          # "full" (full window height) or "partial" (attach to pane)
-  new_tab_button: true
-  new_group_button: true
-  show_empty_groups: true
-  close_button: false
-  sort_by: "group"  # "group" or "index"
-  colors:
-    disclosure_fg: "#000000"
-    disclosure_expanded: "⊟"
-    disclosure_collapsed: "⊞"
-    active_indicator: "◀"  # Active window/pane indicator
-    active_indicator_fg: "auto"  # "auto" uses group/window bg color
-```
-
-## Tab Grouping
-
-Windows are organized into groups based on name patterns or manual assignment:
-
-```
-+---------------------------+
-|  SIDEBAR                  |      SESSION
-|                           |         |
-|  Frontend  [group]        |         +-- Frontend (group)
-|    0. dashboard           |         |     +-- 0. dashboard (window)
-|    1. components          |         |     |     +-- pane 0: vim
-|                           |         |     |     +-- pane 1: terminal
-|  Backend   [group]        |         |     +-- 1. components (window)
-|    2. api                 |         |           +-- pane 0: npm run dev
-|    3. tests               |         |
-|                           |         +-- Backend (group)
-|  Default   [group]        |         |     +-- 2. api (window)
-|  > 4. vim                 |         |     +-- 3. tests (window)
-|    5. notes               |         |
-|                           |         +-- Default (group)
-|  [+] New Tab              |               +-- 4. vim (window) <- active
-+---------------------------+               +-- 5. notes (window)
-```
-
-### Assigning Groups
-
-**By pattern** - Windows matching a regex are auto-grouped:
-- `^FE|` matches `FE|dashboard`, `FE|components`
-- `^BE|` matches `BE|api`, `BE|tests`
-- `.*` catches everything else in Default
-
-**By right-click menu** - Select "Move to Group" to manually assign
-
-**By tmux option** - Set programmatically:
-```bash
-tmux set-window-option -t :0 @tabby_group "Frontend"
-```
-
-### Custom Colors and Transparent Mode
-
-Set custom colors for individual windows or groups:
-
-**Window colors** - Right-click window → Set Tab Color:
-- Predefined colors: Red, Orange, Yellow, Green, Blue, Purple, Pink, Cyan, Gray
-- **Transparent**: No background, simple text color (minimal visual)
-- Reset to default group color
-
-**Group colors** - Right-click group → Edit Group → Change Color:
-- Same color options as windows
-- **Transparent**: Clean text-only display for the entire group
-- Affects all windows in the group (unless they have custom colors)
-
-**Set programmatically**:
-```bash
-# Set window to transparent
-tmux set-window-option -t :0 @tabby_color "transparent"
-
-# Set window to custom color
-tmux set-window-option -t :0 @tabby_color "#e91e63"
-
-# Reset to group color
-tmux set-window-option -t :0 -u @tabby_color
-```
-
-### Group Working Directories
-
-Set a default working directory for each group. New windows created in the group will automatically use this directory:
-
-**Via context menu**: Right-click group → Edit Group → Set Working Directory
-
-**In config.yaml**:
-```yaml
-groups:
-  - name: "MyProject"
-    working_dir: "~/projects/myproject"
-    # ...
-```
-
-### Pane Management
-
-**Rename panes** with title locking (like window names):
-- Right-click pane → Rename
-- Locked titles persist until manually unlocked
-- Right-click pane → Unlock Name to restore automatic naming
-
-**Set programmatically**:
-```bash
-# Set locked pane title
-tmux set-option -p -t %123 @tabby_pane_title "My Pane"
-
-# Clear locked title
-tmux set-option -p -t %123 -u @tabby_pane_title
-```
-
-## Widgets
-
-The sidebar hosts pinnable widgets below the window list. Enable and configure per widget in `config.yaml` under `widgets:`.
-
-| Widget | Default | What it shows |
-|--------|---------|---------------|
-| `clock` | on | Local time and date |
-| `pet` | on | Terminal pet with Claude-powered thought bubbles, hunger/happiness state, feeding, and adventure mode |
-| `stats` | on | CPU, memory, and battery — emoji or bar style |
-| `git` | off | Branch, dirty/clean, ahead/behind, stash count for the active pane's cwd |
-| `session` | off | Current tmux session, client, and window count |
-| `claude` | off | Claude Code usage for today / week / month / total, read from the sqlite history DB |
-| `teamclaude` | off | Per-account quota left from a [teamclaude](https://github.com/KarpelesLab/teamclaude) proxy — session (5h) and weekly (7d) bars with reset countdowns |
-
-Each widget supports `pin`, `priority` (render order), `position: top|bottom`, padding, margins, dividers, and per-field colors. See `config.yaml` for the full schema.
-
-### TeamClaude quotas
-
-[teamclaude](https://github.com/KarpelesLab/teamclaude) is a multi-account Claude proxy that rotates accounts based on quota. Its server exposes a `GET /teamclaude/status` endpoint; this widget polls it over HTTP and shows, per managed account, how much session (5h) and weekly (7d) quota each has left — as bars with the percentage and reset countdown drawn inside (e.g. `87% 4h`), color-coded by headroom (green/yellow/red).
-
-Because the proxy load-balances sessions across accounts, more than one account can be serving traffic at the same time. Every actively-serving account is highlighted green with a live indicator — `active(N/M)` (N in-flight requests of an M concurrency cap), `active(N)` when the cap is unknown, or a bare `active` for an account used in the last 15 minutes — so you can see at a glance how many accounts are in use, not just the single primary (marked `▸`). The indicator is dropped on narrow sidebars where it wouldn't fit. (On older proxies that don't report `activeRequests`/`maxConcurrency`, the widget falls back to the last-used recency signal alone.)
-
-```yaml
-widgets:
-  teamclaude:
-    enabled: true
-    url: "http://your-gateway:8081"   # teamclaude proxy base URL
-    # api_key: "tc-..."               # proxy key; prefer the env var below
-    show_session: true                # 5h window
-    show_weekly: true                 # 7d window
-    update_interval: 60               # seconds between fetches
-    position: bottom
-    priority: 60
-```
-
-The proxy API key is read from `widgets.teamclaude.api_key` **or**, preferably, the `TABBY_TEAMCLAUDE_API_KEY` environment variable so the secret can stay out of `config.yaml`. (teamclaude skips auth for `localhost` connections, so no key is needed when tabby and the proxy run on the same host.) Fetches happen off the render path on the `update_interval` cadence; if the proxy is unreachable the widget shows a one-line placeholder and never blocks the sidebar.
-
-## Command-Line Reference
-
-User-facing entry points. Internal subcommands (`daemon`, `watchdog`, `render …`) are spawned automatically by `tabby.tmux` and shouldn't be invoked by hand.
-
-| Command | What it does |
-|---------|--------------|
-| `tabby toggle` | Enable or disable tabby for the current tmux session (daemon lifecycle). Bound by default to `prefix + Tab`. |
-| `tabby hook toggle-collapse-sidebar` | Hide/show the sidebar via stash/restore. Same action as the mobile hamburger. Bound by default to `Cmd+Shift+\`. |
-| `tabby hook focus-pane <session:window.pane>` | Jump to a specific pane. Useful from macOS notification deep-links. |
-| `tabby cycle-pane [--ensure-content \| --dim-only]` | Cycle the active content pane. `--ensure-content` moves focus to a content pane only if a sidebar/header is active (invoked from window-switch hooks). `--dim-only` just re-applies inactive-pane dimming. |
-| `tabby new-window [name]` | Create a new window that inherits the current group's working directory and color. |
-| `tabby manage-group` | Interactive TUI to edit window-group entries in `config.yaml`. |
-| `tabby pane-picker` | Interactive pane picker for keyboard-driven pane selection. |
-| `tabby setup` | Guided wizard for first-time configuration. |
-
-`tabby hook` has many more subcommands used by tmux hook lines — `ensure-sidebar`, `on-pane-resize`, `preserve-pane-ratios`, `kill-pane`, `kill-window`, `split-pane`, `new-group`, `set-indicator`, `osc-handler`, `resurrect-save`, `resurrect-restore`, etc. These are registered by `tabby.tmux` and not meant for manual use.
-
-## Development
-
-### Building from Source
-```bash
-cd ~/.tmux/plugins/tabby
-./scripts/install.sh
-```
-
-### Commit Hygiene Guardrails
-```bash
-# Install the local git hooks
-./scripts/install-git-hooks.sh
-```
-
-This installs the tracked repo hooks, including the pre-commit guard that blocks
-committing logs, local agent state, temporary files, and likely hardcoded
-secrets. It also replaces any stale external hook-manager wrappers with local
-repo hooks so commits and pushes do not depend on extra binaries.
-
-### Running Tests
-```bash
-# Comprehensive visual tests
-./tests/e2e/test_visual_comprehensive.sh
-
-# Tab stability tests  
-./tests/e2e/test_tab_stability.sh
-
-# Edge case tests
-./tests/e2e/test_edge_cases.sh
-```
-
-
-## macOS Notifications with Deep Links
-
-Tabby includes helper scripts for creating notifications that deep-link back to specific tmux windows/panes. When clicked, the notification brings your terminal to the foreground and navigates to the target location.
-
-Works with **Claude Code**, **OpenCode**, and **Grok CLI** (xAI's Grok Build) out of the box.
-
-### Requirements
-
-1. Install a notification tool via Homebrew:
-```bash
-# Recommended: growlrrr (supports custom emoji icons as thumbnails)
-brew install growlrrr
-
-# Alternative: terminal-notifier (basic notifications)
-brew install terminal-notifier
-```
-
-2. Configure your terminal app in `config.yaml`:
-```yaml
-# Options: Ghostty, iTerm, Terminal, Alacritty, kitty, WezTerm
-terminal_app: Ghostty
-```
-
-### Basic Usage
-
-The `tabby hook focus-pane` script activates your terminal and navigates tmux:
-
-```bash
-# Focus window 2, pane 0
-~/.tmux/plugins/tabby/bin/tabby hook focus-pane 2
-
-# Focus window 1, pane 2
-~/.tmux/plugins/tabby/bin/tabby hook focus-pane 1.2
-
-# Focus specific session, window, and pane
-~/.tmux/plugins/tabby/bin/tabby hook focus-pane main:2.1
-```
-
-### Sending Notifications with Deep Links
-
-```bash
-# Simple notification that jumps to window 2
-terminal-notifier -title "Build Complete" -message "Click to view" \
-  -execute "$HOME/.tmux/plugins/tabby/bin/tabby hook focus-pane 2"
-
-# Notification with current location (useful in scripts/hooks)
-TARGET=$(tmux display-message -p '#{window_index}.#{pane_index}')
-terminal-notifier -title "Task Done" -message "Click to return" \
-  -execute "$HOME/.tmux/plugins/tabby/bin/tabby hook focus-pane $TARGET"
-```
-
-### Integration with Claude Code
-
-Claude Code hooks run as subprocesses, so you need to capture the correct pane — not the currently focused one. The key is using the `TMUX_PANE` environment variable with `tmux display-message -t`.
-
-**Important:** Using `tmux display-message -p` (without `-t`) returns the *currently focused* pane, which may have changed while Claude was working. Using `-t "$TMUX_PANE"` queries the *specific pane* where the hook originated.
-
-#### Hook Configuration
-
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "<tabby-dir>/bin/tabby hook set-indicator busy 1"
-          },
-          {
-            "type": "command",
-            "command": "<tabby-dir>/bin/tabby hook set-indicator input 0"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/your/claude-stop-notify.sh"
-          }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/your/claude-notification.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Notification scripts should:
-- Read hook JSON from stdin (`jq -r '.transcript_path'` for transcript)
-- Use `TMUX_PANE` env var to query the originating pane (not current focus)
-- Call `tabby hook focus-pane` for click-to-navigate deep links
-- Set tabby indicators (`tabby hook set-indicator busy 0`, `bell 1`, etc.)
-- Use growlrrr with `--image` for emoji group icon thumbnails
-
-See the [example hook scripts](https://github.com/brendandebeasi/tabby/blob/main/README.md#example-hook-script) or use the built-in OpenCode hook as a reference.
-
-#### Example Hook Script
-
-```bash
-#!/usr/bin/env bash
-# claude-stop-notify.sh — Rich notification with emoji icons + deep linking
-set -u
-
-TABBY_DIR="${HOME}/.tmux/plugins/tabby"
-INDICATOR="$TABBY_DIR/bin/tabby hook set-indicator"
-
-# Read hook JSON from stdin (Claude provides session info)
-HOOK_JSON=$(cat)
-TRANSCRIPT_PATH=$(echo "$HOOK_JSON" | jq -r '.transcript_path // empty')
-
-# Get tmux info for the SPECIFIC pane where Claude runs
-# CRITICAL: Use -t "$TMUX_PANE" to query the originating pane, not current focus
-if [[ -n "${TMUX:-}" && -n "${TMUX_PANE:-}" ]]; then
-    WINDOW_NAME=$(tmux display-message -t "$TMUX_PANE" -p '#W')
-    TMUX_TARGET=$(tmux display-message -t "$TMUX_PANE" -p '#{session_name}:#{window_index}.#{pane_index}')
-fi
-
-# Extract last assistant message from transcript
-MESSAGE="Session complete"
-if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
-    LAST_MSG=$(tac "$TRANSCRIPT_PATH" | grep -m1 '"type":"assistant"' | jq -r '
-        .message.content |
-        if type == "array" then
-            [.[] | select(.type == "text") | .text] | join(" ")
-        elif type == "string" then .
-        else empty end
-    ' 2>/dev/null)
-    [[ -n "$LAST_MSG" && "$LAST_MSG" != "null" ]] && \
-        MESSAGE=$(echo "$LAST_MSG" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-300)
-fi
-
-# Send notification with click-to-focus (growlrrr preferred, terminal-notifier fallback)
-if command -v growlrrr &>/dev/null; then
-    growlrrr send --appId ClaudeCode --title "$WINDOW_NAME" \
-        --subtitle "Task complete" --sound default \
-        --execute "$TABBY_DIR/bin/tabby hook focus-pane $TMUX_TARGET" \
-        "$MESSAGE" &>/dev/null &
-elif command -v terminal-notifier &>/dev/null; then
-    terminal-notifier -title "$WINDOW_NAME" -message "$MESSAGE" \
-        -sound default -execute "$TABBY_DIR/bin/tabby hook focus-pane $TMUX_TARGET" &>/dev/null &
-fi
-
-# Set tabby indicators
-"$INDICATOR" busy 0
-"$INDICATOR" bell 1
-```
-
-### Integration with OpenCode
-
-Tabby includes a built-in OpenCode hook at `scripts/opencode-tabby-hook.sh`. It supports:
-- All OpenCode events (complete, permission, question, error, start)
-- Emoji group icon thumbnails via growlrrr
-- SQLite-based message extraction from OpenCode's database
-- Process tree walking to find the correct `TMUX_PANE`
-- Tabby sidebar indicators (busy, input, bell)
-
-#### OpenCode Notifier Configuration
-
-Create `~/.config/opencode/opencode-notifier.json`:
-
-```json
-{
-  "sound": false,
-  "notification": false,
-  "command": {
-    "enabled": true,
-    "path": "<tabby-dir>/scripts/opencode-tabby-hook.sh",
-    "args": ["{event}", "{projectName}", "{sessionTitle}", "{message}"],
-    "minDuration": 0
-  },
-  "events": {
-    "complete": { "sound": false, "notification": false },
-    "permission": { "sound": false, "notification": false },
-    "error": { "sound": false, "notification": false }
-  }
-}
-```
-
-Set `sound` and `notification` to `false` in the notifier config since the hook script handles notifications directly via growlrrr/terminal-notifier.
-
-### Integration with Grok CLI
-
-xAI's **Grok Build** CLI (`grok`) ships a Claude-compatible hooks system, so it wires into Tabby exactly like Claude Code — the same `UserPromptSubmit` / `Stop` / `Notification` lifecycle events, the same hook-JSON-on-stdin contract, and the same `TMUX_PANE` capture rule. The only difference is where the hooks live: `~/.grok/user-settings.json` instead of `~/.claude/settings.json`.
-
-Add to `~/.grok/user-settings.json`:
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator busy 1" },
-          { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator input 0" }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator busy 0" },
-          { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator input 1" }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "matcher": "",
-        "hooks": [
-          { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator bell 1" }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Grok's process name is `grok`, which is already listed under `busy_detection.ai_tools` in `config.yaml` — so a Grok pane gets AI busy/idle treatment and the live AI tab summary even before any hooks fire. The hooks above just make the busy/input/bell indicators flip precisely on turn boundaries rather than on output heuristics. For deep-link notifications, point `Stop`/`Notification` at the same notify script you use for Claude Code (it reads hook JSON from stdin and uses `TMUX_PANE` identically).
-
-### Notification Persistence
-
-By default, macOS banner notifications disappear after ~5 seconds. To make them persist until clicked:
-
-1. Open **System Settings** → **Notifications** → **terminal-notifier** (or **growlrrr**)
-2. Change notification style from **Banners** to **Alerts**
-
-### Disabling Built-in Notifications
-
-To avoid duplicate notifications when using custom hooks:
-
-**Claude Code** — add to `~/.claude/settings.json`:
-```json
-{
-  "preferredNotifChannel": "none"
-}
-```
-
-**OpenCode** — set `sound` and `notification` to `false` in `opencode-notifier.json` (shown above).
-
-## Session Persistence (tmux-resurrect)
-
-Tabby integrates with [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) so your sessions survive tmux server restarts and reboots. When resurrect is installed, Tabby automatically:
-
-- **On save** (`prefix + Ctrl-s`): Strips Tabby utility panes (sidebar, pane headers) from the save file so they don't create zombie shell panes on restore.
-- **On restore** (`prefix + Ctrl-r`): Cleans stale runtime state, kills leftover processes, and re-initializes the sidebar based on your saved mode.
-
-### Setup
-
-Install tmux-resurrect via [TPM](https://github.com/tmux-plugins/tpm):
-
-```bash
-# Add to ~/.tmux.conf (before the Tabby plugin line)
-set -g @plugin 'tmux-plugins/tmux-resurrect'
-```
-
-Then `prefix + I` to install, or `tmux source ~/.tmux.conf` to reload. That's it — Tabby detects resurrect and wires the hooks automatically.
-
-### What Gets Saved and Restored
-
-| Preserved by resurrect | Restored by Tabby |
+| Feature | Detail |
 |---|---|
-| Window layout and names | Sidebar UI |
-| Pane working directories | Pane headers |
-| Running programs (vim, etc.) | Daemon process |
-| Global options (`@tabby_sidebar` mode) | Mouse state cleanup |
-| Window groups and custom colors | Runtime files |
+| Vertical sidebar | Clickable and persistent across windows. Left-click switches, right-click opens context menus, middle-click closes. Collapse it from the hamburger, a key, or the CLI. |
+| Window groups | Colour-coded by project, assigned by name pattern or right-click. Each group carries its own colour, icon, and working directory. |
+| Dashboard | `prefix + 0` gathers every pane into one tiled window and back again. Seven arrangements, including two where the focused pane takes the main slot. |
+| Pane headers | Per-pane titles with clickable controls, inactive-pane dimming, and border styling. |
+| Deep links | Click a notification to land on the exact session, window, and pane. |
+| Activity indicators | Bell, activity, silence, busy, input, and SSH hooks, forwarded over OSC 7700. |
+| AI tool detection | Recognises when opencode, gemini, codex, aider, cursor, copilot, or grok is working and marks the window busy. |
+| Responsive layout | Separate mobile, tablet, and desktop profiles. Narrow windows get a compact sidebar; phones get a window header with nav buttons. |
+| Widgets | Clock, pet, git, session, stats, and Claude and Kimi quota, pinnable in the sidebar. |
+| Themes | Fifteen built in, paired for a `prefix + T` light/dark toggle that works locally and over SSH. |
+| Mouse | Click, right-click menus, middle-click close, drag to resize, and OSC 52 copy that survives SSH. |
+| Session persistence | Clean save and restore of sidebar state through tmux-resurrect. |
 
-### Manual Installation (without TPM)
+## Documentation
 
-```bash
-git clone https://github.com/tmux-plugins/tmux-resurrect ~/.tmux/plugins/tmux-resurrect
-```
+The [wiki](docs/wiki/Home.md) is the full reference.
 
-Add to `~/.tmux.conf` (before Tabby's `run-shell` line):
-```bash
-run-shell ~/.tmux/plugins/tmux-resurrect/resurrect.tmux
-```
+**Getting started**
 
-### Hook Coexistence
+| Page | Covers |
+|---|---|
+| [Installation](docs/wiki/Installation.md) | TPM and manual install, requirements, first run |
+| [Quick Start](docs/wiki/Quick-Start.md) | The first ten minutes |
+| [Keyboard and Mouse](docs/wiki/Keyboard-and-Mouse.md) | Every binding, click, and context menu |
 
-Tabby only sets the resurrect hook options if they are unset or already owned by Tabby. If you have custom resurrect hooks configured, Tabby will not override them. To use both, chain them in a wrapper script:
+**Configuration**
 
-```bash
-#!/usr/bin/env bash
-# my-resurrect-restore-wrapper.sh
-/path/to/your/custom-hook.sh
-~/.tmux/plugins/tabby/bin/tabby hook resurrect-restore
-```
+| Page | Covers |
+|---|---|
+| [Configuration](docs/wiki/Configuration.md) | `config.yaml`, file locations, how settings merge |
+| [Themes](docs/wiki/Themes.md) | The fifteen themes, pairing, terminal background |
+| [Groups and Colors](docs/wiki/Groups-and-Colors.md) | Grouping rules, per-window colours, working directories |
+| [Sidebar](docs/wiki/Sidebar.md) | Position, mode, collapse, sort order |
+| [Pane Headers](docs/wiki/Pane-Headers.md) | Titles, dimming, borders, resize controls |
+| [Dashboard](docs/wiki/Dashboard.md) | Gathering panes, layouts, promote and move |
+| [Responsive Layout](docs/wiki/Responsive-Layout.md) | Breakpoints and width rules |
+| [Widgets](docs/wiki/Widgets.md) | Every widget and its settings |
 
-## Known Limitations
+**Integrations**
 
-1. **Mosh does not support mouse events** — Mosh strips mouse escape sequences, so sidebar clicks, right-click context menus, and middle-click close will not work over mosh connections. Keyboard navigation works normally. If you need mouse support, use SSH directly instead of mosh.
+| Page | Covers |
+|---|---|
+| [Notifications and Deep Links](docs/wiki/Notifications-and-Deep-Links.md) | Click-to-focus, Claude Code, OpenCode, Grok CLI |
+| [AI Tool Indicators](docs/wiki/AI-Tool-Indicators.md) | Busy detection and driving indicators from scripts |
+| [SSH and Remote Hosts](docs/wiki/SSH-and-Remote-Hosts.md) | Remote bells, themes, and clipboard |
+| [Session Persistence](docs/wiki/Session-Persistence.md) | tmux-resurrect setup and coexistence |
 
-## Troubleshooting
+**Reference**
 
-### Tabs not appearing
-- Ensure Tabby is not explicitly disabled: `tmux show -gv @tabby_enabled` (should not be `0`)
-- Run `tmux source ~/.tmux.conf` to reload
-- Check if binaries exist: `ls ~/.tmux/plugins/tabby/bin/`
+| Page | Covers |
+|---|---|
+| [CLI Reference](docs/wiki/CLI-Reference.md) | Every subcommand |
+| [tmux Options](docs/wiki/tmux-Options.md) | Every `@tabby_*` option and env var |
+| [Troubleshooting](docs/wiki/Troubleshooting.md) | Symptoms, causes, log files |
+| [Architecture](docs/wiki/Architecture.md) | Daemon, renderers, where state lives |
+| [Development](docs/wiki/Development.md) | Building, testing, the dev reload loop |
 
-### Sidebar not toggling
-- Verify the toggle key binding: `tmux list-keys | grep toggle_sidebar`
-- Check if the sidebar binary is running: `ps aux | grep sidebar`
+## About
 
-## Zellij Port
+Tabby started as a fix for a personal problem: managing dozens of tmux windows
+across projects without losing track of which was which. It grew into something
+others might find useful.
 
-**[tabby-zj](https://github.com/brendandebeasi/tabby-zj)** — A port of Tabby to Zellij as a single Rust WASM plugin. Same grouped tab/pane sidebar, context menus, indicators, and widgets — no tmux required.
+Features are modular, so you can run the sidebar without pane headers or
+widgets, and the widget system takes custom content. Every glyph set renders,
+whether you have Nerd Fonts installed or are stuck with plain ASCII over a
+serial console. It works on most modern terminals: Ghostty, iTerm, kitty,
+Alacritty, WezTerm.
 
-## Similar Projects
+## Known limitations
 
-- [cmux](https://github.com/manaflow-ai/cmux) — AI-powered tmux session manager with intelligent window organization
+Mosh strips mouse escape sequences, so sidebar clicks, context menus, and
+middle-click close do not work over mosh. Keyboard navigation is unaffected.
+Use SSH directly if you need the mouse.
+
+## Zellij port
+
+[tabby-zj](https://github.com/brendandebeasi/tabby-zj) is a port to Zellij as a
+single Rust WASM plugin, with the same grouped sidebar, context menus,
+indicators, and widgets. No tmux required.
+
+## Similar projects
+
+[cmux](https://github.com/manaflow-ai/cmux) is an AI-powered tmux session
+manager with automatic window organization.
 
 ## Contributing
 
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Run the test suite
-4. Submit a pull request
+PRs are welcome. Fork, branch, run `make ci`, and open a pull request. Tabby is
+actively developed, though support for every terminal emulator and use case is
+not something I can promise. See [Development](docs/wiki/Development.md) for the
+build and test setup.
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT. See LICENSE.
