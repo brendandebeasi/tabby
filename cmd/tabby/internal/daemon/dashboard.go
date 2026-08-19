@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashlayout"
 )
 
 // paneBorderFormat returns the tmux pane-border-format string used by BOTH
@@ -120,6 +122,109 @@ func lightenHex(hex string, frac float64) string {
 }
 
 const dashboardWindowName = "Dashboard"
+
+// dashLayoutOption is the global tmux option that persists the chosen dashboard
+// arrangement across gathers and daemon restarts. Read/written via the cached
+// tmuxGlobalOption / setTmuxGlobalOption helpers so a write is visible to a
+// same-cycle read (avoids the 30s option-cache staleness trap).
+const dashLayoutOption = "@tabby_dash_layout"
+
+// dashAllowedLayouts is the set of dashboard arrangements the picker can apply,
+// in the order the picker presents them. The first entry is the default (and
+// historical) arrangement. The "-auto" entries reuse the main-* geometry but
+// keep the ACTIVE pane in the big slot (see promoteActivePaneToMain and
+// cycle-pane --main-follow); they map to their base tmux layout via
+// baseTmuxLayout when handed to select-layout.
+var dashAllowedLayouts = []string{
+	"tiled",                // Grid
+	"even-horizontal",      // Columns
+	"even-vertical",        // Rows
+	"main-vertical",        // Main + stack (big left)
+	"main-horizontal",      // Main + row (big top)
+	"main-vertical-auto",   // Main + stack, active pane is the big one
+	"main-horizontal-auto", // Main + row, active pane is the big one
+}
+
+// isAllowedDashLayout reports whether name is one of the supported arrangements.
+func isAllowedDashLayout(name string) bool {
+	for _, l := range dashAllowedLayouts {
+		if l == name {
+			return true
+		}
+	}
+	return false
+}
+
+// baseTmuxLayout maps a dashboard layout name to the native tmux layout to hand
+// select-layout: the "-auto" variants share their base main-* geometry (only
+// which pane occupies the big slot differs, handled separately).
+func baseTmuxLayout(name string) string {
+	return strings.TrimSuffix(name, "-auto")
+}
+
+// isAutoMainLayout reports whether name is an "active pane is the big one" mode.
+func isAutoMainLayout(name string) bool {
+	return strings.HasSuffix(name, "-auto")
+}
+
+// promoteActivePaneToMain rearranges the dashboard so the active content pane
+// occupies the main/big slot with the remaining panes in a stable, pane-id
+// sorted order (so panes don't drift as focus moves). Used to make an "-auto"
+// layout take effect immediately when selected; ongoing focus tracking is
+// handled by cycle-pane --main-follow from the after-select-pane hook. Shares
+// the swap planner with that binary so both arrange panes identically.
+func (c *Coordinator) promoteActivePaneToMain(winID string) {
+	if winID == "" {
+		return
+	}
+	out := tmuxOutputTrimmed("list-panes", "-t", winID, "-F",
+		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_start_command}")
+	var ids []string
+	active := ""
+	for _, line := range dashLines(out) {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 2 {
+			continue
+		}
+		cur, start := "", ""
+		if len(parts) >= 3 {
+			cur = parts[2]
+		}
+		if len(parts) >= 4 {
+			start = parts[3]
+		}
+		if isAuxiliaryPaneCommand(cur) || isSidebarPaneCommand(cur, start) {
+			continue
+		}
+		ids = append(ids, parts[0])
+		if parts[1] == "1" {
+			active = parts[0]
+		}
+	}
+	swaps := dashlayout.PlanActiveMainSwaps(ids, active)
+	if len(swaps) == 0 {
+		return
+	}
+	args := make([]string, 0, len(swaps)*5+4)
+	for i, sw := range swaps {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, "swap-pane", "-s", sw[0], "-t", sw[1])
+	}
+	args = append(args, ";", "select-pane", "-t", active)
+	_ = tmuxRun(args...)
+}
+
+// dashboardLayoutName returns the persisted dashboard layout (global
+// @tabby_dash_layout option), validated against the supported set. Falls back
+// to "tiled" when unset or invalid.
+func (c *Coordinator) dashboardLayoutName() string {
+	if name := tmuxGlobalOption(dashLayoutOption); isAllowedDashLayout(name) {
+		return name
+	}
+	return "tiled"
+}
 
 // dashWindowSnapshot records enough of an origin window to recreate it on exit
 // and to render it in the sidebar while gathered.
@@ -322,7 +427,18 @@ func (c *Coordinator) enterDashboard() {
 		}
 	}
 
-	_ = tmuxRun("select-layout", "-t", dashID, "tiled")
+	// Apply the user's chosen arrangement (default "tiled"). The in-loop
+	// re-tiles above intentionally stay "tiled" — joining repeatedly into one
+	// target halves it each time, and "tiled" reflows give the most headroom so
+	// the Nth join doesn't fail for lack of space. We only switch to a non-grid
+	// arrangement once, here, after every pane has landed.
+	layout := c.dashboardLayoutName()
+	_ = tmuxRun("select-layout", "-t", dashID, baseTmuxLayout(layout))
+	if isAutoMainLayout(layout) {
+		// Put the focused pane in the big slot right away; the after-select-pane
+		// hook keeps it there as focus moves.
+		c.promoteActivePaneToMain(dashID)
+	}
 	_ = tmuxRun("select-window", "-t", dashID)
 
 	// Label each tile with tmux's NATIVE pane-border-status (a single line on the

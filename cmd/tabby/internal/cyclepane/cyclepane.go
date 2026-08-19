@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashlayout"
 	"github.com/brendandebeasi/tabby/pkg/config"
 )
 
@@ -36,6 +37,19 @@ type paneInfo struct {
 }
 
 func Run(args []string) int {
+	// --move <promote|next|prev> reorders the focused CONTENT pane instead of
+	// cycling focus. Handled before the focus-cycle path below.
+	if len(args) >= 2 && args[0] == "--move" {
+		return movePane(args[1])
+	}
+
+	// --main-follow keeps the active pane in the main/largest slot when the
+	// dashboard is in an "-auto" layout (Main+stack/row, active). Wired to the
+	// after-select-pane hook so the big pane follows focus. No-op otherwise.
+	if len(args) >= 1 && args[0] == "--main-follow" {
+		return mainFollow()
+	}
+
 	dimOnly := len(args) > 0 && args[0] == "--dim-only"
 	ensureContent := len(args) > 0 && args[0] == "--ensure-content"
 
@@ -172,6 +186,128 @@ func cyclePane(content []paneInfo) string {
 	target := content[nextIdx].id
 	_ = exec.Command("tmux", "select-pane", "-t", target).Run()
 	return target
+}
+
+// moveTargetIndex computes the destination slot for a move within the content-
+// pane list. Pure so it can be unit-tested without tmux. Returns (idx, true)
+// when a swap should happen, or (_, false) for a no-op (too few panes, active
+// not found, already primary on promote, or an unknown direction).
+//
+//   - promote: slot 0 (the first/main content pane); no-op if already there.
+//   - next:    one slot forward, wrapping.
+//   - prev:    one slot back, wrapping.
+func moveTargetIndex(activeIdx, n int, dir string) (int, bool) {
+	if n < 2 || activeIdx < 0 || activeIdx >= n {
+		return 0, false
+	}
+	switch dir {
+	case "promote":
+		if activeIdx == 0 {
+			return 0, false
+		}
+		return 0, true
+	case "next":
+		return (activeIdx + 1) % n, true
+	case "prev":
+		return (activeIdx - 1 + n) % n, true
+	default:
+		return 0, false
+	}
+}
+
+// movePane swaps the focused content pane with another content slot, keeping
+// focus on the moved pane. Aux panes (sidebar / pane-header) are excluded from
+// the slot list via filterContent, so the sidebar is never a swap target. In
+// the dashboard window it reflows to the active @tabby_dash_layout so main-*
+// arrangements rebuild with the moved pane in its new slot.
+func movePane(dir string) int {
+	content := filterContent(listPanes())
+	activeIdx := -1
+	for i, p := range content {
+		if p.active {
+			activeIdx = i
+			break
+		}
+	}
+	// activeIdx == -1 means a non-content pane (e.g. the sidebar) is focused;
+	// there's nothing to promote/move.
+	targetIdx, ok := moveTargetIndex(activeIdx, len(content), dir)
+	if !ok {
+		return 0
+	}
+
+	activeID := content[activeIdx].id
+	targetID := content[targetIdx].id
+	// swap-pane exchanges the two panes' on-screen POSITIONS (pane ids are
+	// stable). That alone is the move/promote: the focused pane lands in the
+	// target slot — slot 0 (the main/primary position) for promote, the
+	// adjacent slot for next/prev. We deliberately do NOT re-run
+	// `select-layout <named>` afterward: named tmux layouts assign the main
+	// pane by pane *index*, not position, so a reflow would immediately revert
+	// the swap and snap the original pane back to primary.
+	_ = exec.Command("tmux", "swap-pane", "-s", activeID, "-t", targetID).Run()
+	// Keep focus following the pane we moved into its new slot.
+	_ = exec.Command("tmux", "select-pane", "-t", activeID).Run()
+
+	// In the dashboard, skip dim + daemon signal (mirrors the focus-cycle
+	// dashboard branch — the sidebar content doesn't change on a pane reorder).
+	if inDashboardWindow() {
+		return 0
+	}
+	signalDaemon()
+	return 0
+}
+
+// dashLayout returns the persisted dashboard arrangement (global
+// @tabby_dash_layout option), defaulting to "tiled" when unset.
+func dashLayout() string {
+	out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_dash_layout").Output()
+	if err != nil {
+		return "tiled"
+	}
+	if v := strings.TrimSpace(string(out)); v != "" {
+		return v
+	}
+	return "tiled"
+}
+
+// mainFollow rearranges the dashboard so the active content pane occupies the
+// main/big slot and the remaining panes keep a stable, pane-id-sorted order in
+// the stack (so a pane always falls back to the same slot rather than drifting
+// to wherever focus came from). Only acts in the dashboard when the saved
+// layout is an "-auto" mode (main-vertical-auto / main-horizontal-auto);
+// otherwise it's a cheap no-op. Wired to after-select-pane so the main pane
+// tracks focus. swap-pane preserves the window geometry — only which pane
+// occupies each slot changes.
+func mainFollow() int {
+	if !inDashboardWindow() || !strings.HasSuffix(dashLayout(), "-auto") {
+		return 0
+	}
+	content := filterContent(listPanes()) // position order, sidebar/aux excluded
+	ids := make([]string, 0, len(content))
+	active := ""
+	for _, p := range content {
+		ids = append(ids, p.id)
+		if p.active {
+			active = p.id
+		}
+	}
+	swaps := dashlayout.PlanActiveMainSwaps(ids, active)
+	if len(swaps) == 0 {
+		return 0
+	}
+	// One chained tmux command (swap … ; swap … ; select-pane) so tmux redraws
+	// once at the final arrangement instead of flickering per swap.
+	args := make([]string, 0, len(swaps)*5+4)
+	for i, sw := range swaps {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, "swap-pane", "-s", sw[0], "-t", sw[1])
+	}
+	args = append(args, ";", "select-pane", "-t", active)
+	_ = exec.Command("tmux", args...).Run()
+	return 0
 }
 
 func isSpawning() bool {

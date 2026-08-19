@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/closeconfirm"
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashlayoutpopup"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/degradedmodelspopup"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/paneheader"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/petqapopup"
@@ -18,7 +19,7 @@ import (
 
 func Run(args []string) int {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: tabby render <sidebar|window-header|pane-header|sidebar-popup|pet-qa-popup|degraded-models-popup> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: tabby render <sidebar|window-header|pane-header|sidebar-popup|pet-qa-popup|degraded-models-popup|close-confirm|dash-layout-popup> [args...]")
 		return 2
 	}
 	rest := args[1:]
@@ -37,6 +38,8 @@ func Run(args []string) int {
 		return degradedmodelspopup.Run(rest)
 	case "close-confirm":
 		return closeconfirm.Run(rest)
+	case "dash-layout-popup":
+		return dashlayoutpopup.Run(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "tabby render: unknown renderer %q\n", args[0])
 		return 2

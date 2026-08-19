@@ -17739,6 +17739,36 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		}
 		return true
 
+	case "dashboard_layout_picker":
+		// Open the ASCII layout-picker popup (prefix+L). The popup posts back a
+		// dashboard_set_layout action when the user chooses an arrangement.
+		c.launchDashLayoutPopup(clientID)
+		return false
+
+	case "dashboard_set_layout":
+		// Apply (and persist) a dashboard arrangement chosen in the picker popup.
+		// Persisting via the global @tabby_dash_layout option means the next
+		// gather reuses it even if no dashboard is currently open.
+		name := strings.TrimSpace(input.ResolvedTarget)
+		if !isAllowedDashLayout(name) {
+			coordinatorDebugLog.Printf("dashboard_set_layout: ignoring invalid layout %q", name)
+			return false
+		}
+		_ = setTmuxGlobalOption(dashLayoutOption, name)
+		if c.dashboardWindowID != "" {
+			_ = tmuxRun("select-layout", "-t", c.dashboardWindowID, baseTmuxLayout(name))
+			if isAutoMainLayout(name) {
+				// "-auto" mode: make the focused pane the big one immediately;
+				// the after-select-pane hook keeps it tracking focus afterward.
+				c.promoteActivePaneToMain(c.dashboardWindowID)
+			}
+			c.applyDashboardBorders()
+			coordinatorDebugLog.Printf("dashboard_set_layout: applied %q to live dashboard %s", name, c.dashboardWindowID)
+		} else {
+			coordinatorDebugLog.Printf("dashboard_set_layout: stored default %q (no live dashboard)", name)
+		}
+		return true
+
 	case "sidebar_settings":
 		// Show sidebar settings context menu
 		c.showSidebarSettingsMenu(clientID, menuPosition{PaneID: input.PaneID, X: input.MouseX, Y: input.MouseY})
@@ -18972,6 +19002,35 @@ func (c *Coordinator) launchDegradedModelsPopup(clientID string) {
 	escSess := strings.ReplaceAll(sessID, "'", `'\''`)
 	popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
 	go tmuxCmd("display-popup", "-E", "-w", "60%", "-h", "40%",
+		"--", popupCmd).Run()
+}
+
+// launchDashLayoutPopup spawns the dashboard layout-style picker via `tmux
+// display-popup`, mirroring launchDegradedModelsPopup. The popup binary
+// (cmd/tabby/internal/dashlayoutpopup, dispatched via `tabby render
+// dash-layout-popup`) renders an ASCII preview of each native tmux arrangement
+// and posts the chosen one back to the daemon as a dashboard_set_layout action.
+// We don't block on it — display-popup -E keeps it attached and closes on
+// Esc/Enter.
+func (c *Coordinator) launchDashLayoutPopup(clientID string) {
+	_ = clientID
+	sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+	sessID := strings.TrimSpace(string(sessIDOut))
+	if sessID == "" {
+		sessID = c.sessionID
+	}
+	popupBin := rendererExecPrefix("tabby-dash-layout-popup", "dash-layout-popup")
+	if popupBin == "" || sessID == "" {
+		coordinatorDebugLog.Printf("  -> launchDashLayoutPopup: missing popupBin=%q or sessID=%q", popupBin, sessID)
+		return
+	}
+	// display-popup's shell-command MUST be a single argument (see
+	// launchQuestionPopup for the flash-open-then-close failure mode otherwise).
+	escSess := strings.ReplaceAll(sessID, "'", `'\''`)
+	popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
+	// Fixed geometry sized to the menu (7 choices) + a 5-line ASCII preview +
+	// title/footer/padding. Columns/rows, not %, so the box hugs content.
+	go exec.Command("tmux", "display-popup", "-E", "-w", "48", "-h", "24",
 		"--", popupCmd).Run()
 }
 

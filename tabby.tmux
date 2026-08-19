@@ -361,8 +361,9 @@ tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M 
     "Split Horizontal" "-" "split-window -v -c '#{pane_current_path}'" \
     "" \
     "Break to New Window" "b" "break-pane" \
-    "Swap Up" "u" "swap-pane -U" \
-    "Swap Down" "d" "swap-pane -D" \
+    "Promote to Primary" "p" "run-shell '$CYCLE_PANE_BIN --move promote'" \
+    "Move Up" "u" "run-shell '$CYCLE_PANE_BIN --move prev'" \
+    "Move Down" "d" "run-shell '$CYCLE_PANE_BIN --move next'" \
     "" \
     "Kill Pane" "x" "run-shell '$KILL_PANE_SCRIPT'"
 
@@ -507,7 +508,10 @@ tmux bind-key r command-prompt -I "#W" "rename-window '%%' ; set-window-option @
 # inside the tiled dashboard grid don't change anything the sidebar depends on,
 # but the resulting BroadcastRender makes the sidebar renderer redraw — visible
 # as an up/down flicker on every [/]/swap. Other windows still refresh normally.
-tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' '' 'run-shell -b \"$SIGNAL_CMD\"'"
+# In the dashboard we instead run cycle-pane --main-follow, which only acts when
+# the layout is an "-auto" mode (Main+stack/row, active) — keeping the focused
+# pane in the big slot as focus moves; it's a cheap no-op for other layouts.
+tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' 'run-shell -b \"$CYCLE_PANE_BIN --main-follow\"' 'run-shell -b \"$SIGNAL_CMD\"'"
 # after-split-window: daemon handles window name preservation (PreserveWindowNames)
 tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_CMD'"
 
@@ -661,6 +665,17 @@ if [ -x "$TABBY_CYCLE_BIN" ]; then
     tmux bind-key o run-shell "$CYCLE_PANE_BIN"
 fi
 
+# Move/promote the focused CONTENT pane (skips the sidebar/aux panes and, in the
+# dashboard, reflows to the active @tabby_dash_layout). prefix+P promotes the
+# pane to the primary/main slot; prefix+{ / prefix+} shuffle it one slot back/
+# forward. These override tmux's default prefix+{ / } (raw swap-pane -U/-D),
+# which don't skip aux panes or rebuild main-* layouts.
+if [ -x "$TABBY_CYCLE_BIN" ]; then
+    tmux bind-key P run-shell "$CYCLE_PANE_BIN --move promote"
+    tmux bind-key "{" run-shell "$CYCLE_PANE_BIN --move prev"
+    tmux bind-key "}" run-shell "$CYCLE_PANE_BIN --move next"
+fi
+
 # Optional: Also bind to a prefix-less key for quick access
 # tmux bind-key -n M-Tab run-shell "$CURRENT_DIR/bin/tabby-toggle"
 
@@ -701,6 +716,12 @@ tmux bind-key g run-shell -b "$CURRENT_DIR/bin/tabby dashboard"
 # through the tabby hook so minimized windows are skipped, same as Option+[/].
 tmux bind-key n run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN next-window"
 tmux bind-key p run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
+
+# prefix + L opens the dashboard layout-style picker: an ASCII popup that
+# previews each native tmux arrangement (Grid/Columns/Rows/Main+stack/Main+row).
+# Choosing one applies it to the live dashboard and is remembered for the next
+# gather. Overrides tmux's default prefix+L (last-client), unused by tabby.
+tmux bind-key L run-shell -b "$CURRENT_DIR/bin/tabby dashboard-layout"
 
 # Direct window access with prefix + number (match tmux window indexes)
 tmux bind-key 1 select-window -t :1
