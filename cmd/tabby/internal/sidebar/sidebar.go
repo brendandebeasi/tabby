@@ -191,8 +191,43 @@ type rendererModel struct {
 	colorPickerLit     int // 0-100
 	colorPickerFocus   int // 0=hue, 1=sat, 2=lit
 	// Daemon auto-restart: track consecutive disconnects
-	reconnectAttempts      int
-	daemonRestartTriggered bool
+	reconnectAttempts int
+	// Number of ensure-sidebar recovery attempts made during the current
+	// disconnected stretch. Reset on a successful connect.
+	daemonRestartAttempts int
+}
+
+// Daemon recovery tuning. A renderer whose daemon is gone retries
+// ensure-sidebar on a widening interval rather than once: a single failed
+// attempt used to latch a one-shot flag forever, leaving the
+// renderer reconnecting to a dead socket indefinitely (observed in the
+// wild at 11 days of uptime with no daemon and a frozen sidebar).
+const (
+	// Disconnect ticks (~1s each) before the first recovery attempt.
+	daemonRestartFirstAttemptAfter = 5
+	// Give up and exit after this many failed recovery attempts, so an
+	// orphaned renderer releases its pane instead of spinning forever.
+	daemonRestartMaxAttempts = 10
+)
+
+// daemonRestartRetryAfter returns the number of consecutive disconnects to
+// wait for before recovery attempt n (1-based): 5s, 10s, 20s, 40s, then a
+// 60s ceiling.
+func daemonRestartRetryAfter(n int) int {
+	if n < 0 {
+		return daemonRestartFirstAttemptAfter
+	}
+	// Cap the shift before applying it: 5<<n overflows to a negative
+	// number for large n, and a negative threshold would fire recovery on
+	// every tick.
+	if n > 8 {
+		return 60
+	}
+	backoff := daemonRestartFirstAttemptAfter << uint(n)
+	if backoff > 60 {
+		backoff = 60
+	}
+	return backoff
 }
 
 // Message types
@@ -283,7 +318,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clientID = msg.target.Key()
 		m.connected = true
 		m.reconnectAttempts = 0
-		m.daemonRestartTriggered = false
+		m.daemonRestartAttempts = 0
 		debugLog.Printf("Connected as %s", m.clientID)
 		if inputLog != nil && isInputLogEnabled() {
 			inputLog.Printf("CONNECTED client=%s", m.clientID)
@@ -328,11 +363,25 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if inputLog != nil && isInputLogEnabled() {
 			inputLog.Printf("DISCONNECTED attempt=%d", m.reconnectAttempts)
 		}
-		// After 5 consecutive disconnects (~5s), trigger daemon restart
-		// ensure_sidebar.sh checks if daemon is alive and restarts if dead
-		if m.reconnectAttempts >= 5 && !m.daemonRestartTriggered {
-			m.daemonRestartTriggered = true
-			debugLog.Printf("Daemon appears dead after %d reconnect attempts, triggering restart", m.reconnectAttempts)
+		// After 5 consecutive disconnects (~5s), try to bring the daemon
+		// back. ensure-sidebar checks if the daemon is alive and restarts
+		// it if dead. Retry on a widening interval: a single attempt that
+		// fails would otherwise leave this renderer reconnecting to a dead
+		// socket forever.
+		if m.daemonRestartAttempts >= daemonRestartMaxAttempts {
+			// Recovery is not working — the daemon is gone for good (its
+			// session was killed, say). Exit so the pane closes instead of
+			// leaving a frozen sidebar the user cannot dismiss.
+			debugLog.Printf("Daemon still dead after %d recovery attempts, exiting", m.daemonRestartAttempts)
+			if inputLog != nil && isInputLogEnabled() {
+				inputLog.Printf("GIVING_UP attempts=%d", m.daemonRestartAttempts)
+			}
+			return m, tea.Quit
+		}
+		if m.reconnectAttempts >= daemonRestartRetryAfter(m.daemonRestartAttempts) {
+			m.daemonRestartAttempts++
+			m.reconnectAttempts = 0
+			debugLog.Printf("Daemon appears dead, recovery attempt %d/%d", m.daemonRestartAttempts, daemonRestartMaxAttempts)
 			go func() {
 				// Single-binary form: `tabby hook ensure-sidebar` (the standalone
 				// tabby-hook binary no longer exists).
