@@ -2,34 +2,34 @@
 
 <table>
 <tr>
-<td width="72%"><img src="./screenshots/main.png" alt="Tabby desktop view"/></td>
-<td width="28%"><img src="./screenshots/mobile.png" alt="Tabby mobile view"/></td>
-</tr>
-<tr>
 <td align="center"><b>Sidebar on a wide terminal</b><br/>Windows, groups, and widgets down the left edge.</td>
 <td align="center"><b>Mobile layout</b><br/>Under 110 columns the sidebar drops to icons.</td>
+</tr>
+<tr>
+<td width="72%"><img src="./screenshots/main.png" alt="Tabby desktop view"/></td>
+<td width="28%"><img src="./screenshots/mobile.png" alt="Tabby mobile view"/></td>
 </tr>
 </table>
 
 <table>
-<tr>
-<td width="50%"><img src="./screenshots/llm_harness_integration.png" alt="Tabby LLM harness integration"/></td>
-<td width="50%"><img src="./screenshots/dark_mode.png" alt="Tabby dark mode"/></td>
-</tr>
 <tr>
 <td align="center"><b>AI tool indicators</b><br/>Running agents are flagged per window and per pane.</td>
 <td align="center"><b>Dark theme</b><br/>One of 15 built-in themes.</td>
 </tr>
+<tr>
+<td width="50%"><img src="./screenshots/llm_harness_integration.png" alt="Tabby LLM harness integration"/></td>
+<td width="50%"><img src="./screenshots/dark_mode.png" alt="Tabby dark mode"/></td>
+</tr>
 </table>
 
 <table>
 <tr>
-<td width="50%"><img src="./screenshots/dashboard_view.png" alt="Tabby dashboard gathering every pane into one tiled window"/></td>
-<td width="50%"><img src="./screenshots/vertical_horizontal_panes.png" alt="Tabby vertical and horizontal pane splits"/></td>
-</tr>
-<tr>
 <td align="center"><b>Dashboard</b><br/>Every pane joined into one tiled window, then put back.</td>
 <td align="center"><b>Pane headers</b><br/>Titles that survive vertical and horizontal splits.</td>
+</tr>
+<tr>
+<td width="50%"><img src="./screenshots/dashboard_view.png" alt="Tabby dashboard gathering every pane into one tiled window"/></td>
+<td width="50%"><img src="./screenshots/vertical_horizontal_panes.png" alt="Tabby vertical and horizontal pane splits"/></td>
 </tr>
 </table>
 

@@ -6,12 +6,12 @@ deep-link back to the exact pane that sent them.
 
 <table>
 <tr>
-<td width="72%"><img src="../../screenshots/main.png" alt="Tabby desktop view"/></td>
-<td width="28%"><img src="../../screenshots/mobile.png" alt="Tabby mobile view"/></td>
-</tr>
-<tr>
 <td align="center"><b>Sidebar on a wide terminal</b><br/>Windows, groups, and widgets down the left edge.</td>
 <td align="center"><b>Mobile layout</b><br/>Under 110 columns the sidebar drops to icons.</td>
+</tr>
+<tr>
+<td width="72%"><img src="../../screenshots/main.png" alt="Tabby desktop view"/></td>
+<td width="28%"><img src="../../screenshots/mobile.png" alt="Tabby mobile view"/></td>
 </tr>
 </table>
 

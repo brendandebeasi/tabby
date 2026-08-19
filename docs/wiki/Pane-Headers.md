@@ -7,8 +7,8 @@ clickable controls. These are overlay panes drawn by Tabby, not tmux's native
 border titles, which is what makes the buttons work.
 
 <p align="center">
+  <b>Pane headers</b><br/>Titles that survive vertical and horizontal splits.<br/>
   <img src="../../screenshots/vertical_horizontal_panes.png" width="90%" alt="Headers on vertical and horizontal pane splits"/>
-  <br/><b>Pane headers</b><br/>Titles that survive vertical and horizontal splits.
 </p>
 
 Turn them on:
