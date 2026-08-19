@@ -4,10 +4,16 @@ Tabby is a tab manager for tmux: a clickable vertical sidebar, colour-coded
 window groups, per-pane headers, sidebar widgets, and notifications that
 deep-link back to the exact pane that sent them.
 
-<p align="center">
-  <img src="../../screenshots/main.png" width="70%" alt="Tabby desktop view"/>
-  <img src="../../screenshots/mobile.png" width="25%" alt="Tabby mobile view"/>
-</p>
+<table>
+<tr>
+<td width="72%"><img src="../../screenshots/main.png" alt="Tabby desktop view"/></td>
+<td width="28%"><img src="../../screenshots/mobile.png" alt="Tabby mobile view"/></td>
+</tr>
+<tr>
+<td align="center"><b>Sidebar on a wide terminal</b><br/>Windows, groups, and widgets down the left edge.</td>
+<td align="center"><b>Mobile layout</b><br/>Under 110 columns the sidebar drops to icons.</td>
+</tr>
+</table>
 
 ## Getting started
 

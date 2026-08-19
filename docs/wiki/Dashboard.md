@@ -6,6 +6,7 @@ the window it came from.
 
 <p align="center">
   <img src="../../screenshots/dashboard_view.png" width="90%" alt="Every pane gathered into one tiled dashboard window"/>
+  <br/><b>Dashboard</b><br/>Every pane joined into one tiled window, then put back.
 </p>
 
 ```

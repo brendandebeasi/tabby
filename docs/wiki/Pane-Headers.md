@@ -8,6 +8,7 @@ border titles, which is what makes the buttons work.
 
 <p align="center">
   <img src="../../screenshots/vertical_horizontal_panes.png" width="90%" alt="Headers on vertical and horizontal pane splits"/>
+  <br/><b>Pane headers</b><br/>Titles that survive vertical and horizontal splits.
 </p>
 
 Turn them on:
