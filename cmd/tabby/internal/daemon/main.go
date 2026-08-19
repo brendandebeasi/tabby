@@ -2614,7 +2614,6 @@ func Run(args []string) int {
 	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	var selfTerminating atomic.Bool
 
 	// Set up input callback with panic recovery.
 	// The server validates msg.Target before calling OnInput, so clientID
@@ -2861,7 +2860,6 @@ func Run(args []string) int {
 					if crashLog != nil {
 						crashLog.Printf("LOOP_FATAL: %d consecutive stalls for %s, self-terminating", stalls, task)
 					}
-					selfTerminating.Store(true)
 					select {
 					case sigCh <- syscall.SIGTERM:
 					default:
@@ -2997,12 +2995,21 @@ func Run(args []string) int {
 	logEvent("DAEMON_STOP session=%s pid=%d signal=%v uptime=%s clients=%d", *sessionID, os.Getpid(), sig, uptime, server.ClientCount())
 	crashLog.Printf("Daemon stopped: signal=%v pid=%d uptime=%s clients=%d", sig, os.Getpid(), uptime, server.ClientCount())
 
-	// Write clean-stop sentinel so the watchdog knows this was intentional.
-	// Skip if self-terminating due to LOOP_FATAL — that's a crash, not a clean stop.
-	if !selfTerminating.Load() {
-		sentinelPath := daemon.RuntimePath(*sessionID, ".clean-stop")
-		os.WriteFile(sentinelPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)
-	}
+	// Deliberately do NOT write the clean-stop sentinel here.
+	//
+	// This handler runs for any SIGTERM, and the sentinel tells the
+	// watchdog "stay down". Writing it on every TERM meant an
+	// externally-delivered kill -- OS shutdown, memory pressure, a stray
+	// pkill -- left the daemon unsupervised precisely when it should have
+	// been restarted.
+	//
+	// An intentional stop is signalled by `tabby toggle` (disable), which
+	// writes the sentinel itself before signalling us and then kills the
+	// watchdog directly, so the quiet path still works. The
+	// internal-session guard earlier in main() likewise writes its own
+	// sentinel to avoid a respawn loop. Anything else reaching here is an
+	// unexpected death and should be respawned -- including LOOP_FATAL
+	// self-termination, which is a crash and wants a fresh daemon.
 
 	close(heartbeatDone)
 	server.Stop()
