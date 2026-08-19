@@ -26,6 +26,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
+	"github.com/rivo/uniseg"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
@@ -1103,7 +1104,7 @@ func (m rendererModel) renderMenuLines() []string {
 		maxTitleW = 0
 	}
 	title = truncateToWidth(title, maxTitleW)
-	titleW := runewidth.StringWidth(title)
+	titleW := displayWidth(title)
 	padCount := w - 3 - titleW // "┌─" + title + pad*"─" + "┐" = w
 	if padCount < 0 {
 		padCount = 0
@@ -1143,13 +1144,13 @@ func (m rendererModel) renderMenuLines() []string {
 		// Build inner text content (plain, no ANSI)
 		var inner string
 		if key != "" {
-			keyW := runewidth.StringWidth(key)
+			keyW := displayWidth(key)
 			labelMax := innerW - keyW - 1
 			if labelMax < 0 {
 				labelMax = 0
 			}
 			label = truncateToWidth(label, labelMax)
-			labelW := runewidth.StringWidth(label)
+			labelW := displayWidth(label)
 			gap := labelMax - labelW
 			if gap < 0 {
 				gap = 0
@@ -1157,7 +1158,7 @@ func (m rendererModel) renderMenuLines() []string {
 			inner = label + strings.Repeat(" ", gap) + " " + key
 		} else {
 			label = truncateToWidth(label, innerW)
-			labelW := runewidth.StringWidth(label)
+			labelW := displayWidth(label)
 			inner = label + strings.Repeat(" ", innerW-labelW)
 		}
 
@@ -1781,7 +1782,7 @@ func (m rendererModel) renderColorPickerModal() []string {
 		title = "Pick Color"
 	}
 	title = truncateToWidth(title, innerW)
-	titlePad := innerW - runewidth.StringWidth(title)
+	titlePad := innerW - displayWidth(title)
 	if titlePad < 0 {
 		titlePad = 0
 	}
@@ -1823,20 +1824,20 @@ func (m rendererModel) renderColorPickerModal() []string {
 		return hslToHex(m.colorPickerHue, m.colorPickerSat, v)
 	})
 
-	lines = append(lines, borderStyle.Render("│ ")+hLabel+strings.Repeat(" ", max(0, innerW-runewidth.StringWidth(stripAnsi(hLabel))))+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+hLabel+strings.Repeat(" ", max(0, innerW-displayWidth(stripAnsi(hLabel))))+borderStyle.Render(" │"))
 	lines = append(lines, borderStyle.Render("│ ")+hueBar+borderStyle.Render(" │"))
 	lines = append(lines, borderStyle.Render("│ ")+strings.Repeat(" ", innerW)+borderStyle.Render(" │"))
-	lines = append(lines, borderStyle.Render("│ ")+sLabel+strings.Repeat(" ", max(0, innerW-runewidth.StringWidth(stripAnsi(sLabel))))+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+sLabel+strings.Repeat(" ", max(0, innerW-displayWidth(stripAnsi(sLabel))))+borderStyle.Render(" │"))
 	lines = append(lines, borderStyle.Render("│ ")+satBar+borderStyle.Render(" │"))
 	lines = append(lines, borderStyle.Render("│ ")+strings.Repeat(" ", innerW)+borderStyle.Render(" │"))
-	lines = append(lines, borderStyle.Render("│ ")+lLabel+strings.Repeat(" ", max(0, innerW-runewidth.StringWidth(stripAnsi(lLabel))))+borderStyle.Render(" │"))
+	lines = append(lines, borderStyle.Render("│ ")+lLabel+strings.Repeat(" ", max(0, innerW-displayWidth(stripAnsi(lLabel))))+borderStyle.Render(" │"))
 	lines = append(lines, borderStyle.Render("│ ")+litBar+borderStyle.Render(" │"))
 	lines = append(lines, borderStyle.Render("│ ")+strings.Repeat(" ", innerW)+borderStyle.Render(" │"))
 
 	previewHex := hslToHex(m.colorPickerHue, m.colorPickerSat, m.colorPickerLit)
 	previewSwatch := lipgloss.NewStyle().Background(lipgloss.Color(previewHex)).Render(strings.Repeat(" ", 8))
 	previewText := "Preview: " + previewSwatch + "  " + previewHex
-	previewPad := innerW - runewidth.StringWidth(stripAnsi(previewText))
+	previewPad := innerW - displayWidth(stripAnsi(previewText))
 	if previewPad < 0 {
 		previewPad = 0
 	}
@@ -1848,8 +1849,8 @@ func (m rendererModel) renderColorPickerModal() []string {
 	help2 := "Enter: apply  Esc: cancel"
 	help1 = truncateToWidth(help1, innerW)
 	help2 = truncateToWidth(help2, innerW)
-	help1Pad := innerW - runewidth.StringWidth(help1)
-	help2Pad := innerW - runewidth.StringWidth(help2)
+	help1Pad := innerW - displayWidth(help1)
+	help2Pad := innerW - displayWidth(help2)
 	if help1Pad < 0 {
 		help1Pad = 0
 	}
@@ -1885,7 +1886,7 @@ func (m rendererModel) renderPickerModal() []string {
 
 	lines := make([]string, 0, 24)
 	title := truncateToWidth(m.pickerTitle, innerW)
-	titlePad := innerW - runewidth.StringWidth(title)
+	titlePad := innerW - displayWidth(title)
 	if titlePad < 0 {
 		titlePad = 0
 	}
@@ -1893,10 +1894,10 @@ func (m rendererModel) renderPickerModal() []string {
 	lines = append(lines, borderStyle.Render("│ ")+titleStyle.Render(title)+strings.Repeat(" ", titlePad)+borderStyle.Render(" │"))
 
 	qPrefix := "Search: "
-	queryMax := innerW - runewidth.StringWidth(qPrefix)
+	queryMax := innerW - displayWidth(qPrefix)
 	queryText := truncateToWidth(m.pickerQuery, queryMax)
 	queryLine := qPrefix + queryText
-	queryPad := innerW - runewidth.StringWidth(queryLine)
+	queryPad := innerW - displayWidth(queryLine)
 	if queryPad < 0 {
 		queryPad = 0
 	}
@@ -1904,7 +1905,7 @@ func (m rendererModel) renderPickerModal() []string {
 
 	meta := fmt.Sprintf("Results: %d", len(m.pickerFiltered))
 	meta = truncateToWidth(meta, innerW)
-	metaPad := innerW - runewidth.StringWidth(meta)
+	metaPad := innerW - displayWidth(meta)
 	if metaPad < 0 {
 		metaPad = 0
 	}
@@ -1929,7 +1930,7 @@ func (m rendererModel) renderPickerModal() []string {
 			styleForRow = emptyStyle
 		}
 		content = truncateToWidth(content, innerW)
-		pad := innerW - runewidth.StringWidth(content)
+		pad := innerW - displayWidth(content)
 		if pad < 0 {
 			pad = 0
 		}
@@ -1944,7 +1945,7 @@ func (m rendererModel) renderPickerModal() []string {
 	lines = append(lines, borderStyle.Render("├"+strings.Repeat("─", modalW-2)+"┤"))
 	help := "Enter: apply  Esc: cancel  Up/Down: select  Fuzzy search"
 	help = truncateToWidth(help, innerW)
-	helpPad := innerW - runewidth.StringWidth(help)
+	helpPad := innerW - displayWidth(help)
 	if helpPad < 0 {
 		helpPad = 0
 	}
@@ -1956,16 +1957,19 @@ func (m rendererModel) renderPickerModal() []string {
 
 // truncateToWidth truncates a string to fit within maxW display columns
 func truncateToWidth(s string, maxW int) string {
-	if runewidth.StringWidth(s) <= maxW {
+	if displayWidth(s) <= maxW {
 		return s
 	}
 	w := 0
-	for i, r := range s {
-		rw := runewidth.RuneWidth(r)
-		if w+rw > maxW {
-			return s[:i]
+	g := uniseg.NewGraphemes(s)
+	for g.Next() {
+		cluster := g.Str()
+		cw := displayWidth(cluster)
+		if w+cw > maxW {
+			start, _ := g.Positions()
+			return s[:start]
 		}
-		w += rw
+		w += cw
 	}
 	return s
 }
@@ -2025,7 +2029,7 @@ func (m rendererModel) View() string {
 	for i := visibleStart; i < visibleEnd && i < len(lines); i++ {
 		line := lines[i]
 		// Pad line to full width if shorter
-		lineWidth := runewidth.StringWidth(stripAnsi(line))
+		lineWidth := displayWidth(stripAnsi(line))
 		if lineWidth < m.width {
 			line += strings.Repeat(" ", m.width-lineWidth)
 		}
@@ -2052,7 +2056,7 @@ func (m rendererModel) View() string {
 		for i, ml := range menuLines {
 			row := startY + i
 			if row >= 0 && row < len(visible) {
-				visible[row] = ml
+				visible[row] = clampToWidth(ml, m.width)
 			}
 		}
 	}
@@ -2071,7 +2075,7 @@ func (m rendererModel) View() string {
 				rightWidth = 0
 			}
 			right := bgStyle.Render(strings.Repeat(" ", rightWidth))
-			visible[row] = left + pl + right
+			visible[row] = clampToWidth(left+pl+right, m.width)
 		}
 	}
 
@@ -2089,8 +2093,15 @@ func (m rendererModel) View() string {
 				rightWidth = 0
 			}
 			right := bgStyle.Render(strings.Repeat(" ", rightWidth))
-			visible[row] = left + pl + right
+			visible[row] = clampToWidth(left+pl+right, m.width)
 		}
+	}
+
+	// A frame taller than the pane scrolls the alt-screen buffer, and every
+	// later frame then lands one row lower. Clamp so a width miscalculation
+	// costs a truncated row instead of corrupting the whole sidebar.
+	if m.height > 0 && len(visible) > m.height {
+		visible = visible[:m.height]
 	}
 
 	return strings.Join(visible, "\n")
@@ -2303,3 +2314,69 @@ func stripAnsi(s string) string {
 	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	return ansiRegex.ReplaceAllString(s, "")
 }
+
+// displayWidth measures the columns a terminal actually draws for s.
+//
+// displayWidth measures rune-by-rune and reports 1 for emoji
+// presentation sequences such as the keycap "1️⃣", which every
+// terminal draws as 2 columns. Padding computed from the smaller number
+// overflows the pane by a column, wrapping the line and scrolling the
+// alt-screen frame. Measure by grapheme cluster instead, treating any
+// cluster carrying an emoji presentation selector as double-width.
+func displayWidth(s string) int {
+	w := 0
+	g := uniseg.NewGraphemes(s)
+	for g.Next() {
+		cluster := g.Str()
+		cw := runewidth.StringWidth(cluster)
+		if cw < 2 && strings.ContainsRune(cluster, '️') {
+			cw = 2
+		}
+		w += cw
+	}
+	return w
+}
+
+// clampToWidth trims s to at most maxW drawn columns, preserving ANSI escapes.
+//
+// Overlay rows (context menu, marker picker) are composed from parts whose
+// widths are computed independently. A row wider than the pane wraps, which
+// scrolls the alt-screen buffer and leaves every later frame offset, so the
+// sidebar stays corrupted until its renderer restarts. Clamping keeps a width
+// miscalculation to a single clipped row.
+func clampToWidth(s string, maxW int) string {
+	if maxW <= 0 {
+		return ""
+	}
+	if displayWidth(stripAnsi(s)) <= maxW {
+		return s
+	}
+	var b strings.Builder
+	w := 0
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1b {
+			if loc := ansiSeqRe.FindStringIndex(s[i:]); loc != nil && loc[0] == 0 {
+				b.WriteString(s[i : i+loc[1]])
+				i += loc[1]
+				continue
+			}
+		}
+		r := []rune(s[i:])
+		if len(r) == 0 {
+			break
+		}
+		cluster := string(r[0])
+		cw := displayWidth(cluster)
+		if w+cw > maxW {
+			break
+		}
+		b.WriteString(cluster)
+		w += cw
+		i += len(cluster)
+	}
+	b.WriteString("\033[0m")
+	return b.String()
+}
+
+var ansiSeqRe = regexp.MustCompile(`^\x1b\[[0-9;]*m`)

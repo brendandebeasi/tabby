@@ -31,11 +31,11 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/config"
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/grouping"
+	"github.com/brendandebeasi/tabby/pkg/kimicode"
 	"github.com/brendandebeasi/tabby/pkg/navtrace"
 	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/perf"
 	"github.com/brendandebeasi/tabby/pkg/teamclaude"
-	"github.com/brendandebeasi/tabby/pkg/kimicode"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -15389,8 +15389,11 @@ func constrainWidgetWidth(content string, maxWidth int) string {
 				coordinatorDebugLog.Printf("  Line preview: %s", runewidth.Truncate(stripped, 50, "..."))
 				hadOverflow = true
 			}
-			// Truncate line to maxWidth (accounting for ANSI codes)
-			truncated := runewidth.Truncate(line, maxWidth, "")
+			// Truncate to the same metric the overflow check used.
+			// runewidth.Truncate undercounts emoji presentation sequences
+			// (☁️, 1️⃣), so it leaves the line still wider than the pane,
+			// which wraps and scrolls the sidebar's alt-screen frame.
+			truncated := truncateToWidthUniseg(line, maxWidth)
 			result.WriteString(truncated)
 		} else {
 			result.WriteString(line)
@@ -21674,3 +21677,41 @@ func desaturateHex(hexColor string, opacity float64, targetHex ...string) string
 	}
 	return fmt.Sprintf("#%02x%02x%02x", clamp(dr), clamp(dg), clamp(db))
 }
+
+// truncateToWidthUniseg trims s to at most maxW columns as uniseg measures
+// them, preserving ANSI escape sequences (which occupy no columns).
+func truncateToWidthUniseg(s string, maxW int) string {
+	if maxW <= 0 {
+		return ""
+	}
+	if uniseg.StringWidth(stripAnsi(s)) <= maxW {
+		return s
+	}
+	var b strings.Builder
+	w := 0
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1b {
+			if loc := ansiPrefixRe.FindStringIndex(s[i:]); loc != nil && loc[0] == 0 {
+				b.WriteString(s[i : i+loc[1]])
+				i += loc[1]
+				continue
+			}
+		}
+		g := uniseg.NewGraphemes(s[i:])
+		if !g.Next() {
+			break
+		}
+		cluster := g.Str()
+		cw := uniseg.StringWidth(cluster)
+		if w+cw > maxW {
+			break
+		}
+		b.WriteString(cluster)
+		w += cw
+		i += len(cluster)
+	}
+	return b.String()
+}
+
+var ansiPrefixRe = regexp.MustCompile(`^\x1b\[[0-9;]*m`)
