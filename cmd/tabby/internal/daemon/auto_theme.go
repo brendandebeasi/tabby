@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"os/exec"
 	"strings"
 
 	"github.com/brendandebeasi/tabby/pkg/colors"
@@ -56,7 +55,7 @@ func (c *Coordinator) SetTheme(themeName string) {
 func (c *Coordinator) repaintPanesForTheme() {
 	// Scope to this daemon's session: ApplyPaneDimming treats a window id from
 	// another session as "no tint" and would unset styles another daemon owns.
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", c.sessionID,
+	out, err := tmuxCmd("display-message", "-p", "-t", c.sessionID,
 		"#{window_id}").Output()
 	if err != nil {
 		return

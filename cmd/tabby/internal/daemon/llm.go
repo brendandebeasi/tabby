@@ -5,7 +5,6 @@ import (
 	gocontext "context"
 	"fmt"
 	"os"
-	"os/exec"
 	"reflect"
 	"sort"
 	"strings"
@@ -73,7 +72,7 @@ func initLLM(provider, model, apiKey, baseURL string) error {
 		case "openai":
 			apiKey = os.Getenv("OPENAI_API_KEY")
 			if apiKey == "" {
-				if out, err := exec.Command("tmux", "show-environment", "OPENAI_API_KEY").Output(); err == nil {
+				if out, err := tmuxCmd("show-environment", "OPENAI_API_KEY").Output(); err == nil {
 					line := strings.TrimSpace(string(out))
 					if strings.HasPrefix(line, "OPENAI_API_KEY=") {
 						apiKey = strings.TrimPrefix(line, "OPENAI_API_KEY=")

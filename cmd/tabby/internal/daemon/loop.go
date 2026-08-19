@@ -690,7 +690,7 @@ func (l *Loop) doPaneLayoutOps() {
 		killLeftoverPaneHeaders()
 	}
 	preActive := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
-	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "1").Run()
+	tmuxCmd("set-option", "-g", "@tabby_spawning", "1").Run()
 	windows := l.coord.GetWindows()
 	spawnWindowHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredWindowHeaderHeight(), windows, l.coord)
 	if !nativeBorders {
@@ -735,11 +735,11 @@ func (l *Loop) doPaneLayoutOps() {
 				logEvent("PANE_LAYOUT_ADOPT_ACTIVE pre=%s post=%s reason=coordinator_intends", preActive, postActive)
 			} else {
 				logEvent("PANE_LAYOUT_RESTORE_ACTIVE pre=%s post=%s", preActive, postActive)
-				_ = exec.Command("tmux", "select-window", "-t", preActive).Run()
+				_ = tmuxCmd("select-window", "-t", preActive).Run()
 			}
 		}
 	}
-	exec.Command("tmux", "set-option", "-g", "@tabby_spawning", "0").Run()
+	tmuxCmd("set-option", "-g", "@tabby_spawning", "0").Run()
 	startOSCPipes(windows)
 	cleanupOrphanedHeaders(customBorder, l.coord, l.activeWindowID)
 	// NOTE: updateHeaderBorderStyles is NOT called here to avoid border
@@ -1393,7 +1393,7 @@ func (l *Loop) handleClientResized() {
 func (l *Loop) handleIdleTick() {
 	l.flags.idle.Store(false)
 	// Check if session still exists
-	if _, err := exec.Command("tmux", "has-session", "-t", l.deps.SessionID).Output(); err != nil {
+	if _, err := tmuxCmd("has-session", "-t", l.deps.SessionID).Output(); err != nil {
 		logEvent("SHUTDOWN_REASON session=%s reason=session_gone", l.deps.SessionID)
 		debugLog.Printf("Session %s no longer exists, shutting down", l.deps.SessionID)
 		select {
@@ -1404,7 +1404,7 @@ func (l *Loop) handleIdleTick() {
 	}
 
 	// Check if any windows remain
-	out, err := exec.Command("tmux", "list-windows", "-t", l.deps.SessionID, "-F", "#{window_id}").Output()
+	out, err := tmuxCmd("list-windows", "-t", l.deps.SessionID, "-F", "#{window_id}").Output()
 	if err != nil || strings.TrimSpace(string(out)) == "" {
 		logEvent("SHUTDOWN_REASON session=%s reason=no_windows", l.deps.SessionID)
 		debugLog.Printf("No windows remaining, shutting down")
@@ -1442,7 +1442,7 @@ func (l *Loop) handleIdleTick() {
 // Used as a safety guard before idle-shutdown: a daemon should never exit while
 // a real user is attached, even if the render panes are momentarily disconnected.
 func tmuxAttachedClients(sessionID string) int {
-	out, err := exec.Command("tmux", "list-clients", "-t", sessionID, "-F", "#{client_tty}").Output()
+	out, err := tmuxCmd("list-clients", "-t", sessionID, "-F", "#{client_tty}").Output()
 	if err != nil {
 		return 0
 	}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -247,7 +246,7 @@ func initInputLog(sessionID string) {
 // Caches result for 10 seconds to avoid excessive tmux calls
 func isInputLogEnabled() bool {
 	if time.Since(inputLogCheckTime) > 10*time.Second {
-		out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_input_log").Output()
+		out, err := tmuxCmd("show-options", "-gqv", "@tabby_input_log").Output()
 		if err != nil {
 			inputLogEnabled = false
 		} else {
@@ -367,7 +366,7 @@ func getPopupBin() string {
 // so that tabby-hook preserve-pane-ratios can restore it after the kill.
 // This MUST be called before user/content-pane kill-pane operations.
 func saveLayoutBeforeKill(paneID string) {
-	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}|||#{window_layout}").Output()
+	out, err := tmuxCmd("display-message", "-t", paneID, "-p", "#{window_id}|||#{window_layout}").Output()
 	if err != nil {
 		return
 	}
@@ -375,14 +374,14 @@ func saveLayoutBeforeKill(paneID string) {
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return
 	}
-	exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_layout_%s", parts[0]), parts[1]).Run()
+	tmuxCmd("set-option", "-g", fmt.Sprintf("@tabby_layout_%s", parts[0]), parts[1]).Run()
 }
 
 // markSkipPreserveForWindow tells tabby-hook preserve-pane-ratios to skip exactly once
 // for a specific window. Use this for daemon-managed system-pane cleanup
 // (headers/sidebar) where restoring a saved layout can corrupt mixed splits.
 func markSkipPreserveForWindow(paneID string) {
-	windowOut, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{window_id}").Output()
+	windowOut, err := tmuxCmd("display-message", "-t", paneID, "-p", "#{window_id}").Output()
 	if err != nil {
 		return
 	}
@@ -390,7 +389,7 @@ func markSkipPreserveForWindow(paneID string) {
 	if windowID == "" {
 		return
 	}
-	exec.Command("tmux", "set-option", "-g", fmt.Sprintf("@tabby_skip_preserve_%s", windowID), "1").Run()
+	tmuxCmd("set-option", "-g", fmt.Sprintf("@tabby_skip_preserve_%s", windowID), "1").Run()
 }
 
 // computeResponsiveSidebarWidth applies responsive breakpoint logic given all parameters.
@@ -446,7 +445,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		logEvent("SPAWN_SKIP reason=sidebar_hidden")
 		return false
 	}
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
+	if out, err := tmuxCmd("show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
 		logEvent("SPAWN_SKIP script_lock_active")
 		return false
 	}
@@ -476,7 +475,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 	// Collect windows whose sidebar is currently stashed (break-pane'd out).
 	// Those sidebars are alive in holding windows — don't re-spawn.
 	stashedWindows := make(map[string]bool)
-	if stashOut, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_name}").Output(); err == nil {
+	if stashOut, err := tmuxCmd("list-windows", "-a", "-F", "#{window_name}").Output(); err == nil {
 		for _, name := range strings.Split(strings.TrimSpace(string(stashOut)), "\n") {
 			if !strings.HasPrefix(name, "_tabby_stash_") {
 				continue
@@ -498,7 +497,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 
 	// Get the currently active window so we only select-pane in it
 	// We can't easily cache this as it changes frequently, but one query is better than N
-	activeWindowOut, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+	activeWindowOut, _ := tmuxCmd("display-message", "-p", "#{window_id}").Output()
 	activeWindow := strings.TrimSpace(string(activeWindowOut))
 
 	// connectedClients was already computed above as part of the stable-state
@@ -534,7 +533,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		// so we must ask tmux directly. This also catches renderers from other daemons.
 		// Dead system panes (from a crashed daemon) are killed here so focus can escape them.
 		hasRenderer := false
-		if rawOut, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+		if rawOut, err := tmuxCmd("list-panes", "-t", windowID, "-F",
 			"#{pane_id}|||#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
 			for _, rawLine := range strings.Split(strings.TrimSpace(string(rawOut)), "\n") {
 				if rawLine == "" {
@@ -553,7 +552,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 				if dead && isSystem {
 					// Kill dead system panes so tmux moves focus to the content pane
 					logEvent("CLEANUP_DEAD_SYSTEM_PANE window=%s pane=%s cmd=%s", windowID, paneID, curCmd)
-					exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+					tmuxCmd("kill-pane", "-t", paneID).Run()
 					continue
 				}
 				if !dead && isSystem {
@@ -567,7 +566,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 						!strings.Contains(startCmd, "-session "+sessionID+" ") &&
 						!strings.HasSuffix(startCmd, "-session "+sessionID) {
 						logEvent("CLEANUP_STALE_RENDERER window=%s pane=%s session_mismatch start_cmd=%s", windowID, paneID, startCmd)
-						exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+						tmuxCmd("kill-pane", "-t", paneID).Run()
 						continue
 					}
 					hasRenderer = true
@@ -610,7 +609,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			debugFlag = "-debug"
 		}
 		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
-		cmd := exec.Command("tmux", "split-window", "-d", "-t", firstPane, "-h", "-b", "-f", "-l", fmt.Sprintf("%d", width), "-P", "-F", "#{pane_id}", cmdStr)
+		cmd := tmuxCmd("split-window", "-d", "-t", firstPane, "-h", "-b", "-f", "-l", fmt.Sprintf("%d", width), "-P", "-F", "#{pane_id}", cmdStr)
 		paneOut, err := cmd.CombinedOutput()
 		if err != nil {
 			debugLog.Printf("Failed to spawn renderer: %v, output: %s", err, string(paneOut))
@@ -629,7 +628,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			cfg := coordinator.GetConfig()
 			nativeBorders := cfg != nil && cfg.PaneHeader.Native != nil && *cfg.PaneHeader.Native
 			if !nativeBorders {
-				exec.Command("tmux", "set-option", "-p", "-t", newPaneID, "pane-border-status", "off").Run()
+				tmuxCmd("set-option", "-p", "-t", newPaneID, "pane-border-status", "off").Run()
 			}
 		}
 
@@ -666,7 +665,7 @@ func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Windo
 func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 	// Skip cleanup during new window creation to prevent killing windows
 	// whose content pane hasn't been detected yet (race condition).
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
+	if out, err := tmuxCmd("show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
 		if strings.TrimSpace(string(out)) == "1" {
 			return
 		}
@@ -690,7 +689,7 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 			continue
 		}
 
-		paneOut, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+		paneOut, err := tmuxCmd("list-panes", "-t", windowID, "-F",
 			"#{pane_id}|||#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output()
 		if err != nil {
 			continue
@@ -728,7 +727,7 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 				// respawns with the correct `-window` arg.
 				if target := windowTargetFromStartCmd(startCmd); target != "" && target != windowID {
 					logEvent("CLEANUP_STALE_SIDEBAR pane=%s window=%s start_target=%s", paneID, windowID, target)
-					_ = exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+					_ = tmuxCmd("kill-pane", "-t", paneID).Run()
 					continue
 				}
 				if !dead {
@@ -754,7 +753,7 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 			for _, id := range liveSidebars[1:] {
 				logEvent("CLEANUP_DUPLICATE_SIDEBAR window=%s pane=%s keep=%s", windowID, id, liveSidebars[0])
 				markSkipPreserveForWindow(id)
-				_ = exec.Command("tmux", "kill-pane", "-t", id).Run()
+				_ = tmuxCmd("kill-pane", "-t", id).Run()
 			}
 		}
 
@@ -763,19 +762,19 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 			// carousel footer (its content is stashed in limbo). Never reap it as an
 			// orphan — that would destroy the full-width view. Authoritative check,
 			// only reached for candidate-orphan windows so the extra query is rare.
-			if fsv, _ := exec.Command("tmux", "show-window-option", "-v", "-t", windowID, "@tabby_fullscreen_sidebar").Output(); strings.TrimSpace(string(fsv)) == "1" {
+			if fsv, _ := tmuxCmd("show-window-option", "-v", "-t", windowID, "@tabby_fullscreen_sidebar").Output(); strings.TrimSpace(string(fsv)) == "1" {
 				continue
 			}
 			currentWindow := ""
-			if curOut, curErr := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); curErr == nil {
+			if curOut, curErr := tmuxCmd("display-message", "-p", "#{window_id}").Output(); curErr == nil {
 				currentWindow = strings.TrimSpace(string(curOut))
 			}
 			if currentWindow == windowID {
-				exec.Command("tmux", "last-window").Run()
+				tmuxCmd("last-window").Run()
 			}
 			logEvent("CLEANUP_ORPHAN_SIDEBAR_WINDOW window=%s", windowID)
 			debugLog.Printf("Window %s has only system panes, closing window", windowID)
-			exec.Command("tmux", "kill-window", "-t", windowID).Run()
+			tmuxCmd("kill-window", "-t", windowID).Run()
 		}
 	}
 }
@@ -814,7 +813,7 @@ func startOSCPipes(windows []tmux.Window) {
 			if paneIsSystemPane(p.Command, p.StartCommand) {
 				continue
 			}
-			exec.Command("tmux", "pipe-pane", "-o", "-t", p.ID, cmd).Run()
+			tmuxCmd("pipe-pane", "-o", "-t", p.ID, cmd).Run()
 		}
 	}
 }
@@ -833,11 +832,11 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 		return
 	}
 
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_enable_orphan_window_kill").Output(); err != nil || strings.TrimSpace(string(out)) != "1" {
+	if out, err := tmuxCmd("show-option", "-gqv", "@tabby_enable_orphan_window_kill").Output(); err != nil || strings.TrimSpace(string(out)) != "1" {
 		return
 	}
 
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
+	if out, err := tmuxCmd("show-option", "-gqv", "@tabby_spawning").Output(); err == nil {
 		if strings.TrimSpace(string(out)) == "1" {
 			return
 		}
@@ -849,7 +848,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 		}
 	}
 
-	out, err := exec.Command("tmux", "list-windows", "-t", sessionID, "-F", "#{window_id}|||#{window_name}").Output()
+	out, err := tmuxCmd("list-windows", "-t", sessionID, "-F", "#{window_id}|||#{window_name}").Output()
 	if err != nil {
 		return
 	}
@@ -873,7 +872,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 		}
 		seen[windowID] = true
 
-		paneOut, paneErr := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+		paneOut, paneErr := tmuxCmd("list-panes", "-t", windowID, "-F",
 			"#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output()
 		if paneErr != nil {
 			delete(orphanWindowFirstSeen, windowID)
@@ -924,7 +923,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 			continue
 		}
 
-		confirmOut, confirmErr := exec.Command("tmux", "list-panes", "-t", windowID, "-F",
+		confirmOut, confirmErr := tmuxCmd("list-panes", "-t", windowID, "-F",
 			"#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output()
 		if confirmErr != nil {
 			delete(orphanWindowFirstSeen, windowID)
@@ -959,14 +958,14 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 		}
 
 		currentWindow := ""
-		if curOut, curErr := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); curErr == nil {
+		if curOut, curErr := tmuxCmd("display-message", "-p", "#{window_id}").Output(); curErr == nil {
 			currentWindow = strings.TrimSpace(string(curOut))
 		}
 		if currentWindow == windowID {
-			exec.Command("tmux", "last-window").Run()
+			tmuxCmd("last-window").Run()
 		}
 		logEvent("CLEANUP_ORPHAN_WINDOW window=%s source=daemon_fallback", windowID)
-		exec.Command("tmux", "kill-window", "-t", windowID).Run()
+		tmuxCmd("kill-window", "-t", windowID).Run()
 		delete(orphanWindowFirstSeen, windowID)
 	}
 
@@ -983,7 +982,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 // profile so the sidebar can claim the row back without overlap. Safe to call
 // when no headers exist — the list-panes scan no-ops in that case.
 func killPhoneWindowHeaders() {
-	headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
+	headerOut, err := tmuxCmd("list-panes", "-a", "-F",
 		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 	if err != nil {
 		return
@@ -998,7 +997,7 @@ func killPhoneWindowHeaders() {
 		}
 		if strings.Contains(parts[1], "window-header") || strings.Contains(parts[2], "window-header") {
 			markSkipPreserveForWindow(parts[0])
-			exec.Command("tmux", "kill-pane", "-t", parts[0]).Run()
+			tmuxCmd("kill-pane", "-t", parts[0]).Run()
 			logEvent("WINDOW_HEADER_KILL_DESKTOP pane=%s", parts[0])
 		}
 	}
@@ -1018,7 +1017,7 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 	}
 
 	// Check if window headers are enabled (tmux option name unchanged for compat)
-	out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output()
+	out, err := tmuxCmd("show-options", "-gqv", "@tabby_pane_headers").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "on" {
 		return
 	}
@@ -1033,7 +1032,7 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 
 	// Discover existing window-header panes keyed by window_id
 	windowsWithHeader := make(map[string]bool)
-	if headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
+	if headerOut, err := tmuxCmd("list-panes", "-a", "-F",
 		"#{window_id}|||#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
 		byWindow := make(map[string][]string)
 		for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
@@ -1063,7 +1062,7 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 			for _, extraPane := range panes[1:] {
 				logEvent("WINDOW_HEADER_DEDUP window=%s kill=%s", winID, extraPane)
 				markSkipPreserveForWindow(extraPane)
-				exec.Command("tmux", "kill-pane", "-t", extraPane).Run()
+				tmuxCmd("kill-pane", "-t", extraPane).Run()
 			}
 		}
 	}
@@ -1109,7 +1108,7 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 			debugFlag = "-debug"
 		}
 		activeBeforeHeader := ""
-		if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
+		if out, err := tmuxCmd("display-message", "-p", "#{pane_id}").Output(); err == nil {
 			activeBeforeHeader = strings.TrimSpace(string(out))
 		}
 		logEvent("SPAWN_WINDOW_HEADER window=%s target_pane=%s active_before=%s custom_border=%v header_rows=%d",
@@ -1117,7 +1116,7 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -window '%s' %s",
 			headerBin, sessionID, win.ID, debugFlag)
 		// -v -f (without -b) = full-width split at bottom of window (footer).
-		spawnCmd := exec.Command("tmux", "split-window", "-d", "-t", topPane.ID, "-v", "-f",
+		spawnCmd := tmuxCmd("split-window", "-d", "-t", topPane.ID, "-v", "-f",
 			"-l", fmt.Sprintf("%d", headerHeightRows), cmdStr)
 		if out, err := spawnCmd.CombinedOutput(); err != nil {
 			debugLog.Printf("Failed to spawn window-header for %s: %v, output: %s", win.ID, err, string(out))
@@ -1130,7 +1129,7 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 	// Disable pane borders on all newly spawned header panes
 	if spawned {
 		for winID := range spawnedInWindow {
-			headerPaneOut, err := exec.Command("tmux", "list-panes", "-t", winID, "-F",
+			headerPaneOut, err := tmuxCmd("list-panes", "-t", winID, "-F",
 				"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 			if err == nil {
 				for _, hLine := range strings.Split(string(headerPaneOut), "\n") {
@@ -1142,7 +1141,7 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 							if globalCoordinator != nil {
 								hTarget = fmt.Sprintf("%d", globalCoordinator.desiredWindowHeaderHeight())
 							}
-							exec.Command("tmux", "resize-pane", "-t", hParts[0], "-y", hTarget).Run()
+							tmuxCmd("resize-pane", "-t", hParts[0], "-y", hTarget).Run()
 							// Skip the per-pane pane-border-status=off in native
 							// mode — tmux treats this option as window-scope and
 							// `-p` falls through, clobbering the "top" set by
@@ -1155,8 +1154,8 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 								}
 							}
 							if !nativeBordersHdr {
-								exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
-								exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
+								tmuxCmd("set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
+								tmuxCmd("set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
 							}
 						}
 					}
@@ -1192,7 +1191,7 @@ func paneTargetFromStartCmd(startCmd string) string {
 // renderer process registers as "pane-header" but pane_current_command can
 // also show "tabby" after the consolidated subcommand entrypoint takes over.
 func killLeftoverPaneHeaders() {
-	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
+	out, err := tmuxCmd("list-panes", "-a", "-F",
 		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 	if err != nil {
 		return
@@ -1220,7 +1219,7 @@ func killLeftoverPaneHeaders() {
 		if !isPaneHeader {
 			continue
 		}
-		_ = exec.Command("tmux", "kill-pane", "-t", id).Run()
+		_ = tmuxCmd("kill-pane", "-t", id).Run()
 	}
 }
 
@@ -1236,14 +1235,14 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 	}
 
 	// Check if pane headers are enabled
-	out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output()
+	out, err := tmuxCmd("show-options", "-gqv", "@tabby_pane_headers").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "on" {
 		return
 	}
 
 	panesWithHeader := make(map[string]bool) // content paneID -> has header
 
-	if headerOut, err := exec.Command("tmux", "list-panes", "-a", "-F",
+	if headerOut, err := tmuxCmd("list-panes", "-a", "-F",
 		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
 		headersByTarget := make(map[string][]string)
 		for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
@@ -1274,7 +1273,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			for _, extraPane := range headerPanes[1:] {
 				logEvent("HEADER_DEDUP target=%s kill=%s", target, extraPane)
 				markSkipPreserveForWindow(extraPane)
-				exec.Command("tmux", "kill-pane", "-t", extraPane).Run()
+				tmuxCmd("kill-pane", "-t", extraPane).Run()
 			}
 		}
 	}
@@ -1335,14 +1334,14 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			debugFlag = "-debug"
 		}
 		activeBeforeHeader := ""
-		if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
+		if out, err := tmuxCmd("display-message", "-p", "#{pane_id}").Output(); err == nil {
 			activeBeforeHeader = strings.TrimSpace(string(out))
 		}
 		logEvent("SPAWN_HEADER pane=%s window=%s active_before=%s width=%d height=%d custom_border=%v header_rows=%d",
 			pane.id, pane.windowID, activeBeforeHeader, pane.width, pane.height, customBorder, headerHeightRows)
 		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -pane '%s' %s",
 			headerBin, sessionID, pane.id, debugFlag)
-		spawnCmd := exec.Command("tmux", "split-window", "-d", "-t", pane.id, "-v", "-b", "-l",
+		spawnCmd := tmuxCmd("split-window", "-d", "-t", pane.id, "-v", "-b", "-l",
 			fmt.Sprintf("%d", headerHeightRows), cmdStr)
 		if out, err := spawnCmd.CombinedOutput(); err != nil {
 			debugLog.Printf("Failed to spawn pane header for %s: %v, output: %s", pane.id, err, string(out))
@@ -1354,7 +1353,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 
 	if spawned {
 		for winID := range spawnedInWindow {
-			headerPaneOut, err := exec.Command("tmux", "list-panes", "-t", winID, "-F",
+			headerPaneOut, err := tmuxCmd("list-panes", "-t", winID, "-F",
 				"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 			if err == nil {
 				for _, hLine := range strings.Split(string(headerPaneOut), "\n") {
@@ -1366,9 +1365,9 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 							if globalCoordinator != nil {
 								hTarget = fmt.Sprintf("%d", globalCoordinator.desiredPaneHeaderHeight())
 							}
-							exec.Command("tmux", "resize-pane", "-t", hParts[0], "-y", hTarget).Run()
-							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
-							exec.Command("tmux", "set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
+							tmuxCmd("resize-pane", "-t", hParts[0], "-y", hTarget).Run()
+							tmuxCmd("set-option", "-p", "-t", hParts[0], "pane-border-status", "off").Run()
+							tmuxCmd("set-option", "-p", "-t", hParts[0], "pane-border-lines", "off").Run()
 						}
 					}
 				}
@@ -1404,12 +1403,12 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 	}
 	listArgs = append(listArgs, "-F",
 		"#{pane_id}|||#{pane_current_command}|||#{pane_width}|||#{pane_start_command}|||#{pane_height}|||#{pane_top}|||#{pane_left}|||#{window_id}")
-	out, err := exec.Command("tmux", listArgs...).Output()
+	out, err := tmuxCmd(listArgs...).Output()
 	if err != nil {
 		return
 	}
 
-	enabledOut, _ := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output()
+	enabledOut, _ := tmuxCmd("show-options", "-gqv", "@tabby_pane_headers").Output()
 	headersEnabled := strings.TrimSpace(string(enabledOut)) == "on"
 
 	// Track which windows and content panes currently exist
@@ -1502,26 +1501,26 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		if !headersEnabled {
 			logEvent("CLEANUP_WINDOW_HEADER pane=%s reason=disabled", hdr.paneID)
 			markSkipPreserveForWindow(hdr.paneID)
-			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			tmuxCmd("kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
 		}
 		if !keepWindowHeader[hdr.paneID] {
 			logEvent("CLEANUP_WINDOW_HEADER pane=%s window=%s reason=duplicate", hdr.paneID, hdr.windowID)
 			markSkipPreserveForWindow(hdr.paneID)
-			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			tmuxCmd("kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
 		}
 		expectedHeight := coordinator.desiredWindowHeaderHeight()
 		if hdr.height > expectedHeight {
 			logEvent("WINDOW_HEADER_HEIGHT_ADJUST trigger=cleanup pane=%s height=%d expected=%d", hdr.paneID, hdr.height, expectedHeight)
-			exec.Command("tmux", "resize-pane", "-t", hdr.paneID, "-y", fmt.Sprintf("%d", expectedHeight)).Run()
+			tmuxCmd("resize-pane", "-t", hdr.paneID, "-y", fmt.Sprintf("%d", expectedHeight)).Run()
 		}
 		if hdr.target != "" && hdr.target != hdr.windowID && !windowExists[hdr.target] {
 			logEvent("CLEANUP_WINDOW_HEADER pane=%s target=%s reason=target_window_gone", hdr.paneID, hdr.target)
 			markSkipPreserveForWindow(hdr.paneID)
-			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			tmuxCmd("kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 		}
 	}
@@ -1544,14 +1543,14 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		if !headersEnabled {
 			logEvent("CLEANUP_PANE_HEADER pane=%s reason=disabled", hdr.paneID)
 			markSkipPreserveForWindow(hdr.paneID)
-			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			tmuxCmd("kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
 		}
 		if hdr.target == "" || !keepPaneHeader[hdr.paneID] {
 			logEvent("CLEANUP_PANE_HEADER pane=%s target=%s reason=duplicate_or_no_target", hdr.paneID, hdr.target)
 			markSkipPreserveForWindow(hdr.paneID)
-			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			tmuxCmd("kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
 		}
@@ -1559,14 +1558,14 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		if hdr.target != "" && !contentPaneExists[hdr.target] {
 			logEvent("CLEANUP_PANE_HEADER pane=%s target=%s reason=target_pane_gone", hdr.paneID, hdr.target)
 			markSkipPreserveForWindow(hdr.paneID)
-			exec.Command("tmux", "kill-pane", "-t", hdr.paneID).Run()
+			tmuxCmd("kill-pane", "-t", hdr.paneID).Run()
 			killed = true
 			continue
 		}
 		expectedHeight := coordinator.desiredPaneHeaderHeight()
 		if hdr.height > expectedHeight {
 			logEvent("PANE_HEADER_HEIGHT_ADJUST trigger=cleanup pane=%s height=%d expected=%d", hdr.paneID, hdr.height, expectedHeight)
-			exec.Command("tmux", "resize-pane", "-t", hdr.paneID, "-y", fmt.Sprintf("%d", expectedHeight)).Run()
+			tmuxCmd("resize-pane", "-t", hdr.paneID, "-y", fmt.Sprintf("%d", expectedHeight)).Run()
 		}
 	}
 
@@ -1578,7 +1577,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 
 // isWatchdogEnabled checks if the watchdog is enabled via tmux option
 func isWatchdogEnabled() bool {
-	out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_watchdog").Output()
+	out, err := tmuxCmd("show-options", "-gqv", "@tabby_watchdog").Output()
 	if err != nil {
 		return true // default: enabled
 	}
@@ -1607,7 +1606,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 	}
 	watchdogArgs = append(watchdogArgs, "-F",
 		"#{pane_id}|||#{pane_current_command}|||#{pane_pid}|||#{window_id}|||#{pane_dead}|||#{pane_width}|||#{window_width}|||#{pane_start_command}")
-	out, err := exec.Command("tmux", watchdogArgs...).Output()
+	out, err := tmuxCmd(watchdogArgs...).Output()
 	if err != nil {
 		return
 	}
@@ -1651,7 +1650,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 		if paneDead == "1" {
 			logEvent("DEAD_PANE pane=%s cmd=%s window=%s -- killing dead pane", paneID, cmd, windowID)
 			markSkipPreserveForWindow(paneID)
-			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+			tmuxCmd("kill-pane", "-t", paneID).Run()
 
 			// Respawn sidebar renderer if it was a sidebar
 			if isSidebar && !sidebarHidden {
@@ -1661,7 +1660,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 					debugFlag = "-debug"
 				}
 				cmdStr := fmt.Sprintf("%s -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
-				exec.Command("tmux", "split-window", "-d", "-t", windowID, "-h", "-b", "-l", fmt.Sprintf("%d", globalWidth), cmdStr).Run()
+				tmuxCmd("split-window", "-d", "-t", windowID, "-h", "-b", "-l", fmt.Sprintf("%d", globalWidth), cmdStr).Run()
 			}
 			continue
 		}
@@ -1680,7 +1679,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 			logEvent("ZOMBIE_PANE pane=%s pid=%d cmd=%s window=%s -- process dead, killing pane",
 				paneID, pid, cmd, windowID)
 			markSkipPreserveForWindow(paneID)
-			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+			tmuxCmd("kill-pane", "-t", paneID).Run()
 
 			if isSidebar && !sidebarHidden {
 				logEvent("RESPAWN_SIDEBAR window=%s after zombie pane cleanup", windowID)
@@ -1689,7 +1688,7 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 					debugFlag = "-debug"
 				}
 				cmdStr := fmt.Sprintf("%s -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
-				exec.Command("tmux", "split-window", "-d", "-t", windowID, "-h", "-b", "-l", fmt.Sprintf("%d", globalWidth), cmdStr).Run()
+				tmuxCmd("split-window", "-d", "-t", windowID, "-h", "-b", "-l", fmt.Sprintf("%d", globalWidth), cmdStr).Run()
 			}
 			continue
 		}
@@ -1702,13 +1701,13 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 			logEvent("LAYOUT_CORRUPT_SIDEBAR pane=%s window=%s pane_w=%d win_w=%d -- killing flipped sidebar",
 				paneID, windowID, paneWidth, windowWidth)
 			markSkipPreserveForWindow(paneID)
-			exec.Command("tmux", "kill-pane", "-t", paneID).Run()
+			tmuxCmd("kill-pane", "-t", paneID).Run()
 			debugFlag := ""
 			if *debugMode {
 				debugFlag = "-debug"
 			}
 			cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -window '%s' %s", rendererBin, sessionID, windowID, debugFlag)
-			exec.Command("tmux", "split-window", "-d", "-t", windowID, "-h", "-b", "-f", "-l", fmt.Sprintf("%d", globalWidth), cmdStr).Run()
+			tmuxCmd("split-window", "-d", "-t", windowID, "-h", "-b", "-f", "-l", fmt.Sprintf("%d", globalWidth), cmdStr).Run()
 		}
 	}
 }
@@ -1736,7 +1735,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	}
 
 	// Skip during legitimate state transitions to avoid false positives.
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
+	if out, err := tmuxCmd("show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
 		return
 	}
 	if status := coordinator.NewWindowStatus(); status.State == "inFlight" {
@@ -1762,7 +1761,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	}
 	snapArgs = append(snapArgs, "-F",
 		"#{pane_id}|||#{window_id}|||#{pane_current_command}|||#{pane_start_command}|||#{pane_width}|||#{pane_top}|||#{pane_height}|||#{window_height}")
-	out, err := exec.Command("tmux", snapArgs...).Output()
+	out, err := tmuxCmd(snapArgs...).Output()
 	if err != nil {
 		logEvent("AUDIT_SNAPSHOT_ERR err=%v", err)
 		return
@@ -1774,7 +1773,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	// request_refresh feedback loop. Build a skip-set of their window IDs
 	// once and exclude them from byWindow.
 	stashWindowIDs := map[string]bool{}
-	if winOut, werr := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_id}|||#{window_name}").Output(); werr == nil {
+	if winOut, werr := tmuxCmd("list-windows", "-a", "-F", "#{window_id}|||#{window_name}").Output(); werr == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(winOut)), "\n") {
 			parts := strings.SplitN(strings.TrimSpace(line), "|||", 2)
 			if len(parts) < 2 {
@@ -1886,7 +1885,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 							winID, sb.paneID, sb.height, win.windowHeight, fixOrLog("kill_for_respawn"))
 						if panelAuditApplyFixes {
 							markSkipPreserveForWindow(sb.paneID)
-							exec.Command("tmux", "kill-pane", "-t", sb.paneID).Run()
+							tmuxCmd("kill-pane", "-t", sb.paneID).Run()
 						}
 					}
 				}
@@ -1952,7 +1951,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	// --- Check 4: window-header count per window ------------------------------
 	// Phone profile expects exactly one per window when @tabby_pane_headers=on.
 	// Desktop profile expects zero (any leak should be killed).
-	headersOpt, _ := exec.Command("tmux", "show-options", "-gqv", "@tabby_pane_headers").Output()
+	headersOpt, _ := tmuxCmd("show-options", "-gqv", "@tabby_pane_headers").Output()
 	headersEnabled := strings.TrimSpace(string(headersOpt)) == "on"
 
 	for winID, win := range byWindow {
@@ -1963,7 +1962,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 				if panelAuditApplyFixes {
 					for _, p := range win.windowHeaders {
 						markSkipPreserveForWindow(p.paneID)
-						exec.Command("tmux", "kill-pane", "-t", p.paneID).Run()
+						tmuxCmd("kill-pane", "-t", p.paneID).Run()
 					}
 				}
 			}
@@ -1987,7 +1986,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 			if panelAuditApplyFixes {
 				for _, p := range sorted[1:] {
 					markSkipPreserveForWindow(p.paneID)
-					exec.Command("tmux", "kill-pane", "-t", p.paneID).Run()
+					tmuxCmd("kill-pane", "-t", p.paneID).Run()
 				}
 			}
 		}
@@ -2015,7 +2014,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 					if panelAuditApplyFixes {
 						for _, h := range hdrs {
 							markSkipPreserveForWindow(h.paneID)
-							exec.Command("tmux", "kill-pane", "-t", h.paneID).Run()
+							tmuxCmd("kill-pane", "-t", h.paneID).Run()
 						}
 					}
 					continue
@@ -2027,7 +2026,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 					if panelAuditApplyFixes {
 						for _, h := range hdrs[1:] {
 							markSkipPreserveForWindow(h.paneID)
-							exec.Command("tmux", "kill-pane", "-t", h.paneID).Run()
+							tmuxCmd("kill-pane", "-t", h.paneID).Run()
 						}
 					}
 				}
@@ -2110,7 +2109,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 		if !panelAuditApplyFixes {
 			continue
 		}
-		if rerr := exec.Command("tmux", "select-layout", "-t", winID, newLayout).Run(); rerr != nil {
+		if rerr := tmuxCmd("select-layout", "-t", winID, newLayout).Run(); rerr != nil {
 			logEvent("AUDIT_FOOTER_REPAIR_ERR window=%s err=%v", winID, rerr)
 		}
 	}
@@ -2137,7 +2136,7 @@ func restoreSidebarWidths() {
 // Also sets sidebar pane backgrounds using set-option (not select-pane -P which steals focus).
 func updateHeaderBorderStyles(coordinator *Coordinator) {
 	// Get all panes with start command info
-	out, err := exec.Command("tmux", "list-panes", "-s", "-F",
+	out, err := tmuxCmd("list-panes", "-s", "-F",
 		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 	if err != nil {
 		return
@@ -2154,21 +2153,21 @@ func updateHeaderBorderStyles(coordinator *Coordinator) {
 // so they can be restored after daemon startup completes
 func saveFocusState(sessionID string) {
 	// Get current window and pane
-	windowOut, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+	windowOut, err := tmuxCmd("display-message", "-p", "#{window_id}").Output()
 	if err != nil {
 		return
 	}
 	currentWindow := strings.TrimSpace(string(windowOut))
 
-	paneOut, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output()
+	paneOut, err := tmuxCmd("display-message", "-p", "#{pane_id}").Output()
 	if err != nil {
 		return
 	}
 	currentPane := strings.TrimSpace(string(paneOut))
 
 	// Save to tmux options
-	exec.Command("tmux", "set-option", "-g", "@tabby_last_window", currentWindow).Run()
-	exec.Command("tmux", "set-option", "-g", "@tabby_last_pane", currentPane).Run()
+	tmuxCmd("set-option", "-g", "@tabby_last_window", currentWindow).Run()
+	tmuxCmd("set-option", "-g", "@tabby_last_pane", currentPane).Run()
 
 	logEvent("SAVE_FOCUS window=%s pane=%s", currentWindow, currentPane)
 }
@@ -2181,18 +2180,18 @@ func restoreFocusState(coordinator *Coordinator) {
 			return
 		}
 	}
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
+	if out, err := tmuxCmd("show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
 		return
 	}
 
 	// Get saved window and pane
-	windowOut, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_last_window").Output()
+	windowOut, err := tmuxCmd("show-option", "-gqv", "@tabby_last_window").Output()
 	if err != nil {
 		return
 	}
 	savedWindow := strings.TrimSpace(string(windowOut))
 
-	paneOut, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_last_pane").Output()
+	paneOut, err := tmuxCmd("show-option", "-gqv", "@tabby_last_pane").Output()
 	if err != nil {
 		return
 	}
@@ -2213,11 +2212,11 @@ func restoreFocusState(coordinator *Coordinator) {
 		args = append(args, ";", "select-pane", "-t", savedPane)
 	}
 	args = append(args, ";", "set-option", "-g", "@tabby_spawning", "0")
-	exec.Command("tmux", args...).Run()
+	tmuxCmd(args...).Run()
 }
 
 func shouldRestoreFocus() bool {
-	out, err := exec.Command("tmux", "display-message", "-p", "#{pane_current_command}").Output()
+	out, err := tmuxCmd("display-message", "-p", "#{pane_current_command}").Output()
 	if err != nil {
 		return false
 	}
@@ -2237,7 +2236,7 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 	start := time.Now()
 
 	// Get all panes with their sizes and commands
-	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
+	out, err := tmuxCmd("list-panes", "-a", "-F",
 		"#{window_id}|||#{pane_id}|||#{pane_width}|||#{pane_height}|||#{pane_current_command}|||#{pane_start_command}").Output()
 	if err != nil {
 		logEvent("GEOM_SYNC_ERROR trigger=%s err=%v", trigger, err)
@@ -2337,13 +2336,13 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 			desiredH := coordinator.desiredWindowHeaderHeight()
 			if size.height > desiredH {
 				logEvent("HEADER_HEIGHT_ANOMALY trigger=%s client=%s height=%d desired=%d", trigger, clientID, size.height, desiredH)
-				exec.Command("tmux", "resize-pane", "-t", size.paneID, "-y", fmt.Sprintf("%d", desiredH)).Run()
+				tmuxCmd("resize-pane", "-t", size.paneID, "-y", fmt.Sprintf("%d", desiredH)).Run()
 			}
 		} else if daemon.KindOf(clientID) == daemon.TargetPaneHeader {
 			desiredH := coordinator.desiredPaneHeaderHeight()
 			if size.height > desiredH {
 				logEvent("HEADER_HEIGHT_ANOMALY trigger=%s client=%s height=%d desired=%d", trigger, clientID, size.height, desiredH)
-				exec.Command("tmux", "resize-pane", "-t", size.paneID, "-y", fmt.Sprintf("%d", desiredH)).Run()
+				tmuxCmd("resize-pane", "-t", size.paneID, "-y", fmt.Sprintf("%d", desiredH)).Run()
 			}
 		}
 		server.UpdateClientSize(clientID, size.width, size.height)
@@ -2378,7 +2377,7 @@ func clientTTYForPane(paneID string) string {
 	if paneID == "" {
 		return ""
 	}
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{client_tty}").Output()
+	out, err := tmuxCmd("display-message", "-p", "-t", paneID, "#{client_tty}").Output()
 	if err != nil {
 		return ""
 	}
@@ -2456,19 +2455,19 @@ func resetTerminalModes(sessionID string) {
 	// Use tmux's refresh-client to reset terminal state
 	// The -S flag forces a full refresh which can help reset stuck modes
 	// We must refresh ALL clients to handle multi-client scenarios correctly
-	if out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output(); err == nil {
+	if out, err := tmuxCmd("list-clients", "-F", "#{client_tty}").Output(); err == nil {
 		for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			if tty == "" {
 				continue
 			}
-			exec.Command("tmux", "refresh-client", "-t", tty, "-S").Run()
+			tmuxCmd("refresh-client", "-t", tty, "-S").Run()
 		}
 	}
 
 	// Also try to reset mouse mode by toggling tmux's mouse option
 	// This forces tmux to re-sync mouse state with the terminal
-	exec.Command("tmux", "set", "-g", "mouse", "off").Run()
-	exec.Command("tmux", "set", "-g", "mouse", "on").Run()
+	tmuxCmd("set", "-g", "mouse", "off").Run()
+	tmuxCmd("set", "-g", "mouse", "on").Run()
 }
 
 func Run(args []string) int {
@@ -2485,7 +2484,7 @@ func Run(args []string) int {
 
 	// Get session ID from environment if not provided
 	if *sessionID == "" {
-		out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+		out, err := tmuxCmd("display-message", "-p", "#{session_id}").Output()
 		if err == nil {
 			*sessionID = strings.TrimSpace(string(out))
 		}
@@ -2520,7 +2519,7 @@ func Run(args []string) int {
 	// re-runs tabby.tmux there, which would otherwise start a daemon+sidebar scoped
 	// to that session — whose sidebar shows ONLY minimized windows (#23). tabby.tmux
 	// also guards this, but keep the safety net here.
-	if out, err := exec.Command("tmux", "display-message", "-p", "-t", *sessionID, "#{session_name}").Output(); err == nil {
+	if out, err := tmuxCmd("display-message", "-p", "-t", *sessionID, "#{session_name}").Output(); err == nil {
 		if name := strings.TrimSpace(string(out)); strings.HasPrefix(name, "_tabby_") {
 			debugLog.Printf("refusing to start daemon for internal session %s (%s)", *sessionID, name)
 			// Write the clean-stop sentinel so the watchdog does NOT respawn us in a
@@ -2768,7 +2767,7 @@ func Run(args []string) int {
 		defer ticker.Stop()
 		reap := func() {
 			hours := 0
-			if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_client_idle_timeout_hours").Output(); err == nil {
+			if out, err := tmuxCmd("show-option", "-gqv", "@tabby_client_idle_timeout_hours").Output(); err == nil {
 				if v, perr := strconv.Atoi(strings.TrimSpace(string(out))); perr == nil && v > 0 {
 					hours = v
 				}
@@ -2778,7 +2777,7 @@ func Run(args []string) int {
 			}
 			threshold := time.Duration(hours) * time.Hour
 			activeTTY := strings.TrimSpace(tmuxOutputTrimmed("display-message", "-p", "#{client_tty}"))
-			out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|#{client_activity}").Output()
+			out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_activity}").Output()
 			if err != nil {
 				return
 			}
@@ -2798,7 +2797,7 @@ func Run(args []string) int {
 				idle := now.Sub(time.Unix(actSec, 0))
 				if idle > threshold {
 					logEvent("CLIENT_IDLE_DETACH tty=%s idle=%s threshold=%s", parts[0], idle.Round(time.Second), threshold)
-					exec.Command("tmux", "detach-client", "-t", parts[0]).Run()
+					tmuxCmd("detach-client", "-t", parts[0]).Run()
 				}
 			}
 		}

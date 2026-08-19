@@ -13,7 +13,6 @@ import (
 	"context"
 	"fmt"
 	"hash/crc32"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -104,13 +103,13 @@ func (c *Coordinator) RefreshTabSummaries() {
 				// verbatim and hides the summary, so don't spend an LLM call — just
 				// clear any stale transient title lingering behind it.
 				if isGenericTabName(win.Name) {
-					exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_name_locked").Run()
+					tmuxCmd("set-window-option", "-t", win.ID, "-u", "@tabby_name_locked").Run()
 					win.NameLocked = false
 					changed = true
 					// fall through — summarize this window this pass
 				} else {
 					if strings.TrimSpace(win.AITitle) != "" {
-						exec.Command("tmux", "set-window-option", "-t", win.ID, "-u", "@tabby_ai_title").Run()
+						tmuxCmd("set-window-option", "-t", win.ID, "-u", "@tabby_ai_title").Run()
 						changed = true
 					}
 					continue
@@ -168,7 +167,7 @@ func (c *Coordinator) RefreshTabSummaries() {
 				continue
 			}
 
-			exec.Command("tmux", "set-window-option", "-t", win.ID, "@tabby_ai_title", summary).Run()
+			tmuxCmd("set-window-option", "-t", win.ID, "@tabby_ai_title", summary).Run()
 			c.recordSummaryHash(win.ID, h)
 			changed = true
 		}
@@ -209,7 +208,7 @@ func firstContentPaneID(win tmux.Window) string {
 
 // capturePaneText returns the last `lines` rows of a pane's visible content.
 func capturePaneText(paneID string, lines int) string {
-	out, err := exec.Command("tmux", "capture-pane", "-p", "-t", paneID, "-S", fmt.Sprintf("-%d", lines)).Output()
+	out, err := tmuxCmd("capture-pane", "-p", "-t", paneID, "-S", fmt.Sprintf("-%d", lines)).Output()
 	if err != nil {
 		return ""
 	}

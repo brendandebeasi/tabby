@@ -16,7 +16,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -165,7 +164,7 @@ func lookupAPIKey(name string) string {
 	// a bare `show-environment` has no reliable session context), then the session
 	// env as a fallback.
 	for _, args := range [][]string{{"show-environment", "-g", name}, {"show-environment", name}} {
-		out, err := exec.Command("tmux", args...).Output()
+		out, err := tmuxCmd(args...).Output()
 		if err != nil {
 			continue
 		}
