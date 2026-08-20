@@ -69,6 +69,36 @@ func rotateLogs(sessionID string) {
 	rotateLogFile(navtrace.Path, 64*1024*1024)                               // 64MB
 }
 
+// recentEventLogs orders the events log and its .prev backup most-recently-written
+// first, so crash forensics quote whichever one the daemon that just died was
+// actually writing to.
+//
+// This used to hardcode .prev ahead of the live log, on the theory that startup
+// had just rotated. Rotation only happens above 1MB, so .prev is usually an old
+// file that nothing has touched in days -- and because it was non-empty it won
+// every time, then broke out of the loop. A daemon crash-looping five times in
+// six seconds produced five identical forensic blocks quoting the same stale
+// events, and the real pre-crash activity never appeared in the crash log or
+// the issue built from it (see #52, #47).
+func recentEventLogs(eventsPath string) []string {
+	paths := []string{eventsPath, eventsPath + ".prev"}
+	newer := func(a, b string) bool {
+		ai, err := os.Stat(a)
+		if err != nil {
+			return false
+		}
+		bi, err := os.Stat(b)
+		if err != nil {
+			return true
+		}
+		return ai.ModTime().After(bi.ModTime())
+	}
+	if newer(paths[1], paths[0]) {
+		paths[0], paths[1] = paths[1], paths[0]
+	}
+	return paths
+}
+
 // checkPreviousCrash detects if the previous daemon died abnormally and logs forensics.
 func checkPreviousCrash(sessionID string) {
 	pidPath := daemon.RuntimePath(sessionID, ".pid")
@@ -108,8 +138,7 @@ func checkPreviousCrash(sessionID string) {
 
 	// Read last 20 lines of the previous events log for context
 	eventsPath := daemon.RuntimePath(sessionID, "-events.log")
-	// Check .prev first (in case we just rotated), then current
-	for _, path := range []string{eventsPath + ".prev", eventsPath} {
+	for _, path := range recentEventLogs(eventsPath) {
 		if evData, err := os.ReadFile(path); err == nil && len(evData) > 0 {
 			lines := strings.Split(strings.TrimSpace(string(evData)), "\n")
 			start := 0

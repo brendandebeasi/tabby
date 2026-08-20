@@ -26,7 +26,14 @@ TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INDICATOR="$TABBY_DIR/bin/tabby hook set-indicator"
 LOG="/tmp/tabby-crash-handler.log"
 CRASH_LOG="/tmp/tabby-daemon-${SESSION_ID}-crash.log"
-EVENTS_LOG="/tmp/tabby-daemon-${SESSION_ID}.events.log"
+# Hyphen, not dot. The daemon has always written -events.log (see
+# daemon.RuntimePath); the dotted name here matched nothing, so every crash
+# report ever filed silently omitted its Events Log section.
+EVENTS_LOG="/tmp/tabby-daemon-${SESSION_ID}-events.log"
+# Where a panic actually lands: the watchdog points the daemon's stderr here and
+# runs it under GOTRACEBACK=crash. Without this the "panic / fatal error" reports
+# carried no stack at all.
+STDERR_LOG="/tmp/tabby-daemon-${SESSION_ID}-stderr.log"
 
 # ── Logging ───────────────────────────────────────────────────────────────
 log() {
@@ -43,9 +50,19 @@ crash_reason() {
         143) echo "terminated (SIGTERM)" ;;
         134) echo "abort (SIGABRT)" ;;
         130) echo "interrupted (SIGINT)" ;;
+        141) echo "broken pipe (SIGPIPE)" ;;
           2) echo "panic / fatal error" ;;
           1) echo "general error" ;;
-          *) echo "exit code $EXIT_CODE" ;;
+          0) echo "clean exit (killed without the clean-stop sentinel)" ;;
+          *)
+            # Anything else above 128 is 128+signal; name the signal rather than
+            # filing another issue titled "exit code 141".
+            if [ "$EXIT_CODE" -gt 128 ] 2>/dev/null && [ "$EXIT_CODE" -lt 165 ] 2>/dev/null; then
+                echo "signal $((EXIT_CODE - 128))"
+            else
+                echo "exit code $EXIT_CODE"
+            fi
+            ;;
     esac
 }
 
@@ -148,6 +165,16 @@ collect_crash_context() {
     ctx+="| tmux | $(tmux -V 2>/dev/null || echo unknown) |\n"
     ctx+="\n"
 
+    # Daemon stderr — panic text and goroutine dump. Listed first because it is
+    # the only section that says what actually killed the process; the crash log
+    # below is the watchdog's account of the aftermath.
+    if [ -s "$STDERR_LOG" ]; then
+        ctx+="### Daemon stderr (last $max_lines lines)\n\n"
+        ctx+="\`\`\`\n"
+        ctx+="$(tail -"$max_lines" "$STDERR_LOG" 2>/dev/null)\n"
+        ctx+="\`\`\`\n\n"
+    fi
+
     # Crash log (last N lines — contains stack traces, LOOP_STALL, DEADLOCK info)
     if [ -f "$CRASH_LOG" ]; then
         ctx+="### Crash Log (last $max_lines lines)\n\n"
@@ -217,9 +244,21 @@ create_github_issue() {
     local body
     body=$(collect_crash_context 120)
 
-    # Check for existing open crash issues to avoid duplicates
+    # Make sure the labels exist before anything relies on them. They did not,
+    # so every report fell through to the unlabelled create below, and the
+    # label-filtered dedupe query below then matched nothing -- which is how the
+    # repo ended up with three separate near-identical crash issues (#47, #52, #60).
+    gh label create crash --repo "$UPSTREAM_REPO" --color d73a4a \
+        --description "Auto-filed daemon crash report" &>/dev/null || true
+    gh label create auto-triage --repo "$UPSTREAM_REPO" --color ededed \
+        --description "Filed by tooling, needs triage" &>/dev/null || true
+
+    # Check for existing open crash issues to avoid duplicates. Match on the
+    # title prefix as well as the label so reports filed before the label
+    # existed still absorb follow-ups instead of spawning siblings.
     local existing
-    existing=$(gh issue list --repo "$UPSTREAM_REPO" --label "crash" --state open --limit 5 --json number,title -q '.[].number' 2>/dev/null || echo "")
+    existing=$(gh issue list --repo "$UPSTREAM_REPO" --state open --limit 20 \
+        --json number,title -q '[.[] | select(.title | startswith("Crash:"))] | .[].number' 2>/dev/null || echo "")
 
     if [ -n "$existing" ]; then
         # Append to most recent open crash issue instead of creating a new one

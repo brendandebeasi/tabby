@@ -91,6 +91,10 @@ func Run(args []string) int {
 		// a real panic next time.
 		cmd.Stdout = os.Stdout
 		stderrLog := fmt.Sprintf("/tmp/tabby-daemon-%s-stderr.log", sessionID)
+		// Trim before opening, not from the daemon's own startup rotation: the
+		// daemon would rename the file this loop already holds open, leaving the
+		// new run's stderr appended to a .prev nobody reads.
+		rotateIfLarge(stderrLog, 5*1024*1024)
 		var stderrFile *os.File
 		if f, ferr := os.OpenFile(stderrLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); ferr == nil {
 			cmd.Stderr = f
@@ -192,6 +196,17 @@ func logCrash(path, format string, args ...interface{}) {
 	}
 	defer f.Close()
 	f.WriteString(entry)
+}
+
+// rotateIfLarge keeps one .prev backup once path grows past maxBytes. The daemon
+// does the same for its own logs; stderr is the watchdog's file, so it rotates here.
+func rotateIfLarge(path string, maxBytes int64) {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= maxBytes {
+		return
+	}
+	os.Remove(path + ".prev")
+	os.Rename(path, path+".prev")
 }
 
 func fileExists(path string) bool {

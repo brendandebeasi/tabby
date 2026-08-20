@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Crash reports carry the crash. The stack trace goes to the daemon's stderr log, which the report never attached; the events log was read from a path with a dot where the filename has a hyphen, so that section was silently missing from every report ever filed; and the pre-crash forensics quoted whichever `.prev` a size rotation had left lying around, days old, instead of the events the dying daemon had just written. A daemon that restarted five times in six seconds produced five copies of the same stale block and nothing about the panic. The `crash` and `auto-triage` labels are also created if absent, which is what the duplicate-suppression query filters on: without them each crash opened its own issue (#47, #52, #60).
+
 - A session whose name contains `tabby`, `sidebar`, or `renderer` no longer destroys itself on a tmux-resurrect restore. Restored panes get a start command that names the capture file after the session (`cat '…/pane-tabby_session:1.0'; exec -l /bin/bash`), which the pane classifier read as tabby's own infrastructure. Every window then looked empty of real panes and got killed a few seconds after the restore. Classification is now anchored to the program name instead of matching the bare word anywhere in the command line. Thanks to @Corosauce for the diagnosis in #59.
 
 - The sidebar context menu follows the theme. Its text was drawn in a hard-coded `#000000` and its highlight in `#2563eb`, so on rose-pine, catppuccin-mocha, dracula, nord, or any other dark preset the menu was black on near-black. The daemon now sends the resolved palette to the renderer. Where a theme leaves a colour unset the menu inherits the terminal's foreground rather than guessing a literal. Fix contributed by @logicalor in #54, for #53.
