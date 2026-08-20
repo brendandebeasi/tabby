@@ -818,11 +818,56 @@ func startOSCPipes(windows []tmux.Window) {
 	}
 }
 
+// systemPaneMarkers are the argv[0] names tabby's own panes run under. See
+// rendererExecPrefix: renderers are launched as `exec -a <argv0> tabby render
+// <kind>`, so both #{pane_current_command} and #{pane_start_command} carry one
+// of these names in program position.
+var systemPaneMarkers = []string{"tabby", "sidebar", "renderer", "window-header", "pane-header"}
+
+// systemPaneToken reports whether a single command-line token names a tabby
+// system binary. The token is reduced to its basename first, so an absolute
+// path like /usr/local/bin/tabby-daemon still matches.
+//
+// Matching is name-boundary anchored rather than a bare substring test. A plain
+// strings.Contains(startCmd, "tabby") also matched any *argument* that happened
+// to spell one of these words, which is how a session named tabby_session used
+// to delete itself: tmux-resurrect restores scrollback by setting each restored
+// pane's start command to
+//
+//	cat '…/pane_contents/pane-tabby_session:1.0'; exec -l /bin/bash
+//
+// That contains "tabby", so every restored content pane was read as tabby
+// infrastructure, every window then looked like it held nothing but system
+// panes, and cleanupOrphanedSidebars() killed the lot a few seconds after the
+// restore finished. See issue #59.
+func systemPaneToken(token string) bool {
+	name := strings.Trim(token, `'"`)
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		name = name[i+1:]
+	}
+	if name == "" {
+		return false
+	}
+	for _, marker := range systemPaneMarkers {
+		if name == marker || strings.HasPrefix(name, marker+"-") || strings.HasSuffix(name, "-"+marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func paneIsSystemPane(cmd string, startCmd string) bool {
-	return strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") ||
-		strings.Contains(cmd, "tabby") || strings.Contains(cmd, "window-header") || strings.Contains(cmd, "pane-header") ||
-		strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") ||
-		strings.Contains(startCmd, "tabby") || strings.Contains(startCmd, "window-header") || strings.Contains(startCmd, "pane-header")
+	for _, field := range strings.Fields(cmd) {
+		if systemPaneToken(field) {
+			return true
+		}
+	}
+	for _, field := range strings.Fields(startCmd) {
+		if systemPaneToken(field) {
+			return true
+		}
+	}
+	return false
 }
 
 var orphanWindowFirstSeen = map[string]time.Time{}
@@ -1296,13 +1341,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			continue
 		}
 		for _, p := range win.Panes {
-			isSystem := strings.Contains(p.Command, "sidebar") || strings.Contains(p.Command, "renderer") ||
-				strings.Contains(p.Command, "pane-header") || strings.Contains(p.Command, "window-header") ||
-				strings.Contains(p.Command, "tabby") ||
-				strings.Contains(p.StartCommand, "sidebar") || strings.Contains(p.StartCommand, "renderer") ||
-				strings.Contains(p.StartCommand, "pane-header") || strings.Contains(p.StartCommand, "window-header") ||
-				strings.Contains(p.StartCommand, "tabby")
-			if isSystem {
+			if paneIsSystemPane(p.Command, p.StartCommand) {
 				if strings.Contains(p.Command, "pane-header") || strings.Contains(p.StartCommand, "pane-header") {
 					target := paneTargetFromStartCmd(p.StartCommand)
 					if target != "" {
@@ -1443,11 +1482,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		}
 		curCmd := parts[1]
 		startCmd := parts[3]
-		isSystem := strings.Contains(curCmd, "window-header") || strings.Contains(curCmd, "pane-header") ||
-			strings.Contains(curCmd, "sidebar") || strings.Contains(curCmd, "renderer") || strings.Contains(curCmd, "tabby") ||
-			strings.Contains(startCmd, "window-header") || strings.Contains(startCmd, "pane-header") ||
-			strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer") || strings.Contains(startCmd, "tabby")
-		if !isSystem {
+		if !paneIsSystemPane(curCmd, startCmd) {
 			contentPaneExists[parts[0]] = true
 		}
 	}

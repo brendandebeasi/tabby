@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- A session whose name contains `tabby`, `sidebar`, or `renderer` no longer destroys itself on a tmux-resurrect restore. Restored panes get a start command that names the capture file after the session (`cat '…/pane-tabby_session:1.0'; exec -l /bin/bash`), which the pane classifier read as tabby's own infrastructure. Every window then looked empty of real panes and got killed a few seconds after the restore. Classification is now anchored to the program name instead of matching the bare word anywhere in the command line. Thanks to @Corosauce for the diagnosis in #59.
+
 - Nav keys (`M-;` / `M-'`) work in grouped sessions. A session created with `tmux new-session -t <existing>` had no daemon of its own, so every keypress dialed a socket that was never there, hung for the full 1.5s retry budget, and then did nothing. `session-created` and `client-attached` now both ensure a daemon for the session they fire in, via the new `scripts/ensure-daemon.sh`.
 
 ### 2026-08-11 — Light and dark themes now switch on a keypress

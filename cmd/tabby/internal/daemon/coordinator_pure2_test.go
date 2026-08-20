@@ -299,6 +299,10 @@ func TestPaneIsSystemPane(t *testing.T) {
 		{"tabby-daemon", ""},
 		{"pane-header", ""},
 		{"my-renderer", ""},
+		{"", "exec -a sidebar-renderer '/home/u/.tmux/plugins/tabby/bin/tabby' render sidebar"},
+		{"", "exec -a window-header '/home/u/bin/tabby' render window-header"},
+		{"tabby", ""},
+		{"", "/usr/local/bin/tabby watchdog -session $0"},
 	}
 	for _, tt := range trueTests {
 		cmd, start := tt[0], tt[1]
@@ -312,6 +316,14 @@ func TestPaneIsSystemPane(t *testing.T) {
 		{"vim", ""},
 		{"git", "git"},
 		{"", ""},
+		// issue #59: tmux-resurrect restores scrollback by pointing the pane's
+		// start command at a capture file named after the session. A session
+		// called tabby_session (or sidebar, or renderer) must not make every
+		// restored pane look like tabby infrastructure.
+		{"bash", "cat '/home/u/.tmux/resurrect/restore/pane_contents//pane-tabby_session:1.0'; exec -l /bin/bash"},
+		{"bash", "cat '/home/u/.tmux/resurrect/restore/pane_contents//pane-sidebar:2.0'; exec -l /bin/bash"},
+		{"bash", "cat '/home/u/.tmux/resurrect/restore/pane_contents//pane-renderer:2.0'; exec -l /bin/bash"},
+		{"nvim", "nvim /home/u/src/tabby_notes.md"},
 	}
 	for _, tt := range falseTests {
 		cmd, start := tt[0], tt[1]
