@@ -6,6 +6,10 @@
 
 - `auto_theme.sync_claude_code` mirrors the light/dark toggle into Claude Code's own theme setting in `~/.claude/settings.json`. Off by default. Preserves the `-ansi` and `-daltonized` variant of whatever theme is already set. Claude Code reloads the file, so running sessions repaint without a restart.
 
+### Fixed
+
+- Nav keys (`M-;` / `M-'`) work in grouped sessions. A session created with `tmux new-session -t <existing>` had no daemon of its own, so every keypress dialed a socket that was never there, hung for the full 1.5s retry budget, and then did nothing. `session-created` and `client-attached` now both ensure a daemon for the session they fire in, via the new `scripts/ensure-daemon.sh`.
+
 ### 2026-08-11 — Light and dark themes now switch on a keypress
 
 - The theme no longer follows your OS appearance setting. Pair a light theme with a dark one in `config.yaml` and switch between them with `prefix + T`, or `tabby theme toggle` from a shell. — bd

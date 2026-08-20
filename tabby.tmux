@@ -42,26 +42,10 @@ if [ "${TABBY_DEFERRED:-}" != "1" ]; then
 
     # Default mode is "enabled", so act when enabled OR not yet set
     if [ -n "$_SESSION" ] && { [ "$_MODE" = "enabled" ] || [ -z "$_MODE" ]; }; then
-        # Pre-start daemon if not already running
-        _SOCK="/tmp/tabby-daemon-${_SESSION}.sock"
-        _PIDF="/tmp/tabby-daemon-${_SESSION}.pid"
-        _WDF="/tmp/tabby-daemon-${_SESSION}.watchdog.pid"
-        _ALIVE=false
-        if [ -S "$_SOCK" ] && [ -f "$_PIDF" ]; then
-            _PID=$(cat "$_PIDF" 2>/dev/null || echo "")
-            [ -n "$_PID" ] && kill -0 "$_PID" 2>/dev/null && _ALIVE=true
-        fi
-        if [ "$_ALIVE" = "false" ]; then
-            _WD_ALIVE=false
-            if [ -f "$_WDF" ]; then
-                _WP=$(cat "$_WDF" 2>/dev/null || echo "")
-                [ -n "$_WP" ] && kill -0 "$_WP" 2>/dev/null && _WD_ALIVE=true
-            fi
-            if [ "$_WD_ALIVE" = "false" ]; then
-                rm -f "$_SOCK" "$_PIDF"
-                "$CURRENT_DIR/bin/tabby" watchdog -session "$_SESSION" &
-            fi
-        fi
+        # Pre-start daemon if not already running. Shared with the
+        # session-created/client-attached hooks so a session cannot be entered
+        # without a daemon behind it.
+        "$CURRENT_DIR/scripts/ensure-daemon.sh" "$_SESSION" "$_SESSION_NAME"
 
         # Instant sidebar pane — single list-panes call for both check and pane ID
         # Renderers are now subcommands of tabby; exec -a preserves the legacy
@@ -485,6 +469,7 @@ EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby hook exit-if-no-main"
 # pane dimming, window history, layout save, border color, status exclusivity,
 # sidebar spawning, and renderer management.
 SIGNAL_CMD="$CURRENT_DIR/scripts/signal-daemon.sh"
+ENSURE_DAEMON_CMD="$CURRENT_DIR/scripts/ensure-daemon.sh"
 
 tmux set-hook -g window-linked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S'"
 tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
@@ -522,14 +507,19 @@ PRESERVE_RATIOS_CMD="$HOOK_BIN preserve-pane-ratios"
 tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"'; run-shell -b '$SIGNAL_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
 
 # Restore sidebar when client reattaches to session
-tmux set-hook -g client-attached "run-shell '$RESTORE_SIDEBAR_CMD'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
+tmux set-hook -g client-attached "run-shell -b '$ENSURE_DAEMON_CMD'; run-shell '$RESTORE_SIDEBAR_CMD'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
 
 # Client resize: resize windows to client geometry, signal daemon
 tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
 tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
 
-# session-created: daemon handles sidebar spawning via USR1
-tmux set-hook -g session-created "run-shell -b '$SIGNAL_CMD'"
+# session-created: ensure the new session has a daemon before signalling. A
+# session created after plugin load (most easily a grouped clone, which shares
+# the window list and so looks normal) otherwise never gets one: rendering
+# works via the shared windows' renderer panes while every input hook derives
+# its socket from the current session id and drops the keypress.
+# Sidebar spawning itself is handled by the daemon via USR1.
+tmux set-hook -g session-created "run-shell -b '$ENSURE_DAEMON_CMD; $SIGNAL_CMD'"
 
 # Maintain sidebar width after terminal resize
 tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
