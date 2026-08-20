@@ -10893,9 +10893,19 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 
 	sidebarBg := ""
 	terminalBg := ""
+	activeFg := ""
+	inactiveFg := ""
+	borderFg := ""
+	dividerFg := ""
+	indicatorBg := ""
 	if c.theme != nil {
 		sidebarBg = c.theme.SidebarBg
 		terminalBg = c.theme.TerminalBg
+		activeFg = c.theme.ActiveFg
+		inactiveFg = c.theme.InactiveFg
+		borderFg = c.theme.BorderFg
+		dividerFg = c.theme.DividerFg
+		indicatorBg = c.theme.DefaultIndicatorBg
 	}
 	// Tint the chrome to match the window's content panes. A sidebar's client
 	// key IS its window id (RenderTarget.Key), so clientID addresses the window
@@ -10914,6 +10924,11 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		PinnedRegions: nil, // All regions are in main Regions array now
 		SidebarBg:     sidebarBg,
 		TerminalBg:    terminalBg,
+		ActiveFg:      activeFg,
+		InactiveFg:    inactiveFg,
+		BorderFg:      borderFg,
+		DividerFg:     dividerFg,
+		IndicatorBg:   indicatorBg,
 	}
 }
 
@@ -11711,9 +11726,19 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	sidebarBg := ""
 	terminalBg := ""
+	activeFg := ""
+	inactiveFg := ""
+	borderFg := ""
+	dividerFg := ""
+	indicatorBg := ""
 	if c.theme != nil {
 		sidebarBg = c.theme.SidebarBg
 		terminalBg = c.theme.TerminalBg
+		activeFg = c.theme.ActiveFg
+		inactiveFg = c.theme.InactiveFg
+		borderFg = c.theme.BorderFg
+		dividerFg = c.theme.DividerFg
+		indicatorBg = c.theme.DefaultIndicatorBg
 	}
 	sidebarBg = c.tintedChromeBGLocked(windowID, sidebarBg)
 	terminalBg = c.tintedChromeBGLocked(windowID, terminalBg)
@@ -11737,6 +11762,11 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 		Regions:      regions,
 		SidebarBg:    sidebarBg,
 		TerminalBg:   terminalBg,
+		ActiveFg:     activeFg,
+		InactiveFg:   inactiveFg,
+		BorderFg:     borderFg,
+		DividerFg:    dividerFg,
+		IndicatorBg:  indicatorBg,
 		ActiveClient: activeClient,
 	}
 }
@@ -12208,9 +12238,19 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 
 	sidebarBg := ""
 	terminalBg := ""
+	activeFg := ""
+	inactiveFg := ""
+	borderFg := ""
+	dividerFg := ""
+	indicatorBg := ""
 	if c.theme != nil {
 		sidebarBg = c.theme.SidebarBg
 		terminalBg = c.theme.TerminalBg
+		activeFg = c.theme.ActiveFg
+		inactiveFg = c.theme.InactiveFg
+		borderFg = c.theme.BorderFg
+		dividerFg = c.theme.DividerFg
+		indicatorBg = c.theme.DefaultIndicatorBg
 	}
 	// foundWindow is the window owning this pane — the header sits directly
 	// above the content pane, so it must carry that pane's tint.
@@ -12237,6 +12277,11 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 		Regions:      regions,
 		SidebarBg:    sidebarBg,
 		TerminalBg:   terminalBg,
+		ActiveFg:     activeFg,
+		InactiveFg:   inactiveFg,
+		BorderFg:     borderFg,
+		DividerFg:    dividerFg,
+		IndicatorBg:  indicatorBg,
 		ActiveClient: activeClient,
 	}
 }

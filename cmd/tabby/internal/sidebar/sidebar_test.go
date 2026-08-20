@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func newPickerTestModel() *rendererModel {
@@ -96,6 +97,77 @@ func TestRenderMenuLinesIncludesTitleAndBorders(t *testing.T) {
 	}
 	if !strings.Contains(joined, "┌") || !strings.Contains(joined, "└") {
 		t.Fatalf("expected rendered menu borders")
+	}
+}
+
+func TestRenderMenuLinesUsesThemeColors(t *testing.T) {
+	m := rendererModel{
+		width:         20,
+		height:        10,
+		menuY:         0,
+		menuTitle:     "Menu",
+		menuItems: []daemon.MenuItemPayload{
+			{Label: "Header", Header: true},
+			{Label: "Item", Key: "i"},
+		},
+		menuHighlight: 1,
+		activeFg:      "#e0def4",
+		indicatorBg:   "#eb6f92",
+	}
+
+	border, normal, header, highlight := m.menuStyles()
+
+	if got := normal.GetForeground(); got != lipgloss.Color(m.activeFg) {
+		t.Fatalf("normal foreground = %v, want %v", got, m.activeFg)
+	}
+	if got := header.GetForeground(); got != lipgloss.Color(m.activeFg) {
+		t.Fatalf("header foreground = %v, want %v", got, m.activeFg)
+	}
+	if got := highlight.GetForeground(); got != lipgloss.Color(m.indicatorBg) {
+		t.Fatalf("highlight foreground = %v, want %v", got, m.indicatorBg)
+	}
+
+	// Border falls back to divider then #666; with neither set it should use
+	// the literal fallback.
+	if got := border.GetForeground(); got != lipgloss.Color("#666") {
+		t.Fatalf("border foreground = %v, want #666 fallback", got)
+	}
+
+	lines := m.renderMenuLines()
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Menu") || !strings.Contains(joined, "┌") {
+		t.Fatalf("expected rendered menu with title and borders, got %q", joined)
+	}
+}
+
+func TestRenderMenuLinesFallsBackWhenThemeEmpty(t *testing.T) {
+	m := rendererModel{
+		width:         20,
+		height:        10,
+		menuY:         0,
+		menuTitle:     "Menu",
+		menuItems:     []daemon.MenuItemPayload{{Label: "Item", Key: "i"}},
+		menuHighlight: 0,
+	}
+
+	border, normal, header, highlight := m.menuStyles()
+
+	if got := normal.GetForeground(); got != lipgloss.Color("#000000") {
+		t.Fatalf("normal fallback foreground = %v, want #000000", got)
+	}
+	if got := header.GetForeground(); got != lipgloss.Color("#000000") {
+		t.Fatalf("header fallback foreground = %v, want #000000", got)
+	}
+	if got := highlight.GetForeground(); got != lipgloss.Color("#2563eb") {
+		t.Fatalf("highlight fallback foreground = %v, want #2563eb", got)
+	}
+	if got := border.GetForeground(); got != lipgloss.Color("#666") {
+		t.Fatalf("border fallback foreground = %v, want #666", got)
+	}
+
+	lines := m.renderMenuLines()
+	if len(lines) == 0 {
+		t.Fatal("expected rendered menu lines when theme fields are empty")
 	}
 }
 
