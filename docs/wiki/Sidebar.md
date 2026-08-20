@@ -84,6 +84,17 @@ sidebar:
 tints the header with the active window's group colour, so the top of the
 sidebar tells you where you are at a glance.
 
+The banner itself is `text` (default `TABBY`), `height` in rows (default `3`),
+and `padding_bottom`, the blank rows under it (default `1`). Set `height: 0` to
+drop the banner and start the window list at the top of the sidebar:
+
+```yaml
+sidebar:
+  header:
+    height: 0
+    padding_bottom: 0
+```
+
 `line_height` inserts blank lines between rows. `0` is compact; `1` or more
 spaces things out, which helps on a touch screen.
 

@@ -152,9 +152,20 @@ func TestGenerateSidebarHeader_EmptyConfig(t *testing.T) {
 
 func TestGenerateSidebarHeader_WithTitle(t *testing.T) {
 	c := newRenderCoordinator(t)
-	c.config.Sidebar.Header.Text = "MY SIDEBAR"
+	c.config.Sidebar.Header.Text = config.Ptr("MY SIDEBAR")
 	content, _ := c.generateSidebarHeader(30, "test-client")
 	assert.Contains(t, content, "MY SIDEBAR")
+}
+
+// Issue #58: height 0 removes the banner entirely — no rows, and no click
+// region (an EndLine of -1 would eat clicks aimed at the window list).
+func TestGenerateSidebarHeader_ZeroHeightEmitsNothing(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Sidebar.Header.Height = config.Ptr(0)
+	c.config.Sidebar.Header.PaddingBottom = config.Ptr(0)
+	content, regions := c.generateSidebarHeader(30, "test-client")
+	assert.Equal(t, "", content)
+	assert.Empty(t, regions)
 }
 
 func TestGenerateSidebarHeader_WithActiveWindow(t *testing.T) {

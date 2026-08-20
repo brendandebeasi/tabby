@@ -12495,9 +12495,9 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 	var regions []daemon.ClickableRegion
 
 	hdr := c.config.Sidebar.Header
-	headerText := hdr.Text
-	headerHeight := hdr.Height
-	paddingBottom := hdr.PaddingBottom
+	headerText := hdr.ResolvedText()
+	headerHeight := hdr.ResolvedHeight()
+	paddingBottom := hdr.ResolvedPaddingBottom()
 	centered := headerBoolDefault(hdr.Centered)
 	activeColor := headerBoolDefault(hdr.ActiveColor)
 	bold := headerBoolDefault(hdr.Bold)
@@ -12637,11 +12637,16 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 		s.WriteString(strings.Repeat(" ", width) + "\n")
 	}
 
-	// Clickable region covers the header rows (not padding)
-	regions = append(regions, daemon.ClickableRegion{
-		StartLine: 0, EndLine: headerHeight - 1,
-		Action: "sidebar_header_area", Target: "",
-	})
+	// Clickable region covers the header rows (not padding). With height: 0
+	// there are no header rows, so there is nothing to click; emitting the
+	// region anyway would give it EndLine -1 and swallow clicks meant for the
+	// window list below.
+	if headerHeight > 0 {
+		regions = append(regions, daemon.ClickableRegion{
+			StartLine: 0, EndLine: headerHeight - 1,
+			Action: "sidebar_header_area", Target: "",
+		})
+	}
 
 	return s.String(), regions
 }

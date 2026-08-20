@@ -357,19 +357,15 @@ func applyDefaults(cfg *Config) {
 	// are applied at render time in coordinator.go since we can't distinguish
 	// between unset and false for Draggable in YAML.
 
-	// Sidebar header defaults
-	if cfg.Sidebar.Header.Text == "" {
-		cfg.Sidebar.Header.Text = "TABBY"
-	}
-	if cfg.Sidebar.Header.Height == 0 {
-		cfg.Sidebar.Header.Height = 3
-	}
-	if cfg.Sidebar.Header.PaddingBottom == 0 {
-		cfg.Sidebar.Header.PaddingBottom = 1
-	}
-	// Bool defaults (Centered, ActiveColor, Bold) default to true.
-	// Since Go zero-value is false, we use *bool pointers in the struct
-	// so nil = unset = use default (true). See headerBoolDefault() in coordinator.
+	// Sidebar header defaults are NOT applied here. Text, Height and
+	// PaddingBottom are pointers, so nil already carries "unset" through to the
+	// render path, which resolves the default. Filling them in here would undo
+	// an explicit `text: ""` / `height: 0` — the two ways to remove the banner —
+	// because a zero value is indistinguishable from an absent one.
+	// See SidebarHeaderText/Height/PaddingBottom in pkg/config.
+	//
+	// Bool defaults (Centered, ActiveColor, Bold) default to true and are
+	// *bool for the same reason. See headerBoolDefault() in coordinator.
 
 	// Sidebar text defaults
 	if cfg.Sidebar.Colors.InactiveFg == "" {

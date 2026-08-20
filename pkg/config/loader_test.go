@@ -40,8 +40,8 @@ func TestLoadConfig(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		assert.NotNil(t, cfg)
-		assert.Equal(t, "MY TABBY", cfg.Sidebar.Header.Text)
-		assert.Equal(t, 4, cfg.Sidebar.Header.Height)
+		assert.Equal(t, "MY TABBY", cfg.Sidebar.Header.ResolvedText())
+		assert.Equal(t, 4, cfg.Sidebar.Header.ResolvedHeight())
 		assert.Len(t, cfg.Groups, 2)
 		assert.Equal(t, "Work", cfg.Groups[0].Name)
 	})
@@ -54,7 +54,7 @@ func TestLoadConfig(t *testing.T) {
 		assert.NotNil(t, cfg)
 		assert.Len(t, cfg.Groups, 1)
 		assert.Equal(t, "Default", cfg.Groups[0].Name)
-		assert.Equal(t, "TABBY", cfg.Sidebar.Header.Text)
+		assert.Equal(t, "TABBY", cfg.Sidebar.Header.ResolvedText())
 	})
 
 	t.Run("missing file returns error wrapping os.ErrNotExist", func(t *testing.T) {
@@ -72,7 +72,7 @@ func TestLoadConfig(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		assert.NotNil(t, cfg)
-		assert.Equal(t, "TABBY", cfg.Sidebar.Header.Text)
+		assert.Equal(t, "TABBY", cfg.Sidebar.Header.ResolvedText())
 		assert.Equal(t, "●", cfg.Indicators.Activity.Icon)
 	})
 
@@ -98,7 +98,7 @@ sidebar:
 			t.Fatalf("unexpected error: %v", err)
 		}
 		assert.NotNil(t, cfg)
-		assert.Equal(t, "KNOWN", cfg.Sidebar.Header.Text)
+		assert.Equal(t, "KNOWN", cfg.Sidebar.Header.ResolvedText())
 	})
 }
 
@@ -154,9 +154,29 @@ func TestApplyDefaults_PaneHeader(t *testing.T) {
 func TestApplyDefaults_SidebarHeader(t *testing.T) {
 	cfg := loadEmpty(t)
 
-	assert.Equal(t, "TABBY", cfg.Sidebar.Header.Text)
-	assert.Equal(t, 3, cfg.Sidebar.Header.Height)
-	assert.Equal(t, 1, cfg.Sidebar.Header.PaddingBottom)
+	assert.Equal(t, "TABBY", cfg.Sidebar.Header.ResolvedText())
+	assert.Equal(t, 3, cfg.Sidebar.Header.ResolvedHeight())
+	assert.Equal(t, 1, cfg.Sidebar.Header.ResolvedPaddingBottom())
+}
+
+// Issue #58: setting the header keys to their zero values is how you remove the
+// banner. applyDefaults() used to re-fill them, because a plain string/int
+// cannot say "the user wrote 0" as opposed to "the key was absent".
+func TestApplyDefaults_SidebarHeaderExplicitZeroSticks(t *testing.T) {
+	cfg, err := loadYAML(t, `
+sidebar:
+  header:
+    text: ""
+    height: 0
+    padding_bottom: 0
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assert.Equal(t, "", cfg.Sidebar.Header.ResolvedText())
+	assert.Equal(t, 0, cfg.Sidebar.Header.ResolvedHeight())
+	assert.Equal(t, 0, cfg.Sidebar.Header.ResolvedPaddingBottom())
 }
 
 func TestApplyDefaults_SidebarColors(t *testing.T) {
@@ -246,8 +266,8 @@ sidebar:
 
 	assert.Equal(t, "★", cfg.Indicators.Activity.Icon)
 	assert.Equal(t, "#ff0000", cfg.Indicators.Activity.Color)
-	assert.Equal(t, "CUSTOM", cfg.Sidebar.Header.Text)
-	assert.Equal(t, 5, cfg.Sidebar.Header.Height)
+	assert.Equal(t, "CUSTOM", cfg.Sidebar.Header.ResolvedText())
+	assert.Equal(t, 5, cfg.Sidebar.Header.ResolvedHeight())
 	assert.Equal(t, "#aabbcc", cfg.Sidebar.Colors.InactiveFg)
 	assert.Equal(t, "◆", cfg.Indicators.Bell.Icon)
 }
@@ -331,7 +351,7 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	cfg.Sidebar.Header.Text = "ROUND-TRIP"
+	cfg.Sidebar.Header.Text = Ptr("ROUND-TRIP")
 	cfg.Groups = append(cfg.Groups, Group{
 		Name:    "Personal",
 		Pattern: "^personal\\|",
@@ -348,7 +368,7 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 		t.Fatalf("LoadConfig after save: %v", err)
 	}
 
-	assert.Equal(t, "ROUND-TRIP", cfg2.Sidebar.Header.Text)
+	assert.Equal(t, "ROUND-TRIP", cfg2.Sidebar.Header.ResolvedText())
 	assert.Len(t, cfg2.Groups, 3)
 
 	personal := FindGroup(cfg2, "Personal")

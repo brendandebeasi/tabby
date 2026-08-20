@@ -22,9 +22,9 @@ func testConfig() *config.Config {
 		{Name: "Default", Pattern: `.*`, Theme: config.Theme{Bg: "#2c3e50"}},
 	}
 	// Sidebar header
-	cfg.Sidebar.Header.Text = "TABBY"
-	cfg.Sidebar.Header.Height = 3
-	cfg.Sidebar.Header.PaddingBottom = 1
+	cfg.Sidebar.Header.Text = config.Ptr("TABBY")
+	cfg.Sidebar.Header.Height = config.Ptr(3)
+	cfg.Sidebar.Header.PaddingBottom = config.Ptr(1)
 	// Indicators
 	cfg.Indicators.Activity.Icon = "●"
 	cfg.Indicators.Activity.Color = "#f39c12"
@@ -142,8 +142,8 @@ func TestHelpersSanity(t *testing.T) {
 	assert.NotNil(t, c.lastPaneMenuOpen)
 
 	// Config fields
-	assert.Equal(t, "TABBY", c.config.Sidebar.Header.Text)
-	assert.Equal(t, 3, c.config.Sidebar.Header.Height)
+	assert.Equal(t, "TABBY", c.config.Sidebar.Header.ResolvedText())
+	assert.Equal(t, 3, c.config.Sidebar.Header.ResolvedHeight())
 	assert.Equal(t, "●", c.config.Indicators.Activity.Icon)
 	assert.Equal(t, "◆", c.config.Indicators.Bell.Icon)
 	assert.Equal(t, 6, len(c.config.Sidebar.Colors.ActiveIndicatorFrames))

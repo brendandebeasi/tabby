@@ -425,14 +425,55 @@ type PaneHeader struct {
 }
 
 type SidebarHeader struct {
-	Text          string `yaml:"text"`           // Header text (default: "TABBY")
-	Height        int    `yaml:"height"`         // Total header rows (default: 3)
-	PaddingBottom int    `yaml:"padding_bottom"` // Transparent rows below header (default: 1)
+	// Text, Height and PaddingBottom are pointers for the same reason the bools
+	// below are: nil means "not set in config.yaml, use the default", which is
+	// the only way an explicit `text: ""` or `height: 0` can survive defaulting
+	// and actually remove the banner.
+	Text          *string `yaml:"text,omitempty"`           // Header text (default: "TABBY")
+	Height        *int    `yaml:"height,omitempty"`         // Total header rows (default: 3, 0 hides the header)
+	PaddingBottom *int    `yaml:"padding_bottom,omitempty"` // Transparent rows below header (default: 1)
 	Centered      *bool  `yaml:"centered"`       // Center text horizontally and vertically (default: true)
 	ActiveColor   *bool  `yaml:"active_color"`   // Color based on active window group (default: true)
 	Fg            string `yaml:"fg"`             // Override text color (default: "" = auto from active group or theme)
 	Bg            string `yaml:"bg"`             // Override background color (default: "" = transparent/sidebar bg)
 	Bold          *bool  `yaml:"bold"`           // Bold text (default: true)
+}
+
+// Ptr returns a pointer to v. Config fields that need to tell "absent" apart
+// from a zero value are pointers, and this keeps setting them a one-liner.
+func Ptr[T any](v T) *T { return &v }
+
+// ResolvedText returns the configured header text, or "TABBY" when the key is
+// absent. An explicit `text: ""` resolves to the empty string.
+func (h SidebarHeader) ResolvedText() string {
+	if h.Text == nil {
+		return "TABBY"
+	}
+	return *h.Text
+}
+
+// ResolvedHeight returns the configured header height in rows, or 3 when the
+// key is absent. An explicit `height: 0` hides the header.
+func (h SidebarHeader) ResolvedHeight() int {
+	if h.Height == nil {
+		return 3
+	}
+	if *h.Height < 0 {
+		return 0
+	}
+	return *h.Height
+}
+
+// ResolvedPaddingBottom returns the transparent rows below the header, or 1
+// when the key is absent. An explicit `padding_bottom: 0` removes the gap.
+func (h SidebarHeader) ResolvedPaddingBottom() int {
+	if h.PaddingBottom == nil {
+		return 1
+	}
+	if *h.PaddingBottom < 0 {
+		return 0
+	}
+	return *h.PaddingBottom
 }
 
 type Sidebar struct {

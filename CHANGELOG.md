@@ -10,6 +10,8 @@
 
 - A session whose name contains `tabby`, `sidebar`, or `renderer` no longer destroys itself on a tmux-resurrect restore. Restored panes get a start command that names the capture file after the session (`cat '…/pane-tabby_session:1.0'; exec -l /bin/bash`), which the pane classifier read as tabby's own infrastructure. Every window then looked empty of real panes and got killed a few seconds after the restore. Classification is now anchored to the program name instead of matching the bare word anywhere in the command line. Thanks to @Corosauce for the diagnosis in #59.
 
+- `sidebar.header.height: 0` now actually removes the banner, as do `text: ""` and `padding_bottom: 0`. The loader treated a zero value as an absent key and put `TABBY` / `3` / `1` straight back, so there was no way to turn the header off. These three keys are pointers now, matching `centered`/`active_color`/`bold`, and the defaults resolve at render time. Reported in #58.
+
 - A failed first build no longer leaves a silently dead plugin. `tabby.tmux` checked only for `bin/render-status` before deciding the binaries were present, then discarded the build's exit status, so a machine without a Go toolchain got a plugin that loaded and did nothing. It now checks `bin/tabby` too and reports the failure through `tmux display-message`, with the build log at `/tmp/tabby-install.log`. Reported in #55.
 
 - `make build-linux` says what it is for. It cross-compiles into `bin-linux/` for copying to a remote host; on Linux you still want `make build`, which writes the `bin/` that the plugin loads.
