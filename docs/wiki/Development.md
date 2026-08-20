@@ -39,7 +39,7 @@ which surfaces as `returned 126`. Rebuild natively afterwards.
 | Target | What it does |
 |---|---|
 | `build` | Build `bin/tabby` for the host platform |
-| `build-linux` | Cross-compile for Linux |
+| `build-linux` | Cross-compile Linux amd64 binaries into `bin-linux/`, for copying to a remote host. Not the way to build on Linux — use `build` for that, whatever platform you are on |
 | `deps` | Download and tidy modules |
 | `test` | Unit and integration tests |
 | `test-unit` | `go test ./pkg/...` only |

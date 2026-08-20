@@ -35,7 +35,8 @@ build-linux:
 	@for name in $(TABBY_BINS); do \
 		GOOS=linux GOARCH=amd64 $(GOBUILD) -o bin-linux/$$name ./cmd/$$name || exit 1; \
 	done
-	@echo "Linux binaries in bin-linux/"
+	@echo "Linux binaries in bin-linux/ — copy these to the remote host."
+	@echo "To run tabby on THIS machine, use 'make build' instead; it writes bin/."
 
 
 # Download dependencies

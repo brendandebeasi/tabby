@@ -14,9 +14,17 @@ if [ "$TABBY_ENABLED" = "0" ]; then
     exit 0
 fi
 
-# Build binaries if not present
-if [ ! -f "$CURRENT_DIR/bin/render-status" ]; then
-    "$CURRENT_DIR/scripts/install.sh" || true
+# Build binaries if not present. Probe bin/tabby as well as bin/render-status:
+# everything below invokes bin/tabby, and a half-populated bin/ (or a bin/ left
+# behind by `make build-linux`, which writes to bin-linux/ and is only for
+# deploying to a remote host) used to sail past a render-status-only check.
+if [ ! -x "$CURRENT_DIR/bin/tabby" ] || [ ! -x "$CURRENT_DIR/bin/render-status" ]; then
+    if ! "$CURRENT_DIR/scripts/install.sh" >/tmp/tabby-install.log 2>&1; then
+        # Don't leave the user with a silently dead plugin. install.sh already
+        # says what went wrong (usually: no Go toolchain on this machine).
+        tmux display-message "tabby: build failed, see /tmp/tabby-install.log" 2>/dev/null || true
+        exit 0
+    fi
 fi
 
 # --- Phase 1: Fast path (daemon pre-start + instant sidebar pane) ---
