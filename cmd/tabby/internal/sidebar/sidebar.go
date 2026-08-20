@@ -1140,31 +1140,24 @@ func (m rendererModel) menuItemAtScreenY(screenY int) int {
 // menuStyles returns the lipgloss styles used by the context menu, resolved
 // from the theme plumbed by the daemon with fallback defaults.
 func (m rendererModel) menuStyles() (borderStyle, normalStyle, headerStyle, highlightStyle lipgloss.Style) {
-	borderColor := lipgloss.Color(m.borderFg)
-	if m.borderFg == "" {
-		borderColor = lipgloss.Color(m.dividerFg)
-		if m.dividerFg == "" {
-			borderColor = lipgloss.Color("#666")
+	// Where a theme field is empty, fall back to the terminal's own foreground
+	// by leaving the colour unset rather than naming one. Any literal we could
+	// pick here is a guess about the user's background, and the guess this code
+	// used to make (#000000) is exactly what made the menu unreadable on dark
+	// themes. An unset foreground is legible on light and dark alike.
+	withColor := func(hex string, fallbacks ...string) lipgloss.Style {
+		for _, c := range append([]string{hex}, fallbacks...) {
+			if c != "" {
+				return lipgloss.NewStyle().Foreground(lipgloss.Color(c))
+			}
 		}
+		return lipgloss.NewStyle()
 	}
-	borderStyle = lipgloss.NewStyle().Foreground(borderColor)
 
-	textColor := lipgloss.Color(m.activeFg)
-	if m.activeFg == "" {
-		textColor = lipgloss.Color("#000000")
-	}
-	normalStyle = lipgloss.NewStyle().Foreground(textColor)
-	headerStyle = lipgloss.NewStyle().
-		Foreground(textColor).
-		Bold(true)
-
-	highlightColor := lipgloss.Color(m.indicatorBg)
-	if m.indicatorBg == "" {
-		highlightColor = lipgloss.Color("#2563eb")
-	}
-	highlightStyle = lipgloss.NewStyle().
-		Foreground(highlightColor).
-		Bold(true)
+	borderStyle = withColor(m.borderFg, m.dividerFg, m.inactiveFg)
+	normalStyle = withColor(m.activeFg)
+	headerStyle = withColor(m.activeFg).Bold(true)
+	highlightStyle = withColor(m.indicatorBg, m.activeFg).Bold(true)
 
 	return
 }

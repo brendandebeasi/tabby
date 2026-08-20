@@ -127,10 +127,10 @@ func TestRenderMenuLinesUsesThemeColors(t *testing.T) {
 		t.Fatalf("highlight foreground = %v, want %v", got, m.indicatorBg)
 	}
 
-	// Border falls back to divider then #666; with neither set it should use
-	// the literal fallback.
-	if got := border.GetForeground(); got != lipgloss.Color("#666") {
-		t.Fatalf("border foreground = %v, want #666 fallback", got)
+	// Border falls back through divider then inactive; with none of the three
+	// set it stays unset and inherits the terminal foreground.
+	if got := border.GetForeground(); got != lipgloss.TerminalColor(lipgloss.NoColor{}) {
+		t.Fatalf("border foreground = %v, want unset", got)
 	}
 
 	lines := m.renderMenuLines()
@@ -152,17 +152,14 @@ func TestRenderMenuLinesFallsBackWhenThemeEmpty(t *testing.T) {
 
 	border, normal, header, highlight := m.menuStyles()
 
-	if got := normal.GetForeground(); got != lipgloss.Color("#000000") {
-		t.Fatalf("normal fallback foreground = %v, want #000000", got)
-	}
-	if got := header.GetForeground(); got != lipgloss.Color("#000000") {
-		t.Fatalf("header fallback foreground = %v, want #000000", got)
-	}
-	if got := highlight.GetForeground(); got != lipgloss.Color("#2563eb") {
-		t.Fatalf("highlight fallback foreground = %v, want #2563eb", got)
-	}
-	if got := border.GetForeground(); got != lipgloss.Color("#666") {
-		t.Fatalf("border fallback foreground = %v, want #666", got)
+	// With no theme, every style leaves the foreground unset so the terminal's
+	// own text colour applies. Naming a literal here is what broke dark themes.
+	for name, st := range map[string]lipgloss.Style{
+		"normal": normal, "header": header, "highlight": highlight, "border": border,
+	} {
+		if got := st.GetForeground(); got != lipgloss.TerminalColor(lipgloss.NoColor{}) {
+			t.Fatalf("%s fallback foreground = %v, want unset", name, got)
+		}
 	}
 
 	lines := m.renderMenuLines()
