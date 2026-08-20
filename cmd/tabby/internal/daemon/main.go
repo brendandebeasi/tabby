@@ -467,6 +467,27 @@ func isEffectivelyParked(win tmux.Window) bool {
 	return p == "%parked" || p == ""
 }
 
+var rendererSessionRe = regexp.MustCompile(`-session '?(\$[0-9]+)'?`)
+
+// rendererSessionID pulls the session a renderer pane was launched for out of
+// its pane_start_command; "" when the command carries no session flag.
+func rendererSessionID(startCmd string) string {
+	m := rendererSessionRe.FindStringSubmatch(startCmd)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
+func sessionAlive(sessionID string, cache map[string]bool) bool {
+	if alive, ok := cache[sessionID]; ok {
+		return alive
+	}
+	alive := tmuxCmd("has-session", "-t", sessionID).Run() == nil
+	cache[sessionID] = alive
+	return alive
+}
+
 func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window, coordinator *Coordinator) bool {
 	spawnRenderersMu.Lock()
 	defer spawnRenderersMu.Unlock()
@@ -533,6 +554,9 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 	// probe; reuse it here.
 	debugLog.Printf("spawnRenderers: active=%s clients=%v", activeWindow, connectedClients)
 
+	// Liveness of peer sessions owning renderer panes, memoised for this pass.
+	aliveSessions := map[string]bool{}
+
 	// Check each window
 	for _, win := range windows {
 		windowID := win.ID
@@ -594,6 +618,15 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 					if startCmd != "" && !strings.Contains(startCmd, "-session '"+sessionID+"'") &&
 						!strings.Contains(startCmd, "-session "+sessionID+" ") &&
 						!strings.HasSuffix(startCmd, "-session "+sessionID) {
+						// Grouped sessions share their windows and panes, so a
+						// renderer tagged with another session is only an orphan
+						// once that session is gone. Killing a live peer's pane
+						// makes both daemons kill and respawn each other forever.
+						if owner := rendererSessionID(startCmd); owner != "" && sessionAlive(owner, aliveSessions) {
+							logEvent("CLEANUP_STALE_RENDERER_SKIP window=%s pane=%s reason=peer_session_alive owner=%s", windowID, paneID, owner)
+							hasRenderer = true
+							break
+						}
 						logEvent("CLEANUP_STALE_RENDERER window=%s pane=%s session_mismatch start_cmd=%s", windowID, paneID, startCmd)
 						tmuxCmd("kill-pane", "-t", paneID).Run()
 						continue

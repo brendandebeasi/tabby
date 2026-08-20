@@ -14,6 +14,8 @@
 
 ### Fixed
 
+- Two sidebars stop fighting over the same panes. A grouped tmux session shares its windows with its peers, so each session's daemon saw the other's renderer panes as orphans from a dead daemon, killed them, and respawned its own — endlessly, which showed up as the sidebar redrawing and focus jumping between windows. A renderer belonging to another session is now only killed once tmux confirms that session is gone; the daemon left without clients idles out on its own.
+
 - The cat stays home when there is something to do. It would head off on an adventure the moment its animation state read `idle`, which happens a frame after you drop food or throw yarn, so a toy could land and the cat would walk away from it. It now waits for an empty yard — no food, no yarn, no mouse, no poop, no unanswered question — and a few seconds of actual idling before it goes (#28).
 
 - `adventure_chance` does something. The key was in the config schema and the documentation but nothing ever read it. It is now the percentage gate on the urge to wander; unset or `0` means 100, which is what the cat has always done (#28).
