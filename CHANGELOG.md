@@ -4,9 +4,21 @@
 
 ### Added
 
+- The cat keeps a permanent record. Time in each state, adventures and what came back from them, catches and escapes by species, care and adventure streaks, fastest yarn catch, favourite biome, longest nap, worst neglect — it all accumulates under `lifetime_stats` in `~/.local/state/tabby/pet.json`. Rates and rankings are computed on read rather than stored, so a counter fix never leaves a stale number behind. An older `pet.json` loads unchanged: the counters start at zero and the birthday is backdated to first sight (#25).
+
+- Cats bring you things. A successful pounce on an adventure sometimes gets carried home and left on the ground; click it to accept and the cat is pleased with itself, or it takes the gift back after ten minutes. Three at a time, oldest first out (#28).
+
+- On an adventure the cat now hops over rocks, logs and trees instead of walking through them, and about a third of the time climbs one and sits up there a while before carrying on (#28).
+
 - `auto_theme.sync_claude_code` mirrors the light/dark toggle into Claude Code's own theme setting in `~/.claude/settings.json`. Off by default. Preserves the `-ansi` and `-daltonized` variant of whatever theme is already set. Claude Code reloads the file, so running sessions repaint without a restart.
 
 ### Fixed
+
+- The cat stays home when there is something to do. It would head off on an adventure the moment its animation state read `idle`, which happens a frame after you drop food or throw yarn, so a toy could land and the cat would walk away from it. It now waits for an empty yard — no food, no yarn, no mouse, no poop, no unanswered question — and a few seconds of actual idling before it goes (#28).
+
+- `adventure_chance` does something. The key was in the config schema and the documentation but nothing ever read it. It is now the percentage gate on the urge to wander; unset or `0` means 100, which is what the cat has always done (#28).
+
+- The cat is no longer painted over by its own scenery. In both the home scene and the adventure play area the dragon, the yarn, the food and the falling debris were placed after the cat and overwrote it, so the pet you are looking at could vanish behind a passing bird. The cat is drawn last now (#28).
 
 - Crash reports carry the crash. The stack trace goes to the daemon's stderr log, which the report never attached; the events log was read from a path with a dot where the filename has a hyphen, so that section was silently missing from every report ever filed; and the pre-crash forensics quoted whichever `.prev` a size rotation had left lying around, days old, instead of the events the dying daemon had just written. A daemon that restarted five times in six seconds produced five copies of the same stale block and nothing about the panic. The `crash` and `auto-triage` labels are also created if absent, which is what the duplicate-suppression query filters on: without them each crash opened its own issue (#47, #52, #60).
 

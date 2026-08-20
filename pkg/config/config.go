@@ -280,7 +280,7 @@ type PetWidget struct {
 	DebugBar        bool   `yaml:"debug_bar"`        // Show debug controls below pet widget (default: false)
 	// Adventure mode settings
 	AdventureEnabled bool   `yaml:"adventure_enabled"` // Enable random adventure events (default: true)
-	AdventureChance  int    `yaml:"adventure_chance"`  // % chance per idle tick to start adventure (default: 5)
+	AdventureChance  int    `yaml:"adventure_chance"`  // % chance the cat acts on the urge to wander (0 or unset = 100)
 	AdventureBlood   bool   `yaml:"adventure_blood"`
 	AdventureVibe    string `yaml:"adventure_vibe"`
 	// LLM settings for thoughts
@@ -432,11 +432,11 @@ type SidebarHeader struct {
 	Text          *string `yaml:"text,omitempty"`           // Header text (default: "TABBY")
 	Height        *int    `yaml:"height,omitempty"`         // Total header rows (default: 3, 0 hides the header)
 	PaddingBottom *int    `yaml:"padding_bottom,omitempty"` // Transparent rows below header (default: 1)
-	Centered      *bool  `yaml:"centered"`       // Center text horizontally and vertically (default: true)
-	ActiveColor   *bool  `yaml:"active_color"`   // Color based on active window group (default: true)
-	Fg            string `yaml:"fg"`             // Override text color (default: "" = auto from active group or theme)
-	Bg            string `yaml:"bg"`             // Override background color (default: "" = transparent/sidebar bg)
-	Bold          *bool  `yaml:"bold"`           // Bold text (default: true)
+	Centered      *bool   `yaml:"centered"`                 // Center text horizontally and vertically (default: true)
+	ActiveColor   *bool   `yaml:"active_color"`             // Color based on active window group (default: true)
+	Fg            string  `yaml:"fg"`                       // Override text color (default: "" = auto from active group or theme)
+	Bg            string  `yaml:"bg"`                       // Override background color (default: "" = transparent/sidebar bg)
+	Bold          *bool   `yaml:"bold"`                     // Bold text (default: true)
 }
 
 // Ptr returns a pointer to v. Config fields that need to tell "absent" apart

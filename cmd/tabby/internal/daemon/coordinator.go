@@ -675,6 +675,13 @@ type Coordinator struct {
 	// without ownership they all tick+write it and clobber each other (a stale
 	// daemon perpetually resetting hunger). Set each tick by acquirePetOwnership.
 	petIsOwner bool
+	// countedThought is the last thought already folded into the lifetime
+	// thought counters. Thoughts are set from dozens of places, so instead of
+	// instrumenting every assignment the owning daemon diffs LastThought once
+	// per tick. Seeded on the first tick so a restart doesn't recount the
+	// thought that was already on disk.
+	countedThought       string
+	countedThoughtSeeded bool
 
 	cwdColors   map[string]CWDColorMapping
 	cwdColorsMu sync.RWMutex
@@ -1203,6 +1210,11 @@ type petState struct {
 	TotalMouseCatches int
 	// Adventure state
 	Adventure adventureState
+	// Presents the cat has dragged home from an adventure and left on the
+	// ground for the owner. Clicking one accepts it.
+	Presents []petPresent `json:"presents,omitempty"`
+	// Lifetime stats — the cat's permanent record. See pet_stats.go.
+	Stats lifetimeStats `json:"lifetime_stats,omitzero"`
 	// Debug state
 	DebugThoughtIdx int // Index into debugThoughtCategories for debug bar
 	// Dragon friend state
@@ -1232,6 +1244,16 @@ type petState struct {
 type pos2D struct {
 	X int
 	Y int
+}
+
+// petPresent is a kill the cat carried home from an adventure and dropped on
+// the ground as a gift. It sits there until the owner clicks it (accepting the
+// present) or presentTTL elapses and the cat quietly takes it away again.
+type petPresent struct {
+	Type      string    `json:"type"`  // wildlife type, e.g. "mouse"
+	Emoji     string    `json:"emoji"` // what to draw
+	X         int       `json:"x"`
+	BroughtAt time.Time `json:"brought_at"`
 }
 
 type floatingItem struct {
@@ -1266,6 +1288,16 @@ type adventureState struct {
 	ManuallyTriggered bool // True if started via debug button, ignores config disable
 	LastThought       string
 	TotalCatches      int
+	StartedAt         time.Time // when this adventure began, for the lifetime record
+	// Carrying is the wildlife type the cat is bringing home as a present
+	// (empty when it isn't). CarryingEmoji is what to draw when it arrives.
+	Carrying      string
+	CarryingEmoji string
+	// HopFrames counts down while the cat is airborne clearing scenery, and
+	// PerchFrames while it is sitting on top of something. Both freeze the
+	// scenery scroll so the cat stays lined up with the thing it jumped.
+	HopFrames   int
+	PerchFrames int
 }
 
 type wildlifeEncounter struct {
@@ -3477,6 +3509,8 @@ func (c *Coordinator) loadPersistentPetStats() {
 	c.pet.StarvingStart = d.StarvingStart
 	c.pet.LastHungerTick = d.LastHungerTick
 	c.pet.LastHappyTick = d.LastHappyTick
+	c.pet.Stats = d.Stats
+	c.pet.Presents = d.Presents
 }
 
 // savePetStateData saves the given pet state snapshot to the shared file.
@@ -6535,6 +6569,18 @@ func (c *Coordinator) UpdatePetState() bool {
 	c.petIsOwner = c.acquirePetOwnership(now)
 	if c.petIsOwner {
 		atomic.StoreInt32(&petWriteAllowed, 1)
+		// Only the owner accrues lifetime stats, otherwise every daemon
+		// watching the same pet.json would count the same second twice.
+		c.pet.Stats.tick(now, c.pet.State, c.pet.IsDead, c.pet.Hunger, c.pet.Happiness)
+		if !c.countedThoughtSeeded {
+			c.countedThought = c.pet.LastThought
+			c.countedThoughtSeeded = true
+		} else if c.pet.LastThought != c.countedThought {
+			c.countedThought = c.pet.LastThought
+			if c.pet.LastThought != "" {
+				c.pet.Stats.recordThought(c.pet.LastThought)
+			}
+		}
 	} else {
 		atomic.StoreInt32(&petWriteAllowed, 0)
 		c.loadPersistentPetStats()
@@ -6865,6 +6911,7 @@ func (c *Coordinator) UpdatePetState() bool {
 	if !c.pet.NeedsPoopAt.IsZero() && now.After(c.pet.NeedsPoopAt) {
 		poopX := c.pet.Pos.X
 		c.pet.PoopPositions = append(c.pet.PoopPositions, poopX)
+		c.pet.Stats.recordPoop(now, len(c.pet.PoopPositions))
 		c.pet.LastPoop = now
 		c.pet.NeedsPoopAt = time.Time{}
 		c.pet.LastThought = randomThought("poop") // instant fallback; LLM upgrades it below
@@ -6931,7 +6978,9 @@ func (c *Coordinator) UpdatePetState() bool {
 			// Jump over the obstacle!
 			c.pet.Pos.Y = 2
 			c.pet.State = "jumping"
+			c.pet.Stats.TotalJumps++
 			if isPoopAhead {
+				c.pet.Stats.PoopJumps++
 				c.pet.LastThought = randomThought("poop_jump")
 			}
 		}
@@ -6944,6 +6993,9 @@ func (c *Coordinator) UpdatePetState() bool {
 			nextX = 0
 		}
 
+		if nextX != c.pet.Pos.X {
+			c.pet.Stats.TotalDistance++
+		}
 		c.pet.Pos.X = nextX
 
 		// If chasing yarn, push it or catch it when reached
@@ -6979,6 +7031,7 @@ func (c *Coordinator) UpdatePetState() bool {
 			c.pet.HasTarget = false
 			switch c.pet.ActionPending {
 			case "eat":
+				c.pet.Stats.recordFeeding(now, c.pet.Hunger)
 				c.pet.Hunger = 100
 				c.pet.State = "eating"
 				c.pet.LastFed = now
@@ -7002,6 +7055,7 @@ func (c *Coordinator) UpdatePetState() bool {
 					}
 				}
 				c.pet.TotalYarnPlays++
+				c.pet.Stats.recordYarnCatch(now)
 				c.pet.LastThought = "got it!"
 				// Yarn disappears when caught
 				c.pet.YarnPos = pos2D{X: -1, Y: 0}
@@ -7040,6 +7094,8 @@ func (c *Coordinator) UpdatePetState() bool {
 		}
 	}
 	c.pet.FloatingItems = activeItems
+
+	c.expirePresents(now)
 
 	// === RANDOM BEHAVIORS (cat mood) ===
 
@@ -7211,8 +7267,9 @@ func (c *Coordinator) UpdatePetState() bool {
 						c.pet.LastThought = randomThought("mouse_spot")
 					}
 				case 9:
-					// Start an adventure! (if enabled and happy enough)
-					if adventureEnabled && c.pet.Happiness >= 50 && !c.pet.Adventure.Active {
+					// Start an adventure! (if enabled, happy enough, and
+					// there's nothing going on at home worth staying for)
+					if adventureEnabled && c.pet.Happiness >= 50 && c.petCanAdventure(now) {
 						c.startAdventure(maxX)
 					}
 				}
@@ -7232,6 +7289,7 @@ func (c *Coordinator) UpdatePetState() bool {
 			c.pet.MousePos = pos2D{X: maxX, Y: 0}
 		}
 		c.pet.MouseAppearsAt = time.Time{} // Clear timer
+		c.pet.Stats.recordMouseAppear(now)
 		c.pet.LastThought = randomThought("mouse_spot")
 	}
 
@@ -7252,6 +7310,8 @@ func (c *Coordinator) UpdatePetState() bool {
 		if dist <= 2 && c.pet.Pos.Y == 0 {
 			c.pet.MousePos = pos2D{X: -1, Y: 0}
 			c.pet.TotalMouseCatches++
+			c.pet.Stats.recordMouseCatch(now)
+			c.spawnBlood(now, c.pet.Pos.X+1, 0)
 			c.pet.Happiness = min(100, c.pet.Happiness+20)
 			c.pet.State = "happy"
 			c.pet.HasTarget = false
@@ -7382,6 +7442,7 @@ func (c *Coordinator) UpdatePetState() bool {
 				c.pet.IsDead = true
 				c.pet.DeathTime = now
 				c.pet.State = "dead"
+				c.pet.Stats.recordDeath(now)
 				c.pet.LastThought = "goodbye..."
 				petSnap := c.pet
 				c.stateMu.Unlock()
@@ -7529,7 +7590,9 @@ func (c *Coordinator) startAdventureWithOptions(maxX int, manual bool) {
 		HomeX:             c.pet.Pos.X,
 		ManuallyTriggered: manual,
 		LastThought:       "adventure calls...",
+		StartedAt:         time.Now(),
 	}
+	c.pet.Stats.recordAdventureStart(time.Now(), biome)
 	c.pet.State = "walking"
 	c.pet.Direction = 1 // Walking right (departing)
 	c.pet.LastThought = "adventure calls..."
@@ -7559,8 +7622,26 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 
 	case advPhaseExploring:
 		// Scenery scrolls past, cat stays centered
-		if c.pet.AnimFrame%4 == 0 {
+		if adv.HopFrames > 0 {
+			adv.HopFrames--
+		}
+		if adv.PerchFrames > 0 {
+			// Sitting on top of something. The world holds still so the cat
+			// stays lined up with whatever it climbed.
+			adv.PerchFrames--
+		} else if c.pet.AnimFrame%4 == 0 {
+			// Look at the column about to slide under the cat: when
+			// SceneOffset ticks up, the sprite one to the right lands on CatX.
+			next := adventureSceneryAt(adventureBiomes[adv.Biome], adv.CatX+adv.SceneOffset+1)
 			adv.SceneOffset++
+			if adv.HopFrames == 0 && adventureIsObstacle(next) {
+				if rand.Intn(100) < perchChance {
+					adv.PerchFrames = perchMinFrames + rand.Intn(perchMaxFrames-perchMinFrames+1)
+					c.pet.LastThought = "good spot."
+				} else {
+					adv.HopFrames = hopFrames
+				}
+			}
 		}
 
 		// Random chance to encounter wildlife
@@ -7573,7 +7654,9 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 			adv.Phase = advPhaseEncounter
 			adv.PhaseStart = now
 			adv.PhaseDuration = time.Duration(10+rand.Intn(10)) * time.Second
+			adv.HopFrames, adv.PerchFrames = 0, 0
 		} else if elapsed >= adv.PhaseDuration {
+			adv.HopFrames, adv.PerchFrames = 0, 0
 			// No encounter, start returning
 			adv.Phase = advPhaseReturning
 			adv.PhaseStart = now
@@ -7629,11 +7712,16 @@ func (c *Coordinator) updateAdventurePhase(now time.Time, maxX int) {
 
 		if elapsed >= adv.PhaseDuration || adv.CatX <= adv.HomeX {
 			// Adventure complete!
+			c.pet.Stats.recordAdventureEnd(adv.StartedAt, now, adv.TotalCatches > 0)
+			carrying, carryingEmoji := adv.Carrying, adv.CarryingEmoji
 			c.pet.Adventure = adventureState{
 				TotalCatches: adv.TotalCatches,
 			}
 			c.pet.State = "happy"
 			c.pet.LastThought = "good adventure."
+			if carrying != "" {
+				c.dropPresent(now, carrying, carryingEmoji, maxX)
+			}
 		}
 	}
 }
@@ -7703,22 +7791,15 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 				ExpiresAt: now.Add(2 * time.Second),
 			})
 			c.spawnAdventureCatchFX(now, adv.CatX, w.Y)
-			if c.config.Widgets.Pet.AdventureBlood {
-				blood := "🩸"
-				if c.config.Widgets.Pet.Icons.Blood != "" {
-					blood = c.config.Widgets.Pet.Icons.Blood
-				}
-				if blood != "" {
-					c.pet.FloatingItems = append(c.pet.FloatingItems, floatingItem{
-						Emoji:     blood,
-						Pos:       pos2D{X: adv.CatX, Y: 0},
-						Velocity:  pos2D{X: 0, Y: 0},
-						ExpiresAt: now.Add(1200 * time.Millisecond),
-					})
-				}
+			c.spawnBlood(now, adv.CatX, 0)
+			c.pet.Stats.recordCatch(w.Type)
+			if adv.Carrying == "" && rand.Intn(100) < presentChance {
+				adv.Carrying = w.Type
+				adv.CarryingEmoji = w.Emoji
 			}
 		} else {
 			w.Escaped = true
+			c.pet.Stats.recordEscape(w.Type)
 			thought := c.getAdventureThought(w.Type, "escape")
 			if thought == "" {
 				thought = fmt.Sprintf("the %s got away!", w.Type)
@@ -7932,23 +8013,11 @@ func (c *Coordinator) renderAdventurePlayArea(safePlayWidth int, petSprite strin
 	// Place scenery elements at fixed intervals, offset by scroll position
 	for i := 0; i < safePlayWidth; i++ {
 		worldX := i + adv.SceneOffset
-		// Ground scenery every 7 columns
-		if worldX%7 == 0 && len(biome.Scenery) > 0 {
-			idx := (worldX / 7) % len(biome.Scenery)
-			emoji := biome.Scenery[idx]
-			// Only place on ground if not a flying creature
-			if emoji != "🦋" {
-				groundSprites[i] = emoji
-			}
+		if emoji := adventureSceneryAt(biome, worldX); emoji != "" {
+			groundSprites[i] = emoji
 		}
-		// Air scenery every 11 columns (less frequent)
-		if worldX%11 == 0 && len(biome.Scenery) > 0 {
-			idx := (worldX / 11) % len(biome.Scenery)
-			emoji := biome.Scenery[idx]
-			// Butterflies and birds in air
-			if emoji == "🦋" || emoji == "🐦" {
-				lowAirSprites[i] = emoji
-			}
+		if emoji := adventureAirSceneryAt(biome, worldX); emoji != "" {
+			lowAirSprites[i] = emoji
 		}
 	}
 
@@ -7969,15 +8038,6 @@ func (c *Coordinator) renderAdventurePlayArea(safePlayWidth int, petSprite strin
 	}
 
 	catX := adv.CatX
-	if catX >= 0 && catX < safePlayWidth {
-		if c.pet.Pos.Y >= 2 {
-			highAirSprites[catX] = petSprite
-		} else if c.pet.Pos.Y == 1 {
-			lowAirSprites[catX] = petSprite
-		} else {
-			groundSprites[catX] = petSprite
-		}
-	}
 
 	// Place dragon! The dragon follows on the adventure
 	if c.pet.DragonState != "" {
@@ -8022,6 +8082,24 @@ func (c *Coordinator) renderAdventurePlayArea(safePlayWidth int, petSprite strin
 			default:
 				groundSprites[item.Pos.X] = item.Emoji
 			}
+		}
+	}
+
+	// The cat goes in last so nothing else can paint over it — it is the
+	// subject of the scene, not part of the backdrop.
+	if catX >= 0 && catX < safePlayWidth {
+		// Mid-hop or sat on a rock, the cat is a row up from the scenery it
+		// is clearing or standing on.
+		catY := c.pet.Pos.Y
+		if adv.HopFrames > 0 || adv.PerchFrames > 0 {
+			catY = 1
+		}
+		if catY >= 2 {
+			highAirSprites[catX] = petSprite
+		} else if catY == 1 {
+			lowAirSprites[catX] = petSprite
+		} else {
+			groundSprites[catX] = petSprite
 		}
 	}
 
@@ -16045,9 +16123,6 @@ func (c *Coordinator) renderPetWidget(clientID string, width int, skipDebugBar b
 			highAirSprites[item.Pos.X] = item.Emoji
 		}
 	}
-	if petY >= 2 && petX >= 0 && petX < safePlayWidth {
-		highAirSprites[petX] = petSprite
-	}
 	if dragonY >= 2 && dragonX >= 0 && dragonX < safePlayWidth {
 		highAirSprites[dragonX] = dragonSprite
 	}
@@ -16056,6 +16131,10 @@ func (c *Coordinator) renderPetWidget(clientID string, width int, skipDebugBar b
 	}
 	if foodY >= 2 && foodX >= 0 && foodX < safePlayWidth {
 		highAirSprites[foodX] = sprites.Food
+	}
+	// The cat goes in last so nothing else can paint over it.
+	if petY >= 2 && petX >= 0 && petX < safePlayWidth {
+		highAirSprites[petX] = petSprite
 	}
 	highAirLine := buildAirRow(highAirSprites, safePlayWidth)
 	highAirWidth := uniseg.StringWidth(highAirLine)
@@ -16074,9 +16153,6 @@ func (c *Coordinator) renderPetWidget(clientID string, width int, skipDebugBar b
 			lowAirSprites[item.Pos.X] = item.Emoji
 		}
 	}
-	if petY == 1 && petX >= 0 && petX < safePlayWidth {
-		lowAirSprites[petX] = petSprite
-	}
 	if dragonY == 1 && dragonX >= 0 && dragonX < safePlayWidth {
 		lowAirSprites[dragonX] = dragonSprite
 	}
@@ -16085,6 +16161,10 @@ func (c *Coordinator) renderPetWidget(clientID string, width int, skipDebugBar b
 	}
 	if foodY == 1 && foodX >= 0 && foodX < safePlayWidth {
 		lowAirSprites[foodX] = sprites.Food
+	}
+	// The cat goes in last so nothing else can paint over it.
+	if petY == 1 && petX >= 0 && petX < safePlayWidth {
+		lowAirSprites[petX] = petSprite
 	}
 	lowAirLine := buildAirRow(lowAirSprites, safePlayWidth)
 	lowAirWidth := uniseg.StringWidth(lowAirLine)
@@ -16152,7 +16232,18 @@ func (c *Coordinator) renderPetWidget(clientID string, width int, skipDebugBar b
 		placeSprite(groundSprites, c.pet.MousePos.X, sprites.Mouse, safePlayWidth)
 	}
 
-	// Place cat on top (overwrites anything at that position)
+	// Place presents the cat dragged home
+	for _, present := range c.pet.Presents {
+		placeSprite(groundSprites, present.X, present.Emoji, safePlayWidth)
+	}
+
+	// Place dragon
+	if dragonY == 0 {
+		placeSprite(groundSprites, dragonX, dragonSprite, safePlayWidth)
+	}
+
+	// The cat goes in last so nothing else can paint over it — it is the
+	// subject of the scene, not part of the backdrop.
 	// When sleeping, cat curls up in bottom left corner with zzz
 	if petY == 0 {
 		if c.pet.State == "sleeping" {
@@ -16160,11 +16251,6 @@ func (c *Coordinator) renderPetWidget(clientID string, width int, skipDebugBar b
 		} else {
 			placeSprite(groundSprites, petX, petSprite, safePlayWidth)
 		}
-	}
-
-	// Place dragon on top
-	if dragonY == 0 {
-		placeSprite(groundSprites, dragonX, dragonSprite, safePlayWidth)
 	}
 
 	// Build the ground row using helper
@@ -16364,11 +16450,13 @@ func (c *Coordinator) handleDebugBarClick(clientID string, clickX, clickY int) b
 				c.pet.State = "idle"
 				c.pet.Hunger = 50
 				c.pet.Happiness = 50
+				c.pet.Stats.recordRevival(time.Now())
 				c.pet.LastThought = "I'm back!"
 			} else {
 				c.pet.IsDead = true
 				c.pet.State = "dead"
 				c.pet.DeathTime = time.Now()
+				c.pet.Stats.recordDeath(c.pet.DeathTime)
 				c.pet.LastThought = randomThought("dead")
 			}
 			petSnap := c.pet
@@ -17569,6 +17657,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.pet.Hunger = 80
 			c.pet.Happiness = 50
 			c.pet.State = "eating"
+			c.pet.Stats.recordRevival(time.Now())
 			c.pet.LastThought = "life-giving noms!"
 			petSnap := c.pet
 			c.stateMu.Unlock()
@@ -17591,6 +17680,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			}
 			dropX = safeRandRange(2, width-2)
 		}
+		c.pet.Stats.recordInteraction(time.Now())
 		c.pet.FoodItem = pos2D{X: dropX, Y: 2} // Drop from high air
 		c.pet.LastThought = "food!"
 		petSnap := c.pet
@@ -17622,6 +17712,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.HasTarget = true
 		c.pet.ActionPending = "play"
 		c.pet.State = "walking"
+		c.pet.Stats.recordYarnThrow(time.Now())
 		c.pet.LastThought = "yarn!"
 		petSnap := c.pet
 		c.stateMu.Unlock()
@@ -17636,6 +17727,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			// Remove the first poop (or use input.ResolvedTarget for specific position)
 			c.pet.PoopPositions = c.pet.PoopPositions[1:]
 			c.pet.TotalPoopsCleaned++
+			c.pet.Stats.recordInteraction(time.Now())
 			c.pet.LastThought = "much better." // instant fallback; LLM upgrades it
 			c.triggerPetEventThought("cleaned")
 		}
@@ -17652,6 +17744,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.Happiness = min(100, c.pet.Happiness+10)
 		c.pet.TotalPets++
 		c.pet.LastPet = time.Now()
+		c.pet.Stats.recordInteraction(c.pet.LastPet)
 		c.pet.State = "happy"
 		if wasSleeping {
 			c.pet.LastThought = randomThought("wakeup")
@@ -18647,6 +18740,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.pet.Happiness = min(100, c.pet.Happiness+10)
 			c.pet.TotalPets++
 			c.pet.LastPet = time.Now()
+			c.pet.Stats.recordInteraction(c.pet.LastPet)
 			c.pet.State = "happy"
 			if wasSleeping {
 				c.pet.LastThought = randomThought("wakeup")
@@ -18665,6 +18759,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				// Clean this poop
 				c.pet.PoopPositions = append(c.pet.PoopPositions[:i], c.pet.PoopPositions[i+1:]...)
 				c.pet.TotalPoopsCleaned++
+				c.pet.Stats.recordInteraction(time.Now())
 				c.pet.LastThought = "much better." // instant fallback; LLM upgrades it
 				c.triggerPetEventThought("cleaned")
 				petSnap := c.pet
@@ -18690,6 +18785,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		c.pet.HasTarget = true
 		c.pet.ActionPending = "play"
 		c.pet.State = "walking"
+		c.pet.Stats.recordYarnThrow(time.Now())
 		c.pet.LastThought = "yarn!"
 		petSnap := c.pet
 		c.stateMu.Unlock()
@@ -18750,6 +18846,7 @@ func (c *Coordinator) handlePetWidgetClick(clientID string, input *daemon.InputP
 		coordinatorDebugLog.Printf("  -> Feed line clicked, dropping food")
 		c.stateMu.Lock()
 		dropX := safeRandRange(2, clientWidth-2)
+		c.pet.Stats.recordInteraction(time.Now())
 		c.pet.FoodItem = pos2D{X: dropX, Y: 2}
 		c.pet.LastThought = "food!"
 		petSnap := c.pet
@@ -19263,6 +19360,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 			c.pet.Hunger = 50
 			c.pet.Happiness = 50
 			c.pet.State = "happy"
+			c.pet.Stats.recordRevival(time.Now())
 			c.pet.LastThought = "back from the void!"
 			petSnap := c.pet
 			c.stateMu.Unlock()
@@ -19273,6 +19371,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		c.pet.Happiness = min(100, c.pet.Happiness+10)
 		c.pet.TotalPets++
 		c.pet.LastPet = time.Now()
+		c.pet.Stats.recordInteraction(c.pet.LastPet)
 		c.pet.State = "happy"
 		c.pet.LastThought = randomThought("petting")
 		petSnap := c.pet
@@ -19326,6 +19425,17 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 		return true
 	}
 
+	// Check if clicking on a present the cat brought home (only on ground).
+	// Presents are checked before poop: they're the thing the cat wants you
+	// to notice, and a gift dropped next to a poop shouldn't get shadowed.
+	if petY == 0 && c.acceptPresentAt(clickX) {
+		coordinatorDebugLog.Printf("    -> Accepted a present at x=%d", clickX)
+		petSnap := c.pet
+		c.stateMu.Unlock()
+		savePetStateData(petSnap)
+		return true
+	}
+
 	// Check if clicking on poop (only on ground)
 	if petY == 0 {
 		poopWidth := uniseg.StringWidth(sprites.Poop)
@@ -19345,6 +19455,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 				coordinatorDebugLog.Printf("    -> Clicked on poop at X=%d (poop rendered at %d, width=%d)! Cleaning.", clickX, clampedPoopX, poopWidth)
 				c.pet.PoopPositions = append(c.pet.PoopPositions[:i], c.pet.PoopPositions[i+1:]...)
 				c.pet.TotalPoopsCleaned++
+				c.pet.Stats.recordInteraction(time.Now())
 				c.pet.LastThought = "much better." // instant fallback; LLM upgrades it
 				c.triggerPetEventThought("cleaned")
 				petSnap := c.pet
@@ -19372,6 +19483,9 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 			coordinatorDebugLog.Printf("    -> Clicked on mouse! Pet catches it.")
 			c.pet.MousePos = pos2D{X: -1, Y: 0}
 			c.pet.TotalMouseCatches++
+			c.pet.Stats.recordMouseCatch(time.Now())
+			c.pet.Stats.recordInteraction(time.Now())
+			c.spawnBlood(time.Now(), clampedMouseX, 0)
 			c.pet.Happiness = min(100, c.pet.Happiness+20)
 			c.pet.State = "happy"
 			c.pet.HasTarget = false
@@ -19437,6 +19551,7 @@ func (c *Coordinator) handlePetPlayAreaClick(clientID string, input *daemon.Inpu
 	c.pet.HasTarget = true
 	c.pet.ActionPending = "play"
 	c.pet.State = "walking"
+	c.pet.Stats.recordYarnThrow(time.Now())
 	c.pet.LastThought = "yarn!"
 	petSnap := c.pet
 	c.stateMu.Unlock()

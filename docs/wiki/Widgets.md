@@ -142,6 +142,32 @@ widgets:
 The pet gets hungry over time, can be fed, and has an adventure mode. State
 lives in `~/.local/state/tabby/pet.json`.
 
+On an adventure the cat scrolls through a biome, hops over rocks and logs, and
+sometimes climbs one and sits there a while before moving on. It hunts what it
+finds, and a good catch occasionally comes home as a present, left on the
+ground for you — click it to accept, or the cat takes it back after ten
+minutes.
+
+```yaml
+widgets:
+  pet:
+    adventure_enabled: true
+    adventure_chance: 100   # % of the time the cat acts on the urge to wander
+    adventure_blood: false  # splatter on a successful pounce
+```
+
+The cat only leaves when there is nothing going on at home: no yarn or food
+out, no mouse to chase, no poop to scoop, no unanswered question, and it has
+been genuinely idle for a few seconds first. `adventure_chance` then gates how
+often it actually goes. This key used to be documented but never read; leaving
+it unset keeps the old behaviour.
+
+The cat's permanent record — time spent in each state, adventures and catches,
+care streaks, fastest yarn catch, favourite biome — accumulates in the same
+`pet.json` under `lifetime_stats`. A `pet.json` from an older version loads
+fine; the counters simply start at zero, and the cat's birthday is backdated to
+the first time the new version sees it.
+
 It can also think out loud, using an LLM:
 
 ```yaml
