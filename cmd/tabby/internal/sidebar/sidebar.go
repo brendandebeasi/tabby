@@ -24,12 +24,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 	"github.com/rivo/uniseg"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
+	"github.com/brendandebeasi/tabby/pkg/textwidth"
 )
 
 var (
@@ -2400,17 +2400,7 @@ func stripAnsi(s string) string {
 // alt-screen frame. Measure by grapheme cluster instead, treating any
 // cluster carrying an emoji presentation selector as double-width.
 func displayWidth(s string) int {
-	w := 0
-	g := uniseg.NewGraphemes(s)
-	for g.Next() {
-		cluster := g.Str()
-		cw := runewidth.StringWidth(cluster)
-		if cw < 2 && strings.ContainsRune(cluster, '️') {
-			cw = 2
-		}
-		w += cw
-	}
-	return w
+	return textwidth.Display(s)
 }
 
 // clampToWidth trims s to at most maxW drawn columns, preserving ANSI escapes.

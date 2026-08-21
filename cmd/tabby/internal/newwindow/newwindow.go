@@ -278,9 +278,47 @@ func Run(args []string) int {
 	// the ssh icon/host color) and the tab returns to a shell on disconnect.
 	if remoteCmd != "" && contentPane != "" {
 		sendCommandToPane(cfg, contentPane, remoteCmd)
+	} else if contentPane != "" && landingEnabled(tcfg) {
+		// No inherited ssh, so open the launcher instead of a bare prompt. It
+		// goes through the same send-keys path for the same reason: the command
+		// it picks must run in the pane's own interactive shell, or tmux reports
+		// the wrapper shell as pane_current_command and the daemon loses remote
+		// detection. eval keeps the chosen `cd` in this shell rather than a
+		// subshell that exits immediately.
+		sendCommandToPane(cfg, contentPane, landingCommand())
 	}
 	_ = filepath.Dir // silence unused import when code paths change
 	return 0
+}
+
+// landingCommand is what a new tab types to open the launcher.
+//
+// The launcher writes the chosen command to stdout and draws its UI on stderr,
+// so eval runs the choice in this shell. A failed or cancelled launcher prints
+// nothing, which evals to a no-op and leaves a normal prompt.
+//
+// It resolves the running binary rather than trusting PATH, so a tabby that was
+// started by absolute path still finds itself. Falls back to a bare name when
+// the executable cannot be resolved.
+func landingCommand() string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		exe = "tabby"
+	}
+	return `eval "$(` + shellQuote(exe) + ` landing)"`
+}
+
+// shellQuote wraps s in single quotes, escaping any it contains, so a path with
+// spaces survives the shell that types it.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// landingEnabled reports whether new windows should open on the launcher.
+// Absent config means off: a new tab that lands somewhere unexpected is worse
+// than one that does not.
+func landingEnabled(tcfg *tabbycfg.Config) bool {
+	return tcfg != nil && tcfg.Landing.Enabled != nil && *tcfg.Landing.Enabled
 }
 
 // sendCommandToPane types a shell command into a pane and presses Enter, the way
