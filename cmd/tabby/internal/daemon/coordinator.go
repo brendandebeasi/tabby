@@ -747,6 +747,7 @@ type Coordinator struct {
 	lastSyncClientWidth    int                  // Active physical client width seen at the last width sync (detects a client/election flip so we don't adopt a transient clamp as the global)
 	activeWindowChangeTime time.Time            // When the active window changed (for grace period)
 	windowFirstSeen        map[string]time.Time // When each window was first observed by width sync (a brand-new window's sidebar width is spawn output, never a user drag)
+	pendingAdopt           pendingWidthAdopt    // Ambiguous active-window sidebar width awaiting confirmation by a second pass (see confirmWidthAdoptCandidate)
 	windowHistory          []string             // LIFO stack of recently visited window IDs (most recent first, max 20)
 	clientWindowHistory    map[string][]string  // Per-client LIFO stacks, keyed by client tty. Two terminals attached to one session each need their own back-target; a single shared stack restored one client's close to the other client's last window.
 	widthSyncMu            sync.Mutex
@@ -8327,6 +8328,36 @@ func isWindowSettling(firstSeen map[string]time.Time, activeWindowID string, now
 	return now.Sub(first) < sidebarWindowSettlePeriod
 }
 
+// pendingWidthAdopt holds a sidebar width measured on the active window that
+// could not be attributed to a user drag on sight, along with the window
+// geometry it was measured in.
+type pendingWidthAdopt struct {
+	windowID    string
+	width       int
+	windowWidth int
+	at          time.Time
+}
+
+// How long an unconfirmed width candidate stays eligible. Long enough to span
+// a couple of sync passes, short enough that a width nobody re-measures is
+// forgotten rather than adopted much later out of context.
+const widthAdoptCandidateTTL = 5 * time.Second
+
+// confirmWidthAdoptCandidate decides whether an ambiguous measurement has been
+// corroborated. A measurement counts as a user drag once an independent pass
+// reads the same sidebar width in the same window at the same window width:
+// the states this disambiguates from -- two differently-sized clients reflowing
+// the window between them, and a pass landing mid-resize -- move the numbers on
+// every pass, so they never agree twice running. Returns the candidate to carry
+// into the next pass when unconfirmed.
+func confirmWidthAdoptCandidate(pending pendingWidthAdopt, windowID string, width, windowWidth int, now time.Time) (bool, pendingWidthAdopt) {
+	if pending.windowID == windowID && pending.width == width && pending.windowWidth == windowWidth &&
+		now.Sub(pending.at) <= widthAdoptCandidateTTL {
+		return true, pendingWidthAdopt{}
+	}
+	return false, pendingWidthAdopt{windowID: windowID, width: width, windowWidth: windowWidth, at: now}
+}
+
 // SetActiveClientWidth records the currently-focused physical tmux client's
 // terminal width (in cols). RunWidthSync caps sidebar targets against this so
 // that we never ask tmux for more cols than the active client can honor.
@@ -9972,6 +10003,16 @@ func (c *Coordinator) attachedClientWidthSpread() bool {
 	return distinctClientWidths(string(out)) > 1
 }
 
+// adoptGlobalSidebarWidth promotes a measured sidebar width to the global
+// target. Callers hold widthSyncMu. The per-profile width is persisted here,
+// before per-client targets are computed, so sidebarReasonableMaxForWindow
+// reads the new value — otherwise the clamp reverts the drag on the same pass.
+func (c *Coordinator) adoptGlobalSidebarWidth(activeWindowID string, width int) {
+	c.globalWidth = width
+	tmuxCmd("set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", width)).Run()
+	c.persistSidebarWidthProfile(activeWindowID, width)
+}
+
 // PlanWidthSync computes the resize ops needed to reconcile every sidebar
 // pane's width with the global target. Returns ops without executing — the
 // caller chooses whether to flush directly (RunWidthSync wrapper) or
@@ -10156,7 +10197,15 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	// Prefer actual tmux pane width over client-reported width (the latter
 	// can lag a drag by a render cycle).
 	adoptedActiveWidth := 0
+	// Set when we hold off on an ambiguous measurement: the active window keeps
+	// whatever width it currently has for this pass instead of being pulled back
+	// to the global, so the candidate can be re-measured and confirmed.
+	deferActiveWindow := false
 	if activeWindowID != "" {
+		// Any path other than the ambiguity branch below invalidates a carried
+		// candidate, so clear it up front and re-arm only where it applies.
+		prevAdoptCandidate := c.pendingAdopt
+		c.pendingAdopt = pendingWidthAdopt{}
 		effectiveActive := clientSnapshot[activeWindowID]
 		reportedActive := effectiveActive
 		haveActual := false
@@ -10221,27 +10270,43 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=just_became_active active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
 			} else if atCap {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_active_client_cap active=%s measured=%d global=%d cap=%d", activeWindowID, effectiveActive, c.globalWidth, capped)
-			} else if multiClientSizes {
-				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=multi_client_sizes active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
-			} else if measurementsDisagree {
-				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=resize_in_flight active=%s pane_w=%d reported_w=%d global=%d", activeWindowID, effectiveActive, reportedActive, c.globalWidth)
 			} else if windowSettling {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=window_settling active=%s measured=%d global=%d age_ms=%d", activeWindowID, effectiveActive, c.globalWidth, now.Sub(c.windowFirstSeen[activeWindowID]).Milliseconds())
 			} else if fullWidth {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=full_window_width active=%s measured=%d global=%d win_w=%d", activeWindowID, effectiveActive, c.globalWidth, activeWinWidth)
 			} else if atProfileClamp {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_profile_clamp active=%s measured=%d global=%d clamp=%d", activeWindowID, effectiveActive, c.globalWidth, profileClamped)
+			} else if multiClientSizes || measurementsDisagree {
+				// Ambiguous, not wrong. Two attached clients of different sizes
+				// make tmux reflow the window to whichever acted last, and a pass
+				// landing mid-resize reads a width that is still moving; neither
+				// measurement is authoritative on sight. Refusing outright was
+				// worse than useless though — the per-window loop below then
+				// pulled the active window back to the stale global, so every
+				// sidebar drag on a desktop with a second client attached snapped
+				// straight back (WIDTH_SYNC_ADOPT_SKIP reason=multi_client_sizes
+				// followed by current=35 target=15). Hold the measurement as a
+				// candidate, leave the active window at the width it has, and
+				// adopt once a second pass corroborates it.
+				reason := "multi_client_sizes"
+				if !multiClientSizes {
+					reason = "resize_in_flight"
+				}
+				confirmed, next := confirmWidthAdoptCandidate(prevAdoptCandidate, activeWindowID, effectiveActive, activeWinWidth, now)
+				c.pendingAdopt = next
+				if !confirmed {
+					deferActiveWindow = true
+					logEvent("WIDTH_SYNC_ADOPT_DEFER reason=%s active=%s measured=%d global=%d win_w=%d", reason, activeWindowID, effectiveActive, c.globalWidth, activeWinWidth)
+				} else {
+					logEvent("WIDTH_SYNC_ADOPT_CONFIRMED reason=%s active=%s from=%d to=%d", reason, activeWindowID, c.globalWidth, effectiveActive)
+					c.adoptGlobalSidebarWidth(activeWindowID, effectiveActive)
+					adoptedActiveWidth = effectiveActive
+				}
 			} else {
 				coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global",
 					activeWindowID, c.globalWidth, effectiveActive)
 				logEvent("WIDTH_SYNC_ADOPT active=%s from=%d to=%d", activeWindowID, c.globalWidth, effectiveActive)
-				c.globalWidth = effectiveActive
-				tmuxCmd("set-option", "-gq", "@tabby_sidebar_width", fmt.Sprintf("%d", effectiveActive)).Run()
-				// Persist the per-profile width NOW (before per-client target
-				// computation) so sidebarReasonableMaxForWindow reads the new
-				// value, not the stale one. Otherwise the clamp would revert the
-				// drag on the same pass.
-				c.persistSidebarWidthProfile(activeWindowID, effectiveActive)
+				c.adoptGlobalSidebarWidth(activeWindowID, effectiveActive)
 				adoptedActiveWidth = effectiveActive
 			}
 		}
@@ -10256,6 +10321,11 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 
 		// Check per-window sync opt-out
 		if !syncSettings[clientID] {
+			continue
+		}
+
+		if deferActiveWindow && clientID == activeWindowID {
+			logEvent("WIDTH_SYNC_SKIP_DEFER client=%s width=%d global=%d", clientID, currentWidth, c.globalWidth)
 			continue
 		}
 

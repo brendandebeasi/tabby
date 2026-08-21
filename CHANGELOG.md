@@ -14,6 +14,8 @@
 
 ### Fixed
 
+- Dragging the sidebar border resizes it again when a second terminal is attached. With two clients of different widths on one session, tmux reflows the window to whichever acted last, so the daemon could not tell a drag from a reflow and refused to adopt the new width — while still snapping the pane back to the old one, which read as the drag doing nothing. An unattributable width is now held and adopted once a second pass measures the same width in the same window, and the window you are dragging is left alone until then.
+
 - Two sidebars stop fighting over the same panes. A grouped tmux session shares its windows with its peers, so each session's daemon saw the other's renderer panes as orphans from a dead daemon, killed them, and respawned its own — endlessly, which showed up as the sidebar redrawing and focus jumping between windows. A renderer belonging to another session is now only killed once tmux confirms that session is gone; the daemon left without clients idles out on its own.
 
 - The cat stays home when there is something to do. It would head off on an adventure the moment its animation state read `idle`, which happens a frame after you drop food or throw yarn, so a toy could land and the cat would walk away from it. It now waits for an empty yard — no food, no yarn, no mouse, no poop, no unanswered question — and a few seconds of actual idling before it goes (#28).
