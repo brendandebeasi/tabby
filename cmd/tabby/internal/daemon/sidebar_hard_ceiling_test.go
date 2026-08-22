@@ -30,6 +30,13 @@ func TestSidebarHardCeiling(t *testing.T) {
 		{"content_floor_wins", 120, maxPercent, 100, 20},
 		// Higher configured percent loosens the cap: 33% of 240 = 79.
 		{"loose_percent", 240, 33, minContent, 79},
+		// Regression: the mobile 20% guard applied to a desktop window pinned a
+		// 167-column window's sidebar to 33, so an explicit drag to 49 was
+		// clamped back on the next width sync and the sidebar snapped back
+		// forever. Desktop windows get the looser desktop percent (default 50),
+		// which leaves room for the drag while still blocking a runaway.
+		{"desktop_167_mobile_percent_too_tight", 167, maxPercent, minContent, 33},
+		{"desktop_167_desktop_percent_allows_drag", 167, 50, minContent, 83},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,5 +50,24 @@ func TestSidebarHardCeiling(t *testing.T) {
 				t.Fatalf("ceiling %d below hard floor 15", got)
 			}
 		})
+	}
+}
+
+// TestSidebarEffectiveMaxPercent locks in the two invariants that matter for the
+// desktop relaxation, independently of whatever options this machine has set:
+// the mobile guard still applies at or below the tablet threshold, and above it
+// the ceiling is never *tighter* than the mobile guard.
+func TestSidebarEffectiveMaxPercent(t *testing.T) {
+	threshold := sidebarTabletMaxWindowCols()
+
+	if got := sidebarEffectiveMaxPercent(threshold, 20); got != 20 {
+		t.Fatalf("at tablet threshold %d: got %d%%, want the mobile guard 20%%", threshold, got)
+	}
+	if got := sidebarEffectiveMaxPercent(threshold+1, 20); got < 20 {
+		t.Fatalf("above tablet threshold: got %d%%, must not be tighter than the mobile guard 20%%", got)
+	}
+	// A mobile guard looser than the desktop default must not be tightened.
+	if got := sidebarEffectiveMaxPercent(threshold+1, 60); got < 60 {
+		t.Fatalf("above tablet threshold: got %d%%, must not be tighter than the mobile guard 60%%", got)
 	}
 }

@@ -55,7 +55,8 @@ The responsive rules behind these are in [Responsive Layout](Responsive-Layout.m
 | `@tabby_sidebar_width_mobile_keyboard` | `14` | Width when a soft keyboard has shortened the window. |
 | `@tabby_sidebar_mobile_max_window_cols` | `110` | Windows this wide or narrower use the mobile profile. Only accepted at 60 or above. |
 | `@tabby_sidebar_tablet_max_window_cols` | `170` | Windows this wide or narrower use the tablet profile. Must be at least the mobile value. |
-| `@tabby_sidebar_mobile_max_percent` | `40` | Ceiling on the mobile sidebar as a share of window width. |
+| `@tabby_sidebar_mobile_max_percent` | `40` | Ceiling on the mobile sidebar as a share of window width. Applies to mobile and tablet windows only. |
+| `@tabby_sidebar_desktop_max_percent` | `50` | Ceiling on the sidebar as a share of window width on desktop windows. Accepted between 10 and 80, and never below the mobile ceiling. |
 | `@tabby_sidebar_mobile_min_content_cols` | `40` | Columns always left over for your content pane on mobile. |
 | `@tabby_sidebar_mobile_keyboard_rows` | `20` | Window height at or below which Tabby assumes a soft keyboard is up. |
 | `@tabby_sidebar_min_width` | `10` | Hard floor for any computed width. |

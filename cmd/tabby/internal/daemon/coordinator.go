@@ -746,6 +746,7 @@ type Coordinator struct {
 	lastWidthSync          time.Time            // Last time we synced widths (for debouncing)
 	lastActiveWindowID     string               // Track which window was last active (for detecting window switch)
 	lastSyncClientWidth    int                  // Active physical client width seen at the last width sync (detects a client/election flip so we don't adopt a transient clamp as the global)
+	lastSyncClientHeight   int                  // Same, for height: any geometry change reflows every window, and a pass landing mid-reflow must not adopt the transient width
 	activeWindowChangeTime time.Time            // When the active window changed (for grace period)
 	windowFirstSeen        map[string]time.Time // When each window was first observed by width sync (a brand-new window's sidebar width is spawn output, never a user drag)
 	pendingAdopt           pendingWidthAdopt    // Ambiguous active-window sidebar width awaiting confirmation by a second pass (see confirmWidthAdoptCandidate)
@@ -8540,6 +8541,28 @@ func confirmWidthAdoptCandidate(pending pendingWidthAdopt, windowID string, widt
 	return false, pendingWidthAdopt{windowID: windowID, width: width, windowWidth: windowWidth, at: now}
 }
 
+// clientGeometryFlipped reports whether the elected physical client changed
+// size since the last width-sync pass, in either axis.
+//
+// Height matters as much as width: tmux reflows every window on ANY client
+// geometry change, and mid-reflow a sidebar pane sweeps through transient
+// widths before settling. A height-only change (167x45 -> 167x46 — a status
+// line appearing, a window-switch repaint) used to leave the guard off, so a
+// forced pass landing on the transient adopted it as the user's chosen width:
+// observed live as `WIDTH_SYNC_ADOPT active=@1930 from=30 to=46`, 46 being a
+// reflow artifact rather than a drag, which then persisted into
+// @tabby_sidebar_width{,_desktop} and jumped every window's sidebar. Same
+// transient, same treatment.
+//
+// Both checks are edge-triggered against the last committed measurement, and a
+// zero on either side means "not measured yet" — the first pass after startup
+// has nothing to compare against and must not report a flip.
+func clientGeometryFlipped(lastWidth, lastHeight, curWidth, curHeight int) (widthChanged, heightChanged bool) {
+	widthChanged = curWidth > 0 && lastWidth != 0 && lastWidth != curWidth
+	heightChanged = curHeight > 0 && lastHeight != 0 && lastHeight != curHeight
+	return widthChanged, heightChanged
+}
+
 // SetActiveClientWidth records the currently-focused physical tmux client's
 // terminal width (in cols). RunWidthSync caps sidebar targets against this so
 // that we never ask tmux for more cols than the active client can honor.
@@ -10327,7 +10350,10 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	// read that stale 10-col pane and adopt it as the new global, permanently
 	// shrinking every window's sidebar. See the sidebar-width bug.
 	curSyncClientWidth := int(c.activeClientWidth.Load())
-	clientWidthChanged := curSyncClientWidth > 0 && c.lastSyncClientWidth != 0 && c.lastSyncClientWidth != curSyncClientWidth
+	curSyncClientHeight := c.ActiveClientSnapshot().Height
+	clientWidthChanged, clientHeightChanged := clientGeometryFlipped(
+		c.lastSyncClientWidth, c.lastSyncClientHeight, curSyncClientWidth, curSyncClientHeight)
+	clientGeometryChanged := clientWidthChanged || clientHeightChanged
 
 	// clientWidthChanged is edge-triggered: it fires on the pass where the
 	// width flips, then lastSyncClientWidth commits and the next pass adopts
@@ -10363,6 +10389,9 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	// pass that follows would no longer see the flip.
 	if curSyncClientWidth > 0 {
 		c.lastSyncClientWidth = curSyncClientWidth
+	}
+	if curSyncClientHeight > 0 {
+		c.lastSyncClientHeight = curSyncClientHeight
 	}
 
 	// Build list of panes to resize (compute under lock, execute after unlock)
@@ -10469,13 +10498,18 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 			// tick. Use the same test so the two checks agree.
 			activeWinWidth := windowWidths[activeWindowID]
 			fullWidth := activeWinWidth > 0 && effectiveActive >= activeWinWidth-2
-			if clientWidthChanged {
+			if clientGeometryChanged {
 				// The elected physical client just changed size (phone<->desktop
-				// flip / reattach). The measured discrepancy is a stale clamp
-				// about to be restored by the per-window loop, not a drag.
-				// Adopting here would let a narrow client permanently shrink the
-				// global sidebar width for every window.
-				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=client_width_changed active=%s measured=%d global=%d client_width=%d", activeWindowID, effectiveActive, c.globalWidth, curSyncClientWidth)
+				// flip / reattach, or a height-only reflow). The measured
+				// discrepancy is a stale clamp or a mid-reflow transient about to
+				// be restored by the per-window loop, not a drag. Adopting here
+				// would let a narrow client permanently shrink the global sidebar
+				// width for every window.
+				reason := "client_width_changed"
+				if !clientWidthChanged {
+					reason = "client_height_changed"
+				}
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=%s active=%s measured=%d global=%d client_width=%d client_height=%d", reason, activeWindowID, effectiveActive, c.globalWidth, curSyncClientWidth, curSyncClientHeight)
 			} else if justBecameActive {
 				// First sync tick after a window switch. The discrepancy is a
 				// stale width about to be synced TO this window, not a drag
@@ -10904,6 +10938,43 @@ func (c *Coordinator) updateKeyboardHoldLocked(clientID string, reportedHeight i
 // width ceiling: the smaller of maxPercent of the window width and
 // (windowWidth - minContentCols), never below 15. Extracted so the clamp logic
 // is unit-testable without a live tmux server.
+// sidebarEffectiveMaxPercent returns the percentage-of-window ceiling that
+// applies to a window of this width. @tabby_sidebar_mobile_max_percent is a
+// mobile guard — it exists so a sidebar can't swallow a phone-sized window —
+// but it was being applied to desktop windows too, where it is far too tight:
+// on a 167-column window it capped the sidebar at 33, so an explicit drag to 49
+// was clamped back on the very next width sync while the persisted preference
+// stayed at 49, i.e. the sidebar snapped back forever. Above the tablet
+// threshold the ceiling relaxes to @tabby_sidebar_desktop_max_percent (default
+// 50%), which still blocks a runaway drag from eating the window.
+func sidebarEffectiveMaxPercent(windowWidth, mobileMaxPercent int) int {
+	if windowWidth <= sidebarTabletMaxWindowCols() {
+		return mobileMaxPercent
+	}
+	desktopPercent := 50
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_desktop_max_percent")); err == nil && v >= 10 && v <= 80 {
+		desktopPercent = v
+	}
+	if desktopPercent < mobileMaxPercent {
+		return mobileMaxPercent
+	}
+	return desktopPercent
+}
+
+// sidebarTabletMaxWindowCols returns the window width at or below which the
+// tablet (or narrower) profile applies.
+func sidebarTabletMaxWindowCols() int {
+	maxWindowCols := 110
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_mobile_max_window_cols")); err == nil && v >= 60 {
+		maxWindowCols = v
+	}
+	tabletMaxWindowCols := 170
+	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_tablet_max_window_cols")); err == nil && v >= maxWindowCols {
+		tabletMaxWindowCols = v
+	}
+	return tabletMaxWindowCols
+}
+
 func sidebarHardCeiling(windowWidth, maxPercent, minContentCols int) int {
 	ceiling := windowWidth * maxPercent / 100
 	if byContent := windowWidth - minContentCols; byContent < ceiling {
@@ -10943,7 +11014,7 @@ func (c *Coordinator) sidebarHardCeilingForWindow(windowID string) (int, bool) {
 	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_mobile_min_content_cols")); err == nil && v >= 20 {
 		minContentCols = v
 	}
-	return sidebarHardCeiling(windowWidth, maxPercent, minContentCols), true
+	return sidebarHardCeiling(windowWidth, sidebarEffectiveMaxPercent(windowWidth, maxPercent), minContentCols), true
 }
 
 func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeight int) (int, bool) {
@@ -10997,10 +11068,7 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 		maxWindowCols = v
 	}
 
-	tabletMaxWindowCols := 170
-	if v, err := strconv.Atoi(tmuxGlobalOption("@tabby_sidebar_tablet_max_window_cols")); err == nil && v >= maxWindowCols {
-		tabletMaxWindowCols = v
-	}
+	tabletMaxWindowCols := sidebarTabletMaxWindowCols()
 
 	widthDesktop := c.globalWidth
 	if widthDesktop < 15 {
@@ -11024,7 +11092,7 @@ func (c *Coordinator) sidebarReasonableMaxForWindow(windowID string, clientHeigh
 	if maxByContent < 15 {
 		maxByContent = 15
 	}
-	hardCeiling := sidebarHardCeiling(windowWidth, maxPercent, minContentCols)
+	hardCeiling := sidebarHardCeiling(windowWidth, sidebarEffectiveMaxPercent(windowWidth, maxPercent), minContentCols)
 
 	if windowWidth > tabletMaxWindowCols {
 		if widthDesktop > hardCeiling {

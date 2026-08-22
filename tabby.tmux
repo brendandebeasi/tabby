@@ -378,6 +378,7 @@ POSITION=${POSITION:-top}
 
 # Sidebar width safety caps for mobile/focus view
 SIDEBAR_MOBILE_MAX_PERCENT=$(grep -A40 "^sidebar:" "$CONFIG_FILE" 2>/dev/null | grep "mobile_max_percent:" | awk '{print $2}' | tr -d '"' || echo "")
+SIDEBAR_DESKTOP_MAX_PERCENT=$(grep -A40 "^sidebar:" "$CONFIG_FILE" 2>/dev/null | grep "desktop_max_percent:" | awk '{print $2}' | tr -d '"' || echo "")
 SIDEBAR_MOBILE_MIN_CONTENT=$(grep -A40 "^sidebar:" "$CONFIG_FILE" 2>/dev/null | grep "mobile_min_content_cols:" | awk '{print $2}' | tr -d '"' || echo "")
 SIDEBAR_MOBILE_MAX_WINDOW=$(grep -A40 "^sidebar:" "$CONFIG_FILE" 2>/dev/null | grep "mobile_max_window_cols:" | awk '{print $2}' | tr -d '"' || echo "")
 SIDEBAR_TABLET_MAX_WINDOW=$(grep -A40 "^sidebar:" "$CONFIG_FILE" 2>/dev/null | grep "tablet_max_window_cols:" | awk '{print $2}' | tr -d '"' || echo "")
@@ -386,20 +387,38 @@ SIDEBAR_WIDTH_TABLET=$(grep -A40 "^sidebar:" "$CONFIG_FILE" 2>/dev/null | grep "
 SIDEBAR_WIDTH_DESKTOP=$(grep -A40 "^sidebar:" "$CONFIG_FILE" 2>/dev/null | grep "width_desktop:" | awk '{print $2}' | tr -d '"' || echo "")
 
 SIDEBAR_MOBILE_MAX_PERCENT=${SIDEBAR_MOBILE_MAX_PERCENT:-20}
+SIDEBAR_DESKTOP_MAX_PERCENT=${SIDEBAR_DESKTOP_MAX_PERCENT:-50}
 SIDEBAR_MOBILE_MIN_CONTENT=${SIDEBAR_MOBILE_MIN_CONTENT:-40}
 SIDEBAR_MOBILE_MAX_WINDOW=${SIDEBAR_MOBILE_MAX_WINDOW:-110}
 SIDEBAR_TABLET_MAX_WINDOW=${SIDEBAR_TABLET_MAX_WINDOW:-140}
-SIDEBAR_WIDTH_MOBILE=${SIDEBAR_WIDTH_MOBILE:-15}
-SIDEBAR_WIDTH_TABLET=${SIDEBAR_WIDTH_TABLET:-20}
-SIDEBAR_WIDTH_DESKTOP=${SIDEBAR_WIDTH_DESKTOP:-25}
+
+# The per-profile widths double as persisted state: when you drag the sidebar the
+# daemon adopts the new width and writes it back into
+# @tabby_sidebar_width_<profile>. Setting them unconditionally on every plugin
+# load — including the run-shell reload and every client-attached re-entry — wiped
+# that adoption and snapped the sidebar back to the built-in default. So write
+# only what the config actually specifies, and otherwise seed the default just
+# once, when nothing valid is set yet.
+_tabby_seed_width_option() {
+    local opt="$1" configured="$2" fallback="$3" existing
+    if [ -n "$configured" ]; then
+        tmux set-option -g "$opt" "$configured"
+        return
+    fi
+    existing=$(tmux show-option -gqv "$opt" 2>/dev/null || echo "")
+    case "$existing" in
+        ''|*[!0-9]*) tmux set-option -g "$opt" "$fallback" ;;
+    esac
+}
 
 tmux set-option -g @tabby_sidebar_mobile_max_percent "$SIDEBAR_MOBILE_MAX_PERCENT"
+tmux set-option -g @tabby_sidebar_desktop_max_percent "$SIDEBAR_DESKTOP_MAX_PERCENT"
 tmux set-option -g @tabby_sidebar_mobile_min_content_cols "$SIDEBAR_MOBILE_MIN_CONTENT"
 tmux set-option -g @tabby_sidebar_mobile_max_window_cols "$SIDEBAR_MOBILE_MAX_WINDOW"
 tmux set-option -g @tabby_sidebar_tablet_max_window_cols "$SIDEBAR_TABLET_MAX_WINDOW"
-tmux set-option -g @tabby_sidebar_width_mobile "$SIDEBAR_WIDTH_MOBILE"
-tmux set-option -g @tabby_sidebar_width_tablet "$SIDEBAR_WIDTH_TABLET"
-tmux set-option -g @tabby_sidebar_width_desktop "$SIDEBAR_WIDTH_DESKTOP"
+_tabby_seed_width_option @tabby_sidebar_width_mobile "$SIDEBAR_WIDTH_MOBILE" 15
+_tabby_seed_width_option @tabby_sidebar_width_tablet "$SIDEBAR_WIDTH_TABLET" 20
+_tabby_seed_width_option @tabby_sidebar_width_desktop "$SIDEBAR_WIDTH_DESKTOP" 25
 
 # First-run bootstrap: if no mode has ever been set, default to enabled.
 INITIAL_MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
