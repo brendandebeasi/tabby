@@ -953,8 +953,10 @@ func sendAction(action, target, value string) error {
 		return fmt.Errorf("failed to get session ID: %w", err)
 	}
 
-	sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	// Our own session's daemon first, then any grouped peer's. Peers hold the
+	// same windows, so a peer daemon can service the request while ours is
+	// being respawned — otherwise the keypress is simply dropped.
+	conn, sockPath, err := dialDaemon(append([]string{sessionID}, peerSessionIDs(sessionID)...))
 	if err != nil {
 		return fmt.Errorf("daemon not running (socket %s): %w", sockPath, err)
 	}
@@ -983,12 +985,100 @@ func sendAction(action, target, value string) error {
 	return err
 }
 
+// dialDaemon tries each session's daemon socket in order and returns the first
+// live connection. On failure the reported path is the first session's socket —
+// the one the caller actually wanted — so error messages stay readable.
+func dialDaemon(sessionIDs []string) (net.Conn, string, error) {
+	var lastErr error
+	primary := ""
+	for _, sid := range sessionIDs {
+		if sid == "" {
+			continue
+		}
+		sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sid)
+		if primary == "" {
+			primary = sockPath
+		}
+		conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+		if err == nil {
+			return conn, sockPath, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no session id")
+	}
+	return nil, primary, lastErr
+}
+
 func getSessionID() (string, error) {
+	// Prefer the session of the client that fired the binding. Under grouped
+	// sessions (`new-session -t`) every session in the group holds the same
+	// windows, and a bare `display-message -p '#{session_id}'` — no client, no
+	// target — answers with the newest session in the group regardless of where
+	// the invoking client actually sits. Dialling that session's socket reaches
+	// a daemon that idle-quit 30s after its own session went clientless, and the
+	// keypress is dropped.
+	if tty := strings.TrimSpace(os.Getenv("TABBY_INVOKING_TTY")); tty != "" {
+		if sid := sessionIDForTTY(tty); sid != "" {
+			return sid, nil
+		}
+	}
 	out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// sessionIDForTTY returns the session id the given client tty is attached to,
+// or "" when no such client exists. list-clients evaluates the format against
+// each client's own session, so this is unambiguous where display-message is
+// not.
+func sessionIDForTTY(tty string) string {
+	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|#{session_id}").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 2)
+		if len(parts) == 2 && parts[0] == tty {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
+}
+
+// peerSessionIDs lists the other sessions sharing sessionID's session group.
+// Grouped peers see the same windows, so a daemon on any of them can service a
+// request when our own session's daemon is down.
+func peerSessionIDs(sessionID string) []string {
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_id}|#{session_group}").Output()
+	if err != nil {
+		return nil
+	}
+	group := ""
+	rows := [][2]string{}
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		rows = append(rows, [2]string{strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])})
+		if parts[0] == sessionID {
+			group = strings.TrimSpace(parts[1])
+		}
+	}
+	if group == "" {
+		return nil
+	}
+	peers := []string{}
+	for _, r := range rows {
+		if r[1] == group && r[0] != sessionID {
+			peers = append(peers, r[0])
+		}
+	}
+	return peers
 }
 
 func fatal(msg string) {

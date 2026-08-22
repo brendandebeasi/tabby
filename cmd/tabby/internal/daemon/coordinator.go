@@ -2984,14 +2984,24 @@ func (c *Coordinator) SelectWindow(targetWindowID, reason, source string) error 
 	// so select-window can reach it) before selecting.
 	c.surfaceForActivate(targetWindowID)
 
-	if err := tmuxRun("select-window", "-t", targetWindowID); err != nil {
-		if reason == "" {
-			reason = "unspecified"
+	// Qualify with our own session: under grouped sessions a bare `@id`
+	// resolves to the newest session in the group, not ours. Fall back to the
+	// bare id if the qualified form fails — surfaceForActivate may have just
+	// moved the window in from the holding session.
+	selectTarget := targetWindowID
+	if sess := strings.TrimSpace(c.sessionID); sess != "" {
+		selectTarget = sess + ":" + targetWindowID
+	}
+	if err := tmuxRun("select-window", "-t", selectTarget); err != nil {
+		if selectTarget == targetWindowID || tmuxRun("select-window", "-t", targetWindowID) != nil {
+			if reason == "" {
+				reason = "unspecified"
+			}
+			if source == "" {
+				source = "unknown"
+			}
+			return fmt.Errorf("select window target=%s reason=%s source=%s: %w", targetWindowID, reason, source, err)
 		}
-		if source == "" {
-			source = "unknown"
-		}
-		return fmt.Errorf("select window target=%s reason=%s source=%s: %w", targetWindowID, reason, source, err)
 	}
 
 	c.SetActiveWindowOptimistic(targetWindowID)
@@ -9835,7 +9845,10 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 	}
 	target := wins[(idx+delta+len(wins))%len(wins)]
 
-	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_session}|#{client_window}").Output()
+	// `client_session` is the session NAME; `session_id` is the `$N` form the
+	// daemon keys everything by, and it is what a switch-client target must be
+	// qualified with below.
+	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_session}|#{client_window}|#{session_id}").Output()
 	if err != nil {
 		logEvent("WINDOW_NAV_PERCLIENT_LIST_ERR err=%v", err)
 		return false
@@ -9855,26 +9868,38 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 	daemonSession := strings.TrimSpace(c.sessionID)
 
 	type ttyResolution struct {
-		tty    string
-		window string
+		tty     string
+		window  string
+		session string
 	}
 	var fallbackTTYs []string
+	// Each client's own session, so switch-client can name a
+	// session-qualified target below.
+	ttySession := map[string]string{}
 	resolutions := []ttyResolution{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "|", 3)
-		if len(parts) != 3 {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 4)
+		if len(parts) < 3 {
 			continue
 		}
 		tty := strings.TrimSpace(parts[0])
 		sess := strings.TrimSpace(parts[1])
 		idx := strings.TrimSpace(parts[2])
+		sessID := ""
+		if len(parts) == 4 {
+			sessID = strings.TrimSpace(parts[3])
+		}
 		if tty == "" {
 			continue
 		}
+		if sessID == "" {
+			sessID = sess
+		}
+		ttySession[tty] = sessID
 		// Cache hit path: client is on our session, index resolves.
 		if sess == daemonSession || daemonSession == "" {
 			if winID, ok := idxToID[idx]; ok {
-				resolutions = append(resolutions, ttyResolution{tty: tty, window: winID})
+				resolutions = append(resolutions, ttyResolution{tty: tty, window: winID, session: sessID})
 				continue
 			}
 		}
@@ -9892,7 +9917,7 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 			go func() {
 				defer wg.Done()
 				curOut, _ := tmuxCmd("display-message", "-p", "-c", tty, "#{window_id}").Output()
-				fallbackResults[i] = ttyResolution{tty: tty, window: strings.TrimSpace(string(curOut))}
+				fallbackResults[i] = ttyResolution{tty: tty, window: strings.TrimSpace(string(curOut)), session: ttySession[tty]}
 			}()
 		}
 		wg.Wait()
@@ -9900,9 +9925,22 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 	}
 
 	ttys := []string{}
+	ttyTargets := map[string]string{}
 	for _, r := range resolutions {
-		if r.window == src {
-			ttys = append(ttys, r.tty)
+		if r.window != src {
+			continue
+		}
+		ttys = append(ttys, r.tty)
+		// Qualify the target with the client's OWN session. Grouped
+		// sessions (`new-session -t`) share every window, and tmux
+		// resolves a bare `@id` to the newest session in the group — so
+		// an unqualified switch-client silently drags the client into a
+		// peer session. That leaves our session clientless, its daemon
+		// idle-quits, and the next keypress finds a dead socket.
+		if sess := strings.TrimSpace(r.session); sess != "" {
+			ttyTargets[r.tty] = sess + ":" + target
+		} else {
+			ttyTargets[r.tty] = target
 		}
 	}
 	if len(ttys) == 0 {
@@ -9920,9 +9958,14 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 		i, tty := i, tty
 		go func() {
 			defer swg.Done()
-			if err := tmuxCmd("switch-client", "-c", tty, "-t", target).Run(); err != nil {
-				switchErrs[i] = err
-				return
+			if err := tmuxCmd("switch-client", "-c", tty, "-t", ttyTargets[tty]).Run(); err != nil {
+				// A qualified target can fail if the client moved
+				// sessions mid-flight; the bare id still lands on the
+				// right window, so retry once before giving up.
+				if ttyTargets[tty] == target || tmuxCmd("switch-client", "-c", tty, "-t", target).Run() != nil {
+					switchErrs[i] = err
+					return
+				}
 			}
 			switched[i] = tty
 		}()

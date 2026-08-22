@@ -25,6 +25,21 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # single fork on the init hot path.
 SESSION="${1:-}"
 SESSION_NAME="${2:-}"
+# Optional third arg: the client tty this hook fired for. Under grouped
+# sessions a bare `display-message -p '#{session_id}'` answers with the newest
+# session in the group rather than the one the client is actually on, so when a
+# tty is known resolve through list-clients, which evaluates the format against
+# each client's own session.
+CLIENT_TTY="${3:-}"
+if { [ -z "$SESSION" ] || [ -z "$SESSION_NAME" ]; } && [ -n "$CLIENT_TTY" ]; then
+    _ROW=$(tmux list-clients -F '#{client_tty}|#{session_id}|#{session_name}' 2>/dev/null \
+        | grep -F "${CLIENT_TTY}|" | head -1)
+    if [ -n "$_ROW" ]; then
+        _REST="${_ROW#*|}"
+        [ -z "$SESSION" ] && SESSION="${_REST%%|*}"
+        [ -z "$SESSION_NAME" ] && SESSION_NAME="${_REST#*|}"
+    fi
+fi
 if [ -z "$SESSION" ] || [ -z "$SESSION_NAME" ]; then
     _INFO=$(tmux display-message -p '#{session_id}|#{session_name}' 2>/dev/null || echo "|")
     [ -z "$SESSION" ] && SESSION="${_INFO%%|*}"

@@ -515,7 +515,7 @@ PRESERVE_RATIOS_CMD="$HOOK_BIN preserve-pane-ratios"
 tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"'; run-shell -b '$SIGNAL_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
 
 # Restore sidebar when client reattaches to session
-tmux set-hook -g client-attached "run-shell -b '$ENSURE_DAEMON_CMD'; run-shell '$RESTORE_SIDEBAR_CMD'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
+tmux set-hook -g client-attached "run-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"';run-shell '$RESTORE_SIDEBAR_CMD'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
 
 # Client resize: resize windows to client geometry, signal daemon
 tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
@@ -528,6 +528,12 @@ tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{clien
 # its socket from the current session id and drops the keypress.
 # Sidebar spawning itself is handled by the daemon via USR1.
 tmux set-hook -g session-created "run-shell -b '$ENSURE_DAEMON_CMD; $SIGNAL_CMD'"
+
+# client-session-changed: a client moving between sessions (switch-client, or
+# detach/attach onto a grouped peer) leaves the session it entered possibly
+# daemonless — the old session's daemon idle-quits 30s after going clientless,
+# and nothing else fires for the session being entered.
+tmux set-hook -g client-session-changed "run-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"'"
 
 # Maintain sidebar width after terminal resize
 tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
