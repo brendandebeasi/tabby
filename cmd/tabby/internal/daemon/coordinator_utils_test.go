@@ -441,3 +441,26 @@ func TestGetAnimatedActiveIndicator_BlankFrameBecomesSpace(t *testing.T) {
 	c.spinnerFrame = 0
 	assert.Equal(t, " ", c.getAnimatedActiveIndicator("X"))
 }
+
+func TestIsAIPane(t *testing.T) {
+	t.Run("local_ai_tool_by_command", func(t *testing.T) {
+		assert.True(t, isAIPane(tmux.Pane{Command: "2.1.239", Title: "some task"}))
+	})
+
+	t.Run("local_shell_is_not_ai", func(t *testing.T) {
+		assert.False(t, isAIPane(tmux.Pane{Command: "zsh", Title: "◐ looks busy"}))
+	})
+
+	t.Run("remote_pane_with_spinner_title", func(t *testing.T) {
+		assert.True(t, isAIPane(tmux.Pane{Command: "ssh", Title: "◐ integration-sync"}))
+		assert.True(t, isAIPane(tmux.Pane{Command: "mosh", Title: "⠋ working"}))
+	})
+
+	t.Run("remote_pane_with_idle_title", func(t *testing.T) {
+		assert.True(t, isAIPane(tmux.Pane{Command: "ssh", Title: "✳ Recurring crash"}))
+	})
+
+	t.Run("remote_pane_without_ai_glyph", func(t *testing.T) {
+		assert.False(t, isAIPane(tmux.Pane{Command: "ssh", Title: "b@host: ~"}))
+	})
+}

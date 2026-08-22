@@ -3994,14 +3994,29 @@ func (c *Coordinator) remoteTabPlaceholderCode(win tmux.Window) string {
 	return ""
 }
 
-// isAIWindow reports whether any of the window's content panes runs an AI tool
-// (e.g. Claude Code, which IsAITool detects via its semver process name).
+// isAIPane reports whether a pane hosts an AI tool.
+//
+// Locally that's a command match (e.g. Claude Code, which IsAITool detects via
+// its semver process name). Over ssh/mosh the pane command is just the transport
+// and the tool inside is invisible, so we fall back to the tool's own spinner or
+// idle glyph in the pane title, which propagates through the connection.
+func isAIPane(pane tmux.Pane) bool {
+	if tmux.IsAITool(pane.Command) {
+		return true
+	}
+	if tmux.IsRemoteCommand(pane.Command) {
+		return tmux.HasSpinner(pane.Title) || tmux.HasIdleIcon(pane.Title)
+	}
+	return false
+}
+
+// isAIWindow reports whether any of the window's content panes runs an AI tool.
 func isAIWindow(win tmux.Window) bool {
 	for i := range win.Panes {
 		if isAuxiliaryPane(win.Panes[i]) {
 			continue
 		}
-		if tmux.IsAITool(win.Panes[i].Command) {
+		if isAIPane(win.Panes[i]) {
 			return true
 		}
 	}
@@ -5205,7 +5220,7 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			if isAuxiliaryPane(win.Panes[j]) {
 				continue
 			}
-			if tmux.IsAITool(win.Panes[j].Command) {
+			if isAIPane(win.Panes[j]) {
 				aiPanes = append(aiPanes, &win.Panes[j])
 			}
 		}

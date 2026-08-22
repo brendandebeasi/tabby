@@ -68,44 +68,61 @@ indicators:
 
 **Config**: `~/.claude/settings.json`
 
-Add to the `"hooks"` key:
+Add to the `"hooks"` key. Each command is wrapped in the guard from
+[Remote AI panes](#remote-ssh--mosh-ai-panes) so a `settings.json` shared with
+other hosts no-ops there instead of erroring on every event -- abbreviated below
+as `$T` for readability:
 
 ```json
 {
   "hooks": {
     "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/tabby/bin/tabby hook set-indicator busy 1"
-          }
-        ]
-      }
+      { "matcher": "*", "hooks": [ { "type": "command", "timeout": 5,
+        "command": "$T hook set-indicator input 0; $T hook set-indicator bell 0; $T hook set-indicator busy 1" } ] }
+    ],
+    "Notification": [
+      { "matcher": "*", "hooks": [ { "type": "command", "timeout": 5,
+        "command": "$T hook set-indicator input 1" } ] }
+    ],
+    "PermissionRequest": [
+      { "matcher": "*", "hooks": [ { "type": "command", "timeout": 5,
+        "command": "$T hook set-indicator input 1" } ] }
     ],
     "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/tabby/bin/tabby hook set-indicator busy 0 && /path/to/tabby/bin/tabby hook set-indicator input 1"
-          }
-        ]
-      }
+      { "matcher": "*", "hooks": [ { "type": "command", "timeout": 5,
+        "command": "$T hook set-indicator busy 0; $T hook set-indicator bell 1" } ] }
     ],
-    "SubagentStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/tabby/bin/tabby hook set-indicator busy 1"
-          }
-        ]
-      }
+    "SessionStart": [
+      { "matcher": "*", "hooks": [ { "type": "command", "timeout": 5,
+        "command": "$T hook set-indicator busy 0; $T hook set-indicator input 0; $T hook set-indicator bell 0" } ] }
+    ],
+    "SessionEnd": [
+      { "matcher": "*", "hooks": [ { "type": "command", "timeout": 5,
+        "command": "$T hook set-indicator busy 0; $T hook set-indicator input 0; $T hook set-indicator bell 0" } ] }
     ]
   }
 }
 ```
+
+State mapping:
+
+| State           | Event                             | Indicator          |
+|-----------------|-----------------------------------|--------------------|
+| working         | `UserPromptSubmit`                | spinner (`busy 1`) |
+| thinking        | (no distinct event -- see below)  | spinner (`busy 1`) |
+| has question    | `Notification`, `PermissionRequest` | `?` (`input 1`)  |
+| done working    | `Stop`                            | ◆ (`bell 1`)       |
+
+**Thinking has no distinct hook.** Claude Code exposes no "started/stopped
+reasoning" event, so thinking and tool-work collapse into the one busy spinner:
+`UserPromptSubmit` fires the moment the prompt is submitted (i.e. when thinking
+begins) and `Stop` clears it. If you want them visually distinct, the passive path
+gets closer for free -- the pane title carries the spinner only while the model is
+actually producing.
+
+**Do not hook `PreToolUse` / `PostToolUse`** for indicators. They fire on every
+tool call, add two subprocess spawns each, and set a state `UserPromptSubmit`
+already covers for the whole turn.
 
 **Events available**: `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`,
@@ -480,11 +497,43 @@ Recent versions include state-recovery fallback to reduce skipped `busy 0`/`inpu
 
 Even without hooks, the daemon detects AI tool states by:
 
-1. **Braille spinner** (U+2801-U+28FF) in pane title -- Claude Code uses these
-   while thinking.
-2. **Title change between poll cycles** -- Any tool that updates its title while
+1. **Spinner glyph** in pane title -- two families are recognized: braille
+   (U+2801-U+28FF) and half-filled circles ◐◓◑◒ (U+25D0-U+25D3). Current Claude
+   Code builds use the half-circles; older ones used braille.
+2. **Idle glyph** ✳ (U+2733) in pane title -- Claude Code's explicit
+   "waiting for you" icon, which maps to the `?` input indicator.
+3. **Title change between poll cycles** -- Any tool that updates its title while
    working (every 5 seconds).
-3. **Process exit** -- When the AI tool command exits, the daemon fires a bell.
+4. **Process exit** -- When the AI tool command exits, the daemon fires a bell.
+
+### Remote (SSH / mosh) AI panes
+
+Over a connection the local pane command is just `ssh`, so the tool inside is
+invisible to command-based detection -- but the remote tool still sets the pane
+title, and that propagates through. A pane running `ssh`/`mosh`/`telnet` whose
+title carries a spinner or idle glyph is therefore treated as an AI pane and gets
+the same busy/input indicators as a local one. **Nothing needs to be installed on
+the remote host for this.**
+
+Installing `tabby` on the remote host additionally enables the hook path: on a
+remote host `tabby hook set-indicator` emits an OSC 7700 sequence that the local
+per-pane `tabby hook osc-handler` picks up and applies as a real tmux option.
+
+Note that a hook command referencing an absolute local path will not resolve on a
+remote host. Guard it so it no-ops silently instead of erroring on every event:
+
+```sh
+T=/path/to/tabby/bin/tabby; [ -x "$T" ] || T="$(command -v tabby 2>/dev/null)"
+[ -x "$T" ] && { "$T" hook set-indicator busy 1; }; exit 0
+```
+
+### The `?` indicator is "unseen", not "idle"
+
+`?` means *something happened here you haven't looked at yet*. Once an attached
+client views the window, it is acknowledged and stays quiet until the next
+busy -> idle cycle. A consequence: if a tool's spinner is not recognized, the
+pane never registers as busy, the acknowledgment is never re-armed, and `?` never
+comes back either -- one missed spinner glyph silently costs both indicators.
 
 The passive system works for all tools automatically. Hooks add precision: instant
 state changes instead of 5-second polling, and no false positives from title

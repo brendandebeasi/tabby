@@ -183,6 +183,33 @@ func TestHasSpinner(t *testing.T) {
 	t.Run("idle_star_not_spinner", func(t *testing.T) {
 		assert.False(t, HasSpinner("✳ waiting"))
 	})
+
+	t.Run("half_circle_is_spinner", func(t *testing.T) {
+		assert.True(t, HasSpinner("◐ thinking"))
+		assert.True(t, HasSpinner("◓ thinking"))
+		assert.True(t, HasSpinner("◑ thinking"))
+		assert.True(t, HasSpinner("◒ thinking"))
+	})
+
+	t.Run("other_circle_glyphs_not_spinner", func(t *testing.T) {
+		assert.False(t, HasSpinner("● title")) // U+25CF-adjacent, below the range
+		assert.False(t, HasSpinner("◔ title")) // U+25D4, above the range
+	})
+}
+
+func TestIsRemoteCommand(t *testing.T) {
+	t.Run("connection_commands", func(t *testing.T) {
+		assert.True(t, IsRemoteCommand("ssh"))
+		assert.True(t, IsRemoteCommand("mosh"))
+		assert.True(t, IsRemoteCommand("mosh-client"))
+		assert.True(t, IsRemoteCommand("telnet"))
+	})
+
+	t.Run("local_commands", func(t *testing.T) {
+		assert.False(t, IsRemoteCommand("zsh"))
+		assert.False(t, IsRemoteCommand("2.1.239"))
+		assert.False(t, IsRemoteCommand(""))
+	})
 }
 
 func TestHasIdleIcon(t *testing.T) {

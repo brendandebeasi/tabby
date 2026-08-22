@@ -135,13 +135,21 @@ func IsAITool(command string) bool {
 	return semverRegex.MatchString(command)
 }
 
-// HasSpinner returns true if the title starts with a braille pattern dot (U+2800-U+28FF),
-// which AI tools like Claude Code use as a working/thinking spinner.
+// HasSpinner returns true if the title starts with a spinner glyph that AI tools
+// use to signal working/thinking. Two families are recognized:
+//   - braille patterns U+2801-U+28FF (the classic dot spinner)
+//   - half-filled circles ◐◑◒◓ (U+25D0-U+25D3), which current Claude Code builds
+//     cycle through instead of braille
+//
 // Note: ✳ (U+2733) is Claude Code's idle icon, NOT a spinner.
 func HasSpinner(title string) bool {
 	for _, r := range title {
 		// Braille patterns U+2800-U+28FF (excluding U+2800 which is blank)
-		return r >= 0x2801 && r <= 0x28FF
+		if r >= 0x2801 && r <= 0x28FF {
+			return true
+		}
+		// Half-circle spinner ◐ ◓ ◑ ◒
+		return r >= 0x25D0 && r <= 0x25D3
 	}
 	return false
 }
@@ -164,6 +172,14 @@ func AIIdleTimeout() int64 {
 // For these, we detect "busy" based on recent activity rather than just running
 var remoteCommands = map[string]bool{
 	"ssh": true, "mosh": true, "mosh-client": true, "telnet": true,
+}
+
+// IsRemoteCommand reports whether the pane command is a connection to another
+// host. The AI tool actually running inside it is invisible to us locally — the
+// pane command is just "ssh" — so callers fall back to the pane title, which
+// the remote tool still sets through the connection.
+func IsRemoteCommand(command string) bool {
+	return remoteCommands[command]
 }
 
 // SSHHostForPane returns the SSH destination hostname for a pane's process.

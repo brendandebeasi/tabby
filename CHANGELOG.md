@@ -14,6 +14,10 @@
 
 ### Fixed
 
+- Claude Code's spinner is recognized again, so its panes show activity indicators. Current builds cycle through the half-filled circles ◐◓◑◒ rather than the braille dots tabby was matching, so a working pane read as doing nothing. The knock-on was worse than a missing spinner: the `?` indicator means "something happened here you haven't seen yet" and is only re-armed by a busy → idle transition, so a pane that never registered as busy never flagged for input either. Both glyph families are now matched.
+
+- AI tools running over SSH now get activity indicators. The local pane command for a remote session is just `ssh`, so nothing identified the tool inside it and the whole per-pane AI detection pass was skipped — even though the remote tool's spinner and idle glyphs arrive in the pane title like any other. A remote pane whose title carries one is now treated as an AI pane. Nothing needs installing on the remote host.
+
 - Dragging the sidebar border resizes it again when a second terminal is attached. With two clients of different widths on one session, tmux reflows the window to whichever acted last, so the daemon could not tell a drag from a reflow and refused to adopt the new width — while still snapping the pane back to the old one, which read as the drag doing nothing. An unattributable width is now held and adopted once a second pass measures the same width in the same window, and the window you are dragging is left alone until then.
 
 - Reattaching to a session now brings its daemon back. The daemon exits once you detach, and nothing restarted it on the way back in: the reattach check saw a sidebar pane in the window and stopped there, without noticing the pane belonged to a grouped peer session's daemon rather than this one. The session was left with no daemon at all, so the sidebar sat on "Loading..." and every window-navigation key failed against a socket that no longer existed. The check now only counts a renderer this session owns.
