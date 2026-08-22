@@ -31,6 +31,19 @@ type Landing struct {
 	// Enabled opens new windows on the launcher instead of a bare shell.
 	// Windows that inherit an ssh session go straight to the host regardless.
 	Enabled *bool `yaml:"enabled"`
+
+	// Command replaces `tabby landing` with something else. The value is a
+	// shell command line, typed into the new tab's own interactive shell, so
+	// quote your own paths. Anything of the right shape works — a launcher that
+	// writes its choice to stdout and its interface to stderr, wrapped in
+	// eval so the choice takes effect in the shell that stays behind:
+	//
+	//   landing:
+	//     enabled: true
+	//     command: eval "$(pounce --target current)"
+	//
+	// Empty means tabby's own launcher. Ignored unless Enabled.
+	Command string `yaml:"command"`
 }
 
 // TabNames configures how Tabby composes the sidebar tab label for a window.

@@ -4,6 +4,7 @@
 
 - [Example Config](#example-config)
 - [Sidebar Position and Mode](#sidebar-position-and-mode)
+- [What a New Tab Opens On](#what-a-new-tab-opens-on)
 - [Tips](#tips)
 
 ## Example Config
@@ -94,6 +95,41 @@ After changing position or mode, toggle the sidebar off and on to apply:
 ```bash
 # prefix + Tab (twice) to toggle off then on
 ```
+
+## What a New Tab Opens On
+
+A new tab opens on a shell. `landing` puts something in front of that shell
+instead:
+
+```yaml
+landing:
+  enabled: true
+  command: eval "$(pounce --target current)"
+```
+
+`enabled` is off unless you set it, because a new tab that lands somewhere
+unexpected is worse than one that does not. `command` is optional and names the
+launcher; leave it out for tabby's own `tabby landing`.
+
+Three things to know about the value:
+
+- It is a **shell command line**, typed into the new tab's own interactive
+  shell, so quote your own paths. It is sent byte for byte — tabby does not
+  re-quote it, because that would break the `eval` it probably needs.
+- The `eval "$(...)"` shape matters for a launcher that offers directories or
+  hosts. A launcher writes its choice to stdout and draws its interface on
+  stderr; `eval` runs that choice in the shell that stays behind, so a chosen
+  `cd` sticks and a chosen `ssh` becomes the pane's foreground process — which
+  is what tabby reads to give the tab its remote icon and host color. A launcher
+  run as a child process can do neither.
+- A value naming something that is missing or not executable costs one
+  "command not found" and leaves you at the prompt. That is a usable shell, not
+  a broken tab.
+
+Two things override it. A tab spawned off an ssh tab inherits that connection
+and goes straight to the host, launcher or no launcher — it is asking for that
+host, not for a chance to pick another. And splits are exempt: this is about
+tabs.
 
 ## Tips
 

@@ -4,6 +4,10 @@
 
 ### Added
 
+- `landing.command` points a new tab at a launcher other than tabby's own. The value is a shell command line typed into the new tab's shell, so `command: eval "$(pounce --target current)"` hands the tab to that launcher and nothing in tabby knows or cares what it is. Still gated on `landing.enabled`, still off by default, and a tab that inherits an ssh connection still goes straight to the host. A value naming something absent costs one "command not found" and leaves a usable prompt.
+
+  The sidebar's `+` now honours all of this too. It shares the decision with the `tabby new-window` spawner instead of restating it, which is also a fix: on any install without `bin/new-window` built, `+` fell back to a path that had never learned about landing, so the launcher appeared on `prefix + c` and not on the button.
+
 - The cat keeps a permanent record. Time in each state, adventures and what came back from them, catches and escapes by species, care and adventure streaks, fastest yarn catch, favourite biome, longest nap, worst neglect — it all accumulates under `lifetime_stats` in `~/.local/state/tabby/pet.json`. Rates and rankings are computed on read rather than stored, so a counter fix never leaves a stale number behind. An older `pet.json` loads unchanged: the counters start at zero and the birthday is backdated to first sight (#25).
 
 - Cats bring you things. A successful pounce on an adventure sometimes gets carried home and left on the ground; click it to accept and the cat is pleased with itself, or it takes the gift back after ten minutes. Three at a time, oldest first out (#28).

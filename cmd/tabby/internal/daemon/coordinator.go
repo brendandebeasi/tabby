@@ -27,6 +27,7 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/rivo/uniseg"
 
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/newwindow"
 	"github.com/brendandebeasi/tabby/pkg/colors"
 	"github.com/brendandebeasi/tabby/pkg/config"
 	"github.com/brendandebeasi/tabby/pkg/daemon"
@@ -20959,13 +20960,17 @@ func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, worki
 	if newWindowIDLegacy != "" && icon != "" {
 		tmuxCmd("set-window-option", "-t", newWindowIDLegacy, "@tabby_icon", icon).Run()
 	}
-	if newWindowIDLegacy != "" && remoteCmd != "" {
-		// Type the command into the new window's (only) content pane, as a user
-		// would, so ssh becomes the pane's foreground command and the tab returns
-		// to a shell on disconnect.
+	// Same decision the `tabby new-window` spawner makes, shared rather than
+	// restated: an inherited remote command, else the landing command, else a
+	// bare prompt. Either way it is typed into the new window's (only) content
+	// pane, as a user would, so ssh becomes the pane's foreground command (which
+	// drives the remote icon and host color) and the tab returns to a shell on
+	// disconnect.
+	legacyLandingCmd := newwindow.NewTabCommand(c.config, remoteCmd)
+	if newWindowIDLegacy != "" && legacyLandingCmd != "" {
 		if cp := strings.TrimSpace(tmuxOutputTrimmed("list-panes", "-t", newWindowIDLegacy, "-F", "#{pane_id}")); cp != "" {
 			pane := strings.SplitN(cp, "\n", 2)[0]
-			tmuxCmd("send-keys", "-t", pane, "-l", remoteCmd).Run()
+			tmuxCmd("send-keys", "-t", pane, "-l", legacyLandingCmd).Run()
 			tmuxCmd("send-keys", "-t", pane, "Enter").Run()
 		}
 	}

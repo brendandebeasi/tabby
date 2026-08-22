@@ -276,31 +276,56 @@ func Run(args []string) int {
 	// Type the ssh/mosh command into the new tab's interactive shell — exactly as
 	// if hand-typed — so ssh becomes the pane's foreground command (detected for
 	// the ssh icon/host color) and the tab returns to a shell on disconnect.
-	if remoteCmd != "" && contentPane != "" {
-		sendCommandToPane(cfg, contentPane, remoteCmd)
-	} else if contentPane != "" && landingEnabled(tcfg) {
-		// No inherited ssh, so open the launcher instead of a bare prompt. It
-		// goes through the same send-keys path for the same reason: the command
-		// it picks must run in the pane's own interactive shell, or tmux reports
-		// the wrapper shell as pane_current_command and the daemon loses remote
-		// detection. eval keeps the chosen `cd` in this shell rather than a
-		// subshell that exits immediately.
-		sendCommandToPane(cfg, contentPane, landingCommand())
+	// The landing command goes through this same send-keys path for the same
+	// reason: whatever it picks must run in the pane's own interactive shell, or
+	// tmux reports the wrapper shell as pane_current_command and the daemon
+	// loses remote detection. eval keeps a chosen `cd` in this shell rather than
+	// a subshell that exits immediately.
+	if cmdToType := NewTabCommand(tcfg, remoteCmd); cmdToType != "" && contentPane != "" {
+		sendCommandToPane(cfg, contentPane, cmdToType)
 	}
 	_ = filepath.Dir // silence unused import when code paths change
 	return 0
 }
 
-// landingCommand is what a new tab types to open the launcher.
+// NewTabCommand is what a freshly created tab should type into its own shell:
+// the command inherited from a remote parent if there is one, otherwise the
+// landing command when landing is on, otherwise nothing at all — a bare prompt,
+// which is what a new tab has always given.
 //
-// The launcher writes the chosen command to stdout and draws its UI on stderr,
-// so eval runs the choice in this shell. A failed or cancelled launcher prints
-// nothing, which evals to a no-op and leaves a normal prompt.
+// The inherited command wins on purpose. A tab spawned off a remote one is
+// asking for that host, not for a chance to pick another.
+func NewTabCommand(tcfg *tabbycfg.Config, remoteCmd string) string {
+	if remoteCmd != "" {
+		return remoteCmd
+	}
+	if LandingEnabled(tcfg) {
+		return LandingCommand(tcfg)
+	}
+	return ""
+}
+
+// LandingCommand is what a new tab types when it opens on a launcher.
 //
-// It resolves the running binary rather than trusting PATH, so a tabby that was
-// started by absolute path still finds itself. Falls back to a bare name when
-// the executable cannot be resolved.
-func landingCommand() string {
+// landing.command names the launcher; empty means tabby's own. A configured
+// value is a shell command line and is sent verbatim — it is not quoted or
+// wrapped, because quoting it would break the eval it almost certainly needs,
+// and the shell that receives it is the one that has to do the word splitting.
+// A value naming something absent or non-executable costs one "command not
+// found" and leaves the prompt it was typed at, which is a usable shell.
+//
+// For tabby's own launcher: it writes the chosen command to stdout and draws
+// its UI on stderr, so eval runs the choice in this shell. A failed or
+// cancelled launcher prints nothing, which evals to a no-op. It resolves the
+// running binary rather than trusting PATH, so a tabby that was started by
+// absolute path still finds itself, and falls back to a bare name when the
+// executable cannot be resolved.
+func LandingCommand(tcfg *tabbycfg.Config) string {
+	if tcfg != nil {
+		if custom := strings.TrimSpace(tcfg.Landing.Command); custom != "" {
+			return custom
+		}
+	}
 	exe, err := os.Executable()
 	if err != nil || exe == "" {
 		exe = "tabby"
@@ -314,10 +339,10 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// landingEnabled reports whether new windows should open on the launcher.
+// LandingEnabled reports whether new windows should open on the launcher.
 // Absent config means off: a new tab that lands somewhere unexpected is worse
 // than one that does not.
-func landingEnabled(tcfg *tabbycfg.Config) bool {
+func LandingEnabled(tcfg *tabbycfg.Config) bool {
 	return tcfg != nil && tcfg.Landing.Enabled != nil && *tcfg.Landing.Enabled
 }
 
