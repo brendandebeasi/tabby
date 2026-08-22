@@ -2,6 +2,11 @@
 
 Done items are cut to `roadmap-done.md` (never left checked here).
 
+## 2026-08-21
+
+- [ ] **FEAT-02** URL handler that appends a marker to an opened URL so a macOS URL-opener (Finicky/Choosy) can route it to a specific browser profile based on the originating host or command — a link clicked in a pane on `client-studiodome` lands in the StudioDome profile. pri:P3 · status:todo · ev:none yet
+  Open questions: where the marker rides (query param vs. a custom scheme), how the pane's host/command is known at open time (OSC 8 hyperlink vs. wrapping the opener), and whether the mapping reuses `remote_hosts` groups or gets its own table.
+
 ## 2026-07-31
 
 - [ ] **FEAT-01** Tint the terminal background of a pane by its tab color, so a Claude session is visually identifiable at a glance — working both locally and over ssh. pri:P3 · status:todo · ev:cmd/tabby/internal/daemon/coordinator.go:2160-2200,1954

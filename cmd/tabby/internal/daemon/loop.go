@@ -1427,6 +1427,11 @@ func (l *Loop) handleIdleTick() {
 		} else if time.Since(l.idleStart) > 30*time.Second {
 			logEvent("SHUTDOWN_REASON session=%s reason=idle_timeout clients=0", l.deps.SessionID)
 			debugLog.Printf("No clients for 30s, shutting down")
+			// Idle timeout is an intentional stop, so claim the clean-stop
+			// sentinel the SIGTERM handler deliberately never writes.
+			// Without it an unused grouped session respawns forever: the
+			// watchdog restarts us, we find no clients again, quit again.
+			os.WriteFile(fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", l.deps.SessionID), []byte("idle-timeout"), 0644)
 			select {
 			case l.deps.SigCh <- syscall.SIGTERM:
 			default:

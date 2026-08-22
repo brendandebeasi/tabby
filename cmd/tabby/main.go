@@ -26,6 +26,7 @@ import (
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashboardlayout"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dev"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/hook"
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/landing"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/managegroup"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/newwindow"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/panepicker"
@@ -53,6 +54,7 @@ var subcommands = []subcommand{
 	{"dashboard-layout", "open the dashboard layout-style picker popup", dashboardlayout.Run},
 	{"dev", "developer commands: reload, status", dev.Run},
 	{"hook", "tmux hook dispatcher (split-pane, kill-pane, resize, etc.)", hook.Run},
+	{"landing", "full-pane new-tab launcher over landing.yaml", landing.Run},
 	{"manage-group", "edit window-group entries in the tabby config file", managegroup.Run},
 	{"new-window", "create a new tmux window with sidebar", newwindow.Run},
 	{"pane-picker", "interactive pane picker TUI", panepicker.Run},

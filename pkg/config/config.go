@@ -21,6 +21,16 @@ type Config struct {
 	AutoTheme     AutoTheme     `yaml:"auto_theme"`
 	AI            AIConfig      `yaml:"ai"`
 	TabNames      TabNames      `yaml:"tab_names"`
+	Landing       Landing       `yaml:"landing"`
+}
+
+// Landing controls the full-pane launcher a new window opens to, rendered by
+// `tabby landing` from ~/.config/tabby/landing.yaml. It is off unless enabled:
+// a new tab that lands somewhere unexpected is worse than one that does not.
+type Landing struct {
+	// Enabled opens new windows on the launcher instead of a bare shell.
+	// Windows that inherit an ssh session go straight to the host regardless.
+	Enabled *bool `yaml:"enabled"`
 }
 
 // TabNames configures how Tabby composes the sidebar tab label for a window.

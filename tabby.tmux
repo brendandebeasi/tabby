@@ -740,6 +740,8 @@ tmux unbind-key -n M-k 2>/dev/null || true
 tmux unbind-key -n M-l 2>/dev/null || true
 tmux bind-key -n 'M-\;' run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
 tmux bind-key -n "M-'" run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN next-window"
+tmux bind-key -n M-a run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN prev-window"
+tmux bind-key -n M-s run-shell -b "TABBY_INVOKING_TTY='#{client_tty}' $HOOK_BIN next-window"
 tmux bind-key -n M-n run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux bind-key -n M-N run-shell "$NEW_WINDOW_BIN -client-tty '#{client_tty}'"
 tmux unbind-key -n M-x 2>/dev/null || true
