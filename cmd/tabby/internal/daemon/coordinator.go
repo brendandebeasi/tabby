@@ -10241,6 +10241,50 @@ func (c *Coordinator) attachedClientWidthSpread() bool {
 	return distinctClientWidths(string(out)) > 1
 }
 
+// clientDisplayedWindowID returns the window the elected physical client is
+// currently displaying, or "" when no client is attached. Client-qualified on
+// purpose: an unqualified display-message answers with the daemon's OWN
+// session's active window, which is the wrong window whenever the client is
+// attached to a grouped peer session.
+func clientDisplayedWindowID() string {
+	_, _, tty, _, ok := activeClientGeometry()
+	tty = strings.TrimSpace(tty)
+	if !ok || tty == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-c", tty, "-p", "#{window_id}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// widthAdoptSubject picks the window whose sidebar width the adopt path should
+// judge. That is the window the user is looking at -- the one the elected
+// physical client displays -- not the daemon session's active-window flag.
+//
+// The two differ in a grouped session pair: two sessions share one window set,
+// tmux attaches the client to only one of them, and the daemon whose renderers
+// own the sidebars can be the peer. Its flag then names a window nobody is
+// looking at, so a drag in the displayed window was never examined by the
+// adopt guards and the per-window loop pulled it straight back to the global
+// (observed live as AUDIT_WIDTH_DRIFT ... @1952=44 global=25 followed by
+// WIDTH_SYNC_PLAN client=@1952 active=@1914 current=44 target=25).
+//
+// Only re-point onto a window this daemon manages: the elected client may be
+// sitting in an unrelated session, whose windows we must not touch.
+func widthAdoptSubject(sessionActive, clientDisplayed string, managed map[string]bool) string {
+	if clientDisplayed == "" || clientDisplayed == sessionActive {
+		return sessionActive
+	}
+	if !managed[clientDisplayed] {
+		return sessionActive
+	}
+	return clientDisplayed
+}
+
 // adoptGlobalSidebarWidth promotes a measured sidebar width to the global
 // target. Callers hold widthSyncMu. The per-profile width is persisted here,
 // before per-client targets are computed, so sidebarReasonableMaxForWindow
@@ -10301,6 +10345,13 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 		syncSettings[c.windows[i].ID] = c.windows[i].SyncWidth
 	}
 	c.stateMu.RUnlock()
+
+	// Re-point "active window" at the window the user is actually looking at
+	// before any of the guards below key off it. See widthAdoptSubject.
+	if subject := widthAdoptSubject(activeWindowID, clientDisplayedWindowID(), syncSettings); subject != activeWindowID {
+		logEvent("WIDTH_SYNC_ACTIVE_REPOINT session_active=%s client_active=%s", activeWindowID, subject)
+		activeWindowID = subject
+	}
 
 	keyboardWidth, keyboardThreshold := c.getMobileKeyboardSettings()
 	expiredHolds := make([]string, 0)
