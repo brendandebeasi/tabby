@@ -212,6 +212,125 @@ func TestIsRemoteCommand(t *testing.T) {
 	})
 }
 
+func TestHasQuestion(t *testing.T) {
+	// The chrome an AI pane paints below its last real output: box borders, the
+	// input prompt, and the status footer. Question detection has to look past
+	// all of it to find what the tool actually said.
+	const footer = "\n" +
+		"───────────────────────────────────────\n" +
+		"❯ \n" +
+		"───────────────────────────────────────\n" +
+		"  Opus 5 ·  medium ·  9% ·  2h 55m\n" +
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+
+	t.Run("plain_text_question", func(t *testing.T) {
+		assert.True(t, HasQuestion("  I can do it either way.\n\n  Which approach do you prefer?"+footer))
+	})
+
+	t.Run("question_wrapped_in_markdown", func(t *testing.T) {
+		assert.True(t, HasQuestion("  **Should the retry be capped at 3?**"+footer))
+		assert.True(t, HasQuestion("  (is that the behaviour you wanted?)"+footer))
+	})
+
+	t.Run("permission_dialog", func(t *testing.T) {
+		dialog := "╭──────────────────────────────╮\n" +
+			"│ Bash command                 │\n" +
+			"│ rm -rf build                 │\n" +
+			"│ Do you want to proceed?      │\n" +
+			"│ ❯ 1. Yes                     │\n" +
+			"│   2. No, tell Claude what to │\n" +
+			"╰──────────────────────────────╯\n"
+		assert.True(t, HasQuestion(dialog))
+	})
+
+	t.Run("numbered_options_without_question_phrasing", func(t *testing.T) {
+		assert.True(t, HasQuestion("│ Pick one:            │\n│ ❯ 1. Keep it         │\n│   2. Drop it         │\n"))
+	})
+
+	t.Run("finished_working_is_not_a_question", func(t *testing.T) {
+		report := "  Added TestExampleTargetsLoad and ticked all 30 tasks.\n\n" +
+			"  make lint and go test -race ./... both pass.\n\n" +
+			"✻ Worked for 13m 2s\n" + footer
+		assert.False(t, HasQuestion(report))
+		// The elapsed-time verb is randomized per run, so it can't be matched
+		// by name.
+		assert.False(t, HasQuestion(report+"\n✻ Brewed for 1m 38s\n"+footer))
+	})
+
+	t.Run("numbered_list_in_prose_is_not_a_dialog", func(t *testing.T) {
+		// A findings list reads exactly like a set of options unless the box
+		// border or the ❯ cursor is required.
+		report := "  Three things came out of this:\n\n" +
+			"  1. The signing path is unit-verified but never run end-to-end.\n\n" +
+			"  2. The documented fix command would fail — the role was renamed.\n\n" +
+			"  3. PR #571 is ready to merge.\n" + footer
+		assert.False(t, HasQuestion(report))
+	})
+
+	t.Run("mid_output_question_is_not_the_last_word", func(t *testing.T) {
+		// A rhetorical question earlier in the transcript must not count once
+		// the tool has gone on to answer it — only the final line does.
+		text := "  Why does this fail? Because the socket file outlives the\n" +
+			"  process, so dialing is the only real liveness check.\n" +
+			"  Fixed in daemonAlive.\n" + footer
+		assert.False(t, HasQuestion(text))
+	})
+
+	t.Run("question_the_user_already_answered", func(t *testing.T) {
+		// The capture keeps 40 lines of scrollback, so an answered question is
+		// usually still on screen. The user's own reply below it settles the turn.
+		text := "  Three forks I don't want to guess on:\n\n" +
+			"  What would you like to clarify before I re-pose the questions?\n\n" +
+			"✻ Churned for 1m 30s\n\n" +
+			"❯ design should be configurable and themeable\n\n" +
+			"✳ Skedaddling… (5s · thinking with medium effort)\n" + footer
+		assert.False(t, HasQuestion(text))
+	})
+
+	t.Run("dialog_survives_its_own_option_cursor", func(t *testing.T) {
+		// "❯ 1. Yes" is a choice cursor, not a prompt the user has submitted, so
+		// it must not cut the search above the dialog's question line.
+		dialog := "  Ready to apply the migration.\n\n" +
+			"╭──────────────────────────────╮\n" +
+			"│ Do you want to proceed?      │\n" +
+			"│ ❯ 1. Yes                     │\n" +
+			"│   2. No                      │\n" +
+			"╰──────────────────────────────╯\n"
+		assert.True(t, HasQuestion(dialog))
+	})
+
+	t.Run("empty_capture", func(t *testing.T) {
+		assert.False(t, HasQuestion(""))
+		assert.False(t, HasQuestion("   \n\n  \n"))
+	})
+
+	t.Run("chrome_only_capture", func(t *testing.T) {
+		assert.False(t, HasQuestion(footer))
+	})
+}
+
+func TestHasWorkingLine(t *testing.T) {
+	t.Run("live_counter_is_working", func(t *testing.T) {
+		assert.True(t, HasWorkingLine("✳ Skedaddling… (5s · thinking with medium effort)"))
+		assert.True(t, HasWorkingLine("  output\n✽ Symbioting… (27s · ↓ 1.2k tokens)\n❯ \n"))
+	})
+
+	t.Run("interrupt_hint_is_working", func(t *testing.T) {
+		assert.True(t, HasWorkingLine("  Running tests (esc to interrupt)"))
+	})
+
+	t.Run("elapsed_report_is_not_working", func(t *testing.T) {
+		// Same icon and shape, but the counter has stopped.
+		assert.False(t, HasWorkingLine("✻ Brewed for 2m 29s · 1 shell still running"))
+		assert.False(t, HasWorkingLine("✻ Crunched for 7m 12s"))
+	})
+
+	t.Run("ordinary_output_is_not_working", func(t *testing.T) {
+		assert.False(t, HasWorkingLine(""))
+		assert.False(t, HasWorkingLine("  Added a test and ticked the last task.\n❯ \n"))
+	})
+}
+
 func TestHasIdleIcon(t *testing.T) {
 	t.Run("star_glyph_is_idle_icon", func(t *testing.T) {
 		assert.True(t, HasIdleIcon("✳ idle"))

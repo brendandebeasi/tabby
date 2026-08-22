@@ -831,8 +831,11 @@ type Coordinator struct {
 	prevPaneTitle      map[string]string // pane ID → AI pane title last cycle
 	hookPaneActive     map[string]bool   // pane ID → hooks detected (seen @tabby_busy=1)
 	hookPaneBusyIdleAt map[string]int64  // pane ID → unix timestamp when hook-busy but process looks idle
-	aiInputAck         map[string]bool   // pane ID → user has viewed this idle/input state (suppress "?" until next busy cycle)
+	aiQuestion         map[string]bool   // pane ID → tool asked a question; "?" persists (through visits) until it works again
+	aiBusySince        map[string]int64  // pane ID → unix timestamp the current busy stretch began
 	aiBellUntil        map[int]int64     // window index → unix timestamp when bell expires (window-level)
+	aiWorking          map[string]bool   // pane ID → pane body showed a live progress line (cached, see paneWorking)
+	aiWorkingAt        map[string]int64  // pane ID → unix timestamp aiWorking was last measured
 
 	// Callback to sync sidebar client widths in the server's client map.
 	// Called after a width change (e.g. grow/shrink) to update server-side Width
@@ -1575,7 +1578,10 @@ func NewCoordinator(sessionID string) *Coordinator {
 		aiBellUntil:        make(map[int]int64),
 		hookPaneActive:     make(map[string]bool),
 		hookPaneBusyIdleAt: make(map[string]int64),
-		aiInputAck:         make(map[string]bool),
+		aiQuestion:         make(map[string]bool),
+		aiBusySince:        make(map[string]int64),
+		aiWorking:          make(map[string]bool),
+		aiWorkingAt:        make(map[string]int64),
 		clientProfile:      make(map[string]string),
 		windowZoomOwner:    make(map[string]string),
 		windowLayouts:      make(map[string]map[int]string),
@@ -2861,7 +2867,7 @@ func (c *Coordinator) EnforceStatusExclusivity(sessionID string) {
 
 // HandleWindowSelect performs window-switch housekeeping that was previously
 // done by scripts/on_window_select.sh:
-//   - Clears @tabby_input and @tabby_bell indicators (user acknowledged notification)
+//   - Clears the @tabby_bell indicator (user acknowledged the notification)
 //   - Updates global pane-active-border-style to match active window's tab color
 //     when border_from_tab is enabled
 //
@@ -2874,8 +2880,10 @@ func (c *Coordinator) HandleWindowSelect(activeWindowID string) {
 		}
 	}
 
-	// Clear AI tool input/bell indicators for the active window
-	tmuxCmd("set-option", "-w", "-t", activeWindowID, "@tabby_input", "").Run()
+	// Clear the AI "done working" bell for the window being selected — the
+	// bell is an unseen-notification, and this is the user seeing it. The
+	// input "?" is deliberately left alone: it marks an unanswered question,
+	// and switching to the window doesn't answer it.
 	tmuxCmd("set-option", "-w", "-t", activeWindowID, "@tabby_bell", "").Run()
 
 	cfg := c.GetConfig()
@@ -5214,6 +5222,15 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 		}
 		multiPane := contentPaneCount > 1
 
+		// Is an attached client actually looking at this window right now? Not
+		// merely the active window of a detached session.
+		viewed := viewedWindows[win.ID]
+
+		// win.Input arrives straight from the @tabby_input option, so remember
+		// whether it was persisted in order to reconcile it below: a question
+		// that has since been answered must not linger as a stale option.
+		inputOptionSet := win.Input
+
 		// Find all AI tool panes in this window
 		var aiPanes []*tmux.Pane
 		for j := range win.Panes {
@@ -5225,8 +5242,19 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			}
 		}
 
-		// Check for expiring bell indicators (window-level, from AI tool exit)
-		if expiry, ok := c.aiBellUntil[idx]; ok {
+		// The bell means "done working, and you haven't seen it yet", so
+		// looking at the window is what dismisses it. HandleWindowSelect
+		// already unsets @tabby_bell on select, but the in-memory expiry
+		// re-asserted win.Bell every cycle until it aged out — so the ◆ came
+		// straight back when you switched away. Drop both on view.
+		if viewed {
+			delete(c.aiBellUntil, idx)
+			if win.Bell {
+				win.Bell = false
+				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", unset: true})
+			}
+		} else if expiry, ok := c.aiBellUntil[idx]; ok {
+			// Check for expiring bell indicators (window-level)
 			if now < expiry {
 				win.Bell = true
 			} else {
@@ -5249,9 +5277,13 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 					delete(c.prevPaneTitle, pid)
 					delete(c.hookPaneActive, pid)
 					delete(c.hookPaneBusyIdleAt, pid)
+					delete(c.aiQuestion, pid)
+					delete(c.aiBusySince, pid)
+					delete(c.aiWorking, pid)
+					delete(c.aiWorkingAt, pid)
 				}
 			}
-			if anyPrevAI {
+			if anyPrevAI && !viewed {
 				win.Bell = true
 				win.Input = false
 				c.aiBellUntil[idx] = now + 30
@@ -5273,11 +5305,9 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			continue
 		}
 
-		// If this is the active window, clear window-level input indicator
-		if win.Active && win.Input {
-			win.Input = false
-			pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_input", unset: true})
-		}
+		// Note: window-level input is deliberately NOT cleared for the active
+		// window. A "?" means the tool asked something, and reading the
+		// question doesn't answer it — it stays until the tool works again.
 
 		// === Per-pane AI detection ===
 		// Hook-based: @tabby_busy is set at window level. When hooks are active,
@@ -5298,7 +5328,7 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 
 		// Hook-based input: @tabby_input at window level -> attribute to active AI pane or first
 		hookInputPaneID := ""
-		if win.Input && !win.Active {
+		if win.Input {
 			for _, p := range aiPanes {
 				if tmux.HasIdleIcon(p.Title) {
 					hookInputPaneID = p.ID
@@ -5317,6 +5347,18 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 				if tmux.HasSpinner(p.Title) {
 					anySpinner = true
 					break
+				}
+			}
+			// A pane whose title comes from a tool hook shows a fixed project
+			// name, never a spinner, so its title can never confirm the hook.
+			// Read the pane instead before calling the hook stale, or every long
+			// turn on such a pane is declared finished after ten seconds.
+			if !anySpinner {
+				for _, p := range aiPanes {
+					if c.paneWorking(p.ID, now) {
+						anySpinner = true
+						break
+					}
 				}
 			}
 			if !anySpinner {
@@ -5349,8 +5391,13 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 
 			// === Hook-based detection for this pane ===
 			if win.Busy && pid == hookBusyPaneID {
-				// Hook says this pane is busy
+				// Hook says this pane is busy. Working again answers whatever
+				// it was asking, so the question is resolved.
 				c.hookPaneActive[pid] = true
+				delete(c.aiQuestion, pid)
+				if _, ok := c.aiBusySince[pid]; !ok {
+					c.aiBusySince[pid] = now
+				}
 				pane.AIBusy = true
 				pane.AIInput = false
 				if !c.prevPaneBusy[pid] {
@@ -5358,13 +5405,42 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 						pid, idx, pane.Command)
 				}
 				c.prevPaneBusy[pid] = true
-				delete(c.aiBellUntil, idx)
+				pending = c.clearDoneBell(win, idx, pending)
+				c.prevPaneTitle[pid] = pane.Title
+				continue
+			}
+
+			// A live progress line in the pane body is direct evidence of work,
+			// and it outranks every hook. A pane whose title is set by a tool
+			// hook carries a fixed project name, so ✳ is all its title will ever
+			// say; without reading the pane, a hook that said "idle" one turn ago
+			// freezes it there for the rest of the session. Being at work again
+			// also answers whatever the tool was asking and makes any "done
+			// working" bell untrue.
+			if !hasSpinner && c.paneWorking(pid, now) {
+				if !c.prevPaneBusy[pid] {
+					coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): -> BUSY (progress line)",
+						pid, idx, pane.Command)
+				}
+				if c.aiQuestion[pid] {
+					logEvent("AI_QUESTION_CLEAR pane=%s window=%d reason=working", pid, idx)
+					delete(c.aiQuestion, pid)
+				}
+				if _, ok := c.aiBusySince[pid]; !ok {
+					c.aiBusySince[pid] = now
+				}
+				pending = c.clearDoneBell(win, idx, pending)
+				pane.AIBusy = true
+				pane.AIInput = false
+				c.prevPaneBusy[pid] = true
 				c.prevPaneTitle[pid] = pane.Title
 				continue
 			}
 
 			if pid == hookInputPaneID {
-				// Hook says this pane needs input
+				// Hook says this pane needs input (Notification /
+				// PermissionRequest) — an explicit question from the tool.
+				c.aiQuestion[pid] = true
 				pane.AIInput = true
 				pane.AIBusy = false
 				c.prevPaneBusy[pid] = false
@@ -5378,8 +5454,10 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 				if c.prevPaneBusy[pid] {
 					coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): BUSY -> IDLE (hook)",
 						pid, idx, pane.Command)
+					pending = c.settleAIPane(pane, win, viewed, now, pending)
 				}
 				pane.AIBusy = false
+				pane.AIInput = c.aiQuestion[pid]
 				c.prevPaneBusy[pid] = false
 				c.prevPaneTitle[pid] = pane.Title
 				continue
@@ -5413,33 +5491,37 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			wasBusy := c.prevPaneBusy[pid]
 
 			if busy {
+				// Working again resolves whatever it was asking.
 				pane.AIBusy = true
 				pane.AIInput = false
 				c.prevPaneBusy[pid] = true
-				delete(c.aiBellUntil, idx)
+				delete(c.aiQuestion, pid)
+				pending = c.clearDoneBell(win, idx, pending)
+				if _, ok := c.aiBusySince[pid]; !ok {
+					c.aiBusySince[pid] = now
+				}
 				if !wasBusy {
 					coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): -> BUSY (spinner=%v titleChanged=%v)",
 						pid, idx, pane.Command, hasSpinner, hasPrev && pane.Title != prevTitle)
 				}
-			} else if hasIdle {
-				// Claude Code shows its ✳ idle icon (U+2733) when it's waiting for
-				// the user. Surface the input indicator directly — not only on a
-				// busy->idle transition — so a tab parked at ✳ (wasBusy already
-				// false) still flags "?".
-				pane.AIInput = true
-				pane.AIBusy = false
-				c.prevPaneBusy[pid] = false
-				if wasBusy {
-					coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): -> INPUT (idle icon)",
-						pid, idx, pane.Command)
-				}
 			} else if wasBusy {
-				// busy -> idle: tool waiting for user input
-				pane.AIInput = true
+				// busy -> idle: the tool just stopped working. Decide once,
+				// here, whether it left a question ("?", survives being read)
+				// or simply finished (bell, cleared by looking at it). An AI
+				// pane merely parked at ✳ having asked nothing gets neither.
+				pending = c.settleAIPane(pane, win, viewed, now, pending)
 				pane.AIBusy = false
+				pane.AIInput = c.aiQuestion[pid]
 				c.prevPaneBusy[pid] = false
-				coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): BUSY -> INPUT (title=%q)",
-					pid, idx, pane.Command, pane.Title)
+				coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): BUSY -> IDLE question=%v (title=%q)",
+					pid, idx, pane.Command, c.aiQuestion[pid], pane.Title)
+			} else if hasIdle || c.aiQuestion[pid] {
+				// Steady-state idle: no progress line, no spinner, nothing new
+				// in the title. A question raised on an earlier edge stays up
+				// until the tool works again — reading it doesn't answer it.
+				pane.AIBusy = false
+				pane.AIInput = c.aiQuestion[pid]
+				c.prevPaneBusy[pid] = false
 			} else if !hasPrev {
 				coordinatorDebugLog.Printf("[AI] Pane %s (win %d, %s): FIRST SEEN (title=%q)",
 					pid, idx, pane.Command, pane.Title)
@@ -5453,27 +5535,15 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 		// Multi-pane: indicators stay on pane lines; window shows nothing for busy/input
 		if !multiPane && len(aiPanes) == 1 {
 			pane := aiPanes[0]
-			pid := pane.ID
 			if pane.AIBusy {
 				win.Busy = true
 				win.Input = false
-				// New activity re-arms the unseen-attention signal.
-				delete(c.aiInputAck, pid)
 			} else if pane.AIInput {
-				// The "?" means "something happened here you haven't seen yet" —
-				// not "Claude/AGY is sitting idle". Passive ✳-idle detection fires
-				// whenever the tool is simply ready for input, so once the user
-				// actually views the window (an attached client is on it) we
-				// acknowledge it and keep it quiet until the next busy cycle,
-				// instead of re-flagging every time they switch away.
-				viewed := viewedWindows[win.ID]
-				if viewed {
-					c.aiInputAck[pid] = true
-				}
-				if !viewed && !c.aiInputAck[pid] {
-					win.Input = true
-					win.Busy = false
-				}
+				// A "?" is an unanswered question, so unlike the bell it is not
+				// dismissed by viewing the window — it stays until the tool
+				// starts working again.
+				win.Input = true
+				win.Busy = false
 			}
 		} else if multiPane {
 			// Multi-pane: clear window-level busy/input (indicators are on pane lines)
@@ -5481,28 +5551,18 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			// Only clear the window-level flags that were set by passive detection.
 			anyPaneBusy := false
 			anyPaneInput := false
-			viewed := viewedWindows[win.ID]
 			for _, p := range aiPanes {
 				if p.AIBusy {
 					anyPaneBusy = true
-					delete(c.aiInputAck, p.ID)
 				}
 				if p.AIInput {
-					// Same unseen-attention acknowledgment as the single-pane path:
-					// once the window is actually viewed, stay quiet until the next
-					// busy cycle.
-					if viewed {
-						c.aiInputAck[p.ID] = true
-					}
-					if !c.aiInputAck[p.ID] {
-						anyPaneInput = true
-					}
+					anyPaneInput = true
 				}
 			}
 			// For collapsed multi-pane: aggregate to window level
 			if win.Collapsed {
 				win.Busy = anyPaneBusy
-				if !anyPaneBusy && anyPaneInput && !viewed {
+				if !anyPaneBusy && anyPaneInput {
 					win.Input = true
 				}
 			} else {
@@ -5512,14 +5572,12 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			}
 		}
 
-		// Clear input for the focused pane of a window an attached client is
-		// actually viewing (expanded multi-pane shows indicators on pane lines).
-		if multiPane && viewedWindows[win.ID] {
-			for _, pane := range aiPanes {
-				if pane.Active {
-					pane.AIInput = false
-				}
-			}
+		// Reconcile the persisted question flag with the derived state. Nothing
+		// else clears it now that viewing the window no longer does.
+		if win.Input && !inputOptionSet {
+			pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_input", value: "1"})
+		} else if !win.Input && inputOptionSet {
+			pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_input", unset: true})
 		}
 	}
 
@@ -5530,7 +5588,10 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			delete(c.prevPaneTitle, pid)
 			delete(c.hookPaneActive, pid)
 			delete(c.hookPaneBusyIdleAt, pid)
-			delete(c.aiInputAck, pid)
+			delete(c.aiQuestion, pid)
+			delete(c.aiBusySince, pid)
+			delete(c.aiWorking, pid)
+			delete(c.aiWorkingAt, pid)
 		}
 	}
 	for pid := range c.prevPaneTitle {
@@ -5539,6 +5600,101 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 		}
 	}
 	return pending
+}
+
+// aiQuestionScanLines is how much of an AI pane's tail is inspected for a
+// question when it stops working. Enough to cover a wrapped prompt plus the
+// boxed permission dialog and the footer chrome below it.
+const aiQuestionScanLines = 40
+
+// aiWorkingScanLines is how much of an AI pane's tail is inspected for a live
+// progress line. The status line sits just above the input box, so only the last
+// screenful matters.
+const aiWorkingScanLines = 12
+
+// aiWorkingTTL is how long a pane's progress-line reading is reused before the
+// pane is captured again.
+const aiWorkingTTL = 1
+
+// aiDoneBellSeconds bounds how long a "done working" bell survives if the user
+// never looks at the window. Viewing the window is the normal way it clears; the
+// expiry is only a backstop so a window nobody ever visits doesn't keep a ◆
+// forever.
+const aiDoneBellSeconds = 3600
+
+// aiDoneMinBusySeconds is how long an AI pane must have been working before
+// going idle counts as "done working" worth a bell.
+const aiDoneMinBusySeconds = 5
+
+// paneWorking reports whether an AI pane's body shows a live progress line,
+// caching the answer for aiWorkingTTL seconds. Reconciles are event-driven and
+// can burst, while the progress line only ticks about once a second, so the
+// cache keeps a per-pane capture off the hot path without costing accuracy.
+func (c *Coordinator) paneWorking(paneID string, now int64) bool {
+	if at, ok := c.aiWorkingAt[paneID]; ok && now-at < aiWorkingTTL {
+		return c.aiWorking[paneID]
+	}
+	working := tmux.HasWorkingLine(capturePaneText(paneID, aiWorkingScanLines))
+	c.aiWorking[paneID] = working
+	c.aiWorkingAt[paneID] = now
+	return working
+}
+
+// clearDoneBell drops a "done working" bell because the pane has started working
+// again. The bell says a turn finished without you seeing it; once the next turn
+// is under way that is no longer true, so it goes whether or not the window was
+// ever viewed.
+func (c *Coordinator) clearDoneBell(win *tmux.Window, idx int, pending []tmuxSetOption) []tmuxSetOption {
+	delete(c.aiBellUntil, idx)
+	if win.Bell {
+		win.Bell = false
+		pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", unset: true})
+	}
+	return pending
+}
+
+// settleAIPane runs on the busy→idle edge of an AI pane and decides which of the
+// two "needs you" signals to raise:
+//
+//   - the tool asked something → record a question, which renders "?" and
+//     survives the user reading it (only the tool working again clears it)
+//   - the tool merely finished → window bell ("done working"), which is an
+//     unseen-notification and clears as soon as the window is viewed
+//
+// Deciding here rather than every cycle keeps the pane capture to one tmux call
+// per transition. Returns the pending option writes with any additions appended.
+func (c *Coordinator) settleAIPane(pane *tmux.Pane, win *tmux.Window, viewed bool, now int64, pending []tmuxSetOption) []tmuxSetOption {
+	busySince, hadBusySince := c.aiBusySince[pane.ID]
+	delete(c.aiBusySince, pane.ID)
+
+	if tmux.HasQuestion(capturePaneText(pane.ID, aiQuestionScanLines)) {
+		c.aiQuestion[pane.ID] = true
+		logEvent("AI_QUESTION pane=%s window=%d", pane.ID, win.Index)
+		// A question supersedes any "done working" bell left over from an
+		// earlier stretch in this window — it is the more specific signal, and
+		// the two would otherwise both be pending when the question resolves.
+		delete(c.aiBellUntil, win.Index)
+		if win.Bell {
+			win.Bell = false
+			pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", unset: true})
+		}
+		return pending
+	}
+	delete(c.aiQuestion, pane.ID)
+	if viewed {
+		// They watched it finish; nothing to notify.
+		return pending
+	}
+	// Passive detection reads any title change as work, so a single flickering
+	// cycle can look like a whole busy→idle round trip. Only a stretch of real
+	// work earns a "done" bell; a question, above, is raised either way.
+	if !hadBusySince || now-busySince < aiDoneMinBusySeconds {
+		return pending
+	}
+	win.Bell = true
+	c.aiBellUntil[win.Index] = now + aiDoneBellSeconds
+	logEvent("AI_DONE_BELL pane=%s window=%d", pane.ID, win.Index)
+	return append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", value: "1"})
 }
 
 // processTree holds pre-parsed process table data for CPU-based busy detection.

@@ -12,9 +12,21 @@
 
 - `auto_theme.sync_claude_code` mirrors the light/dark toggle into Claude Code's own theme setting in `~/.claude/settings.json`. Off by default. Preserves the `-ansi` and `-daltonized` variant of whatever theme is already set. Claude Code reloads the file, so running sessions repaint without a restart.
 
+### Changed
+
+- The two AI attention indicators now mean different things and clear differently. The diamond is a notification: an AI pane that finished working while you were on another window raises it, and switching to the window clears it. The `?` is an unanswered question, so it survives you reading it and clears when the tool starts working again — which is what happens when you reply. Deciding between them needs to know whether the tool actually asked anything, so when a pane stops working the daemon reads its last 40 rows once and looks for question phrasing, a boxed list of numbered choices, or a closing line that ends in `?`.
+
+  Before this, `?` appeared on any AI pane that was merely sitting at its idle glyph and was dismissed by looking at the window, which is backwards on both counts: a Claude Code tab parked with nothing to do carried a permanent `?`, and a real question was cleared by switching to the window without answering it. The diamond, meanwhile, only ever meant the tool had exited, and the in-memory expiry re-asserted it every poll — so visiting the window unset the tmux option and the diamond came straight back on the next cycle.
+
+- Whether an AI pane is working is now read from the pane, not just its title and its hooks. Claude Code prints a status line above its input box with a counter that ticks while a turn runs (`✽ Symbioting… (27s · ↓ 1.2k tokens)`) and stops when it ends (`✻ Brewed for 2m 29s`), and that counter now outranks every other signal. It has to: a tool that sets its own pane title sets it to something durable, so a pane titled `✳ fix-manifest-archive-scheme` says exactly that whether it is mid-turn or has been sitting idle for an hour. With nothing to contradict them, the hooks were the only vote — one missed `Stop` and a window kept its diamond for the rest of the session, and a hook-set `?` could sit on a pane that had long since been answered and gone back to work. The reading is cached for a second, so a burst of reconciles still costs one `capture-pane` per pane per second.
+
 ### Fixed
 
-- Claude Code's spinner is recognized again, so its panes show activity indicators. Current builds cycle through the half-filled circles ◐◓◑◒ rather than the braille dots tabby was matching, so a working pane read as doing nothing. The knock-on was worse than a missing spinner: the `?` indicator means "something happened here you haven't seen yet" and is only re-armed by a busy → idle transition, so a pane that never registered as busy never flagged for input either. Both glyph families are now matched.
+- A window no longer gets declared finished ten seconds into a long turn. The daemon cross-checks a hook that says "busy" against the pane title, and clears the hook as stale when the title shows no spinner — but a title set by the tool itself never shows one, so every turn on such a pane was called stale, which manufactured a finished-working bell while the tool was still going. The cross-check now reads the pane's progress line before overriding a hook.
+
+- An answered question no longer keeps its `?`. Question detection scanned the whole visible tail of the pane, which holds around forty rows and so usually still shows the last question along with the reply that settled it. The search now starts below the last prompt the user typed into and sent.
+
+- Claude Code's spinner is recognized again, so its panes show activity indicators. Current builds cycle through the half-filled circles ◐◓◑◒ rather than the braille dots tabby was matching, so a working pane read as doing nothing. The knock-on was worse than a missing spinner: both attention indicators are raised when a pane stops working, so a pane that never registered as busy never flagged for input or completion either. Both glyph families are now matched.
 
 - AI tools running over SSH now get activity indicators. The local pane command for a remote session is just `ssh`, so nothing identified the tool inside it and the whole per-pane AI detection pass was skipped — even though the remote tool's spinner and idle glyphs arrive in the pane title like any other. A remote pane whose title carries one is now treated as an AI pane. Nothing needs installing on the remote host.
 

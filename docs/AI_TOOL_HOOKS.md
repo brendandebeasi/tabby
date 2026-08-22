@@ -38,15 +38,24 @@ instant refresh. It auto-detects which tmux window the tool is running in via
 |-----------|----------------------------|-----------|
 | `busy 1`  | Tool is working            | Spinner   |
 | `busy 0`  | Tool stopped working       | (clears)  |
-| `input 1` | Tool needs user input      | ?         |
-| `input 0` | User resumed interaction   | (clears)  |
-| `bell 1`  | Task completed / exited    | Diamond   |
+| `input 1` | Tool asked a question      | ?         |
+| `input 0` | Question resolved          | (clears)  |
+| `bell 1`  | Done working / exited      | Diamond   |
 | `bell 0`  | Acknowledged               | (clears)  |
 
 Common semantic states:
 - `working` => `busy 1`
 - `question` => `busy 0` then `input 1`
-- `done` => `busy 0` then `input 1` (or `bell 1` for completion alert)
+- `done` => `busy 0` then `bell 1`
+
+The two "needs you" indicators clear differently, and the difference is the
+point:
+
+- The diamond is a notification. Looking at the window is what dismisses it,
+  so it means "finished while you were elsewhere".
+- The `?` is an unanswered question. Reading a question doesn't answer it, so
+  the `?` survives visiting the window and clears only when the tool starts
+  working again -- which is what happens once you reply.
 
 ### Event Mapping
 
@@ -501,10 +510,34 @@ Even without hooks, the daemon detects AI tool states by:
    (U+2801-U+28FF) and half-filled circles ◐◓◑◒ (U+25D0-U+25D3). Current Claude
    Code builds use the half-circles; older ones used braille.
 2. **Idle glyph** ✳ (U+2733) in pane title -- Claude Code's explicit
-   "waiting for you" icon, which maps to the `?` input indicator.
+   "waiting for you" icon. On its own it raises no indicator: a tool sitting
+   ready is not a tool that wants something.
 3. **Title change between poll cycles** -- Any tool that updates its title while
    working (every 5 seconds).
-4. **Process exit** -- When the AI tool command exits, the daemon fires a bell.
+4. **Live progress line in the pane** -- Claude Code prints a ticking status line
+   above its input box (`✽ Symbioting… (27s · ↓ 1.2k tokens)`); when the turn ends
+   the counter stops and the line reads `✻ Brewed for 2m 29s` instead. The
+   parenthesized counter is direct evidence of work and **outranks every other
+   signal, hooks included**. The reading is cached for a second, so a burst of
+   reconciles costs one `capture-pane` per pane per second.
+5. **Pane content when work stops** -- On the busy -> idle edge the daemon reads
+   the last 40 rows of the pane and decides between the two states. A question
+   phrasing (`Do you want`, `Would you like`, `Should I`), a boxed numbered
+   choice list, or a final line ending in `?` raises the `?` indicator.
+   Otherwise the pane merely finished, and the window gets the bell. The search
+   stops at the last prompt the user typed into and sent: a question with your own
+   reply below it has been dealt with, however recently it scrolled past.
+6. **Process exit** -- When the AI tool command exits, the daemon fires a bell.
+
+### Why the progress line outranks the hooks
+
+A tool that sets its own pane title usually sets it to something durable -- Claude
+Code uses the conversation topic, prefixed with ✳. That title never carries a
+spinner, so the title can never confirm or contradict a hook. Trusting the hook
+alone means one missed `Stop` or one `Notification` fired at the wrong moment
+sticks a `?` or a diamond on the window for the rest of the session, and there is
+nothing to shake it loose. Reading the counter gives the daemon a second opinion
+that is always available and always current.
 
 ### Remote (SSH / mosh) AI panes
 
@@ -527,13 +560,13 @@ T=/path/to/tabby/bin/tabby; [ -x "$T" ] || T="$(command -v tabby 2>/dev/null)"
 [ -x "$T" ] && { "$T" hook set-indicator busy 1; }; exit 0
 ```
 
-### The `?` indicator is "unseen", not "idle"
+### A missed spinner costs both indicators
 
-`?` means *something happened here you haven't looked at yet*. Once an attached
-client views the window, it is acknowledged and stays quiet until the next
-busy -> idle cycle. A consequence: if a tool's spinner is not recognized, the
-pane never registers as busy, the acknowledgment is never re-armed, and `?` never
-comes back either -- one missed spinner glyph silently costs both indicators.
+Both "needs you" signals are raised on the busy -> idle edge, so a tool whose
+spinner glyph the daemon doesn't recognize never registers as busy, never
+reaches that edge, and shows neither `?` nor a diamond -- it just sits there
+looking idle. If a tool goes quiet in the sidebar, check its spinner glyph
+first.
 
 The passive system works for all tools automatically. Hooks add precision: instant
 state changes instead of 5-second polling, and no false positives from title

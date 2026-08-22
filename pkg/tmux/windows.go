@@ -163,6 +163,137 @@ func HasIdleIcon(title string) bool {
 	return false
 }
 
+// workingLineRe matches the live status line an AI tool paints while a turn is
+// running: an icon, a randomized gerund, and a counter that is still ticking
+// ("✳ Skedaddling… (5s · thinking)", "✽ Symbioting… (27s · ↓ 1.2k tokens)").
+// The finished form of the same line carries no parenthesized counter
+// ("✻ Brewed for 2m 29s"), which is what separates working from done.
+var workingLineRe = regexp.MustCompile(`(?i)^\s*[✻✳✽*]\s+\S+\s*\(\d+[hms]|esc to interrupt`)
+
+// HasWorkingLine reports whether an AI pane's visible output says a turn is
+// still running. Panes whose title is set by a tool hook carry a fixed project
+// name rather than a spinner, so the pane body is the only place their progress
+// shows up.
+func HasWorkingLine(paneText string) bool {
+	for _, line := range strings.Split(paneText, "\n") {
+		if workingLineRe.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// questionPromptRe matches the phrasings AI tools use to open a choice dialog
+// ("Do you want to proceed?", "Would you like me to ...", "Should I ..."). These
+// arrive as a boxed permission/choice prompt whose own text may wrap onto a line
+// that no longer ends in "?", so the phrasing is a more reliable tell than
+// punctuation alone.
+var questionPromptRe = regexp.MustCompile(`(?i)\b(do you want|would you like|should i|which (one|of these|option)|please (confirm|choose|clarify))\b`)
+
+// numberedOptionRe matches a selectable option line from a permission dialog,
+// e.g. "❯ 1. Yes" or "│   2. No, tell Claude what to do differently". The box
+// border or the ❯ cursor is required: a bare "2. ..." is far more often an
+// ordinary numbered list in the tool's prose than an option to pick.
+var numberedOptionRe = regexp.MustCompile(`^\s*(❯\s*\d+[.)]\s+\S|[│|]\s*(❯\s*)?\d+[.)]\s+\S)`)
+
+// chromeLineRe matches the terminal furniture an AI tool paints below its last
+// real output: box borders, the input prompt, and the status footer. None of it
+// is content, so question detection skips it when looking for the final line the
+// tool actually said.
+var chromeLineRe = regexp.MustCompile(`(?i)^[\s─│┌┐└┘╭╮╰╯━┃▔▁▏▕·]*$|for shortcuts|bypass permissions|accept edits|plan mode|^\s*[✻✳*]\s*(\S+ for \d|thinking|esc to interrupt)|^\s*⏵|^\s*(ctrl|shift|esc|opt|alt)\+|tokens?\b.*\bleft\b`)
+
+// promptLineRe matches the tool's own empty input prompt. Everything from there
+// down is the input box and status footer, never output, so it bounds where the
+// tool's last real line can be. Deliberately anchored to a *bare* prompt so the
+// "❯ 1. Yes" option line of a permission dialog doesn't match.
+var promptLineRe = regexp.MustCompile(`^[\s│|]*[❯>]\s*[│|]?\s*$`)
+
+// submittedPromptRe matches a prompt line the user has already typed into and
+// sent, e.g. "❯ make the design configurable". Everything above it belongs to a
+// turn the user has answered, so it cannot be what the tool is waiting on now.
+var submittedPromptRe = regexp.MustCompile(`^\s*[❯>]\s+(\S.*)$`)
+
+// optionBodyRe matches the text of a numbered choice, so "❯ 1. Yes" from a
+// permission dialog is not mistaken for a prompt the user has submitted.
+var optionBodyRe = regexp.MustCompile(`^\d+[.)]`)
+
+// trailingPunct is stripped from the end of a candidate line before the "?"
+// test, so a question wrapped in markdown or parentheses still counts.
+const trailingPunct = " \t*_`\"'’”)]}>"
+
+// unansweredTail drops every line up to and including the last prompt the user
+// typed into and sent. What remains is the part of the pane the user has not
+// replied to, which is the only place a pending question can live: a question
+// with the user's own answer below it has been dealt with, however recently it
+// scrolled past.
+func unansweredTail(lines []string) []string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.ContainsRune(lines[i], '│') {
+			continue
+		}
+		m := submittedPromptRe.FindStringSubmatch(lines[i])
+		if m == nil || optionBodyRe.MatchString(m[1]) {
+			continue
+		}
+		return lines[i+1:]
+	}
+	return lines
+}
+
+// HasQuestion reports whether recent AI-pane output looks like the tool asking
+// the user something, as opposed to merely finishing its turn. The search is
+// limited to what the user has not replied to yet (see unansweredTail), then
+// looks for two signals:
+//
+//   - a choice/permission dialog: question phrasing, or numbered options with a
+//     "Yes"/"No"-shaped first choice
+//   - the last thing the tool actually said ends in "?"
+//
+// This is what separates the "?" indicator (a question waiting on you, which
+// survives you looking at the window) from the bell (done working, which
+// clears once you have seen it).
+func HasQuestion(paneText string) bool {
+	if strings.TrimSpace(paneText) == "" {
+		return false
+	}
+	lines := unansweredTail(strings.Split(paneText, "\n"))
+
+	// A boxed dialog can appear anywhere in the unanswered tail; scan all of it
+	// for the shape.
+	sawOption := false
+	for _, line := range lines {
+		if questionPromptRe.MatchString(line) {
+			return true
+		}
+		if numberedOptionRe.MatchString(line) {
+			sawOption = true
+		}
+	}
+	if sawOption {
+		return true
+	}
+
+	// Otherwise fall back to the last real content line. The status footer is
+	// free-form (model name, context percentage, elapsed time) and not worth
+	// pattern-matching, so cut the search at the input prompt instead: nothing
+	// below it is ever output.
+	end := len(lines)
+	for i := len(lines) - 1; i >= 0; i-- {
+		if promptLineRe.MatchString(lines[i]) {
+			end = i
+			break
+		}
+	}
+	for i := end - 1; i >= 0; i-- {
+		line := strings.TrimRight(lines[i], " \t")
+		if strings.TrimSpace(line) == "" || chromeLineRe.MatchString(line) {
+			continue
+		}
+		return strings.HasSuffix(strings.TrimRight(line, trailingPunct), "?")
+	}
+	return false
+}
+
 // AIIdleTimeout returns the configured idle timeout in seconds.
 func AIIdleTimeout() int64 {
 	return aiIdleTimeout
