@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -488,6 +489,24 @@ func sessionAlive(sessionID string, cache map[string]bool) bool {
 	return alive
 }
 
+// daemonAlive reports whether the daemon owning sessionID is still accepting
+// connections. A grouped peer session outlives its daemon (the daemon idle-quits
+// once every shared window already has a renderer), and its orphaned renderers
+// then sit on a dead socket showing "Loading..." forever. Dialing rather than
+// stat-ing the socket is deliberate: the socket file survives the process.
+func daemonAlive(sessionID string, cache map[string]bool) bool {
+	if alive, ok := cache[sessionID]; ok {
+		return alive
+	}
+	conn, err := net.DialTimeout("unix", daemon.SocketPath(sessionID), 300*time.Millisecond)
+	alive := err == nil
+	if conn != nil {
+		conn.Close()
+	}
+	cache[sessionID] = alive
+	return alive
+}
+
 func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window, coordinator *Coordinator) bool {
 	spawnRenderersMu.Lock()
 	defer spawnRenderersMu.Unlock()
@@ -556,6 +575,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 
 	// Liveness of peer sessions owning renderer panes, memoised for this pass.
 	aliveSessions := map[string]bool{}
+	aliveDaemons := map[string]bool{}
 
 	// Check each window
 	for _, win := range windows {
@@ -620,9 +640,11 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 						!strings.HasSuffix(startCmd, "-session "+sessionID) {
 						// Grouped sessions share their windows and panes, so a
 						// renderer tagged with another session is only an orphan
-						// once that session is gone. Killing a live peer's pane
-						// makes both daemons kill and respawn each other forever.
-						if owner := rendererSessionID(startCmd); owner != "" && sessionAlive(owner, aliveSessions) {
+						// once that peer's daemon is gone. Killing a live peer's
+						// pane makes both daemons kill and respawn each other
+						// forever; sparing one whose daemon already exited leaves
+						// the sidebar stuck on "Loading..." forever.
+						if owner := rendererSessionID(startCmd); owner != "" && sessionAlive(owner, aliveSessions) && daemonAlive(owner, aliveDaemons) {
 							logEvent("CLEANUP_STALE_RENDERER_SKIP window=%s pane=%s reason=peer_session_alive owner=%s", windowID, paneID, owner)
 							hasRenderer = true
 							break

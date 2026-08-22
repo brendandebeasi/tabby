@@ -583,12 +583,18 @@ func ensureSidebar(sessionID, windowID string) {
 
 	exec.Command("tmux", "set-option", "-g", "status", "off").Run()
 
-	// Check if current window already has a sidebar renderer
+	// Check if current window already has a sidebar renderer THIS session owns.
+	// Grouped sessions share panes, so a peer's renderer is visible here too;
+	// treating that as "already handled" left a reattached session with no
+	// daemon of its own and every nav keybinding failing on a dead socket.
 	if windowID != "" {
 		out, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_current_command}|#{pane_start_command}").Output()
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if strings.Contains(line, "sidebar-renderer") || strings.Contains(line, "sidebar") {
-				return // sidebar already exists
+			if !strings.Contains(line, "sidebar-renderer") && !strings.Contains(line, "sidebar") {
+				continue
+			}
+			if strings.Contains(line, "-session '"+sessionID+"'") {
+				return // this session's own sidebar already exists
 			}
 		}
 	}
