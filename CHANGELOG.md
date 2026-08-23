@@ -26,6 +26,14 @@
 
 ### Fixed
 
+- The phone button bar stops flickering, and focus stops jumping around with it, in a grouped session family. `tmux list-panes -a` walks sessions, and every session in a group links the same windows, so a five-session group reports each pane five times over. The duplicate-header sweep read those repeats as five headers in one window and killed four of them — all the same, only, real pane — leaving the window bare until the next tick spawned a replacement, about a hundred and forty times a minute. Every one of those splits and kills reflows the window and re-pins the client's focus, which is what made focus wander on its own. The header and pane-header sweeps now count each pane once.
+
+  Two related hazards go with it, since several daemons attend the same shared windows: a bar whose owning session and daemon are both still running is now left for that peer to reap rather than killed on sight, the oldest pane wins a genuine duplicate so every peer picks the same survivor instead of each killing a different one, and a daemon whose own client is on a desktop profile no longer tears down a peer's bar while that peer is still serving a phone.
+
+- The layout audit no longer asks for a full refresh twice a second when `pane_header.native` is on. Native mode labels panes through tmux's own border format and deliberately never spawns the overlay header panes, but the audit still counted one missing per content pane and requested the relayout that would never produce them. It now skips that check in native mode.
+
+- A window too short to fit the button bar no longer asks for a full layout refresh every five seconds forever. The spawner declines to split a content pane with fewer rows to spare than the bar needs, but the audit that noticed the missing bar kept requesting the refresh that would never produce one — so a single cramped window drove continuous relayouts across the session. The audit now reports the window as too short and leaves it until it grows.
+
 - A window no longer gets declared finished ten seconds into a long turn. The daemon cross-checks a hook that says "busy" against the pane title, and clears the hook as stale when the title shows no spinner — but a title set by the tool itself never shows one, so every turn on such a pane was called stale, which manufactured a finished-working bell while the tool was still going. The cross-check now reads the pane's progress line before overriding a hook.
 
 - An answered question no longer keeps its `?`. Question detection scanned the whole visible tail of the pane, which holds around forty rows and so usually still shows the last question along with the reply that settled it. The search now starts below the last prompt the user typed into and sent.

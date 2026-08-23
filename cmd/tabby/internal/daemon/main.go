@@ -507,6 +507,38 @@ func daemonAlive(sessionID string, cache map[string]bool) bool {
 	return alive
 }
 
+// headerOwnedByLivePeer reports whether a window-header pane was launched by a
+// different, still-running grouped session. Grouped sessions share their
+// windows, so every peer daemon sees every peer's header and counts the extras
+// as duplicates. Killing a live peer's header makes the daemons reap and
+// respawn each other's bars forever: the phone footer visibly flickers and
+// every respawn re-pins the client's focus. Only a header whose owning session
+// or daemon is gone is safe to reap.
+func headerOwnedByLivePeer(startCmd, selfSessionID string, aliveSessions, aliveDaemons map[string]bool) bool {
+	owner := rendererSessionID(startCmd)
+	if owner == "" || owner == selfSessionID {
+		return false
+	}
+	return sessionAlive(owner, aliveSessions) && daemonAlive(owner, aliveDaemons)
+}
+
+var paneIDNumRe = regexp.MustCompile(`^%(\d+)$`)
+
+// paneIDLess orders pane ids by their numeric index so "oldest wins" holds
+// past %9 (a plain string sort puts %10 before %9). Every daemon derives the
+// same winner from it, which is what stops peers from each killing a different
+// duplicate and leaving the window with none.
+func paneIDLess(a, b string) bool {
+	am := paneIDNumRe.FindStringSubmatch(a)
+	bm := paneIDNumRe.FindStringSubmatch(b)
+	if am == nil || bm == nil {
+		return a < b
+	}
+	ai, _ := strconv.Atoi(am[1])
+	bi, _ := strconv.Atoi(bm[1])
+	return ai < bi
+}
+
 func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, windows []tmux.Window, coordinator *Coordinator) bool {
 	spawnRenderersMu.Lock()
 	defer spawnRenderersMu.Unlock()
@@ -1105,26 +1137,65 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 	}
 }
 
-// killPhoneWindowHeaders removes every window-header pane in the session.
+// listPanesAllUnique runs `tmux list-panes -a` and drops the rows tmux repeats
+// for grouped sessions. tmux walks sessions, and every session in a group links
+// the same windows, so a five-session group reports each pane five times. Code
+// that only builds a set shrugs that off; code that reads extra rows as extra
+// panes to reap kills the one real pane instead. Fields are `|||`-separated and
+// paneIDField is the index of #{pane_id} within them.
+func listPanesAllUnique(format string, paneIDField int) ([]string, error) {
+	out, err := tmuxCmd("list-panes", "-a", "-F", format).Output()
+	if err != nil {
+		return nil, err
+	}
+	return uniqueByPaneID(strings.Split(strings.TrimSpace(string(out)), "\n"), paneIDField), nil
+}
+
+func uniqueByPaneID(rawLines []string, paneIDField int) []string {
+	seen := map[string]bool{}
+	var lines []string
+	for _, line := range rawLines {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "|||")
+		if paneIDField >= len(fields) {
+			continue
+		}
+		if seen[fields[paneIDField]] {
+			continue
+		}
+		seen[fields[paneIDField]] = true
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// killPhoneWindowHeaders removes this daemon's window-header panes.
 // The window-header is the phone-only fat-touch button bar (hamburger / prev /
 // close / next); it must vanish the moment the active client flips to a desktop
 // profile so the sidebar can claim the row back without overlap. Safe to call
 // when no headers exist — the list-panes scan no-ops in that case.
-func killPhoneWindowHeaders() {
-	headerOut, err := tmuxCmd("list-panes", "-a", "-F",
-		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
+// Headers belonging to a live grouped peer are left alone: that peer may still
+// be serving a phone client on the same shared windows, and tearing its bar
+// down only makes it respawn one a tick later.
+func killPhoneWindowHeaders(sessionID string) {
+	headerLines, err := listPanesAllUnique("#{pane_id}|||#{pane_current_command}|||#{pane_start_command}", 0)
 	if err != nil {
 		return
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
-		if line == "" {
-			continue
-		}
+	aliveSessions := map[string]bool{}
+	aliveDaemons := map[string]bool{}
+	for _, line := range headerLines {
 		parts := strings.SplitN(line, "|||", 3)
 		if len(parts) < 3 {
 			continue
 		}
 		if strings.Contains(parts[1], "window-header") || strings.Contains(parts[2], "window-header") {
+			if headerOwnedByLivePeer(parts[2], sessionID, aliveSessions, aliveDaemons) {
+				logEvent("WINDOW_HEADER_KILL_DESKTOP_SKIP pane=%s reason=peer_session_alive", parts[0])
+				continue
+			}
 			markSkipPreserveForWindow(parts[0])
 			tmuxCmd("kill-pane", "-t", parts[0]).Run()
 			logEvent("WINDOW_HEADER_KILL_DESKTOP pane=%s", parts[0])
@@ -1155,19 +1226,17 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 	// buttons that replace the sidebar interaction on narrow clients. On desktop,
 	// kill any that are around and skip spawning new ones.
 	if coordinator != nil && coordinator.ActiveClientProfile() != "phone" {
-		killPhoneWindowHeaders()
+		killPhoneWindowHeaders(sessionID)
 		return
 	}
 
 	// Discover existing window-header panes keyed by window_id
+	type headerPane struct{ paneID, startCmd string }
 	windowsWithHeader := make(map[string]bool)
-	if headerOut, err := tmuxCmd("list-panes", "-a", "-F",
-		"#{window_id}|||#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
-		byWindow := make(map[string][]string)
-		for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
-			if line == "" {
-				continue
-			}
+	if headerLines, err := listPanesAllUnique(
+		"#{window_id}|||#{pane_id}|||#{pane_current_command}|||#{pane_start_command}", 1); err == nil {
+		byWindow := make(map[string][]headerPane)
+		for _, line := range headerLines {
 			parts := strings.SplitN(line, "|||", 4)
 			if len(parts) < 4 {
 				continue
@@ -1180,18 +1249,27 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 				continue
 			}
 			windowsWithHeader[winID] = true
-			byWindow[winID] = append(byWindow[winID], paneID)
+			byWindow[winID] = append(byWindow[winID], headerPane{paneID: paneID, startCmd: startCmd})
 		}
-		// Deduplicate: kill any extra window-header panes in the same window
+		// Deduplicate: kill any extra window-header panes in the same window.
+		// The oldest pane wins so that every grouped peer picks the same
+		// survivor; a duplicate a live peer owns is left for that peer to reap
+		// (see headerOwnedByLivePeer).
+		aliveSessions := map[string]bool{}
+		aliveDaemons := map[string]bool{}
 		for winID, panes := range byWindow {
 			if len(panes) <= 1 {
 				continue
 			}
-			sort.Strings(panes)
+			sort.Slice(panes, func(i, j int) bool { return paneIDLess(panes[i].paneID, panes[j].paneID) })
 			for _, extraPane := range panes[1:] {
-				logEvent("WINDOW_HEADER_DEDUP window=%s kill=%s", winID, extraPane)
-				markSkipPreserveForWindow(extraPane)
-				tmuxCmd("kill-pane", "-t", extraPane).Run()
+				if headerOwnedByLivePeer(extraPane.startCmd, sessionID, aliveSessions, aliveDaemons) {
+					logEvent("WINDOW_HEADER_DEDUP_SKIP window=%s pane=%s reason=peer_session_alive", winID, extraPane.paneID)
+					continue
+				}
+				logEvent("WINDOW_HEADER_DEDUP window=%s kill=%s", winID, extraPane.paneID)
+				markSkipPreserveForWindow(extraPane.paneID)
+				tmuxCmd("kill-pane", "-t", extraPane.paneID).Run()
 			}
 		}
 	}
@@ -1371,13 +1449,10 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 
 	panesWithHeader := make(map[string]bool) // content paneID -> has header
 
-	if headerOut, err := tmuxCmd("list-panes", "-a", "-F",
-		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
+	if headerLines, err := listPanesAllUnique("#{pane_id}|||#{pane_current_command}|||#{pane_start_command}", 0); err == nil {
 		headersByTarget := make(map[string][]string)
-		for _, line := range strings.Split(strings.TrimSpace(string(headerOut)), "\n") {
-			if line == "" {
-				continue
-			}
+		headerStartCmds := make(map[string]string)
+		for _, line := range headerLines {
 			parts := strings.SplitN(line, "|||", 3)
 			if len(parts) < 3 {
 				continue
@@ -1394,12 +1469,23 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			}
 			panesWithHeader[target] = true
 			headersByTarget[target] = append(headersByTarget[target], paneID)
+			headerStartCmds[paneID] = startCmd
 		}
+		// Same peer-ownership rule as the window-header dedup: oldest wins so
+		// every grouped peer agrees on the survivor, and a header a live peer
+		// owns is left for that peer to reap.
+		aliveSessions := map[string]bool{}
+		aliveDaemons := map[string]bool{}
 		for target, headerPanes := range headersByTarget {
 			if len(headerPanes) <= 1 {
 				continue
 			}
+			sort.Slice(headerPanes, func(i, j int) bool { return paneIDLess(headerPanes[i], headerPanes[j]) })
 			for _, extraPane := range headerPanes[1:] {
+				if headerOwnedByLivePeer(headerStartCmds[extraPane], sessionID, aliveSessions, aliveDaemons) {
+					logEvent("HEADER_DEDUP_SKIP target=%s pane=%s reason=peer_session_alive", target, extraPane)
+					continue
+				}
 				logEvent("HEADER_DEDUP target=%s kill=%s", target, extraPane)
 				markSkipPreserveForWindow(extraPane)
 				tmuxCmd("kill-pane", "-t", extraPane).Run()
@@ -2073,6 +2159,21 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	headersOpt, _ := tmuxCmd("show-options", "-gqv", "@tabby_pane_headers").Output()
 	headersEnabled := strings.TrimSpace(string(headersOpt)) == "on"
 
+	headerRows := coordinator.desiredWindowHeaderHeight()
+	// Mirrors the "pane must be tall enough to split off a header row" guard in
+	// spawnWindowHeaders — the topmost content pane is the one that gets split.
+	windowCanHostHeader := func(content []paneInfo) bool {
+		var top *paneInfo
+		for i := range content {
+			if top == nil || content[i].top < top.top {
+				top = &content[i]
+			}
+		}
+		return top != nil && top.height >= headerRows+2
+	}
+	auditAliveSessions := map[string]bool{}
+	auditAliveDaemons := map[string]bool{}
+
 	for winID, win := range byWindow {
 		if profile == "desktop" {
 			if len(win.windowHeaders) > 0 {
@@ -2080,6 +2181,10 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 					winID, len(win.windowHeaders), fixOrLog("kill_desktop"))
 				if panelAuditApplyFixes {
 					for _, p := range win.windowHeaders {
+						if headerOwnedByLivePeer(p.startCmd, sessionID, auditAliveSessions, auditAliveDaemons) {
+							logEvent("AUDIT_WINDOW_HEADER_SKIP window=%s pane=%s reason=peer_session_alive", winID, p.paneID)
+							continue
+						}
 						markSkipPreserveForWindow(p.paneID)
 						tmuxCmd("kill-pane", "-t", p.paneID).Run()
 					}
@@ -2093,17 +2198,32 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 		}
 		switch {
 		case len(win.windowHeaders) == 0:
+			// spawnWindowHeaders refuses to split a content pane that can't
+			// spare the rows, so asking for a refresh here would never produce
+			// a header — it would just re-run the whole layout every audit
+			// tick forever, churning panes and stealing focus. Report it and
+			// leave the window alone until it grows.
+			if !windowCanHostHeader(win.contentPanes) {
+				logEvent("AUDIT_WINDOW_HEADER window=%s count=0 profile=phone expected=1 action=skip_window_too_short rows=%d",
+					winID, headerRows)
+				continue
+			}
 			logEvent("AUDIT_WINDOW_HEADER window=%s count=0 profile=phone expected=1 action=%s",
 				winID, fixOrLog("request_refresh"))
 			needLayoutRefresh = true
 		case len(win.windowHeaders) > 1:
-			// Keep lowest pane_id, kill the rest (mirror WINDOW_HEADER_DEDUP).
+			// Keep the oldest pane, kill the rest (mirror WINDOW_HEADER_DEDUP),
+			// but never a header a live grouped peer owns.
 			sorted := append([]paneInfo(nil), win.windowHeaders...)
-			sort.Slice(sorted, func(i, j int) bool { return sorted[i].paneID < sorted[j].paneID })
+			sort.Slice(sorted, func(i, j int) bool { return paneIDLess(sorted[i].paneID, sorted[j].paneID) })
 			logEvent("AUDIT_WINDOW_HEADER window=%s count=%d profile=phone expected=1 action=%s",
 				winID, len(sorted), fixOrLog("dedup"))
 			if panelAuditApplyFixes {
 				for _, p := range sorted[1:] {
+					if headerOwnedByLivePeer(p.startCmd, sessionID, auditAliveSessions, auditAliveDaemons) {
+						logEvent("AUDIT_WINDOW_HEADER_SKIP window=%s pane=%s reason=peer_session_alive", winID, p.paneID)
+						continue
+					}
 					markSkipPreserveForWindow(p.paneID)
 					tmuxCmd("kill-pane", "-t", p.paneID).Run()
 				}
@@ -2114,7 +2234,14 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	// --- Check 5: pane-header count per content pane --------------------------
 	// When @tabby_pane_headers=on, expect exactly one pane-header targeting
 	// each content pane. Detect missing, duplicate, and orphan (target gone).
-	if headersEnabled {
+	// Native-border mode labels panes through tmux's own pane-border-format and
+	// never spawns these overlay panes, so the missing-header branch would ask
+	// for a layout refresh several times a second forever.
+	nativePaneBorders := false
+	if cfg := coordinator.GetConfig(); cfg != nil && cfg.PaneHeader.Native != nil {
+		nativePaneBorders = *cfg.PaneHeader.Native
+	}
+	if headersEnabled && !nativePaneBorders {
 		for winID, win := range byWindow {
 			contentByID := map[string]bool{}
 			for _, c := range win.contentPanes {
@@ -2826,7 +2953,7 @@ func Run(args []string) int {
 		// of profile transitions collapses to one signal_refresh body run.
 		loop.SubmitRefresh()
 	}
-	coordinator.OnKillPhoneWindowHeaders = killPhoneWindowHeaders
+	coordinator.OnKillPhoneWindowHeaders = func() { killPhoneWindowHeaders(*sessionID) }
 
 	// Register SIGUSR1/SIGUSR2 handlers BEFORE server.Start() creates the
 	// socket. ensure_sidebar.sh sends USR1 the moment it detects the socket,
