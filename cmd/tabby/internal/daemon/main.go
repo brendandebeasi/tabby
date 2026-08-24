@@ -909,8 +909,13 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 // the fallback path used when tabby-hook runs inside an SSH session on a
 // remote host that can't reach this daemon's socket directly.
 //
-// pipe-pane -o is a no-op if a pipe is already running on the pane, so this
-// is safe to call on every refresh cycle.
+// `pipe-pane -o` is NOT idempotent — it is a toggle. tmux closes any existing
+// pipe before acting, and -o then declines to open a replacement, so calling it
+// on an already-piped pane leaves that pane UNPIPED. Called blindly on every
+// full refresh (as it was), this flipped every content pane's OSC pipe off on
+// alternating passes, so the OSC 7700 fallback was dead about half the time.
+// So ask tmux once which panes are already piped and only touch the rest,
+// which also drops the per-pane subprocess forks to zero in the steady state.
 func startOSCPipes(windows []tmux.Window) {
 	exe := tabbyExe()
 	if exe == "" {
@@ -926,6 +931,7 @@ func startOSCPipes(windows []tmux.Window) {
 		}
 	}
 	cmd := fmt.Sprintf("'%s' hook osc-handler", tabbyBin)
+	piped := listPanesWithPipe()
 	for _, win := range windows {
 		// Minimized windows are either parked in the holding session (their entries
 		// here are synthetic, with a placeholder pane id) or transiently peeked;
@@ -935,6 +941,9 @@ func startOSCPipes(windows []tmux.Window) {
 		}
 		for _, p := range win.Panes {
 			if paneIsSystemPane(p.Command, p.StartCommand) {
+				continue
+			}
+			if piped[p.ID] {
 				continue
 			}
 			tmuxCmd("pipe-pane", "-o", "-t", p.ID, cmd).Run()

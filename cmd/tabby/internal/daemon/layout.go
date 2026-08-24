@@ -269,6 +269,34 @@ func listPanesGroupedByWindow() map[string][]panesRow {
 	return result
 }
 
+// listPanesWithPipe returns the set of pane ids in this session that currently
+// have a pipe-pane attached (#{pane_pipe} == 1).
+//
+// Needed because `pipe-pane -o` is a TOGGLE, not an idempotent "ensure piped":
+// tmux closes any existing pipe before acting, and -o then declines to open a
+// new one, so a second call on an already-piped pane leaves it UNPIPED. One
+// query lets callers skip the panes that are already piped.
+func listPanesWithPipe() map[string]bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	args := sessionScopedListPanesArgs("#{pane_id}|||#{pane_pipe}")
+	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	if err != nil {
+		return nil
+	}
+	piped := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		id, pipe, ok := strings.Cut(line, "|||")
+		if !ok || id == "" {
+			continue
+		}
+		if strings.TrimSpace(pipe) == "1" {
+			piped[id] = true
+		}
+	}
+	return piped
+}
+
 // listSidebarPanesByWindow queries tmux once for every sidebar pane and
 // returns a windowID → paneID mapping. Used by the width-sync planner so
 // it can target paneIDs directly instead of issuing one list-panes per

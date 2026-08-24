@@ -731,13 +731,17 @@ func (l *Loop) doPaneLayoutOps() {
 		// bottom navigation bar). Window-headers must keep spawning.
 		killLeftoverPaneHeaders()
 	}
+	pl0 := time.Now()
 	preActive := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 	tmuxCmd("set-option", "-g", "@tabby_spawning", "1").Run()
 	windows := l.coord.GetWindows()
+	pl1 := time.Now()
 	spawnWindowHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredWindowHeaderHeight(), windows, l.coord)
+	pl2 := time.Now()
 	if !nativeBorders {
 		spawnPaneHeaders(l.server, l.deps.SessionID, customBorder, l.coord.desiredPaneHeaderHeight(), windows)
 	}
+	pl3 := time.Now()
 	// Re-assert native pane-border labels on the dashboard window (the chrome
 	// passes above reset pane-border-status/style each cycle). No-op when inactive.
 	l.coord.applyDashboardBorders()
@@ -750,6 +754,7 @@ func (l *Loop) doPaneLayoutOps() {
 			l.coord.applyNativeBorders(w.ID, w.Group)
 		}
 	}
+	pl4 := time.Now()
 	// Profile transitions (desktop ↔ phone) issue kill-pane + split-window
 	// across multiple windows during this bracket. Even with `split-window -d`
 	// the kill-pane sequence can silently flip the session's current-window
@@ -793,9 +798,16 @@ func (l *Loop) doPaneLayoutOps() {
 			}
 		}
 	}
+	pl5 := time.Now()
 	tmuxCmd("set-option", "-g", "@tabby_spawning", "0").Run()
 	startOSCPipes(windows)
+	pl6 := time.Now()
 	cleanupOrphanedHeaders(customBorder, l.coord, l.activeWindowID)
+	pl7 := time.Now()
+	logEvent("PERF_PANE_LAYOUT pre_ms=%d winhdr_ms=%d panehdr_ms=%d borders_ms=%d active_ms=%d osc_ms=%d orphanhdr_ms=%d total_ms=%d windows=%d",
+		pl1.Sub(pl0).Milliseconds(), pl2.Sub(pl1).Milliseconds(), pl3.Sub(pl2).Milliseconds(),
+		pl4.Sub(pl3).Milliseconds(), pl5.Sub(pl4).Milliseconds(), pl6.Sub(pl5).Milliseconds(),
+		pl7.Sub(pl6).Milliseconds(), pl7.Sub(pl0).Milliseconds(), len(windows))
 	// NOTE: updateHeaderBorderStyles is NOT called here to avoid border
 	// flickering. It's only called when windows hash changes (on refresh
 	// + hash change) which is when groups/colors change.
