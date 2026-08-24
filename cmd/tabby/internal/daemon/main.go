@@ -2138,6 +2138,15 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	// session that does have a client. Check 4 in particular would kill the phone
 	// button bars a peer daemon just spawned. Nothing is being displayed from
 	// here, so there is nothing to repair. See HasElectedClient.
+	// Having a client of our own is necessary but not sufficient: in a session
+	// group every peer has its own client, and this audit repairs windows all
+	// of them share. Two daemons auditing the same windows with different
+	// profiles take turns undoing each other (check 4 again). Only the group's
+	// elected layout owner repairs. See layout_lease.go.
+	if !coordinator.OwnsGroupLayout() {
+		logEvent("AUDIT_SKIP reason=not_group_layout_owner session=%s", sessionID)
+		return
+	}
 	if !coordinator.HasElectedClient() {
 		logEvent("AUDIT_SKIP reason=no_elected_client session=%s", sessionID)
 		return

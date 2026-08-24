@@ -841,6 +841,10 @@ type Coordinator struct {
 	sessionID string
 	baseIndex int
 
+	// Which daemon in our session group owns shared-window chrome layout.
+	// See layout_lease.go.
+	layoutOwner layoutOwnerCache
+
 	// Process tree caching
 	lastProcessCheck  time.Time
 	cachedProcessTree *processTree

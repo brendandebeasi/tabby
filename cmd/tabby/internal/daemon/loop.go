@@ -728,6 +728,14 @@ func (l *Loop) doPaneLayoutOps() {
 			return
 		}
 	}
+	// Sessions in a group share their panes, so only the group's elected
+	// layout owner may spawn/kill chrome here. Without this, every daemon in
+	// the group rewrites the same windows with its own client profile and they
+	// undo each other every round. See layout_lease.go.
+	if !l.coord.OwnsGroupLayout() {
+		logEvent("PANE_LAYOUT_SKIP reason=not_group_layout_owner")
+		return
+	}
 	if now.Sub(l.lastPaneLayoutOps) < loopPaneLayoutCooldown {
 		logEvent("PANE_LAYOUT_SKIP cooldown_remaining=%dms", (loopPaneLayoutCooldown - now.Sub(l.lastPaneLayoutOps)).Milliseconds())
 		return
