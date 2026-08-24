@@ -90,6 +90,11 @@ func testWindow(name string, active bool, paneCommands ...string) tmux.Window {
 // no tmux calls, no event loop, and no sockets. Safe to use in pure unit tests.
 func newTestCoordinator(t *testing.T) *Coordinator {
 	t.Helper()
+	// Cut the package loose from whatever tmux server happens to be running on
+	// the developer's machine. Unstubbed, this queries the live server, and a
+	// test asserting on window "@1" flips result depending on which window the
+	// developer is looking at while the suite runs.
+	stubAttachedClientWindows(t, nil)
 	cfg := testConfig()
 	return &Coordinator{
 		config:             cfg,
@@ -169,4 +174,19 @@ func TestHelpersSanity(t *testing.T) {
 	cfg := testConfig()
 	assert.Equal(t, "TestGroup", cfg.Groups[0].Name)
 	assert.Equal(t, "Default", cfg.Groups[1].Name)
+}
+
+// stubAttachedClientWindows replaces the live-tmux "which windows are on
+// screen" lookup for the duration of one test. Pass the window IDs that should
+// count as viewed; nil means nobody is looking at anything, which is what most
+// tests want — the unseen-attention signals (bell, "?") only fire for windows
+// no attached client is displaying.
+func stubAttachedClientWindows(t *testing.T, viewed map[string]bool) {
+	t.Helper()
+	if viewed == nil {
+		viewed = map[string]bool{}
+	}
+	orig := attachedClientWindows
+	attachedClientWindows = func() map[string]bool { return viewed }
+	t.Cleanup(func() { attachedClientWindows = orig })
 }
