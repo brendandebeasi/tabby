@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -91,6 +92,24 @@ func TestElectGroupLayoutOwner_PhoneAndDesktopPeerYieldToOne(t *testing.T) {
 	// The user types on the desktop; ownership follows them.
 	desktop.activity = 1000
 	assert.Equal(t, "$1", electGroupLayoutOwner("$1", groups, []groupLayoutClient{phone, desktop}))
+}
+
+// Regression: the first cut asked tmux for #{client_session}, which is the
+// session NAME ("infras-2"), while list-sessions keys the group map by
+// #{session_id} ("$2"). Nothing matched, every daemon elected nobody, and all
+// chrome layout stopped group-wide. The mismatch is invisible in the election
+// logic itself, so guard the format string that feeds it.
+func TestGroupLayoutStateAsksTmuxForSessionIDNotName(t *testing.T) {
+	src, err := os.ReadFile("layout_lease.go")
+	if err != nil {
+		t.Fatalf("read layout_lease.go: %v", err)
+	}
+	body := string(src)
+
+	assert.Contains(t, body, "#{session_id}|||#{client_activity}",
+		"the client read must key sessions by id to match the group map")
+	assert.NotContains(t, body, "#{client_session}",
+		"#{client_session} is the session name and will not match #{session_id} keys")
 }
 
 func TestOwnsGroupLayout_CachesTheElection(t *testing.T) {
