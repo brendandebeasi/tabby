@@ -1440,6 +1440,39 @@ func killLeftoverPaneHeaders() {
 	}
 }
 
+// classifyPaneHeaders splits a `#{pane_id}|||#{pane_current_command}|||
+// #{pane_start_command}` listing into the pane-header panes grouped by the
+// content pane each one describes, those headers' start commands, and the set
+// of every pane id the listing mentioned.
+//
+// The last of those is what tells an orphan from a header that is simply
+// waiting for its turn: the listing comes from `list-panes -a`, so it spans
+// sessions and includes panes parked in _tabby_limbo and _tabby_minimized. A
+// target missing from it is missing from the whole server.
+func classifyPaneHeaders(lines []string) (headersByTarget map[string][]string, headerStartCmds map[string]string, livePaneIDs map[string]bool) {
+	headersByTarget = make(map[string][]string)
+	headerStartCmds = make(map[string]string)
+	livePaneIDs = make(map[string]bool, len(lines))
+	for _, line := range lines {
+		parts := strings.SplitN(line, "|||", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		paneID, curCmd, startCmd := parts[0], parts[1], parts[2]
+		livePaneIDs[paneID] = true
+		if !strings.Contains(curCmd, "pane-header") && !strings.Contains(startCmd, "pane-header") {
+			continue
+		}
+		target := paneTargetFromStartCmd(startCmd)
+		if target == "" {
+			continue
+		}
+		headersByTarget[target] = append(headersByTarget[target], paneID)
+		headerStartCmds[paneID] = startCmd
+	}
+	return headersByTarget, headerStartCmds, livePaneIDs
+}
+
 // spawnPaneHeaders spawns a header pane above each content pane in all windows.
 // Each content pane gets its own 1-row title strip. The phone button bar lives
 // on window-header; pane-headers are always 1 row on both desktop and phone.
@@ -1460,26 +1493,34 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 	panesWithHeader := make(map[string]bool) // content paneID -> has header
 
 	if headerLines, err := listPanesAllUnique("#{pane_id}|||#{pane_current_command}|||#{pane_start_command}", 0); err == nil {
-		headersByTarget := make(map[string][]string)
-		headerStartCmds := make(map[string]string)
-		for _, line := range headerLines {
-			parts := strings.SplitN(line, "|||", 3)
-			if len(parts) < 3 {
-				continue
-			}
-			paneID := parts[0]
-			curCmd := parts[1]
-			startCmd := parts[2]
-			if !strings.Contains(curCmd, "pane-header") && !strings.Contains(startCmd, "pane-header") {
-				continue
-			}
-			target := paneTargetFromStartCmd(startCmd)
-			if target == "" {
-				continue
-			}
+		headersByTarget, headerStartCmds, livePaneIDs := classifyPaneHeaders(headerLines)
+		for target := range headersByTarget {
 			panesWithHeader[target] = true
-			headersByTarget[target] = append(headersByTarget[target], paneID)
-			headerStartCmds[paneID] = startCmd
+		}
+		// Reap headers whose content pane is gone. A pane header is a separate
+		// tmux pane split above the pane it describes, so killing the content
+		// pane — from the daemon's own kill_pane, the header's close button, a
+		// prefix+x, or just `exit` in the shell — leaves the header behind. It
+		// notices on its own, but only on a five-second tick, and in the
+		// meantime tmux has grown it into the space its content pane vacated:
+		// a two-row strip stretched across half the window, which reads as the
+		// split still being there. Reaping here closes that window down to the
+		// refresh cycle that follows the kill.
+		//
+		// Orphans are handled before the dedup pass below so a target with two
+		// headers and no pane loses both rather than being deduped down to one
+		// survivor that then has to time itself out.
+		for target, headerPanes := range headersByTarget {
+			if livePaneIDs[target] {
+				continue
+			}
+			for _, orphan := range headerPanes {
+				logEvent("HEADER_ORPHAN_KILL target=%s kill=%s", target, orphan)
+				markSkipPreserveForWindow(orphan)
+				tmuxCmd("kill-pane", "-t", orphan).Run()
+			}
+			delete(headersByTarget, target)
+			delete(panesWithHeader, target)
 		}
 		// Same peer-ownership rule as the window-header dedup: oldest wins so
 		// every grouped peer agrees on the survivor, and a header a live peer
