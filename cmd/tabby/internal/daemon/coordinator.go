@@ -17772,7 +17772,12 @@ func (c *Coordinator) openColorPicker(clientID, scope, target, title, currentCol
 	if c.OnSendColorPicker == nil {
 		return
 	}
-	c.OnSendColorPicker(clientID, &daemon.ColorPickerPayload{
+	host := c.pickerHostClient(clientID)
+	if host == "" {
+		logEvent("COLOR_PICKER_NO_HOST client=%s scope=%s", clientID, scope)
+		return
+	}
+	c.OnSendColorPicker(host, &daemon.ColorPickerPayload{
 		Title:        title,
 		Scope:        scope,
 		Target:       target,
@@ -20541,15 +20546,64 @@ func executeTmuxCommand(cmd string) {
 	tmuxCmd("source-file", f.Name()).Run()
 }
 
+// pickerHostClient returns the client that should RENDER an overlay picker
+// (marker or color) opened from clientID. Only the sidebar renderer knows how
+// to draw one, so a menu opened from a window header or a pane header hands
+// the picker to the sidebar of the same window. Returns "" when nothing can
+// draw it — callers hide the menu entry rather than offer one that silently
+// does nothing, which is what a window-header "Custom Color..." used to do.
+func (c *Coordinator) pickerHostClient(clientID string) string {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return ""
+	}
+	var host string
+	switch daemon.KindOf(clientID) {
+	case daemon.TargetSidebar:
+		return clientID
+	case daemon.TargetWindowHeader:
+		host = strings.TrimPrefix(clientID, "window-header:")
+	case daemon.TargetPaneHeader:
+		paneID := strings.TrimPrefix(clientID, "header:")
+		if paneID == "" {
+			return ""
+		}
+		// The pane id is an explicit -t target, so this is not subject to the
+		// most-recently-active-client resolution that bites unqualified queries.
+		out, err := tmuxCmd("display-message", "-p", "-t", paneID, "#{window_id}").Output()
+		if err != nil {
+			return ""
+		}
+		host = strings.TrimSpace(string(out))
+	default:
+		return ""
+	}
+	if host == "" {
+		return ""
+	}
+	c.clientWidthsMu.RLock()
+	_, connected := c.clientWidths[host]
+	c.clientWidthsMu.RUnlock()
+	if !connected {
+		return ""
+	}
+	return host
+}
+
 func (c *Coordinator) openMarkerPicker(clientID, scope, target, title string) {
 	if c.OnSendMarkerPicker == nil {
+		return
+	}
+	host := c.pickerHostClient(clientID)
+	if host == "" {
+		logEvent("MARKER_PICKER_NO_HOST client=%s scope=%s", clientID, scope)
 		return
 	}
 	options := markerOptions()
 	if len(options) == 0 {
 		return
 	}
-	c.OnSendMarkerPicker(clientID, &daemon.MarkerPickerPayload{
+	c.OnSendMarkerPicker(host, &daemon.MarkerPickerPayload{
 		Title:   title,
 		Scope:   scope,
 		Target:  target,
@@ -20710,19 +20764,25 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 	// window id rides along so the daemon can do both in one step.
 	args = append(args, "  + New Group...", "n", newGroupMenuCommand(c.getHookPath(), wid))
 
-	// Set Color submenu
+	// Set Color submenu. The graphical picker is only offered when some client
+	// can actually draw it (see pickerHostClient); the hex prompt always works.
+	canShowPicker := c.pickerHostClient(clientID) != ""
 	args = append(args, "-Set Tab Color", "", "")
-	colorTarget := base64.StdEncoding.EncodeToString([]byte(wid))
-	currentColor := win.CustomColor
-	colorPickerCmd := fmt.Sprintf("tabby-color-picker:window:%s:%s", colorTarget, currentColor)
-	args = append(args, "  Custom Color...", "h", colorPickerCmd)
+	if canShowPicker {
+		colorTarget := base64.StdEncoding.EncodeToString([]byte(wid))
+		currentColor := win.CustomColor
+		colorPickerCmd := fmt.Sprintf("tabby-color-picker:window:%s:%s", colorTarget, currentColor)
+		args = append(args, "  Custom Color...", "h", colorPickerCmd)
+	}
 	customColorCmd := fmt.Sprintf("command-prompt -p 'Hex color (#rrggbb):' \"set-window-option -t %s @tabby_color '%%%%%%%%'\"", wid)
 	args = append(args, "  Custom (Hex)...", "#", customColorCmd)
 	resetColorCmd := fmt.Sprintf("set-window-option -t %s -u @tabby_color", wid)
 	args = append(args, "  Reset to Default", "d", resetColorCmd)
 
-	// Set Marker — opens the searchable emoji/icon picker (same as group menu)
-	if !strings.HasPrefix(clientID, "window-header:") {
+	// Set Marker — opens the searchable emoji/icon picker (same as group menu).
+	// A window header cannot draw the picker itself, but its window's sidebar
+	// can, so the entry is offered whenever a host client exists.
+	if canShowPicker {
 		target := base64.StdEncoding.EncodeToString([]byte(wid))
 		searchCmd := fmt.Sprintf("tabby-marker-picker:window:%s", target)
 		args = append(args, "Set Marker", "s", searchCmd)
@@ -21145,17 +21205,20 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		}
 	}
 
-	groupColorTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
-	groupCurrentColor := group.Theme.Bg
-	colorPickerCmd := fmt.Sprintf("tabby-color-picker:group:%s:%s", groupColorTarget, groupCurrentColor)
-	args = append(args, "  Custom Color...", "h", colorPickerCmd)
+	canShowPicker := c.pickerHostClient(clientID) != ""
+	if canShowPicker {
+		groupColorTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
+		groupCurrentColor := group.Theme.Bg
+		colorPickerCmd := fmt.Sprintf("tabby-color-picker:group:%s:%s", groupColorTarget, groupCurrentColor)
+		args = append(args, "  Custom Color...", "h", colorPickerCmd)
+	}
 	customColorCmd := fmt.Sprintf(
 		"command-prompt -p 'Hex color (#rrggbb):' \"run-shell '%s set-group-color \\\"%s\\\" \\\"%%%%%%%%\\\"'\"",
 		hookPath, group.Name,
 	)
 	args = append(args, "  Custom (Hex)...", "#", customColorCmd)
 
-	canShowMarkerPicker := c.OnSendMenu != nil && !strings.HasPrefix(clientID, "window-header:")
+	canShowMarkerPicker := c.OnSendMenu != nil && canShowPicker
 	if canShowMarkerPicker {
 		groupTarget := base64.StdEncoding.EncodeToString([]byte(group.Name))
 		searchCmd := fmt.Sprintf("tabby-marker-picker:group:%s", groupTarget)
