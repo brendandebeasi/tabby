@@ -18831,7 +18831,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Resolve the target window ID and its index from the live list. We key
 		// neighbor selection on the index, but identify the target by whichever
 		// form we were given.
-		listOut, _ := tmuxCmd("list-windows", "-F", "#{window_index}|#{window_id}").Output()
+		listOut, _ := tmuxCmd(c.listWindowsArgs("#{window_index}|#{window_id}")...).Output()
 		type winRow struct {
 			idx int
 			id  string
@@ -18882,14 +18882,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				return false
 			}
 		}
-		tmuxCmd("set-option", "-g", "@tabby_close_select_window", "1").Run()
-		tmuxCmd("set-option", "-g", "@tabby_close_select_index", strconv.Itoa(targetIdx)).Run()
+		// Focus has already moved to the neighbor above, so the kill is the
+		// last step. No option handshake here: @tabby_close_select_window and
+		// @tabby_close_select_index were set and cleared around this call but
+		// never read by anything, so they only cost four tmux round-trips and a
+		// timer on every close -- and being -g they had both daemons of a
+		// grouped pair writing the same two globals.
 		tmuxCmd("kill-window", "-t", targetID).Run()
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			tmuxCmd("set-option", "-gu", "@tabby_close_select_window").Run()
-			tmuxCmd("set-option", "-gu", "@tabby_close_select_index").Run()
-		}()
 		return true
 
 	case "split_pane":

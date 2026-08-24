@@ -122,6 +122,25 @@ func listClientsArgs(format string) []string {
 	return append(args, "-F", format)
 }
 
+// listWindowsArgs builds a `list-windows` argv scoped to this daemon's session.
+// Without -a, list-windows takes the same unqualified-target path as
+// display-message: it lists whichever session the most recently active client
+// is on. That is wrong even for a grouped pair, because the holding sessions
+// (_tabby_limbo, _tabby_minimized) are not grouped and hold windows we must
+// not treat as our own. Sites that genuinely want every session pass -a.
+func listWindowsArgs(sess, format string) []string {
+	args := []string{"list-windows"}
+	if t := sessionTarget(sess); t != "" {
+		args = append(args, "-t", t)
+	}
+	return append(args, "-F", format)
+}
+
+// listWindowsArgs is the Coordinator-scoped form.
+func (c *Coordinator) listWindowsArgs(format string) []string {
+	return listWindowsArgs(c.SessionID(), format)
+}
+
 // daemonSessionID returns the session this daemon was started for, from the
 // -session flag. Used by the call sites that have no Coordinator in scope.
 func daemonSessionID() string {

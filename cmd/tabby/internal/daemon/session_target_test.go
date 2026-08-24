@@ -199,6 +199,58 @@ func TestNoUnscopedListClients(t *testing.T) {
 	}
 }
 
+// TestNoUnqualifiedListWindows completes the set. `list-windows` with neither
+// -a nor -t resolves its target the same way display-message does, so it lists
+// whichever session the last active client is on. That is wrong even between
+// grouped sessions, because the holding sessions (_tabby_limbo,
+// _tabby_minimized) are not grouped and hold windows the daemon must not treat
+// as its own -- and the kill_window handler picked its focus neighbor out of
+// exactly this list.
+//
+// -a is the legitimate unqualified form: it says "every session" out loud.
+func TestNoUnqualifiedListWindows(t *testing.T) {
+	allowed := map[string]bool{"session_target.go": true}
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+
+	var offenders []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if allowed[name] {
+			continue
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			if !strings.Contains(line, `"list-windows"`) {
+				continue
+			}
+			if strings.Contains(line, `"-a"`) || strings.Contains(line, `"-t"`) {
+				continue
+			}
+			offenders = append(offenders, filepath.Join(".", name)+":"+itoa(i+1)+": "+trimmed)
+		}
+	}
+
+	if len(offenders) > 0 {
+		t.Fatalf("list-windows with neither -a nor -t (lists another session's "+
+			"windows; use listWindowsArgs for our own, or -a to say every "+
+			"session on purpose):\n%s", strings.Join(offenders, "\n"))
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
