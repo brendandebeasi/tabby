@@ -609,6 +609,9 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 	aliveSessions := map[string]bool{}
 	aliveDaemons := map[string]bool{}
 
+	// One pane query for the whole session instead of one per window.
+	panesByWindow := listPanesGroupedByWindow()
+
 	// Check each window
 	for _, win := range windows {
 		windowID := win.ID
@@ -616,7 +619,11 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			continue
 		}
 		// The dashboard view is the bare tiled grid — no sidebar. Skip entirely.
-		if win.ID == dashboardActiveWindowID(sessionID) {
+		// dashWin is the same query, already answered once before the loop:
+		// calling dashboardActiveWindowID here forked a `tmux list-windows`
+		// per window per pass, which is most of why a do-nothing refresh grew
+		// from ~500ms to ~1250ms as windows and clients accumulated.
+		if win.ID == dashWin {
 			logEvent("SPAWN_CHECK window=%s result=skip_dashboard", windowID)
 			continue
 		}
@@ -633,65 +640,56 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			continue
 		}
 
-		// Live check: query tmux directly for ANY sidebar/renderer pane in this window.
-		// The cached win.Panes has sidebar panes filtered out by ListWindowsWithPanes,
-		// so we must ask tmux directly. This also catches renderers from other daemons.
+		// Live check: look for ANY sidebar/renderer pane in this window in the
+		// batched pane snapshot taken once per pass above. The cached win.Panes
+		// has sidebar panes filtered out by ListWindowsWithPanes, so we need the
+		// raw tmux view. This also catches renderers from other daemons.
 		// Dead system panes (from a crashed daemon) are killed here so focus can escape them.
 		hasRenderer := false
 		liveFirstPane := ""
-		if rawOut, err := tmuxCmd("list-panes", "-t", windowID, "-F",
-			"#{pane_id}|||#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
-			for _, rawLine := range strings.Split(strings.TrimSpace(string(rawOut)), "\n") {
-				if rawLine == "" {
-					continue
-				}
-				rawParts := strings.SplitN(rawLine, "|||", 4)
-				if len(rawParts) < 4 {
-					continue
-				}
-				paneID := rawParts[0]
-				dead := rawParts[1] == "1"
-				curCmd := rawParts[2]
-				startCmd := rawParts[3]
-				isSystem := strings.Contains(curCmd, "sidebar") || strings.Contains(curCmd, "renderer") ||
-					strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer")
-				if dead && isSystem {
-					// Kill dead system panes so tmux moves focus to the content pane
-					logEvent("CLEANUP_DEAD_SYSTEM_PANE window=%s pane=%s cmd=%s", windowID, paneID, curCmd)
+		for _, row := range panesByWindow[windowID] {
+			paneID := row.ID
+			dead := row.Dead
+			curCmd := row.CurCmd
+			startCmd := row.StartCmd
+			isSystem := strings.Contains(curCmd, "sidebar") || strings.Contains(curCmd, "renderer") ||
+				strings.Contains(startCmd, "sidebar") || strings.Contains(startCmd, "renderer")
+			if dead && isSystem {
+				// Kill dead system panes so tmux moves focus to the content pane
+				logEvent("CLEANUP_DEAD_SYSTEM_PANE window=%s pane=%s cmd=%s", windowID, paneID, curCmd)
+				tmuxCmd("kill-pane", "-t", paneID).Run()
+				continue
+			}
+			if !dead && !isSystem && liveFirstPane == "" {
+				liveFirstPane = paneID
+			}
+			if !dead && isSystem {
+				// Reject renderers from a different session — they're orphans
+				// from a previous daemon (different session ID) still talking
+				// to a dead socket. Killing the pane lets a fresh renderer
+				// bound to the current session spawn on the next tick.
+				// Why: without this check, SPAWN_CHECK loops forever with
+				// skip_has_pane while the user's sidebar stays frozen.
+				if startCmd != "" && !strings.Contains(startCmd, "-session '"+sessionID+"'") &&
+					!strings.Contains(startCmd, "-session "+sessionID+" ") &&
+					!strings.HasSuffix(startCmd, "-session "+sessionID) {
+					// Grouped sessions share their windows and panes, so a
+					// renderer tagged with another session is only an orphan
+					// once that peer's daemon is gone. Killing a live peer's
+					// pane makes both daemons kill and respawn each other
+					// forever; sparing one whose daemon already exited leaves
+					// the sidebar stuck on "Loading..." forever.
+					if owner := rendererSessionID(startCmd); owner != "" && sessionAlive(owner, aliveSessions) && daemonAlive(owner, aliveDaemons) {
+						logEvent("CLEANUP_STALE_RENDERER_SKIP window=%s pane=%s reason=peer_session_alive owner=%s", windowID, paneID, owner)
+						hasRenderer = true
+						break
+					}
+					logEvent("CLEANUP_STALE_RENDERER window=%s pane=%s session_mismatch start_cmd=%s", windowID, paneID, startCmd)
 					tmuxCmd("kill-pane", "-t", paneID).Run()
 					continue
 				}
-				if !dead && !isSystem && liveFirstPane == "" {
-					liveFirstPane = paneID
-				}
-				if !dead && isSystem {
-					// Reject renderers from a different session — they're orphans
-					// from a previous daemon (different session ID) still talking
-					// to a dead socket. Killing the pane lets a fresh renderer
-					// bound to the current session spawn on the next tick.
-					// Why: without this check, SPAWN_CHECK loops forever with
-					// skip_has_pane while the user's sidebar stays frozen.
-					if startCmd != "" && !strings.Contains(startCmd, "-session '"+sessionID+"'") &&
-						!strings.Contains(startCmd, "-session "+sessionID+" ") &&
-						!strings.HasSuffix(startCmd, "-session "+sessionID) {
-						// Grouped sessions share their windows and panes, so a
-						// renderer tagged with another session is only an orphan
-						// once that peer's daemon is gone. Killing a live peer's
-						// pane makes both daemons kill and respawn each other
-						// forever; sparing one whose daemon already exited leaves
-						// the sidebar stuck on "Loading..." forever.
-						if owner := rendererSessionID(startCmd); owner != "" && sessionAlive(owner, aliveSessions) && daemonAlive(owner, aliveDaemons) {
-							logEvent("CLEANUP_STALE_RENDERER_SKIP window=%s pane=%s reason=peer_session_alive owner=%s", windowID, paneID, owner)
-							hasRenderer = true
-							break
-						}
-						logEvent("CLEANUP_STALE_RENDERER window=%s pane=%s session_mismatch start_cmd=%s", windowID, paneID, startCmd)
-						tmuxCmd("kill-pane", "-t", paneID).Run()
-						continue
-					}
-					hasRenderer = true
-					break
-				}
+				hasRenderer = true
+				break
 			}
 		}
 		if hasRenderer {
@@ -803,6 +801,12 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 		}
 	}
 
+	// One pane query for the whole session instead of one per window. This runs
+	// moments after spawnRenderersForNewWindows asked tmux the very same
+	// question, and both used to fork once per window, so a do-nothing refresh
+	// paid 2N subprocess spawns on the loop goroutine.
+	panesByWindow := listPanesGroupedByWindow()
+
 	for _, win := range windows {
 		windowID := win.ID
 		if windowID == "" {
@@ -815,9 +819,10 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 			continue
 		}
 
-		paneOut, err := tmuxCmd("list-panes", "-t", windowID, "-F",
-			"#{pane_id}|||#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output()
-		if err != nil {
+		rows := panesByWindow[windowID]
+		if len(rows) == 0 {
+			// Window not in the snapshot (raced away, or not in this session).
+			// Treat it as unknown rather than as an empty orphan to kill.
 			continue
 		}
 
@@ -827,18 +832,11 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 		// collected so we can reap duplicates below — two sidebars in one window
 		// render as a stray second "Loading..." strip.
 		var liveSidebars []string
-		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
-			if line == "" {
-				continue
-			}
-			parts := strings.SplitN(line, "|||", 4)
-			if len(parts) < 4 {
-				continue
-			}
-			paneID := parts[0]
-			dead := parts[1] == "1"
-			cmd := parts[2]
-			startCmd := parts[3]
+		for _, row := range rows {
+			paneID := row.ID
+			dead := row.Dead
+			cmd := row.CurCmd
+			startCmd := row.StartCmd
 
 			isSidebar := strings.Contains(cmd, "sidebar") || strings.Contains(startCmd, "sidebar") ||
 				strings.Contains(cmd, "renderer") || strings.Contains(startCmd, "renderer")

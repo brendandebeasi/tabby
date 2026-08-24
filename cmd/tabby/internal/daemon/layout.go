@@ -224,6 +224,51 @@ func listWindowGeoms() []windowGeom {
 	return geoms
 }
 
+// panesRow is one pane as the spawn / cleanup scans need it.
+type panesRow struct {
+	ID       string
+	Dead     bool
+	CurCmd   string
+	StartCmd string
+}
+
+// listPanesGroupedByWindow answers, in ONE tmux call, the per-window pane query
+// that the spawn and orphan-sidebar scans used to fork once per window — and
+// which they each ran with the identical format string moments apart, so a pass
+// over N windows cost 2N forks. Both callers only ever read the snapshot for
+// the window they are on, so batching changes nothing they observe.
+//
+// The returned map is keyed by window id. A window with no entry is
+// indistinguishable from the old per-window call failing, which both callers
+// already treat as "know nothing, do nothing".
+func listPanesGroupedByWindow() map[string][]panesRow {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	args := sessionScopedListPanesArgs("#{window_id}|||#{pane_id}|||#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}")
+	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	if err != nil {
+		return nil
+	}
+	result := make(map[string][]panesRow)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, "|||", 5)
+		if len(parts) != 5 {
+			continue
+		}
+		winID := strings.TrimSpace(parts[0])
+		if winID == "" {
+			continue
+		}
+		result[winID] = append(result[winID], panesRow{
+			ID:       parts[1],
+			Dead:     parts[2] == "1",
+			CurCmd:   parts[3],
+			StartCmd: parts[4],
+		})
+	}
+	return result
+}
+
 // listSidebarPanesByWindow queries tmux once for every sidebar pane and
 // returns a windowID → paneID mapping. Used by the width-sync planner so
 // it can target paneIDs directly instead of issuing one list-panes per
