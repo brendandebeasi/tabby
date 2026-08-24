@@ -359,8 +359,8 @@ tmux bind-key -T root MouseDrag1Border resize-pane -M
 # buffer contents on a click outside copy/mouse-app modes; the binding above
 # never falls through to a paste, so the protection is retained.
 tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M \
-    "Split Vertical" "|" "split-window -h -c '#{pane_current_path}'" \
-    "Split Horizontal" "-" "split-window -v -c '#{pane_current_path}'" \
+    "Split Right" "|" "split-window -h -c '#{pane_current_path}'" \
+    "Split Down" "-" "split-window -v -c '#{pane_current_path}'" \
     "" \
     "Break to New Window" "b" "break-pane" \
     "Promote to Primary" "p" "run-shell '$CYCLE_PANE_BIN --move promote'" \

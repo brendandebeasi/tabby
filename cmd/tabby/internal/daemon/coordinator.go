@@ -12768,12 +12768,14 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
 				StartCol: cursor, EndCol: splitVEnd,
+				// "|" = vertical divider → side-by-side panes → split-window -h
 				Action: "header_split_h", Target: paneID,
 			})
 			splitHEnd := splitVEnd + uniseg.StringWidth(compactSplitHBtn) + 1
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: 0, EndLine: 0,
 				StartCol: splitVEnd, EndCol: splitHEnd,
+				// "-" = horizontal divider → stacked panes → split-window -v
 				Action: "header_split_v", Target: paneID,
 			})
 			closeEnd := splitHEnd + uniseg.StringWidth(compactCloseBtn)
@@ -12807,6 +12809,7 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: cursor, EndCol: splitVEnd,
+			// "|" = vertical divider → side-by-side panes → split-window -h
 			Action: "header_split_h", Target: paneID,
 		})
 		cursor = splitVEnd
@@ -12814,6 +12817,7 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 		regions = append(regions, daemon.ClickableRegion{
 			StartLine: 0, EndLine: 0,
 			StartCol: cursor, EndCol: splitHEnd,
+			// "-" = horizontal divider → stacked panes → split-window -v
 			Action: "header_split_v", Target: paneID,
 		})
 		cursor = splitHEnd + 1
@@ -20694,10 +20698,14 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		splitTarget = activePaneID
 	}
 	if !c.isVerticalStackedPane(win, activePaneID) {
-		splitVCmd := fmt.Sprintf("select-window -t %s ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", wid, splitTarget)
-		splitHCmd := fmt.Sprintf("select-window -t %s ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", wid, splitTarget)
-		args = append(args, "Split Vertical |", "|", splitVCmd)
-		args = append(args, "Split Horizontal -", "-", splitHCmd)
+		// Label by where the new pane lands, not by an axis name: "vertical" and
+		// "horizontal" mean opposite things in tmux (-h is side-by-side) and in
+		// editors (:split is stacked), so either word reads as inverted to half
+		// the audience. The glyph still names the divider the split draws.
+		splitRightCmd := fmt.Sprintf("select-window -t %s ; select-pane -t %s ; split-window -h -c '#{pane_current_path}'", wid, splitTarget)
+		splitDownCmd := fmt.Sprintf("select-window -t %s ; select-pane -t %s ; split-window -v -c '#{pane_current_path}'", wid, splitTarget)
+		args = append(args, "Split Right |", "|", splitRightCmd)
+		args = append(args, "Split Down -", "-", splitDownCmd)
 	}
 
 	// --- Utilities ---
@@ -20828,10 +20836,11 @@ func (c *Coordinator) showPaneContextMenu(clientID string, paneID string, pos me
 	args = append(args, "", "", "")
 
 	// Split options
-	splitVCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
-	splitHCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
-	args = append(args, "Split Vertical |", "|", splitVCmd)
-	args = append(args, "Split Horizontal -", "-", splitHCmd)
+	// Labelled by outcome rather than axis — see the pane menu for why.
+	splitRightCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -h -c '%s'", windowIdx, pane.ID, panePath)
+	splitDownCmd := fmt.Sprintf("select-window -t :%d ; select-pane -t %s ; split-window -v -c '%s'", windowIdx, pane.ID, panePath)
+	args = append(args, "Split Right |", "|", splitRightCmd)
+	args = append(args, "Split Down -", "-", splitDownCmd)
 
 	contentCount := 0
 	for _, p := range window.Panes {

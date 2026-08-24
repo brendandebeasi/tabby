@@ -84,7 +84,7 @@ On a window:
 - Move to Group
 - Set Marker, with a searchable emoji picker
 - Set Tab Color, including a transparent option
-- Split Horizontal or Vertical
+- Split Right or Split Down
 - Open in Finder
 - Kill window
 
