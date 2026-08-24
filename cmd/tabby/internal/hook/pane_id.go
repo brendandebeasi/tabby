@@ -37,7 +37,10 @@ func resolvePaneID(envPane string, exists func(string) bool, active func() strin
 }
 
 // paneExists reports whether pane names a pane on the current tmux server.
-// display-message -t exits non-zero (and prints nothing) for an unknown id.
+// An unknown id is not an error to tmux: `display-message -t %35001 -p
+// '#{pane_id}'` exits 0 and prints an empty line (verified on 3.6b). So the
+// empty output is the signal here, not the exit status — checking only the exit
+// code would treat every dead id as live.
 func paneExists(pane string) bool {
 	out, err := exec.Command("tmux", "display-message", "-t", pane, "-p", "#{pane_id}").Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""
