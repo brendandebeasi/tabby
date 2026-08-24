@@ -3,6 +3,7 @@ package hook
 import (
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -12,9 +13,52 @@ import (
 // a fourth number, so they never match.
 var layoutLeafCell = regexp.MustCompile(`\d+x\d+,\d+,\d+,\d+`)
 
-// layoutPaneCount reports how many panes a tmux layout string describes.
-func layoutPaneCount(layout string) int {
-	return len(layoutLeafCell.FindAllString(layout, -1))
+// layoutPaneIDs returns the pane ids a layout string names. A leaf's fourth
+// field is the pane's id number, i.e. the "7" of "%7" — so a layout reading
+// "...,0,...,2,...,3" describes panes %0, %2 and %3.
+func layoutPaneIDs(layout string) map[int]bool {
+	ids := map[int]bool{}
+	for _, cell := range layoutLeafCell.FindAllString(layout, -1) {
+		fields := strings.Split(cell, ",")
+		if n, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
+			ids[n] = true
+		}
+	}
+	return ids
+}
+
+// livePaneIDs lists the window's current pane ids in the numeric form layout
+// strings use.
+func livePaneIDs(windowID string) map[int]bool {
+	ids := map[int]bool{}
+	out, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}").Output()
+	if err != nil {
+		return ids
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimPrefix(line, "%")); err == nil {
+			ids[n] = true
+		}
+	}
+	return ids
+}
+
+// samePaneSet reports whether two pane-id sets are identical. An empty set is
+// never a match: it means the read failed, not that the window is empty.
+func samePaneSet(a, b map[int]bool) bool {
+	if len(a) == 0 || len(a) != len(b) {
+		return false
+	}
+	for id := range a {
+		if !b[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // doPreservePaneRatios replaces preserve_pane_ratios.sh:
@@ -48,15 +92,8 @@ func doPreservePaneRatios(args []string) {
 	}
 
 	// Only attempt restore if more than one pane remains
-	out, _ := exec.Command("tmux", "list-panes", "-t", windowID).Output()
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	count := 0
-	for _, l := range lines {
-		if l != "" {
-			count++
-		}
-	}
-	if count <= 1 {
+	live := livePaneIDs(windowID)
+	if len(live) <= 1 {
 		return
 	}
 
@@ -72,11 +109,28 @@ func doPreservePaneRatios(args []string) {
 	// window when it changed it wrongly, which is the "closing one split
 	// scrambles the rest, one pane shrinks" report.
 	//
-	// Apply a layout only while it still describes this window. That leaves the
-	// case the hook exists for: a pane exits and the daemon respawns a system
-	// pane (sidebar, header) before this runs, so the counts match again and
-	// the saved ratios are the ones to put back.
-	if layoutPaneCount(layout) != count {
+	// Apply a layout only while it still describes this window -- and "describes"
+	// has to mean the same PANES, not merely the same number of them.
+	//
+	// A count check alone passes in exactly one situation: a pane exits and the
+	// daemon respawns a system pane (sidebar, header) before this runs, so the
+	// tallies agree again while the saved layout still names the dead pane. That
+	// was documented as the case this hook exists for. It isn't -- it is the case
+	// this hook corrupts. select-layout does not reject a layout naming panes
+	// that no longer exist; it assigns cells POSITIONALLY. Measured on tmux 3.6
+	// with three panes 100|32|66: kill the middle one, respawn one, and the
+	// counts match at 3, so the stale layout applies and the surviving right-hand
+	// pane inherits the dead pane's 32-wide slot while the newborn takes its 66.
+	// An untouched pane visibly jumps and a boundary appears where the dead pane
+	// used to be -- the "closing one split leaves a ghost split" report.
+	//
+	// Since @tabby_layout_<wid> is re-saved on every refresh, at after-kill-pane
+	// it always describes the pre-kill pane set, so this check is expected to
+	// skip most of the time. That is correct: there is nothing faithful to
+	// replay. The daemon reached the same conclusion for its own restored
+	// layouts in ec9868a (layoutPaneIDs/samePaneSet in daemon/layout.go); this
+	// hook was the one path still going on a tally.
+	if !samePaneSet(layoutPaneIDs(layout), live) {
 		return
 	}
 
