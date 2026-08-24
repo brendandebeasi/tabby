@@ -773,9 +773,12 @@ func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Windo
 	// un-minimize. Without this it is reported as closed on every full refresh
 	// for as long as it stays minimized (274 such lines in one live log), which
 	// is pure noise in exactly the place you go looking during an investigation.
+	// Grouped sessions share windows, so this has to be the whole holding
+	// session and not just the windows *we* parked: a peer daemon's park takes
+	// the window out of our list too, and we still hold a live client for it.
 	if coordinator != nil {
-		for _, win := range coordinator.listParkedMinimizedWindows() {
-			currentWindows[win.ID] = true
+		for _, id := range coordinator.AnyParkedWindowIDs() {
+			currentWindows[id] = true
 		}
 	}
 

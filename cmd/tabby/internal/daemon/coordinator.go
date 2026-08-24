@@ -722,6 +722,7 @@ type Coordinator struct {
 	// Minimized section right after a minimize/restore.
 	parkedMu    sync.Mutex
 	parkedCache []tmux.Window
+	parkedAllID []string
 	parkedGen   uint64
 	parkedCched uint64
 	parkedValid bool
@@ -9453,32 +9454,49 @@ func (c *Coordinator) invalidateParkedCache() {
 }
 
 func (c *Coordinator) listParkedMinimizedWindows() []tmux.Window {
+	parked, _ := c.listParkedMinimized()
+	return parked
+}
+
+// AnyParkedWindowIDs returns the ids of every window in the holding session,
+// including ones parked by a *peer* session. Grouped sessions share their
+// windows, so a window one daemon parked is one every peer daemon also stops
+// seeing in its own window list — while the sidebar client each of them holds
+// for it stays alive and correct. Existence checks want this set; anything
+// that renders the Minimized section wants the origin-filtered one.
+func (c *Coordinator) AnyParkedWindowIDs() []string {
+	_, all := c.listParkedMinimized()
+	return all
+}
+
+func (c *Coordinator) listParkedMinimized() ([]tmux.Window, []string) {
 	c.parkedMu.Lock()
 	if c.parkedValid && c.parkedCched == c.parkedGen {
-		cached := c.parkedCache
+		cached, cachedAll := c.parkedCache, c.parkedAllID
 		c.parkedMu.Unlock()
-		return cached
+		return cached, cachedAll
 	}
 	gen := c.parkedGen
 	c.parkedMu.Unlock()
 
-	parked := c.listParkedMinimizedWindowsUncached()
+	parked, all := c.listParkedMinimizedWindowsUncached()
 
 	c.parkedMu.Lock()
 	// Only publish if no park/surface landed while we were querying; otherwise
 	// this result is already stale and the next call should re-query.
 	if gen == c.parkedGen {
 		c.parkedCache = parked
+		c.parkedAllID = all
 		c.parkedCched = gen
 		c.parkedValid = true
 	}
 	c.parkedMu.Unlock()
-	return parked
+	return parked, all
 }
 
-func (c *Coordinator) listParkedMinimizedWindowsUncached() []tmux.Window {
+func (c *Coordinator) listParkedMinimizedWindowsUncached() ([]tmux.Window, []string) {
 	if err := tmuxCmd("has-session", "-t", minimizedHoldingSession).Run(); err != nil {
-		return nil
+		return nil, nil
 	}
 	origin := c.dashboardSession()
 	out, err := tmuxCmd("list-windows", "-t", minimizedHoldingSession, "-F",
@@ -9488,9 +9506,10 @@ func (c *Coordinator) listParkedMinimizedWindowsUncached() []tmux.Window {
 			"#{@tabby_color_seeded}", "#{@tabby_appearance_key}",
 		}, "\t")).Output()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var parked []tmux.Window
+	var allIDs []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -9499,6 +9518,7 @@ func (c *Coordinator) listParkedMinimizedWindowsUncached() []tmux.Window {
 		if len(f) < 9 {
 			continue
 		}
+		allIDs = append(allIDs, strings.TrimSpace(f[0]))
 		if strings.TrimSpace(f[3]) != origin {
 			continue // parked by a different user session — not ours to show
 		}
@@ -9537,7 +9557,7 @@ func (c *Coordinator) listParkedMinimizedWindowsUncached() []tmux.Window {
 		}
 		parked = append(parked, w)
 	}
-	return parked
+	return parked, allIDs
 }
 
 func stashNameForWindow(windowID string) string {

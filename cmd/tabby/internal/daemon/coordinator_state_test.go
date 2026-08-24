@@ -1111,3 +1111,24 @@ func TestMovesIncludeGatesFocusRestore(t *testing.T) {
 		t.Error("no moves means no restore")
 	}
 }
+
+// Grouped sessions share their windows, so a window a *peer* daemon parks
+// leaves our window list too — while the sidebar client we hold for it stays
+// alive and correct. The Minimized section must only show what we parked
+// (origin-filtered), but existence checks must see the whole holding session,
+// or every refresh logs a live peer-parked window as closed.
+func TestParkedAccessors_SplitOwnFromPeerParked(t *testing.T) {
+	c := &Coordinator{}
+	c.parkedCache = []tmux.Window{{ID: "@7", Minimized: true}} // ours
+	c.parkedAllID = []string{"@7", "@23"}                      // @23 parked by a peer session
+	c.parkedCched = c.parkedGen
+	c.parkedValid = true
+
+	mine := c.listParkedMinimizedWindows()
+	if assert.Len(t, mine, 1) {
+		assert.Equal(t, "@7", mine[0].ID, "the Minimized section shows only windows this session parked")
+	}
+
+	assert.Equal(t, []string{"@7", "@23"}, c.AnyParkedWindowIDs(),
+		"existence checks see every parked window, including a peer's")
+}
