@@ -158,7 +158,12 @@ func clientTTYForWindow(windowID string) string {
 // while the session is fully detached (nobody is actually watching), so this is
 // the real "the user can see it" signal — used to acknowledge AI input
 // indicators only once they've genuinely been seen.
-func attachedClientWindows() map[string]bool {
+// attachedClientWindows is a var, not a plain func, so tests can stub it. It
+// asks the live tmux server which windows are on screen, and several unseen-
+// attention decisions turn on the answer — so left unstubbed it makes those
+// tests read the developer's own session. A test asserting on window "@1"
+// silently inverts whenever a real client happens to be sitting on @1.
+var attachedClientWindows = func() map[string]bool {
 	set := map[string]bool{}
 	out, err := tmuxOutputCtx(listClientsArgs("#{client_tty}|||#{window_id}")...)
 	if err != nil {
@@ -3177,6 +3182,14 @@ func (c *Coordinator) TrackWindowHistoryForClient(clientTTY, windowID string) {
 // visited window instead of tmux's default adjacent-window behavior.
 // Replaces scripts/select_previous_window.sh.
 func (c *Coordinator) SelectPreviousWindow() {
+	// No client of ours is displaying anything, so there is no focus to restore.
+	// The window that closed was shared with a peer session whose own daemon is
+	// running this same path for the client that can actually see it. See
+	// HasElectedClient.
+	if !c.HasElectedClient() {
+		logEvent("SELECT_PREVIOUS_WINDOW_SKIP reason=no_elected_client")
+		return
+	}
 	// Prefer the requesting client's own stack; fall back to the shared one
 	// when the client is unknown or has no surviving entry.
 	activeTTY := ""
@@ -17602,6 +17615,19 @@ func (c *Coordinator) ActiveClientProfile() string {
 		return "desktop"
 	}
 	return c.computeProfile(acw)
+}
+
+// HasElectedClient reports whether our own session currently has an elected
+// client, i.e. whether ActiveClientProfile() is an observation or a fallback.
+//
+// The distinction matters because sessions in a group SHARE their windows. A
+// daemon whose session is detached still runs its loop over those shared
+// windows, and with no client its width reads 0, which ActiveClientProfile
+// reports as "desktop" — so a detached daemon would confidently undo the phone
+// chrome a peer daemon's real phone client needs. Anything that restyles or
+// restructures a shared window must gate on this, not on the profile alone.
+func (c *Coordinator) HasElectedClient() bool {
+	return c.activeClientWidth.Load() > 0
 }
 
 // SetActiveClient caches the full elected-client snapshot (TTY, Width,

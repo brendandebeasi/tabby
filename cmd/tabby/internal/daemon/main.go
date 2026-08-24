@@ -2088,6 +2088,15 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	}
 
 	profile := coordinator.ActiveClientProfile()
+	// With no client of our own, `profile` is the "desktop" fallback rather than
+	// an observation — and every check below repairs windows we may SHARE with a
+	// session that does have a client. Check 4 in particular would kill the phone
+	// button bars a peer daemon just spawned. Nothing is being displayed from
+	// here, so there is nothing to repair. See HasElectedClient.
+	if !coordinator.HasElectedClient() {
+		logEvent("AUDIT_SKIP reason=no_elected_client session=%s", sessionID)
+		return
+	}
 	activeWindowID := ""
 	for _, w := range coordinator.GetWindows() {
 		if w.Active {

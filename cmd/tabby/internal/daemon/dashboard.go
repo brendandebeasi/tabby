@@ -890,6 +890,18 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	if winID == "" {
 		return
 	}
+	// Never restyle a shared window on a fallback profile. See HasElectedClient.
+	if !c.HasElectedClient() {
+		return
+	}
+	// On a phone the window's chrome is the 3-row button bar along the bottom
+	// (renderPhoneCarousel). Tmux's native title strip would spend a fourth row
+	// of a ~34-row screen on chrome, so keep the border STYLING — the colours
+	// still track the tab — but leave the strip itself off.
+	borderStatus := "top"
+	if c.ActiveClientProfile() == "phone" {
+		borderStatus = "off"
+	}
 	activeFg := c.config.PaneHeader.ActiveFg
 	if activeFg == "" {
 		activeFg = "#ffffff"
@@ -965,7 +977,7 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	// (5 windows × 5 options ≈ 25 tmux execs per layout pass). The signature
 	// covers everything that actually goes into the tmux options below; if
 	// nothing changed we skip the batched set entirely.
-	sig := activeFg + "|" + inactiveFg + "|" + activeBg + "|" + inactiveBg
+	sig := activeFg + "|" + inactiveFg + "|" + activeBg + "|" + inactiveBg + "|" + borderStatus
 	c.nativeBorderMu.Lock()
 	if c.nativeBorderSig == nil {
 		c.nativeBorderSig = make(map[string]string)
@@ -983,7 +995,7 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	// handful of fork/wait round trips per window per refresh.
 	args := []string{
 		"set-window-option", "-t", winID, "pane-border-lines", "single",
-		";", "set-window-option", "-t", winID, "pane-border-status", "top",
+		";", "set-window-option", "-t", winID, "pane-border-status", borderStatus,
 		";", "set-window-option", "-t", winID, "pane-border-format", paneBorderFormat(),
 		";", "set-window-option", "-t", winID, "pane-active-border-style",
 		"fg=" + activeFg + ",bg=" + activeBg,
