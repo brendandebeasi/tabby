@@ -157,6 +157,10 @@ type Loop struct {
 	lastGitState       string
 	lastClientGeom     string
 	lastResizeKey      string
+	// pendingGeom is a client size seen but not yet believed, and
+	// pendingGeomSince is when we first saw it. See geometrySettled.
+	pendingGeom      string
+	pendingGeomSince time.Time
 	// lastStaleClientPrune rate-limits PruneStaleClients; the geometry tick
 	// itself runs far too often to scan clients on every pass.
 	lastStaleClientPrune time.Time
@@ -1045,6 +1049,47 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 // clients. Detaching is user-visible, so this stays deliberately infrequent.
 const staleClientPruneInterval = time.Hour
 
+// clientGeomSettle is how long a client's reported size must hold still before
+// chrome is reflowed for it. The geometry tick runs every 250ms, so this is two
+// ticks: long enough to swallow a renegotiation burst, short enough that a real
+// resize still lands within a frame or two of the user letting go.
+const clientGeomSettle = 500 * time.Millisecond
+
+// geometrySettled reports whether resizeKey is a client size worth reflowing
+// every window's chrome for, and records it as pending when it is not yet.
+//
+// A client's reported size is not trustworthy the instant it changes. mosh
+// renegotiates through intermediate geometries whenever a phone keyboard opens
+// or the device rotates, and each one reaches us as a perfectly ordinary
+// resize: a phone that settles at 43x34 was observed at 82x13 on the way there.
+// Reflowing for a size the client is about to stop having lays the sidebar and
+// window headers out for a width it never really has, and the mismatch is
+// visible — a sidebar rendered for 34 columns clipped into a 15-column pane.
+//
+// Waiting costs a few hundred milliseconds of slightly-wrong chrome on a real
+// resize. Not waiting costs arbitrarily-wrong chrome until something else
+// happens to trigger a reconcile, which on a quiet session can be a long time.
+func (l *Loop) geometrySettled(resizeKey string, now time.Time) bool {
+	// Only the size is debounced. An activity-only change reaches here with
+	// the same size we already laid out for, and must not be delayed.
+	if resizeKey == l.lastResizeKey {
+		return true
+	}
+	// Nothing has been laid out yet (daemon start, first attach). There is no
+	// correct chrome to protect, so believing the first size immediately beats
+	// showing unstyled chrome for half a second.
+	if l.lastResizeKey == "" {
+		return true
+	}
+	if resizeKey != l.pendingGeom {
+		l.pendingGeom = resizeKey
+		l.pendingGeomSince = now
+		logEvent("CLIENT_GEOMETRY_SETTLING key=%s", resizeKey)
+		return false
+	}
+	return now.Sub(l.pendingGeomSince) >= clientGeomSettle
+}
+
 // handleClientGeomTick is the migrated body of the clientGeometryTicker case.
 func (l *Loop) handleClientGeomTick() {
 	l.flags.geom.Store(false)
@@ -1066,10 +1111,18 @@ func (l *Loop) handleClientGeomTick() {
 		if geomKey == l.lastClientGeom {
 			return
 		}
+		resizeKey := fmt.Sprintf("%s:%dx%d", ac.TTY, ac.Width, ac.Height)
+		// Checked before lastClientGeom is committed: a deferred geometry must
+		// stay "changed" so the next tick re-examines it. Recording it here
+		// would make the settled size look already-handled, and the reflow it
+		// is waiting for would never run.
+		if !l.geometrySettled(resizeKey, time.Now()) {
+			return
+		}
+
 		l.lastClientGeom = geomKey
 		logEvent("CLIENT_GEOMETRY_CHANGE tty=%s size=%dx%d activity=%d", ac.TTY, ac.Width, ac.Height, res.Activity)
 		l.coord.SetActiveClient(ac)
-		resizeKey := fmt.Sprintf("%s:%dx%d", ac.TTY, ac.Width, ac.Height)
 		var lockTo *daemon.ActiveClient
 		if resizeKey != l.lastResizeKey {
 			l.lastResizeKey = resizeKey

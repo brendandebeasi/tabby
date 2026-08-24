@@ -73,10 +73,17 @@ var groupLayoutState = func() (groups map[string]string, clients []groupLayoutCl
 	// (electing a stranger's geometry, trusting its active window) do not
 	// apply here — nothing below reads geometry, only client_activity.
 	//
+	// #{session_id}, not the client-session format that reports a session
+	// NAME ("infras-2"): a name never matches the #{session_id} keys ("$2")
+	// that list-sessions reports, so every client would fall outside every
+	// group and no daemon would elect itself. In a list-clients format the
+	// client's session is the format context, so #{session_id} here is that
+	// client's session, which is exactly what the group map is keyed by.
+	//
 	// server-wide list-clients: the whole point is to see our PEERS' clients.
 	// Scoped to our own session, every daemon in the group would find only
 	// itself, elect itself, and resume the fight this exists to end.
-	if out, err := tmuxOutputCtx("list-clients", "-F", "#{client_name}|||#{client_session}|||#{client_activity}"); err == nil {
+	if out, err := tmuxOutputCtx("list-clients", "-F", "#{client_name}|||#{session_id}|||#{client_activity}"); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.Split(strings.TrimSpace(line), "|||")
 			if len(parts) < 3 {
@@ -136,8 +143,12 @@ func electGroupLayoutOwner(sessionID string, groups map[string]string, clients [
 
 // layoutOwnerCache memoizes the election for layoutOwnerRecheck.
 type layoutOwnerCache struct {
-	mu      sync.Mutex
-	owns    bool
+	mu   sync.Mutex
+	owns bool
+	// elected is false until the first election, so that a first result of
+	// "nobody owns" still gets logged rather than being mistaken for the
+	// zero value of owner and silently swallowed.
+	elected bool
 	owner   string
 	checkAt time.Time
 }
@@ -158,10 +169,11 @@ func (c *Coordinator) OwnsGroupLayout() bool {
 	groups, clients := groupLayoutState()
 	owner := electGroupLayoutOwner(c.sessionID, groups, clients)
 	owns := owner == c.sessionID
-	if owner != c.layoutOwner.owner {
-		logEvent("GROUP_LAYOUT_OWNER session=%s owner=%s owns=%v clients=%d",
+	if !c.layoutOwner.elected || owner != c.layoutOwner.owner {
+		logEvent("GROUP_LAYOUT_OWNER session=%s owner=%q owns=%v clients=%d",
 			c.sessionID, owner, owns, len(clients))
 	}
+	c.layoutOwner.elected = true
 	c.layoutOwner.owner = owner
 	c.layoutOwner.owns = owns
 	c.layoutOwner.checkAt = now.Add(layoutOwnerRecheck)
