@@ -48,12 +48,21 @@ func TestBroadcastRender_DebugLogCalled(t *testing.T) {
 	s := newTestServer(t)
 	s.clients["@1"] = &ClientInfo{Width: 80, Height: 24}
 
+	// DebugLog fires from the batch-flush goroutine, so the counter needs its
+	// own lock — flushPendingRenders fans out one goroutine per pending client.
+	var mu sync.Mutex
 	var logCalls int
-	s.DebugLog = func(format string, args ...interface{}) { logCalls++ }
+	s.DebugLog = func(format string, args ...interface{}) {
+		mu.Lock()
+		logCalls++
+		mu.Unlock()
+	}
 	s.BroadcastRender()
 	// Wait for batch timer to fire
 	time.Sleep(s.renderBatchDelay + 10*time.Millisecond)
+	mu.Lock()
 	assert.Greater(t, logCalls, 0)
+	mu.Unlock()
 }
 
 func TestSendRenderToClient_ClientNotFound(t *testing.T) {
@@ -127,8 +136,13 @@ func TestSendRenderToClient_SendsOnContentChange(t *testing.T) {
 
 	s.clients["@1"] = &ClientInfo{Conn: serverConn, Width: 80, Height: 24}
 
+	// The callback runs on the batch-flush goroutine, so the content the test
+	// swaps between renders has to be handed over under a lock.
+	var mu sync.Mutex
 	content := "first"
 	s.OnRenderNeeded = func(clientID string, _, _ int) *RenderPayload {
+		mu.Lock()
+		defer mu.Unlock()
 		return &RenderPayload{Content: content}
 	}
 
@@ -152,7 +166,9 @@ func TestSendRenderToClient_SendsOnContentChange(t *testing.T) {
 	time.Sleep(s.renderBatchDelay + 20*time.Millisecond)
 
 	// Second render with different content
+	mu.Lock()
 	content = "second"
+	mu.Unlock()
 	s.SendRenderToClient("@1")
 	time.Sleep(s.renderBatchDelay + 50*time.Millisecond)
 
@@ -167,9 +183,12 @@ func TestSendRenderToClient_SequenceNumberIncremented(t *testing.T) {
 
 	s.clients["@1"] = &ClientInfo{Conn: serverConn, Width: 80, Height: 24}
 
+	var mu sync.Mutex
 	contentIdx := 0
 	contents := []string{"alpha", "beta"}
 	s.OnRenderNeeded = func(clientID string, _, _ int) *RenderPayload {
+		mu.Lock()
+		defer mu.Unlock()
 		c := contents[contentIdx]
 		contentIdx++
 		return &RenderPayload{Content: c}
@@ -185,14 +204,22 @@ func TestSendRenderToClient_SequenceNumberIncremented(t *testing.T) {
 		}
 	}()
 
-	before := s.sequenceNum
+	// sequenceNum is written under seqMu by sendRenderToClientImmediate, so
+	// read it the same way rather than racing the flush goroutine.
+	seq := func() uint64 {
+		s.seqMu.Lock()
+		defer s.seqMu.Unlock()
+		return s.sequenceNum
+	}
+
+	before := seq()
 	// First render
 	s.SendRenderToClient("@1")
 	time.Sleep(s.renderBatchDelay + 20*time.Millisecond)
 	// Second render with different content
 	s.SendRenderToClient("@1")
 	time.Sleep(s.renderBatchDelay + 50*time.Millisecond)
-	assert.Greater(t, s.sequenceNum, before)
+	assert.Greater(t, seq(), before)
 }
 
 func TestRenderBatching_CoalescesMultipleRequests(t *testing.T) {
@@ -203,8 +230,11 @@ func TestRenderBatching_CoalescesMultipleRequests(t *testing.T) {
 
 	s.clients["@1"] = &ClientInfo{Conn: serverConn, Width: 80, Height: 24}
 
+	var mu sync.Mutex
 	renderCount := 0
 	s.OnRenderNeeded = func(clientID string, _, _ int) *RenderPayload {
+		mu.Lock()
+		defer mu.Unlock()
 		renderCount++
 		return &RenderPayload{Content: fmt.Sprintf("render-%d", renderCount)}
 	}
@@ -228,7 +258,9 @@ func TestRenderBatching_CoalescesMultipleRequests(t *testing.T) {
 	time.Sleep(s.renderBatchDelay + 20*time.Millisecond)
 
 	// Only one render should have been executed
+	mu.Lock()
 	assert.Equal(t, 1, renderCount, "batching should coalesce 5 requests into 1 render")
+	mu.Unlock()
 }
 
 func TestRenderBatching_MultipleClientsInOneBatch(t *testing.T) {
