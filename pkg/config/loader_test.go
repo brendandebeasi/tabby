@@ -475,6 +475,21 @@ func TestDeleteGroup_DefaultGroupReturnsErrCannotDeleteGroup(t *testing.T) {
 	assert.Len(t, cfg.Groups, 1)
 }
 
+func TestIsProtectedGroup(t *testing.T) {
+	for _, name := range []string{"Default", "default", "DEFAULT", "  Default  "} {
+		assert.True(t, IsProtectedGroup(name), "expected %q to be protected", name)
+	}
+	for _, name := range []string{"", "Defaults", "My Default", "Work", "default2"} {
+		assert.False(t, IsProtectedGroup(name), "expected %q not to be protected", name)
+	}
+}
+
+func TestDeleteGroup_ProtectedNameIsCaseInsensitive(t *testing.T) {
+	cfg := &Config{Groups: []Group{{Name: "default", Pattern: ".*"}}}
+	assert.ErrorIs(t, DeleteGroup(cfg, "default"), ErrCannotDeleteGroup)
+	assert.Len(t, cfg.Groups, 1)
+}
+
 func TestDeleteGroup_NonExistentReturnsErrGroupNotFound(t *testing.T) {
 	cfg := &Config{}
 	err := DeleteGroup(cfg, "Ghost")

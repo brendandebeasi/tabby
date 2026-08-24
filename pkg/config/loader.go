@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/brendandebeasi/tabby/pkg/colors"
 	"gopkg.in/yaml.v3"
@@ -13,7 +14,21 @@ var (
 	ErrGroupNotFound     = errors.New("group not found")
 	ErrGroupExists       = errors.New("group already exists")
 	ErrCannotDeleteGroup = errors.New("cannot delete this group")
+	ErrCannotRenameGroup = errors.New("cannot rename this group")
 )
+
+// IsProtectedGroup reports whether a group is structural rather than
+// user-created, and so cannot be renamed or deleted.
+//
+// "Default" is the bucket every window without a @tabby_group lands in.
+// GroupWindowsWithOptions funnels unknown group names there, and a window whose
+// group does not resolve is dropped from the grouped list entirely — so renaming
+// Default out from under that lookup makes every ungrouped window vanish from
+// the sidebar. Delete has always refused; rename had no guard at all, in either
+// the daemon handler or the manage-group CLI.
+func IsProtectedGroup(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "Default")
+}
 
 // IconPreset defines icons for tree, disclosure, and indicators
 type IconPreset struct {
@@ -177,7 +192,7 @@ func UpdateGroup(cfg *Config, oldName string, group Group) error {
 // DeleteGroup removes a group by name.
 // The "Default" group cannot be deleted.
 func DeleteGroup(cfg *Config, name string) error {
-	if name == "Default" {
+	if IsProtectedGroup(name) {
 		return ErrCannotDeleteGroup
 	}
 

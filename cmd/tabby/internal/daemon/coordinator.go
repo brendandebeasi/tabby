@@ -19068,6 +19068,10 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if oldName == "" || newName == "" {
 			return false
 		}
+		if config.IsProtectedGroup(oldName) {
+			tmuxCmd("display-message", "Cannot rename the Default group").Run()
+			return false
+		}
 		configPath := config.DefaultConfigPath()
 		cfg, err := config.LoadConfig(configPath)
 		if err != nil {
@@ -20995,11 +20999,18 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	// --- Group settings section ---
 	args = append(args, "", "", "")
 
-	renameCmd := fmt.Sprintf(
-		"command-prompt -I '%s' -p 'New name:' \"run-shell '%s rename-group \\\"%s\\\" \\\"%%%%\\\"'\"",
-		group.Name, hookPath, group.Name,
-	)
-	args = append(args, "Rename", "r", renameCmd)
+	// Default is structural: it cannot be renamed or deleted (see
+	// config.IsProtectedGroup). Offering the items anyway was the visible half
+	// of this — Delete answered with an error and Rename appeared to work.
+	protected := config.IsProtectedGroup(group.Name)
+
+	if !protected {
+		renameCmd := fmt.Sprintf(
+			"command-prompt -I '%s' -p 'New name:' \"run-shell '%s rename-group \\\"%s\\\" \\\"%%%%\\\"'\"",
+			group.Name, hookPath, group.Name,
+		)
+		args = append(args, "Rename", "r", renameCmd)
+	}
 
 	args = append(args, "-Change Color", "", "")
 	colorOptions := []struct {
@@ -21066,13 +21077,19 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 	args = append(args, "Create New Group", "G", newGroupCmd)
 
 	// --- Destructive actions ---
-	args = append(args, "", "", "")
+	// Skip the separator when neither item below applies, rather than trailing
+	// the menu with a divider and nothing under it.
+	if !protected || len(group.Windows) > 0 {
+		args = append(args, "", "", "")
+	}
 
-	deleteCmd := fmt.Sprintf(
-		"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s delete-group \\\"%s\\\"'\"",
-		group.Name, hookPath, group.Name,
-	)
-	args = append(args, "Delete Group", "d", deleteCmd)
+	if !protected {
+		deleteCmd := fmt.Sprintf(
+			"confirm-before -p 'Delete group %s? (y/n)' \"run-shell '%s delete-group \\\"%s\\\"'\"",
+			group.Name, hookPath, group.Name,
+		)
+		args = append(args, "Delete Group", "d", deleteCmd)
+	}
 
 	// Close all windows in group (only if group has windows)
 	if len(group.Windows) > 0 {

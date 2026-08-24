@@ -122,6 +122,10 @@ func renameGroup(configPath, oldName, newName string) error {
 		return err
 	}
 
+	if config.IsProtectedGroup(oldName) {
+		return config.ErrCannotRenameGroup
+	}
+
 	group := config.FindGroup(cfg, oldName)
 	if group == nil {
 		return config.ErrGroupNotFound
