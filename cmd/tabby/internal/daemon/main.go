@@ -3200,6 +3200,14 @@ func Run(args []string) int {
 		// restart as long as the tmux server stays up. No disk restore needed —
 		// across a tmux-server restart, pane IDs change and any cached layout
 		// would refer to dead panes.
+		//
+		// The per-width buckets used to replay split proportions when a client
+		// geometry comes back are mirrored the same way (@tabby_layouts_<wid>),
+		// but they live in memory, so they have to be read back explicitly.
+		// Must happen before the first reconcile: starting from an empty cache
+		// meant the first lock-windows-to-active resize had nothing to replay
+		// and tmux's greedy scaling flattened the user's splits.
+		coordinator.RestoreWindowLayoutsFromTmux()
 
 		// Eager initial spawn: don't wait for the 3s windowCheckTicker.
 		// The coordinator already has windows from NewCoordinator, so spawn

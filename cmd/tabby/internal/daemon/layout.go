@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -532,9 +533,39 @@ func looksMalformedLayout(layout string) bool {
 	return false
 }
 
+// windowLayoutBucketCap bounds how many per-width layout buckets a single
+// window keeps. In practice a window sees two or three widths (desktop,
+// phone, phone-with-keyboard); the cap only exists so a client that resizes
+// through many widths cannot grow the map without limit.
+const windowLayoutBucketCap = 8
+
+// windowLayoutsOption is the tmux global option a window's width buckets are
+// mirrored into, as JSON. Options live in the tmux server, so the buckets
+// survive a daemon restart and die with the server — which is what we want,
+// since pane ids are reassigned when the server restarts.
+func windowLayoutsOption(windowID string) string {
+	return "@tabby_layouts_" + windowID
+}
+
+// Mirroring goes through these two indirections so tests can observe what
+// would be written without touching the developer's live tmux server (the
+// test binary inherits $TMUX).
+var mirrorTmuxOption = func(name, value string) {
+	tmuxCmd("set-option", "-g", name, value).Run()
+}
+
+var unsetTmuxOption = func(name string) {
+	tmuxCmd("set-option", "-gu", name).Run()
+}
+
 // SaveWindowLayout caches a tmux layout string under (windowID, width). Called
 // before each lock-windows-to-active reconcile so the prior client's split
 // proportions can be replayed when that client regains focus.
+//
+// The bucket map is mirrored into a tmux option on change. Without that, a
+// daemon restart started from an empty cache: the next reconcile resized every
+// window to the active client's geometry with no layout to replay, and tmux's
+// greedy scaling silently flattened the user's split proportions.
 func (c *Coordinator) SaveWindowLayout(windowID string, width int, layout string) {
 	if windowID == "" || width <= 0 || layout == "" {
 		return
@@ -544,13 +575,180 @@ func (c *Coordinator) SaveWindowLayout(windowID string, width int, layout string
 		return
 	}
 	c.windowLayoutsMu.Lock()
-	defer c.windowLayoutsMu.Unlock()
+	if c.windowLayouts == nil {
+		c.windowLayouts = make(map[string]map[int]string)
+	}
 	m, ok := c.windowLayouts[windowID]
 	if !ok {
 		m = make(map[int]string)
 		c.windowLayouts[windowID] = m
 	}
+	if m[width] == layout {
+		c.windowLayoutsMu.Unlock()
+		return
+	}
 	m[width] = layout
+	evictLayoutBuckets(m, width)
+	encoded := encodeLayoutBuckets(m)
+	c.windowLayoutsMu.Unlock()
+
+	if encoded != "" {
+		mirrorTmuxOption(windowLayoutsOption(windowID), encoded)
+	}
+}
+
+// evictLayoutBuckets trims m to windowLayoutBucketCap entries, dropping the
+// widths furthest from keep — the nearby widths are the ones a client is
+// likely to land on again.
+func evictLayoutBuckets(m map[int]string, keep int) {
+	for len(m) > windowLayoutBucketCap {
+		worst, worstDist := 0, -1
+		for w := range m {
+			if w == keep {
+				continue
+			}
+			d := w - keep
+			if d < 0 {
+				d = -d
+			}
+			// Ties break toward the smaller width so eviction is deterministic.
+			if d > worstDist || (d == worstDist && w < worst) {
+				worst, worstDist = w, d
+			}
+		}
+		if worstDist < 0 {
+			return
+		}
+		delete(m, worst)
+	}
+}
+
+func encodeLayoutBuckets(m map[int]string) string {
+	out := make(map[string]string, len(m))
+	for w, l := range m {
+		out[strconv.Itoa(w)] = l
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// RestoreWindowLayoutsFromTmux repopulates the per-width layout cache from the
+// tmux options SaveWindowLayout mirrors into. Call once at daemon startup,
+// before the first reconcile resizes anything.
+//
+// Reads one option per live window rather than parsing `show-options -g`:
+// show-option -gqv prints the raw value, so the JSON needs no unescaping.
+func (c *Coordinator) RestoreWindowLayoutsFromTmux() {
+	livePanes := listPanesGroupedByWindow()
+	restoredWindows, restoredBuckets, dropped := 0, 0, 0
+	for _, w := range listWindowGeoms() {
+		out, err := tmuxCmd("show-option", "-gqv", windowLayoutsOption(w.ID)).Output()
+		if err != nil {
+			continue
+		}
+		buckets := decodeLayoutBuckets(string(out))
+		if len(buckets) == 0 {
+			continue
+		}
+		// Panes can be split or killed while the daemon is down, and a layout
+		// naming panes that no longer exist makes select-layout FAIL — which
+		// aborts the rest of the chained reconcile command, taking every op
+		// after it down with it. Only replay layouts that still describe
+		// exactly the panes the window has.
+		live := paneIDNumbers(livePanes[w.ID])
+		for width, layout := range buckets {
+			if !samePaneSet(layoutPaneIDs(layout), live) {
+				delete(buckets, width)
+				dropped++
+			}
+		}
+		if len(buckets) == 0 {
+			unsetTmuxOption(windowLayoutsOption(w.ID))
+			continue
+		}
+		c.windowLayoutsMu.Lock()
+		if c.windowLayouts == nil {
+			c.windowLayouts = make(map[string]map[int]string)
+		}
+		c.windowLayouts[w.ID] = buckets
+		c.windowLayoutsMu.Unlock()
+		restoredWindows++
+		restoredBuckets += len(buckets)
+	}
+	if restoredWindows > 0 || dropped > 0 {
+		logEvent("LAYOUT_CACHE_RESTORED windows=%d buckets=%d dropped=%d", restoredWindows, restoredBuckets, dropped)
+	}
+}
+
+// layoutPaneIDs returns the pane numbers named by a tmux layout string. Layout
+// leaves carry the numeric part of the pane id (%7 is written as 7).
+func layoutPaneIDs(layout string) map[int]bool {
+	ids := map[int]bool{}
+	for _, m := range layoutLeafRe.FindAllStringSubmatch(layout, -1) {
+		if n, err := strconv.Atoi(m[5]); err == nil {
+			ids[n] = true
+		}
+	}
+	return ids
+}
+
+// paneIDNumbers turns live "%7"-style pane ids into the numeric form layout
+// strings use.
+func paneIDNumbers(rows []panesRow) map[int]bool {
+	ids := map[int]bool{}
+	for _, r := range rows {
+		if n, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(r.ID), "%")); err == nil {
+			ids[n] = true
+		}
+	}
+	return ids
+}
+
+func samePaneSet(a, b map[int]bool) bool {
+	if len(a) == 0 || len(a) != len(b) {
+		return false
+	}
+	for id := range a {
+		if !b[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// decodeLayoutBuckets parses the JSON written by encodeLayoutBuckets. tmux
+// quotes option values that contain no spaces only sometimes, so the leading
+// and trailing quote is stripped when present. Malformed layouts are dropped
+// on the way in, the same as on read.
+func decodeLayoutBuckets(value string) map[int]string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		}
+	}
+	if value == "" {
+		return nil
+	}
+	var raw map[string]string
+	if err := json.Unmarshal([]byte(value), &raw); err != nil {
+		return nil
+	}
+	buckets := make(map[int]string, len(raw))
+	for wStr, layout := range raw {
+		w, err := strconv.Atoi(wStr)
+		if err != nil || w <= 0 || layout == "" || looksMalformedLayout(layout) {
+			continue
+		}
+		buckets[w] = layout
+	}
+	if len(buckets) == 0 {
+		return nil
+	}
+	return buckets
 }
 
 // GetWindowLayout returns the saved layout string for (windowID, width), or
@@ -587,8 +785,9 @@ func (c *Coordinator) ForgetWindowLayouts(windowID string) {
 		return
 	}
 	c.windowLayoutsMu.Lock()
-	defer c.windowLayoutsMu.Unlock()
 	delete(c.windowLayouts, windowID)
+	c.windowLayoutsMu.Unlock()
+	unsetTmuxOption(windowLayoutsOption(windowID))
 }
 
 // ForgetAllWindowLayouts drops every cached layout. Use after a structural
@@ -599,11 +798,15 @@ func (c *Coordinator) ForgetWindowLayouts(windowID string) {
 // to a stale geometry.
 func (c *Coordinator) ForgetAllWindowLayouts() {
 	c.windowLayoutsMu.Lock()
-	defer c.windowLayoutsMu.Unlock()
-	if len(c.windowLayouts) == 0 {
-		return
+	windowIDs := make([]string, 0, len(c.windowLayouts))
+	for id := range c.windowLayouts {
+		windowIDs = append(windowIDs, id)
 	}
 	c.windowLayouts = make(map[string]map[int]string)
+	c.windowLayoutsMu.Unlock()
+	for _, id := range windowIDs {
+		unsetTmuxOption(windowLayoutsOption(id))
+	}
 }
 
 func atoiSafe(s string) (int, error) {
