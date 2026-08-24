@@ -157,6 +157,12 @@ type rendererModel struct {
 	longPressActive bool
 	skipNextRelease bool // Set when menu closes to prevent false drag detection
 
+	// clientProfile is the daemon's classification of the focused tmux client,
+	// "phone" or "desktop". It gates long-press: a touch client has no right
+	// button, so holding is the only way to reach a context menu there, while
+	// on a desktop a slow left click must stay a left click.
+	clientProfile string
+
 	// Double-tap detection (alternative right-click for iOS)
 	lastTapTime time.Time
 	lastTapPos  struct{ X, Y int }
@@ -482,6 +488,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.borderFg = msg.payload.BorderFg
 		m.dividerFg = msg.payload.DividerFg
 		m.indicatorBg = msg.payload.IndicatorBg
+		m.clientProfile = msg.payload.ActiveClient.Profile
 
 		// SIMPLIFIED: Clamp scroll based on simple height calculation
 		maxScroll := m.totalLines - m.height
@@ -700,8 +707,17 @@ func (m *rendererModel) handleMouse(msg tea.MouseMsg) (rendererModel, tea.Cmd) {
 			m.mouseDownValid = true
 			m.mouseDownTime = time.Now()
 			m.mouseDownPos = struct{ X, Y int }{msg.X, msg.Y}
-			m.longPressActive = false
-			return *m, nil
+			m.longPressActive = m.clientProfile == "phone"
+			if !m.longPressActive {
+				return *m, nil
+			}
+			// Touch clients only. A desktop mouse has a right button, so a
+			// slow left click there is a left click; arming this for everyone
+			// would turn every hesitant click into a context menu.
+			pos := m.mouseDownPos
+			return *m, tea.Tick(longPressThreshold, func(time.Time) tea.Msg {
+				return longPressMsg{X: pos.X, Y: pos.Y}
+			})
 		}
 		// Right or middle click - process immediately (not simulated)
 		// Skip the release to prevent false drag detection from stale mouseDownPos

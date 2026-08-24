@@ -390,9 +390,18 @@ func (m rendererModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			button = tea.MouseButtonRight
 		}
 		if button == tea.MouseButtonLeft {
-			m.longPressActive = false
 			m.skipNextRelease = false
-			return m, nil
+			// Long-press stands in for a right-click on touch clients, which
+			// have no right button. Desktop clients keep a slow left click as
+			// a left click.
+			m.longPressActive = m.clientProfile == "phone"
+			if !m.longPressActive {
+				return m, nil
+			}
+			pos := m.mouseDownPos
+			return m, tea.Tick(longPressThreshold, func(time.Time) tea.Msg {
+				return longPressMsg{X: pos.X, Y: pos.Y}
+			})
 		}
 
 		// Only act on press for an explicit Right button (long-press simulation
