@@ -720,6 +720,14 @@ type Coordinator struct {
 	// so it's invalidated explicitly by those two paths (parkedGen) rather
 	// than expiring on a timer, which would let the sidebar show a stale
 	// Minimized section right after a minimize/restore.
+	// petLeaseMu guards the memoized pet-ownership decision (see
+	// petLeaseRenewEvery). Its own mutex, never stateMu: stealPetOwnership
+	// runs from socket-action goroutines while the tick holds stateMu.
+	petLeaseMu      sync.Mutex
+	petLeaseOwner   bool
+	petLeaseCheckAt time.Time
+	petStatsLoadAt  time.Time
+
 	parkedMu    sync.Mutex
 	parkedCache []tmux.Window
 	parkedAllID []string
@@ -3511,7 +3519,37 @@ const petOwnershipTTL = 30 * time.Second
 // daemon perpetually overwrites hunger back to its own state (the "food resets on
 // reboot" bug). A TTL lock elects one writer; a lease older than the TTL is stale
 // and reclaimable, so a crashed owner frees the pet automatically.
+// petLeaseRenewEvery is how often the lease is actually touched on disk. The
+// caller runs at 10 Hz (the pet animation tick) but the lease lives 30s, so
+// re-reading and REWRITING the lock file every 100ms bought nothing and cost
+// ~10.7 disk writes/second — measured on a live daemon — from inside the
+// global stateMu critical section. Any hitch in that write (fsync pressure,
+// a network HOME, an indexer) stalls stateMu, and everything waiting on it
+// with it: the refresh loop stops and the cat's animation freezes. Renewing
+// at a third of the TTL leaves three attempts before expiry.
+const petLeaseRenewEvery = petOwnershipTTL / 3
+
 func (c *Coordinator) acquirePetOwnership(now time.Time) bool {
+	c.petLeaseMu.Lock()
+	if !c.petLeaseCheckAt.IsZero() && now.Before(c.petLeaseCheckAt) {
+		owner := c.petLeaseOwner
+		c.petLeaseMu.Unlock()
+		return owner
+	}
+	c.petLeaseMu.Unlock()
+
+	owner := c.renewPetLease(now)
+
+	c.petLeaseMu.Lock()
+	c.petLeaseOwner = owner
+	c.petLeaseCheckAt = now.Add(petLeaseRenewEvery)
+	c.petLeaseMu.Unlock()
+	return owner
+}
+
+// renewPetLease is the disk half of acquirePetOwnership: read the current
+// holder, and claim the lease if it is ours or stale.
+func (c *Coordinator) renewPetLease(now time.Time) bool {
 	me := c.sessionID
 	if data, err := os.ReadFile(petOwnerPath()); err == nil {
 		fields := strings.Fields(string(data))
@@ -3539,8 +3577,15 @@ var petWriteAllowed int32 = 1
 // pet actions (feed/clean/play) so the session the user is actually interacting
 // with always persists — even if another daemon currently holds the lease.
 func (c *Coordinator) stealPetOwnership() {
-	os.WriteFile(petOwnerPath(), []byte(fmt.Sprintf("%s %d", c.sessionID, time.Now().Add(petOwnershipTTL).Unix())), 0644)
+	now := time.Now()
+	os.WriteFile(petOwnerPath(), []byte(fmt.Sprintf("%s %d", c.sessionID, now.Add(petOwnershipTTL).Unix())), 0644)
 	atomic.StoreInt32(&petWriteAllowed, 1)
+	// Publish the steal into the memoized decision too, or the next tick
+	// would keep returning the cached "not ours" until its renew window.
+	c.petLeaseMu.Lock()
+	c.petLeaseOwner = true
+	c.petLeaseCheckAt = now.Add(petLeaseRenewEvery)
+	c.petLeaseMu.Unlock()
 }
 
 // loadPersistentPetStats refreshes only the SHARED persistent fields (hunger,
@@ -6984,7 +7029,13 @@ func (c *Coordinator) UpdatePetState() bool {
 		}
 	} else {
 		atomic.StoreInt32(&petWriteAllowed, 0)
-		c.loadPersistentPetStats()
+		// Same reasoning as the lease: this is a disk read plus a JSON
+		// unmarshal under stateMu, and hunger/happiness move on a scale of
+		// minutes. Once a second is plenty for a mirror.
+		if now.After(c.petStatsLoadAt) {
+			c.petStatsLoadAt = now.Add(time.Second)
+			c.loadPersistentPetStats()
+		}
 	}
 
 	width := c.lastWidth
