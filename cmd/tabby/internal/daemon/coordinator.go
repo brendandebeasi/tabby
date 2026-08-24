@@ -9878,11 +9878,14 @@ func (c *Coordinator) selectNeighborWindowFrom(currentWindowID string, delta int
 	}
 
 	if active == "" {
-		args := []string{"display-message"}
+		// Same rule as loop.go: with no client tty to ask, fall back to our own
+		// session rather than to whatever client tmux last saw.
+		var args []string
 		if activeTTY != "" {
-			args = append(args, "-c", activeTTY)
+			args = []string{"display-message", "-c", activeTTY, "-p", "#{window_id}"}
+		} else {
+			args = c.displayMessageArgs("#{window_id}")
 		}
-		args = append(args, "-p", "#{window_id}")
 		activeOut, _ := tmuxCmd(args...).Output()
 		active = strings.TrimSpace(string(activeOut))
 	}

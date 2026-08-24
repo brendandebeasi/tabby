@@ -108,9 +108,18 @@ func TestNoUnqualifiedDisplayMessage(t *testing.T) {
 				continue
 			}
 			// display-message without -p is a user-facing notification, not a
-			// query, so there is nothing to resolve incorrectly.
+			// query, so there is nothing to resolve incorrectly -- unless the
+			// line is building an argv piecewise, where the -p arrives on a
+			// later line and the qualification may never arrive at all. That
+			// shape hid a live bug: `args := []string{"display-message"}`
+			// followed by a conditional `-c`, so a session with no clients of
+			// its own queried unqualified on every tick.
 			if !strings.Contains(line, `"-p"`) {
-				continue
+				argv := strings.Contains(line, `[]string{"display-message"`) ||
+					strings.Contains(line, `append(args, "display-message"`)
+				if !argv {
+					continue
+				}
 			}
 			offenders = append(offenders, filepath.Join(".", name)+":"+itoa(i+1)+": "+trimmed)
 		}

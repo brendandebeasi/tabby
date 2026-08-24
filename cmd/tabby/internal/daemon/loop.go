@@ -589,13 +589,20 @@ func (l *Loop) updateActiveWindow() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	args := []string{"display-message"}
+	// With a client TTY we ask that client directly. Without one we still have
+	// to name our own session: an unqualified display-message answers for
+	// whichever client was most recently active anywhere on the server, which
+	// in a grouped session is routinely another session's client sitting on
+	// another window. A session with no clients of its own hits this branch
+	// every tick, so the fallback has to be qualified, not bare.
 	activeTTY := ""
+	var args []string
 	if _, _, tty, _, ok := activeClientGeometry(); ok && strings.TrimSpace(tty) != "" {
 		activeTTY = strings.TrimSpace(tty)
-		args = append(args, "-c", activeTTY)
+		args = []string{"display-message", "-c", activeTTY, "-p", "#{window_id}"}
+	} else {
+		args = l.coord.displayMessageArgs("#{window_id}")
 	}
-	args = append(args, "-p", "#{window_id}")
 	if out, err := exec.CommandContext(ctx, "tmux", args...).Output(); err == nil {
 		newID := strings.TrimSpace(string(out))
 		if newID != "" {
