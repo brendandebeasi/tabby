@@ -15,6 +15,7 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/navtrace"
 	"github.com/brendandebeasi/tabby/pkg/perf"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // Event is the interface implemented by all loop events. The kind() string is
@@ -495,6 +496,36 @@ func (l *Loop) reassertActiveWindow(windowID, reason, driftedTo string) bool {
 
 // coordinatorActiveWindowID returns the windowID the coordinator currently
 // considers active, or empty when no window is marked active.
+// windowKnownAtBracketStart reports whether id appears in the window list the
+// layout bracket captured before it began mutating panes. A window that does
+// not is one tmux created mid-bracket, so tmux selecting it is the user's
+// intent rather than a silent flip caused by our own kill-pane/split-window.
+func windowKnownAtBracketStart(windows []tmux.Window, id string) bool {
+	if id == "" {
+		return true
+	}
+	for _, w := range windows {
+		if w.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// newWindowFlowActive reports whether tabby's own new-window flow is still
+// running. The coordinator's active flag lags the flow, so a window opened
+// through it can already be in the cached list while still looking unintended.
+func newWindowFlowActive(coord *Coordinator) bool {
+	if coord == nil {
+		return false
+	}
+	switch coord.NewWindowStatus().State {
+	case "inFlight", "ready":
+		return true
+	}
+	return false
+}
+
 func (l *Loop) coordinatorActiveWindowID() string {
 	for _, w := range l.coord.GetWindows() {
 		if w.Active {
@@ -730,10 +761,22 @@ func (l *Loop) doPaneLayoutOps() {
 			//    so postActive matching the coordinator's active means the user
 			//    meant to be there — reverting it yanks them back to the old
 			//    window (the "I switch and it switches back" bug).
-			// Only revert when the coordinator does NOT already intend postActive.
-			if postActive == l.coordinatorActiveWindowID() {
+			//  - A window CREATED during the bracket. tmux selects a new window
+			//    the moment it exists, well before the coordinator's cached
+			//    window list carries it or its active flag flips, so the
+			//    coordinator-intends test above says "not intended" and the
+			//    restore yanks the user straight back off the window they just
+			//    opened (the "new windows disappear when I focus them" bug).
+			// Only revert when the coordinator does NOT already intend
+			// postActive AND postActive is a window that predates the bracket.
+			switch {
+			case postActive == l.coordinatorActiveWindowID():
 				logEvent("PANE_LAYOUT_ADOPT_ACTIVE pre=%s post=%s reason=coordinator_intends", preActive, postActive)
-			} else {
+			case !windowKnownAtBracketStart(windows, postActive):
+				logEvent("PANE_LAYOUT_ADOPT_ACTIVE pre=%s post=%s reason=new_window", preActive, postActive)
+			case newWindowFlowActive(l.coord):
+				logEvent("PANE_LAYOUT_ADOPT_ACTIVE pre=%s post=%s reason=new_window_in_flight", preActive, postActive)
+			default:
 				logEvent("PANE_LAYOUT_RESTORE_ACTIVE pre=%s post=%s", preActive, postActive)
 				_ = tmuxCmd("select-window", "-t", preActive).Run()
 			}
