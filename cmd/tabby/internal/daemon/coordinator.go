@@ -879,6 +879,10 @@ type Coordinator struct {
 	lastWindowByClient map[string]time.Time
 	lastPaneMenuOpen   map[string]time.Time
 
+	// Post-creation phantom-click budget. Loop-only, no mutex. See
+	// newTabSuppressState and the SELECT_WINDOW_SUPPRESS_NEWTAB gate.
+	newTabSuppress newTabSuppressState
+
 	// Structural-drift-correction state (loop-only, no mutex — same goroutine as
 	// HandleInput and updateActiveWindow). lastStructuralChurnAt marks when the
 	// daemon last did window-unlink/park/kill churn (proxied by the
@@ -17845,9 +17849,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if st := c.NewWindowStatus(); (st.State == "ready" || st.State == "inFlight") &&
 			st.WindowID != "" && targetWindow != st.WindowID &&
 			time.Since(st.Created) < loopNewWindowReadyTimeout {
-			logEvent("SELECT_WINDOW_SUPPRESS_NEWTAB client=%s raw=%s target=%s pending=%s state=%s age_ms=%d",
+			if c.newTabSuppress.shouldSuppress(st.WindowID, targetWindow) {
+				logEvent("SELECT_WINDOW_SUPPRESS_NEWTAB client=%s raw=%s target=%s pending=%s state=%s age_ms=%d",
+					clientID, rawTarget, targetWindow, st.WindowID, st.State, time.Since(st.Created).Milliseconds())
+				return false
+			}
+			logEvent("SELECT_WINDOW_SUPPRESS_NEWTAB_OVERRIDE client=%s raw=%s target=%s pending=%s state=%s age_ms=%d",
 				clientID, rawTarget, targetWindow, st.WindowID, st.State, time.Since(st.Created).Milliseconds())
-			return false
 		}
 
 		now := time.Now()
