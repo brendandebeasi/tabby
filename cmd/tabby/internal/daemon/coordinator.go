@@ -4970,7 +4970,7 @@ func (c *Coordinator) fetchRefreshSnapshot() *refreshSnapshot {
 
 	// Read the active window before taking stateMu: this is a subprocess fork
 	// (~6ms) and RefreshWindows must not hold the lock across external calls.
-	activeWindowID := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+	activeWindowID := c.ActiveWindowID()
 
 	rwPreLock := time.Now()
 
@@ -5095,7 +5095,7 @@ func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
 	// so "the active window" is unambiguous here.
 	activeBeforeMoves := activeWindowID
 	if len(pendingMoves) > 0 {
-		if fresh := tmuxOutputTrimmed("display-message", "-p", "#{window_id}"); fresh != "" {
+		if fresh := c.ActiveWindowID(); fresh != "" {
 			activeBeforeMoves = fresh
 		}
 	}
@@ -5144,7 +5144,7 @@ func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
 		// new tab loses focus ~150ms after gaining it. The FiringTTY path in
 		// preferredWindowFocusTarget re-reads tmux for this reason; the legacy
 		// path has to be given an equally fresh value.
-		activeAfterMoves := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+		activeAfterMoves := c.ActiveWindowID()
 		if activeAfterMoves == "" {
 			activeAfterMoves = activeWindowID
 		}
@@ -6725,7 +6725,7 @@ func (c *Coordinator) RefreshSession() {
 	defer cancel()
 
 	var sessionName string
-	if out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
+	if out, err := exec.CommandContext(ctx, "tmux", c.displayMessageArgs("#{session_name}")...).Output(); err == nil {
 		sessionName = strings.TrimSpace(string(out))
 	}
 
@@ -6745,7 +6745,7 @@ func (c *Coordinator) RefreshSession() {
 	}
 
 	windowCount := 0
-	if out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{session_windows}").Output(); err == nil {
+	if out, err := exec.CommandContext(ctx, "tmux", c.displayMessageArgs("#{session_windows}")...).Output(); err == nil {
 		windowCount, _ = strconv.Atoi(strings.TrimSpace(string(out)))
 	}
 
@@ -8378,7 +8378,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	activeWindowID := ""
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+	if out, err := exec.CommandContext(ctx, "tmux", c.displayMessageArgs("#{window_id}")...).Output(); err == nil {
 		activeWindowID = strings.TrimSpace(string(out))
 	}
 	isActive := (clientID == activeWindowID)
@@ -9898,12 +9898,12 @@ func (c *Coordinator) selectNeighborWindowFrom(currentWindowID string, delta int
 	}
 	target := wins[idx]
 	logEvent("WINDOW_NAV_SELECT trigger=%s delta=%d active=%s source=%s target=%s candidates=%v", trigger, delta, active, strings.TrimSpace(currentWindowID), target, wins)
-	before := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+	before := c.ActiveWindowID()
 	if err := c.SelectWindow(target, "window_neighbor_nav", trigger); err != nil {
 		logEvent("WINDOW_NAV_SELECT_ERR target=%s err=%v", target, err)
 		return
 	}
-	after := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+	after := c.ActiveWindowID()
 	logEvent("WINDOW_NAV_RESULT source=%s target=%s before=%s after=%s clients=%s", strings.TrimSpace(currentWindowID), target, before, after, tmuxClientWindowSnapshot())
 	if after != target {
 		logEvent("WINDOW_NAV_NOOP source=%s target=%s before=%s after=%s", strings.TrimSpace(currentWindowID), target, before, after)
@@ -18404,7 +18404,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		winID := ""
 		switch {
 		case target == "":
-			winID = tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+			winID = c.ActiveWindowID()
 		case strings.HasPrefix(target, "@"):
 			winID = target
 		case strings.HasPrefix(target, "%"):
@@ -18434,7 +18434,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		} else {
 			// Don't park the focused window out from under the user: move focus to a
 			// neighbor first when minimizing the active window.
-			if tmuxOutputTrimmed("display-message", "-p", "#{window_id}") == winID {
+			if c.ActiveWindowID() == winID {
 				c.selectNeighborWindowFrom(winID, +1, "minimize")
 			}
 			c.parkWindow(winID, true)
@@ -18582,8 +18582,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Targeted at the exact phone client (-c <tty>) so it lands on the right
 		// screen in a multi-client setup. Desktop keeps the inline hide/show below.
 		if c.ActiveClientProfile() == "phone" {
-			sessIDOut, _ := tmuxCmd("display-message", "-p", "#{session_id}").Output()
-			sessID := strings.TrimSpace(string(sessIDOut))
+			sessID := c.SessionID()
 			if sessID == "" {
 				sessID = c.sessionID
 			}
@@ -18725,9 +18724,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// (y=close, n/Esc=keep, arrows+Enter). See launchCloseConfirmPopup.
 		target := input.ResolvedTarget
 		if target == "" {
-			if out, err := tmuxCmd("display-message", "-p", "#{window_id}").Output(); err == nil {
-				target = strings.TrimSpace(string(out))
-			}
+			target = c.ActiveWindowID()
 		}
 		if target != "" {
 			_, _, userTTY, _, _ := activeClientGeometry()
@@ -18742,8 +18739,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 
 	case "pane_header:groups":
 		// Groups button on phone header -> show group context menu as popup
-		sessIDOut, _ := tmuxCmd("display-message", "-p", "#{session_id}").Output()
-		sessID := strings.TrimSpace(string(sessIDOut))
+		sessID := c.SessionID()
 		popupBin := getPopupBin()
 		if popupBin != "" && sessID != "" {
 			// display-popup's shell-command must be a single argv string;
@@ -18860,8 +18856,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			aboveID = belowID
 		}
 		// If killing the active window, switch to neighbor first
-		activeOut, _ := tmuxCmd("display-message", "-p", "#{window_id}").Output()
-		activeID := strings.TrimSpace(string(activeOut))
+		activeID := c.ActiveWindowID()
 		if activeID == targetID && aboveID != "" {
 			if err := c.SelectWindow(aboveID, "kill_window_neighbor_preselect", "kill_window"); err != nil {
 				logEvent("KILL_WINDOW_PRESELECT_ERR target=%s neighbor=%s err=%v", targetID, aboveID, err)
@@ -18913,8 +18908,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		pathOut, _ := tmuxCmd("display-message", "-t", paneID, "-p", "#{pane_current_path}").Output()
 		panePath := strings.TrimSpace(string(pathOut))
 		if panePath == "" {
-			pathOut, _ = tmuxCmd("display-message", "-p", "#{pane_current_path}").Output()
-			panePath = strings.TrimSpace(string(pathOut))
+			panePath = c.DisplayMessage("#{pane_current_path}")
 		}
 		// Get pane dimensions for half-size split
 		var sizeFlag string
@@ -18990,8 +18984,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// drift from a real user switch and put focus back. See
 		// loopStructuralDriftWindow.
 		c.MarkStructuralChurn()
-		sessionIDOut, _ := tmuxCmd("display-message", "-p", "#{session_id}").Output()
-		sessID := strings.TrimSpace(string(sessionIDOut))
+		sessID := c.SessionID()
 		if sessID == "" {
 			return false
 		}
@@ -19653,8 +19646,7 @@ func (c *Coordinator) launchQuestionPopup(clientID string) {
 	if uiSpawnBlocked() {
 		return
 	}
-	sessIDOut, _ := tmuxCmd("display-message", "-p", "#{session_id}").Output()
-	sessID := strings.TrimSpace(string(sessIDOut))
+	sessID := c.SessionID()
 	if sessID == "" {
 		// Fall back to the coordinator's own session id when the live tmux
 		// query fails (e.g. during tests or if tmux isn't responsive).
@@ -19722,8 +19714,7 @@ func (c *Coordinator) launchDegradedModelsPopup(clientID string) {
 	if uiSpawnBlocked() {
 		return
 	}
-	sessIDOut, _ := tmuxCmd("display-message", "-p", "#{session_id}").Output()
-	sessID := strings.TrimSpace(string(sessIDOut))
+	sessID := c.SessionID()
 	if sessID == "" {
 		sessID = c.sessionID
 	}
@@ -19749,8 +19740,7 @@ func (c *Coordinator) launchDegradedModelsPopup(clientID string) {
 // Esc/Enter.
 func (c *Coordinator) launchDashLayoutPopup(clientID string) {
 	_ = clientID
-	sessIDOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
-	sessID := strings.TrimSpace(string(sessIDOut))
+	sessID := c.SessionID()
 	if sessID == "" {
 		sessID = c.sessionID
 	}
@@ -21103,9 +21093,7 @@ func (c *Coordinator) createNewWindowDefault(clientID string) {
 		activeID = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
 	}
 	if activeID == "" {
-		if out, err := tmuxOutputCtx("display-message", "-p", "#{window_id}"); err == nil {
-			activeID = strings.TrimSpace(string(out))
-		}
+		activeID = c.ActiveWindowID()
 	}
 
 	var cwd, curGroup, curColor, curIcon string
@@ -21531,7 +21519,7 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 	case "R":
 		cfg, err := config.LoadConfig(config.DefaultConfigPath())
 		if err == nil {
-			activeWindowID := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+			activeWindowID := c.ActiveWindowID()
 			c.stateMu.Lock()
 			c.config = cfg
 			applyContrastConfig(cfg)
@@ -22239,11 +22227,7 @@ func selectContentPaneInActiveWindow() {
 		return
 	}
 
-	windowIDOut, err := tmuxCmd("display-message", "-p", "#{window_id}").Output()
-	if err != nil {
-		return
-	}
-	windowID := strings.TrimSpace(string(windowIDOut))
+	windowID := activeWindowIDIn(daemonSessionID())
 	if windowID == "" {
 		return
 	}
@@ -22265,11 +22249,7 @@ func focusContentPaneInActiveWindow() {
 	if out, err := tmuxCmd("show-option", "-gqv", "@tabby_spawning").Output(); err == nil && strings.TrimSpace(string(out)) == "1" {
 		return
 	}
-	windowIDOut, err := tmuxCmd("display-message", "-p", "#{window_id}").Output()
-	if err != nil {
-		return
-	}
-	windowID := strings.TrimSpace(string(windowIDOut))
+	windowID := activeWindowIDIn(daemonSessionID())
 	if windowID == "" {
 		return
 	}

@@ -1,0 +1,136 @@
+package daemon
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestSessionTarget(t *testing.T) {
+	cases := []struct {
+		name string
+		sess string
+		want string
+	}{
+		{"session id", "$1", "$1:"},
+		{"session name", "infras-1", "infras-1:"},
+		{"whitespace trimmed", "  $2  ", "$2:"},
+		{"empty stays empty", "", ""},
+		{"whitespace only stays empty", "   ", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sessionTarget(tc.sess); got != tc.want {
+				t.Fatalf("sessionTarget(%q) = %q, want %q", tc.sess, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDisplayMessageArgs(t *testing.T) {
+	got := displayMessageArgs("$1", "#{window_id}")
+	want := []string{"display-message", "-t", "$1:", "-p", "#{window_id}"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("args = %v, want %v", got, want)
+	}
+
+	// No session: the -t flag must be omitted entirely rather than passed
+	// empty, which tmux rejects.
+	got = displayMessageArgs("", "#{window_id}")
+	want = []string{"display-message", "-p", "#{window_id}"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("args = %v, want %v", got, want)
+	}
+	for _, a := range got {
+		if a == "-t" {
+			t.Fatalf("empty session produced a -t flag: %v", got)
+		}
+	}
+}
+
+func TestCoordinatorSessionTargetAndSessionID(t *testing.T) {
+	c := &Coordinator{sessionID: "$3"}
+	if got := c.sessionTarget(); got != "$3:" {
+		t.Fatalf("sessionTarget() = %q, want %q", got, "$3:")
+	}
+	if got := c.SessionID(); got != "$3" {
+		t.Fatalf("SessionID() = %q, want %q", got, "$3")
+	}
+	if got := strings.Join(c.displayMessageArgs("#{pane_id}"), " "); got != "display-message -t $3: -p #{pane_id}" {
+		t.Fatalf("displayMessageArgs() = %q", got)
+	}
+}
+
+// TestNoUnqualifiedDisplayMessage is the guard that keeps the fix from eroding.
+// An unqualified `display-message -p` does not answer for this daemon's session
+// — tmux answers for the most recently active client's session instead — so
+// every read has to carry either `-t <target>` (a session/window/pane) or
+// `-c <tty>` (a specific client). See session_target.go for the mechanism.
+//
+// The check is textual because the mistake is textual: someone types the
+// familiar `display-message", "-p"` and nothing complains until focus starts
+// landing on the wrong window in a grouped session.
+func TestNoUnqualifiedDisplayMessage(t *testing.T) {
+	// session_target.go owns the one legitimate unqualified read: discovering
+	// which session we belong to when the -session flag was empty. There is no
+	// target to qualify with at that point.
+	allowed := map[string]bool{"session_target.go": true}
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+
+	var offenders []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if allowed[name] {
+			continue
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			if !strings.Contains(line, `"display-message"`) {
+				continue
+			}
+			// A qualified call names a target or a client on the same line.
+			if strings.Contains(line, `"-t"`) || strings.Contains(line, `"-c"`) {
+				continue
+			}
+			// display-message without -p is a user-facing notification, not a
+			// query, so there is nothing to resolve incorrectly.
+			if !strings.Contains(line, `"-p"`) {
+				continue
+			}
+			offenders = append(offenders, filepath.Join(".", name)+":"+itoa(i+1)+": "+trimmed)
+		}
+	}
+
+	if len(offenders) > 0 {
+		t.Fatalf("unqualified display-message -p (tmux will answer for another session; use "+
+			"c.ActiveWindowID/c.DisplayMessage or displayMessageArgs):\n%s",
+			strings.Join(offenders, "\n"))
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}

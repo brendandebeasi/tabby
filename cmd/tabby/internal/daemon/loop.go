@@ -732,7 +732,7 @@ func (l *Loop) doPaneLayoutOps() {
 		killLeftoverPaneHeaders()
 	}
 	pl0 := time.Now()
-	preActive := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+	preActive := l.coord.ActiveWindowID()
 	tmuxCmd("set-option", "-g", "@tabby_spawning", "1").Run()
 	windows := l.coord.GetWindows()
 	pl1 := time.Now()
@@ -764,7 +764,7 @@ func (l *Loop) doPaneLayoutOps() {
 	// the wrong active. Detect by comparing pre/post and undo before lifting
 	// the spawning bracket.
 	if preActive != "" {
-		postActive := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+		postActive := l.coord.ActiveWindowID()
 		if postActive != "" && postActive != preActive {
 			// The current window changed during the bracket. Distinguish two
 			// causes:
@@ -913,7 +913,7 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 		activeWin = clientDisplayedWindowID()
 	}
 	if activeWin == "" {
-		activeWin = tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+		activeWin = l.coord.ActiveWindowID()
 	}
 
 	var ops []ResizeOp

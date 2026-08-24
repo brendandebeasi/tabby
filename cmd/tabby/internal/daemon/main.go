@@ -598,8 +598,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 
 	// Get the currently active window so we only select-pane in it
 	// We can't easily cache this as it changes frequently, but one query is better than N
-	activeWindowOut, _ := tmuxCmd("display-message", "-p", "#{window_id}").Output()
-	activeWindow := strings.TrimSpace(string(activeWindowOut))
+	activeWindow := activeWindowIDIn(sessionID)
 
 	// connectedClients was already computed above as part of the stable-state
 	// probe; reuse it here.
@@ -890,9 +889,7 @@ func cleanupOrphanedSidebars(windows []tmux.Window, coordinator *Coordinator) {
 				continue
 			}
 			currentWindow := ""
-			if curOut, curErr := tmuxCmd("display-message", "-p", "#{window_id}").Output(); curErr == nil {
-				currentWindow = strings.TrimSpace(string(curOut))
-			}
+			currentWindow = activeWindowIDIn(daemonSessionID())
 			if currentWindow == windowID {
 				tmuxCmd("last-window").Run()
 			}
@@ -1136,9 +1133,7 @@ func cleanupOrphanWindowsByTmux(sessionID string, coordinator *Coordinator) {
 		}
 
 		currentWindow := ""
-		if curOut, curErr := tmuxCmd("display-message", "-p", "#{window_id}").Output(); curErr == nil {
-			currentWindow = strings.TrimSpace(string(curOut))
-		}
+		currentWindow = activeWindowIDIn(sessionID)
 		if currentWindow == windowID {
 			tmuxCmd("last-window").Run()
 		}
@@ -1332,9 +1327,7 @@ func spawnWindowHeaders(server *daemon.Server, sessionID string, customBorder bo
 			debugFlag = "-debug"
 		}
 		activeBeforeHeader := ""
-		if out, err := tmuxCmd("display-message", "-p", "#{pane_id}").Output(); err == nil {
-			activeBeforeHeader = strings.TrimSpace(string(out))
-		}
+		activeBeforeHeader = activePaneIDIn(sessionID)
 		logEvent("SPAWN_WINDOW_HEADER window=%s target_pane=%s active_before=%s custom_border=%v header_rows=%d",
 			win.ID, topPane.ID, activeBeforeHeader, customBorder, headerHeightRows)
 		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -window '%s' %s",
@@ -1560,9 +1553,7 @@ func spawnPaneHeaders(server *daemon.Server, sessionID string, customBorder bool
 			debugFlag = "-debug"
 		}
 		activeBeforeHeader := ""
-		if out, err := tmuxCmd("display-message", "-p", "#{pane_id}").Output(); err == nil {
-			activeBeforeHeader = strings.TrimSpace(string(out))
-		}
+		activeBeforeHeader = activePaneIDIn(sessionID)
 		logEvent("SPAWN_HEADER pane=%s window=%s active_before=%s width=%d height=%d custom_border=%v header_rows=%d",
 			pane.id, pane.windowID, activeBeforeHeader, pane.width, pane.height, customBorder, headerHeightRows)
 		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -pane '%s' %s",
@@ -2416,17 +2407,15 @@ func updateHeaderBorderStyles(coordinator *Coordinator) {
 // so they can be restored after daemon startup completes
 func saveFocusState(sessionID string) {
 	// Get current window and pane
-	windowOut, err := tmuxCmd("display-message", "-p", "#{window_id}").Output()
-	if err != nil {
+	currentWindow := activeWindowIDIn(sessionID)
+	if currentWindow == "" {
 		return
 	}
-	currentWindow := strings.TrimSpace(string(windowOut))
 
-	paneOut, err := tmuxCmd("display-message", "-p", "#{pane_id}").Output()
-	if err != nil {
+	currentPane := activePaneIDIn(sessionID)
+	if currentPane == "" {
 		return
 	}
-	currentPane := strings.TrimSpace(string(paneOut))
 
 	// Save to tmux options
 	tmuxCmd("set-option", "-g", "@tabby_last_window", currentWindow).Run()
@@ -2479,7 +2468,7 @@ func restoreFocusState(coordinator *Coordinator) {
 }
 
 func shouldRestoreFocus() bool {
-	out, err := tmuxCmd("display-message", "-p", "#{pane_current_command}").Output()
+	out, err := tmuxCmd(displayMessageArgs(daemonSessionID(), "#{pane_current_command}")...).Output()
 	if err != nil {
 		return false
 	}
@@ -2746,10 +2735,7 @@ func Run(args []string) int {
 
 	// Get session ID from environment if not provided
 	if *sessionID == "" {
-		out, err := tmuxCmd("display-message", "-p", "#{session_id}").Output()
-		if err == nil {
-			*sessionID = strings.TrimSpace(string(out))
-		}
+		*sessionID = discoverSessionID()
 	}
 
 	daemonStartTime = time.Now()
@@ -3049,7 +3035,7 @@ func Run(args []string) int {
 				return // opt-in only
 			}
 			threshold := time.Duration(hours) * time.Hour
-			activeTTY := strings.TrimSpace(tmuxOutputTrimmed("display-message", "-p", "#{client_tty}"))
+			activeTTY := displayMessageIn(*sessionID, "#{client_tty}")
 			out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_activity}").Output()
 			if err != nil {
 				return

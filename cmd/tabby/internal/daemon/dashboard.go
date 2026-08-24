@@ -1045,7 +1045,7 @@ func (c *Coordinator) dashboardSession() string {
 	if s := strings.TrimSpace(c.sessionID); s != "" {
 		return s
 	}
-	return tmuxOutputTrimmed("display-message", "-p", "#{session_id}")
+	return c.SessionID()
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────
