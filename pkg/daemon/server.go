@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -122,6 +123,13 @@ func (s *Server) Start() error {
 		os.Remove(s.pidPath) // Clean up pidfile on failure
 		return fmt.Errorf("failed to listen on socket: %w", err)
 	}
+	// Go unlinks the socket path on Close by default, which would bypass the
+	// ownership check in Stop and delete a newer daemon's socket out from
+	// under it. Stop removes the path itself once it confirms we still own
+	// the pidfile.
+	if ul, ok := listener.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
 	s.listener = listener
 
 	// Accept connections in goroutine
@@ -132,30 +140,54 @@ func (s *Server) Start() error {
 
 // checkAndClaimPid checks for existing daemon and claims pidfile
 func (s *Server) checkAndClaimPid() error {
-	// Check if pidfile exists and process is still running
-	if data, err := os.ReadFile(s.pidPath); err == nil {
-		pidStr := strings.TrimSpace(string(data))
-		if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
-			// Check if process is still alive
-			if process, err := os.FindProcess(pid); err == nil {
-				// On Unix, FindProcess always succeeds, so we need to send signal 0
-				if err := process.Signal(syscall.Signal(0)); err == nil {
-					// Process is still running
-					return fmt.Errorf("daemon already running with pid %d", pid)
-				}
+	myPid := os.Getpid()
+	// O_EXCL makes the claim atomic. A read-then-write claim let two daemons
+	// starting in the same instant both believe they had won; the loser went
+	// on to listen, and its socket then replaced the winner's on disk.
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(s.pidPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err == nil {
+			_, writeErr := f.WriteString(strconv.Itoa(myPid))
+			closeErr := f.Close()
+			if writeErr != nil || closeErr != nil {
+				os.Remove(s.pidPath)
+				return fmt.Errorf("failed to write pidfile: %w", errors.Join(writeErr, closeErr))
 			}
+			return nil
 		}
-		// Stale pidfile, remove it
+		if !os.IsExist(err) {
+			return fmt.Errorf("failed to write pidfile: %w", err)
+		}
+		if pid, ok := readPidFile(s.pidPath); ok && processAlive(pid) {
+			return fmt.Errorf("daemon already running with pid %d", pid)
+		}
+		// Stale or unreadable pidfile — clear it and try to claim once more.
 		os.Remove(s.pidPath)
 	}
+	return fmt.Errorf("failed to claim pidfile %s", s.pidPath)
+}
 
-	// Write our pid
-	pid := os.Getpid()
-	if err := os.WriteFile(s.pidPath, []byte(strconv.Itoa(pid)), 0644); err != nil {
-		return fmt.Errorf("failed to write pidfile: %w", err)
+// readPidFile returns the pid recorded in path, if it holds a valid one.
+func readPidFile(path string) (int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
 	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
 
-	return nil
+// processAlive reports whether pid names a running process. On Unix
+// FindProcess always succeeds, so liveness needs signal 0.
+func processAlive(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return process.Signal(syscall.Signal(0)) == nil
 }
 
 // Stop shuts down the server
@@ -183,9 +215,8 @@ func (s *Server) Stop() {
 	// Only remove socket and PID file if we still own them
 	// (prevents a departing daemon from deleting a new daemon's socket)
 	myPid := os.Getpid()
-	if data, err := os.ReadFile(s.pidPath); err == nil {
-		pidStr := strings.TrimSpace(string(data))
-		if pid, err := strconv.Atoi(pidStr); err == nil && pid == myPid {
+	if pid, ok := readPidFile(s.pidPath); ok {
+		if pid == myPid {
 			os.Remove(s.socketPath)
 			os.Remove(s.pidPath)
 		}

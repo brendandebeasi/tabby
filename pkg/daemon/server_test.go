@@ -511,3 +511,35 @@ func TestRenderActiveWindowOnly(t *testing.T) {
 		})
 	})
 }
+
+func TestStopLeavesForeignSocket(t *testing.T) {
+	s := newTestServer(t)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// A daemon that started after us has taken the pidfile; our shutdown must
+	// leave its socket alone. Go unlinks a unix socket on listener.Close by
+	// default, which used to delete the survivor's socket and take it down.
+	if err := os.WriteFile(s.pidPath, []byte("99999"), 0644); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+
+	s.Stop()
+
+	_, statErr := os.Stat(s.socketPath)
+	assert.NoError(t, statErr, "foreign socket should survive our Stop")
+}
+
+func TestCheckAndClaimPidIsExclusive(t *testing.T) {
+	s := newTestServer(t)
+	if err := s.checkAndClaimPid(); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+
+	second := newTestServer(t)
+	second.pidPath = s.pidPath
+	err := second.checkAndClaimPid()
+
+	assert.Error(t, err, "a second claim against a live owner must fail")
+	assert.Contains(t, err.Error(), "daemon already running")
+}
