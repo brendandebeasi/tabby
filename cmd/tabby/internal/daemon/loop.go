@@ -1387,7 +1387,7 @@ func (l *Loop) runHousekeeping(start, t1 time.Time, activeWindowID string, sizes
 		cleanupOrphanWindowsByTmux(l.deps.SessionID, l.coord)
 		t3 := time.Now()
 
-		cleanupSidebarsForClosedWindows(l.server, windows)
+		cleanupSidebarsForClosedWindows(l.server, windows, l.coord)
 		t4 := time.Now()
 
 		l.doPaneLayoutOps()

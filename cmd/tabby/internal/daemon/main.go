@@ -762,10 +762,21 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 }
 
 // cleanupSidebarsForClosedWindows removes sidebar panes from windows that no longer exist
-func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Window) {
+func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Window, coordinator *Coordinator) {
 	currentWindows := make(map[string]bool)
 	for _, win := range windows {
 		currentWindows[win.ID] = true
+	}
+	// A minimized window has been move-window'd out to _tabby_minimized, so it
+	// is absent from this session's window list while still very much alive —
+	// its sidebar pane and client legitimately persist, and it comes back on
+	// un-minimize. Without this it is reported as closed on every full refresh
+	// for as long as it stays minimized (274 such lines in one live log), which
+	// is pure noise in exactly the place you go looking during an investigation.
+	if coordinator != nil {
+		for _, win := range coordinator.listParkedMinimizedWindows() {
+			currentWindows[win.ID] = true
+		}
 	}
 
 	// Check each connected client - if their window no longer exists, disconnect them
