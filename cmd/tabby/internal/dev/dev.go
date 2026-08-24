@@ -60,7 +60,7 @@ func doReload(exe, baseDir string) int {
 		return 0
 	}
 
-	sessionID := tmuxGet("display-message", "-p", "#{session_id}")
+	sessionID, _ := currentSession()
 	sidebarState, _ := exec.Command("tmux", "show-options", "-qv", "@tabby_sidebar").Output()
 	state := strings.TrimSpace(string(sidebarState))
 
@@ -213,10 +213,7 @@ func resolveSession(target string) (string, string) {
 		return strings.TrimSpace(string(id)), target
 	}
 
-	id, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
-	name, _ := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
-	sid := strings.TrimSpace(string(id))
-	sname := strings.TrimSpace(string(name))
+	sid, sname := currentSession()
 
 	if sid == "" {
 		out, _ := exec.Command("tmux", "list-sessions", "-F", "#{session_id} #{session_name}").Output()
@@ -232,6 +229,35 @@ func resolveSession(target string) (string, string) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+// currentSession resolves the session this invocation belongs to, as an id and
+// a name.
+//
+// An unqualified `display-message -p '#{session_id}'` does not answer for the
+// session named in $TMUX. tmux resolves an unqualified target from the most
+// recently active client and answers for whatever session that client sits in,
+// so on a server with more than one session — and especially with grouped
+// sessions, which share their windows — it can name someone else entirely.
+// `dev reload` feeds the answer to the daemon it kills and the session whose
+// input focus it restores, so guessing wrong breaks the session the user asked
+// about and disturbs one they did not.
+//
+// $TMUX_PANE names the pane we were launched from, which is unambiguous. It can
+// be stale: a tmux server copies its launching shell's environment into the
+// server's global environment, so panes can inherit a TMUX_PANE naming a pane
+// that died long ago — and display-message then exits 0 with empty output
+// rather than failing. Fall back to the unqualified read in that case. It is a
+// guess, but it is the only one left.
+func currentSession() (string, string) {
+	if pane := os.Getenv("TMUX_PANE"); pane != "" {
+		id := tmuxGet("display-message", "-t", pane, "-p", "#{session_id}")
+		if id != "" {
+			return id, tmuxGet("display-message", "-t", pane, "-p", "#{session_name}")
+		}
+	}
+	return tmuxGet("display-message", "-p", "#{session_id}"),
+		tmuxGet("display-message", "-p", "#{session_name}")
+}
 
 func run(args ...string) {
 	exec.Command(args[0], args[1:]...).Run()

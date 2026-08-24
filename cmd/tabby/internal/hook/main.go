@@ -459,7 +459,16 @@ func doRestoreInputFocus(args []string) {
 		return
 	}
 
-	curWin, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+	// Ask about THIS session's current window and pane. An unqualified
+	// display-message answers for the most recently active client, whichever
+	// session that client sits in — so restoring focus after a reload of one
+	// session could inspect another session's pane, decide it was already a
+	// content pane, and select it there. The session we were told to fix kept
+	// its focus on the sidebar (or a pane that had just been killed), which is
+	// the "input is dead until you reattach" symptom. The care getSessionID
+	// takes to identify the right session is worth nothing if the very next
+	// read ignores it.
+	curWin, _ := exec.Command("tmux", "display-message", "-t", sessionID, "-p", "#{window_id}").Output()
 	windowID := strings.TrimSpace(string(curWin))
 	if windowID == "" {
 		out, _ := exec.Command("tmux", "list-windows", "-t", sessionID, "-F", "#{window_id}").Output()
@@ -469,7 +478,7 @@ func doRestoreInputFocus(args []string) {
 		}
 	}
 
-	curPane, _ := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output()
+	curPane, _ := exec.Command("tmux", "display-message", "-t", sessionID, "-p", "#{pane_id}").Output()
 	paneID := strings.TrimSpace(string(curPane))
 
 	targetPane := ""
@@ -507,8 +516,16 @@ func doRestoreInputFocus(args []string) {
 		// Get the window containing this pane and select it
 		tw, _ := exec.Command("tmux", "display-message", "-p", "-t", targetPane, "#{window_id}").Output()
 		if w := strings.TrimSpace(string(tw)); w != "" {
-			exec.Command("tmux", "select-window", "-t", w).Run()
+			// Qualify the window id with the session. Grouped sessions share
+			// their windows, so a bare `select-window -t @23` leaves tmux to
+			// pick which of the sharing sessions to move — and it picks by
+			// current client, which can be the other one. Verified: with $1 and
+			// $2 sharing @28, `-t '$1:@28'` and `-t '$2:@28'` each resolve to
+			// their own session.
+			exec.Command("tmux", "select-window", "-t", sessionID+":"+w).Run()
 		}
+		// select-pane needs no session: the active pane is a property of the
+		// window itself, which the sharing sessions hold in common.
 		exec.Command("tmux", "select-pane", "-t", targetPane).Run()
 	}
 
@@ -517,8 +534,10 @@ func doRestoreInputFocus(args []string) {
 	time.Sleep(50 * time.Millisecond)
 	exec.Command("tmux", "set", "-g", "mouse", "on").Run()
 
-	// Refresh all clients
-	out, _ := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output()
+	// Refresh the clients attached to this session. Unscoped, list-clients
+	// answers for the whole server, so a reload of one session would redraw
+	// every client of every other session too.
+	out, _ := exec.Command("tmux", "list-clients", "-t", sessionID, "-F", "#{client_tty}").Output()
 	for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if tty != "" {
 			exec.Command("tmux", "refresh-client", "-t", tty, "-S").Run()
