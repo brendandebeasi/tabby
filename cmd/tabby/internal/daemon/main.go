@@ -1619,7 +1619,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		listArgs = append(listArgs, "-t", *sessionID)
 	}
 	listArgs = append(listArgs, "-F",
-		"#{pane_id}|||#{pane_current_command}|||#{pane_width}|||#{pane_start_command}|||#{pane_height}|||#{pane_top}|||#{pane_left}|||#{window_id}")
+		"#{pane_id}|||#{pane_current_command}|||#{pane_width}|||#{pane_start_command}|||#{pane_height}|||#{pane_top}|||#{pane_left}|||#{window_id}|||#{window_width}")
 	out, err := tmuxCmd(listArgs...).Output()
 	if err != nil {
 		return
@@ -1637,6 +1637,7 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		windowID       string
 		target         string
 		height         int
+		windowWidth    int
 		isWindowHeader bool
 	}
 	var windowHeaders []headerInfo
@@ -1650,8 +1651,8 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|||", 8)
-		if len(parts) < 8 {
+		parts := strings.SplitN(line, "|||", 9)
+		if len(parts) < 9 {
 			continue
 		}
 		winID := parts[7]
@@ -1671,14 +1672,15 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|||", 8)
-		if len(parts) < 8 {
+		parts := strings.SplitN(line, "|||", 9)
+		if len(parts) < 9 {
 			continue
 		}
 		curCmd := parts[1]
 		startCmd := parts[3]
 		h, _ := strconv.Atoi(parts[4])
 		winID := parts[7]
+		winW, _ := strconv.Atoi(parts[8])
 
 		if strings.Contains(curCmd, "window-header") || strings.Contains(startCmd, "window-header") {
 			target := windowTargetFromStartCmd(startCmd)
@@ -1686,12 +1688,12 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 				target = winID
 			}
 			windowHeaders = append(windowHeaders, headerInfo{
-				paneID: parts[0], windowID: winID, target: target, height: h, isWindowHeader: true,
+				paneID: parts[0], windowID: winID, target: target, height: h, windowWidth: winW, isWindowHeader: true,
 			})
 		} else if strings.Contains(curCmd, "pane-header") || strings.Contains(startCmd, "pane-header") {
 			target := paneTargetFromStartCmd(startCmd)
 			paneHeaders = append(paneHeaders, headerInfo{
-				paneID: parts[0], windowID: winID, target: target, height: h, isWindowHeader: false,
+				paneID: parts[0], windowID: winID, target: target, height: h, windowWidth: winW, isWindowHeader: false,
 			})
 		}
 	}
@@ -1725,7 +1727,12 @@ func cleanupOrphanedHeaders(customBorder bool, coordinator *Coordinator, activeW
 			killed = true
 			continue
 		}
-		expectedHeight := coordinator.desiredWindowHeaderHeight()
+		// Per-WINDOW width, not the global active-client profile. The global
+		// version reports the 3-row touch header whenever the most recent
+		// client is narrow, so with a phone attached this shrink-only check
+		// stopped trimming a wide window's header back down from 3 to 1 —
+		// while PlanHeaderHeights, which is per-window, kept asking for 1.
+		expectedHeight := coordinator.desiredWindowHeaderHeightForWidth(hdr.windowWidth)
 		if hdr.height > expectedHeight {
 			logEvent("WINDOW_HEADER_HEIGHT_ADJUST trigger=cleanup pane=%s height=%d expected=%d", hdr.paneID, hdr.height, expectedHeight)
 			tmuxCmd("resize-pane", "-t", hdr.paneID, "-y", fmt.Sprintf("%d", expectedHeight)).Run()
@@ -2489,7 +2496,7 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 
 	// Get all panes with their sizes and commands
 	out, err := tmuxCmd("list-panes", "-a", "-F",
-		"#{window_id}|||#{pane_id}|||#{pane_width}|||#{pane_height}|||#{pane_current_command}|||#{pane_start_command}").Output()
+		"#{window_id}|||#{pane_id}|||#{pane_width}|||#{pane_height}|||#{pane_current_command}|||#{pane_start_command}|||#{window_width}").Output()
 	if err != nil {
 		logEvent("GEOM_SYNC_ERROR trigger=%s err=%v", trigger, err)
 		return false
@@ -2500,6 +2507,7 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 		width  int
 		height int
 		paneID string
+		winW   int
 	}
 
 	sidebarSizes := make(map[string]paneSize)
@@ -2509,8 +2517,8 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|||", 6)
-		if len(parts) < 6 {
+		parts := strings.SplitN(line, "|||", 7)
+		if len(parts) < 7 {
 			continue
 		}
 		windowID := parts[0]
@@ -2519,16 +2527,17 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 		height, _ := strconv.Atoi(parts[3])
 		cmd := parts[4]
 		startCmd := parts[5]
+		winW, _ := strconv.Atoi(parts[6])
 
 		// Check if this is a sidebar/renderer pane
 		if strings.Contains(cmd, "sidebar") || strings.Contains(cmd, "renderer") {
-			sidebarSizes[windowID] = paneSize{width: width, height: height, paneID: paneID}
+			sidebarSizes[windowID] = paneSize{width: width, height: height, paneID: paneID, winW: winW}
 			continue
 		}
 
 		if strings.Contains(cmd, "window-header") || strings.Contains(startCmd, "window-header") {
 			// For window-header panes, the clientID is "window-header:<windowID>"
-			headerSizes["window-header:"+windowID] = paneSize{width: width, height: height, paneID: paneID}
+			headerSizes["window-header:"+windowID] = paneSize{width: width, height: height, paneID: paneID, winW: winW}
 			continue
 		}
 
@@ -2537,7 +2546,7 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 			// clientID is "header:<paneID>".
 			targetPane := paneTargetFromStartCmd(startCmd)
 			if targetPane != "" {
-				headerSizes["header:"+targetPane] = paneSize{width: width, height: height, paneID: paneID}
+				headerSizes["header:"+targetPane] = paneSize{width: width, height: height, paneID: paneID, winW: winW}
 			}
 		}
 	}
@@ -2585,7 +2594,12 @@ func syncClientSizesFromTmux(server *daemon.Server, coordinator *Coordinator, tr
 		}
 		// Enforce correct height per header type
 		if daemon.KindOf(clientID) == daemon.TargetWindowHeader {
-			desiredH := coordinator.desiredWindowHeaderHeight()
+			// Per-WINDOW width, not the global active-client profile: with a
+			// phone attached the global reports 3 for every window, so this
+			// shrink-only check parked a wide window's header at 3 rows right
+			// after the per-window PlanHeaderHeights had asked for 1. The two
+			// enforcers have to agree or they just undo each other.
+			desiredH := coordinator.desiredWindowHeaderHeightForWidth(size.winW)
 			if size.height > desiredH {
 				logEvent("HEADER_HEIGHT_ANOMALY trigger=%s client=%s height=%d desired=%d", trigger, clientID, size.height, desiredH)
 				tmuxCmd("resize-pane", "-t", size.paneID, "-y", fmt.Sprintf("%d", desiredH)).Run()

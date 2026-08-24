@@ -11021,6 +11021,29 @@ func (c *Coordinator) attachedClientCount() int {
 	return count
 }
 
+// headerTargetHeight is the single source of truth for how tall one header
+// pane should be. Every enforcer must go through it: the shrink-only checks in
+// cleanupOrphanedHeaders and syncClientSizesFromTmux used to consult the
+// GLOBAL desiredWindowHeaderHeight() instead, which reports the 3-row touch
+// header whenever the most recently active client is narrow. With a phone
+// attached they therefore held a wide window's header at 3 rows while
+// PlanHeaderHeights — per-window — kept planning 1, and the two enforcers just
+// undid each other.
+//
+// lockedWindowWidth, when > 0, overrides the per-window width. See
+// PlanHeaderHeights for why Reconcile needs that.
+func (c *Coordinator) headerTargetHeight(h headerPaneInfo, lockedWindowWidth int) int {
+	if !h.IsWindowHdr {
+		// Pane-headers are always 1 row (or 2 with CustomBorder); never 3 on phone.
+		return c.desiredPaneHeaderHeight()
+	}
+	effectiveWidth := h.WindowWidth
+	if lockedWindowWidth > 0 {
+		effectiveWidth = lockedWindowWidth
+	}
+	return c.desiredWindowHeaderHeightForWidth(effectiveWidth)
+}
+
 // PlanHeaderHeights iterates pane-header panes across all windows and
 // returns ResizeOps for any whose current height differs from the target.
 // Uses per-window width (not global profile) to avoid phone/desktop
@@ -11043,17 +11066,7 @@ func (c *Coordinator) PlanHeaderHeights(activeClientID string, lockedWindowWidth
 	}
 	out := make([]ResizeOp, 0, len(headers))
 	for _, h := range headers {
-		var target int
-		if h.IsWindowHdr {
-			effectiveWidth := h.WindowWidth
-			if lockedWindowWidth > 0 {
-				effectiveWidth = lockedWindowWidth
-			}
-			target = c.desiredWindowHeaderHeightForWidth(effectiveWidth)
-		} else {
-			// Pane-headers are always 1 row (or 2 with CustomBorder); never 3 on phone.
-			target = c.desiredPaneHeaderHeight()
-		}
+		target := c.headerTargetHeight(h, lockedWindowWidth)
 		if h.CurrentHeight == target {
 			continue
 		}

@@ -340,13 +340,20 @@ type headerPaneInfo struct {
 func listHeaderPanes() []headerPaneInfo {
 	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F",
-		"#{pane_id}|||#{pane_height}|||#{pane_current_command}|||#{pane_start_command}|||#{window_width}").Output()
+	// Session-scoped, NOT `-a`. Grouped sessions link the same windows, so
+	// `list-panes -a` walks every session and reports each shared pane once per
+	// session — a six-session group turns one header into six identical
+	// ResizeOps in the same batch. It also reaches windows this daemon does not
+	// own, resizing another session's headers against this session's config.
+	args := sessionScopedListPanesArgs("#{pane_id}|||#{pane_height}|||#{pane_current_command}|||#{pane_start_command}|||#{window_width}")
+	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
 	if err != nil {
 		return nil
 	}
 	var result []headerPaneInfo
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	// Belt and braces on top of the session scoping: a duplicated row here
+	// becomes a duplicate ResizeOp for the same pane in the same batch.
+	for _, line := range uniqueByPaneID(strings.Split(strings.TrimSpace(string(out)), "\n"), 0) {
 		if line == "" {
 			continue
 		}
