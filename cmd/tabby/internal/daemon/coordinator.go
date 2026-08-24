@@ -8632,6 +8632,36 @@ func clientGeometryFlipped(lastWidth, lastHeight, curWidth, curHeight int) (widt
 	return widthChanged, heightChanged
 }
 
+// atKeyboardWidthClamp reports whether the active window's measured sidebar
+// width is the mobile-keyboard clamp holding rather than a user drag.
+//
+// A client shorter than keyboard_threshold rows -- an on-screen keyboard eating
+// the viewport, or simply a small terminal -- makes RunWidthSync pin every
+// sidebar to keyboard_width, and the pin is held for
+// mobileKeyboardHoldDuration past the height recovering so the sidebar doesn't
+// flap while the keyboard animates away. Either condition means a sidebar
+// sitting exactly AT keyboard_width was put there by the clamp.
+//
+// The adopt path has to know that, because the clamp is otherwise
+// self-perpetuating: a phone client attaching for a moment clamped the active
+// window's sidebar to the default keyboard_width of 15, the next sync pass
+// measured 15 against a global of 25 and adopted it as a drag, and every window
+// in the session followed the phone down and stayed there after it detached.
+// Same shape as the active-client cap and the responsive profile clamp, which
+// this sits alongside in the guard chain.
+//
+// holdPending is whether a hold is recorded at all, not whether it is still
+// live. The adopt decision runs ahead of the loop that restores the clamped
+// width, so the pass that first sees the hold expired is still looking at a
+// clamped pane; only once the loop has retired the hold, having restored the
+// width in the same pass, is a measurement at keyboard_width a real drag.
+func atKeyboardWidthClamp(measured, globalWidth, keyboardWidth, keyboardThreshold, activeHeight int, holdPending bool) bool {
+	if measured != keyboardWidth || keyboardWidth >= globalWidth {
+		return false
+	}
+	return holdPending || (activeHeight > 0 && activeHeight <= keyboardThreshold)
+}
+
 // SetActiveClientWidth records the currently-focused physical tmux client's
 // terminal width (in cols). RunWidthSync caps sidebar targets against this so
 // that we never ask tmux for more cols than the active client can honor.
@@ -10630,6 +10660,33 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 			// tick. Use the same test so the two checks agree.
 			activeWinWidth := windowWidths[activeWindowID]
 			fullWidth := activeWinWidth > 0 && effectiveActive >= activeWinWidth-2
+			// Third clamp, same reasoning as atCap and atProfileClamp: a short
+			// client (an on-screen keyboard eating the viewport, or any client
+			// under keyboard_threshold rows) pins every sidebar to
+			// keyboard_width, and the per-window loop keeps it pinned for
+			// mobileKeyboardHoldDuration after the height recovers so the
+			// sidebar doesn't flap while the keyboard animates away. A sidebar
+			// sitting AT keyboard_width under either condition is that clamp
+			// holding, not a drag.
+			//
+			// Without this the clamp was self-perpetuating and permanent: a
+			// phone client attaching for a moment clamped the active window's
+			// sidebar to the default keyboard_width of 15, the next pass
+			// measured 15 against a global of 25 and adopted it, and every
+			// window in the session followed the phone down and stayed there
+			// after it detached. Observed as WIDTH_SYNC_ADOPT from=25 to=15 one
+			// second after a 200x50 desktop client became sole client again.
+			// Mere PRESENCE of a hold entry counts, expired or not. The adopt
+			// decision runs ahead of the per-window loop that would restore this
+			// width, so a pass that first sees the hold expired still measures
+			// the clamped pane -- and dropping the guard on that pass adopted
+			// the clamp anyway, one tick later than before. The loop retires the
+			// entry in this same pass (expiredHolds) after restoring the width,
+			// so the guard costs exactly the one pass it takes to unwind.
+			keyboardHoldExpiry, keyboardHoldPending := keyboardHoldSnapshot[activeWindowID]
+			activeHeight := clientHeightSnapshot[activeWindowID]
+			atKeyboardClamp := atKeyboardWidthClamp(
+				effectiveActive, c.globalWidth, keyboardWidth, keyboardThreshold, activeHeight, keyboardHoldPending)
 			if clientGeometryChanged {
 				// The elected physical client just changed size (phone<->desktop
 				// flip / reattach, or a height-only reflow). The measured
@@ -10657,6 +10714,8 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=full_window_width active=%s measured=%d global=%d win_w=%d", activeWindowID, effectiveActive, c.globalWidth, activeWinWidth)
 			} else if atProfileClamp {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_profile_clamp active=%s measured=%d global=%d clamp=%d", activeWindowID, effectiveActive, c.globalWidth, profileClamped)
+			} else if atKeyboardClamp {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_keyboard_clamp active=%s measured=%d global=%d clamp=%d hold=%v hold_expired=%v height=%d", activeWindowID, effectiveActive, c.globalWidth, keyboardWidth, keyboardHoldPending, keyboardHoldPending && now.After(keyboardHoldExpiry), activeHeight)
 			} else if multiClientSizes || measurementsDisagree {
 				// Ambiguous, not wrong. Two attached clients of different sizes
 				// make tmux reflow the window to whichever acted last, and a pass
