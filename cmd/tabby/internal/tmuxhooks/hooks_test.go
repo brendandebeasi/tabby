@@ -11,15 +11,46 @@ const testExe = "/plugins/tabby/bin/tabby"
 // as "'<cmd>' returned N" to every attached client, and hook steps are
 // best-effort housekeeping whose status nothing consumes.
 func TestEveryRunShellBodyIsGuarded(t *testing.T) {
+	const prefix = "run-shell -b "
 	for _, def := range Definitions(testExe) {
-		for _, segment := range strings.Split(def.Cmd, "run-shell -b '") {
-			body, _, ok := strings.Cut(segment, "'")
+		rest := def.Cmd
+		for {
+			at := strings.Index(rest, prefix)
+			if at < 0 {
+				break
+			}
+			// The body may be quoted either way: bgQuoted uses double quotes so
+			// the body itself can contain the single quotes a session id needs.
+			rest = rest[at+len(prefix):]
+			quote := rest[:1]
+			body, after, ok := strings.Cut(rest[1:], quote)
 			if !ok {
-				continue // leading fragment before the first run-shell
+				t.Fatalf("hook %s: unterminated %s-quoted body in %q", def.Name, quote, def.Cmd)
 			}
 			if !strings.HasSuffix(body, okGuard) {
 				t.Errorf("hook %s: body %q does not end in %q", def.Name, body, okGuard)
 			}
+			rest = after
+		}
+	}
+}
+
+// tmux expands #{session_id} to text like `$246`. The shell that runs the hook
+// body then reads that as a positional parameter and substitutes it away — to
+// the empty string, or for session $0 to the shell's own name — and every step
+// taking a session id silently no-ops (ensureSidebar returns immediately on an
+// empty id). Double quotes do not stop the expansion; only single quotes at the
+// shell level do, which is what bgQuoted exists to allow.
+func TestSessionIDFormatsAreSingleQuotedForTheShell(t *testing.T) {
+	for _, def := range Definitions(testExe) {
+		for _, bad := range []string{`"#{session_id}"`, ` #{session_id} `} {
+			if strings.Contains(def.Cmd, bad) {
+				t.Errorf("hook %s: session id must be single-quoted at the shell level, got %s in %q",
+					def.Name, bad, def.Cmd)
+			}
+		}
+		if strings.Contains(def.Cmd, "#{session_id}") && !strings.Contains(def.Cmd, `'#{session_id}'`) {
+			t.Errorf("hook %s: uses #{session_id} without single quotes: %q", def.Name, def.Cmd)
 		}
 	}
 }

@@ -271,3 +271,24 @@ func TestSessionScopedListWindowsArgs(t *testing.T) {
 		t.Fatalf("unscoped args: got %v want %v", got, want)
 	}
 }
+
+func TestSessionScopedListPanesArgs(t *testing.T) {
+	orig := tmux.SessionTarget()
+	defer tmux.SetSessionTarget(orig)
+
+	// `-s` alone resolves against the attached client's session, not ours, so a
+	// known session target must always be passed explicitly.
+	tmux.SetSessionTarget("$7")
+	got := sessionScopedListPanesArgs("#{pane_id}")
+	want := []string{"list-panes", "-s", "-t", "$7", "-F", "#{pane_id}"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("scoped args: got %v want %v", got, want)
+	}
+
+	tmux.SetSessionTarget("")
+	got = sessionScopedListPanesArgs("#{pane_id}")
+	want = []string{"list-panes", "-s", "-F", "#{pane_id}"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("unscoped args: got %v want %v", got, want)
+	}
+}

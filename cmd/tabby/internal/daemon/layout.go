@@ -179,6 +179,26 @@ func sessionScopedListWindowsArgs(format string) []string {
 	return []string{"list-windows", "-a", "-F", format}
 }
 
+// sessionScopedListPanesArgs builds `list-panes -s` args restricted to this
+// daemon's own session, falling back to the unscoped form only when the session
+// is unknown.
+//
+// `-s` means "every pane in the session" but says nothing about *which*
+// session: with no `-t`, tmux resolves it against the current client. A daemon
+// is not a client, so a session holding no client reads whichever session the
+// attached client happens to be on. The sidebar lookup then misses every window
+// the daemon actually owns, PlanWidthSync drops all the ops it planned because
+// their pane IDs came back empty, and the 5s width audit re-plans the identical
+// drift forever — a permanent command storm per clientless session, which is
+// what finally saturated the server's accept queue and made tmux start
+// refusing connections.
+func sessionScopedListPanesArgs(format string) []string {
+	if target := tmux.SessionTarget(); target != "" {
+		return []string{"list-panes", "-s", "-t", target, "-F", format}
+	}
+	return []string{"list-panes", "-s", "-F", format}
+}
+
 // listWindowGeoms queries tmux for this session's windows and their current
 // sizes. Used by the planning phase of a reconcile so callers don't each have
 // to issue their own list-windows.
@@ -211,8 +231,8 @@ func listWindowGeoms() []windowGeom {
 func listSidebarPanesByWindow() map[string]string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-s", "-F",
-		"#{pane_id}|#{window_id}|#{pane_current_command}|#{pane_start_command}").Output()
+	args := sessionScopedListPanesArgs("#{pane_id}|#{window_id}|#{pane_current_command}|#{pane_start_command}")
+	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
 	if err != nil {
 		return nil
 	}

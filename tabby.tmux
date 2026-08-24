@@ -274,27 +274,34 @@ tmux bind-key -T root MouseDrag1Pane \
         "send-keys -M -t =" \
         "select-pane -t = ; copy-mode -M"
 
-# Handle clicks on window-header panes specially to allow buttons to work regardless of focus
-# Architecture: Only intercept window-header clicks. Let sidebar and normal panes use default tmux behavior.
-# Flow: MouseDown1Pane -> if window-header: store click pos, select pane -> BubbleTea FocusMsg -> daemon handles action
-
-# Bind MouseDown1Pane:
-# 1. Check target pane command
-# 2. If Sidebar or Header: send-keys -M (Pass mouse ONLY. Do not select-pane, let app handle it)
-# 3. If Normal: select-pane (Instant focus) AND signal daemon immediately
+# Mouse-down/up dispatch by pane kind:
+#   sidebar        -> forward the event only; the app owns its own focus
+#   pane/window header -> forward the event, then focus
+#   normal pane    -> forward the event, focus, and signal the daemon
+#
+# `send-keys -M -t =` comes FIRST in every branch. tmux aborts the rest of a
+# `;`-sequence as soon as one command fails, and `select-pane -t =` fails
+# whenever the client's cached layout no longer matches the server's — exactly
+# the window-switch race `after-select-window`'s refresh-client -S exists to
+# close. With select-pane leading, that failure ate the whole click; with the
+# forward leading, a stale layout costs the focus change at worst.
+#
+# Both header apps treat tea.FocusMsg as an explicit no-op and drive clicks
+# purely off the forwarded mouse event, so nothing depends on focus landing
+# before the event.
 tmux bind-key -T root MouseDown1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M -t =" \
         "if-shell -F -t = \"#{||:#{m:*pane-header*,#{pane_current_command}},#{m:*window-header*,#{pane_current_command}}}\" \
-		    \"select-pane -t = ; send-keys -M -t =\" \
-            \"select-pane -t = ; send-keys -M -t = ; run-shell -b '$CYCLE_PANE_BIN --dim-only ; $CURRENT_DIR/scripts/signal-daemon.sh'\""
+		    \"send-keys -M -t = ; select-pane -t =\" \
+            \"send-keys -M -t = ; select-pane -t = ; run-shell -b '$CYCLE_PANE_BIN --dim-only ; $CURRENT_DIR/scripts/signal-daemon.sh'\""
 
 tmux bind-key -T root MouseUp1Pane \
     if-shell -F -t = "#{m:*sidebar-render*,#{pane_current_command}}" \
         "send-keys -M -t =" \
         "if-shell -F -t = \"#{||:#{m:*pane-header*,#{pane_current_command}},#{m:*window-header*,#{pane_current_command}}}\" \
 		    \"send-keys -M -t =\" \
-            \"select-pane -t = ; send-keys -M -t = ; run-shell -b '$CURRENT_DIR/scripts/signal-daemon.sh'\""
+            \"send-keys -M -t = ; select-pane -t = ; run-shell -b '$CURRENT_DIR/scripts/signal-daemon.sh'\""
 
 tmux unbind-key -T root MouseUp3Pane 2>/dev/null || true
 tmux bind-key -T root MouseUp3Pane send-keys -M -t =
@@ -343,11 +350,14 @@ KILL_PANE_SCRIPT="$CURRENT_DIR/bin/tabby hook kill-pane"
 # IMPORTANT: MouseDown1Border must stay bound for MouseDrag1Border (resize) to work
 tmux bind-key -T root MouseDrag1Border resize-pane -M
 
-# Pane click: focus the clicked pane. We override the tmux default because the
-# default's `paste-buffer -p` fallback pastes stale buffer contents on every
-# click outside of copy/mouse-app modes — which can include error strings or
-# other unintended text.
-tmux bind-key -T root MouseDown1Pane "select-pane -t = ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M' ''"
+# NOTE: MouseDown1Pane is bound once, above, alongside MouseUp1Pane. A second
+# `bind-key MouseDown1Pane` here used to silently replace it — tmux replaces
+# rather than merges — which dropped the sidebar and header branches and the
+# daemon signal, and left mouse-down and mouse-up running different dispatch
+# logic so apps saw a release with no matching press. That binding existed to
+# avoid the tmux default's `paste-buffer -p` fallback, which pastes stale
+# buffer contents on a click outside copy/mouse-app modes; the binding above
+# never falls through to a paste, so the protection is retained.
 tmux bind-key -T root MouseDown3Border display-menu -T "Pane Actions" -x M -y M \
     "Split Vertical" "|" "split-window -h -c '#{pane_current_path}'" \
     "Split Horizontal" "-" "split-window -v -c '#{pane_current_path}'" \
@@ -471,9 +481,6 @@ if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
     tmux bind-key -T root MouseDown1StatusRight new-window
 fi
 
-# Signal sidebar refresh: now inline via SIGNAL_CMD (USR1 to daemon PID)
-SIGNAL_SIDEBAR_SCRIPT="$SIGNAL_CMD"
-
 # Refresh status bar: trivial inline command (replaces refresh_status.sh)
 REFRESH_STATUS_SCRIPT="tmux refresh-client -S"
 
@@ -495,22 +502,28 @@ EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby hook exit-if-no-main"
 # Most hooks now signal the daemon (USR1) which handles all state internally:
 # pane dimming, window history, layout save, border color, status exclusivity,
 # sidebar spawning, and renderer management.
-SIGNAL_CMD="$CURRENT_DIR/scripts/signal-daemon.sh"
-# refresh-client needs a current client, and a backgrounded run-shell fired
-# by a hook whose originating client has already gone away has none.
-REFRESH_CMD="tmux refresh-client -S 2>/dev/null"
+# hook-notify.sh signals the daemon and repaints the client, and always exits
+# 0: tmux prints '<command> returned N' into every attached client when a hook
+# body exits nonzero, so a single missing client used to turn into a screenful
+# of noise on every window switch.
+NOTIFY_CMD="$CURRENT_DIR/scripts/hook-notify.sh"
 ENSURE_DAEMON_CMD="$CURRENT_DIR/scripts/ensure-daemon.sh"
-# tmux prints '<command> returned N' into every attached client when a hook
-# body exits nonzero, so a single missing client turns into a screenful of
-# noise on every window switch. Hook bodies are best-effort housekeeping and
-# nothing consumes their status, so every one of them ends in `true`.
+# Hook bodies are best-effort housekeeping and nothing consumes their status,
+# so any step run outside hook-notify.sh ends in `true`.
 HOOK_OK="true"
 
-tmux set-hook -g window-linked "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $HOOK_OK'"
-tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK'"
-tmux set-hook -g after-new-window "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $HOOK_OK'"
+# Steps taking a #{session_id} must be single-quoted AT THE SHELL LEVEL and so
+# get their own run-shell: tmux expands the format to text like `$246`, which
+# the shell then reads as a positional parameter and substitutes away to the
+# empty string (or, for session $0, to the shell's own name). Double quotes do
+# not help — only single quotes stop the expansion. Chaining such a step inside
+# a shared body would force the whole body into one quoting style, so each gets
+# its own command instead.
+tmux set-hook -g window-linked "run-shell -b '$NOTIFY_CMD'"
+tmux set-hook -g window-unlinked "run-shell -b '$NOTIFY_CMD' ; run-shell -b '$EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK'"
+tmux set-hook -g after-new-window "run-shell -b '$NOTIFY_CMD'"
 tmux set-hook -g after-resize-pane "run-shell -b '$HOOK_BIN on-pane-resize \"#{hook_pane}\"; $HOOK_OK'"
-tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
+tmux set-hook -g after-select-window "run-shell -b '$NOTIFY_CMD' ; run-shell -b \"$ENSURE_SIDEBAR_CMD '#{session_id}' '#{window_id}'; $HOOK_OK\" ; run-shell -b '$CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
 
 # prefix+, opens the per-pane actions menu (close, zoom, splits, break-pane,
 # swap, mark). Works in any window — the menu picks items based on whether the
@@ -531,15 +544,15 @@ tmux bind-key r command-prompt -I "#W" "rename-window '%%' ; set-window-option @
 # In the dashboard we instead run cycle-pane --main-follow, which only acts when
 # the layout is an "-auto" mode (Main+stack/row, active) — keeping the focused
 # pane in the big slot as focus moves; it's a cheap no-op for other layouts.
-tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' 'run-shell -b \"$CYCLE_PANE_BIN --main-follow; $HOOK_OK\"' 'run-shell -b \"$SIGNAL_CMD; $HOOK_OK\"'"
+tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' 'run-shell -b \"$CYCLE_PANE_BIN --main-follow; $HOOK_OK\"' 'run-shell -b \"$NOTIFY_CMD --no-refresh\"'"
 # after-split-window: daemon handles window name preservation (PreserveWindowNames)
-tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_CMD; $HOOK_OK'"
+tmux set-hook -g after-split-window "run-shell -b '$NOTIFY_CMD --no-refresh'"
 
 # When a pane is killed: preserve ratios synchronously (must happen before tmux
 # reflows), then signal daemon in background. The daemon's USR1 handler takes
 # care of orphan cleanup and sidebar spawning.
 PRESERVE_RATIOS_CMD="$HOOK_BIN preserve-pane-ratios"
-tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"; $HOOK_OK'; run-shell -b '$SIGNAL_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK'"
+tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"; $HOOK_OK'; run-shell -b '$NOTIFY_CMD --no-refresh' ; run-shell -b '$EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK'"
 
 # Restore sidebar when client reattaches to session
 tmux set-hook -g client-attached "run-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"; $HOOK_OK';run-shell '$RESTORE_SIDEBAR_CMD; $HOOK_OK'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"; $HOOK_OK'; run-shell -b '$CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
@@ -554,7 +567,7 @@ tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{clien
 # works via the shared windows' renderer panes while every input hook derives
 # its socket from the current session id and drops the keypress.
 # Sidebar spawning itself is handled by the daemon via USR1.
-tmux set-hook -g session-created "run-shell -b '$ENSURE_DAEMON_CMD; $SIGNAL_CMD; $HOOK_OK'"
+tmux set-hook -g session-created "run-shell -b '$ENSURE_DAEMON_CMD; $HOOK_OK' ; run-shell -b '$NOTIFY_CMD --no-refresh'"
 
 # client-session-changed: a client moving between sessions (switch-client, or
 # detach/attach onto a grouped peer) leaves the session it entered possibly

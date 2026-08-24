@@ -40,6 +40,22 @@ func bg(cmd string) string {
 	return fmt.Sprintf("run-shell -b '%s%s'", cmd, okGuard)
 }
 
+// bgQuoted is bg for a body that itself contains single quotes, which tmux's
+// own single-quoted string cannot hold. tmux does no shell-variable expansion,
+// so double-quoting the body at the tmux level is equivalent for everything
+// except the quote character.
+//
+// A body needs this when it passes a session id. tmux expands #{session_id} to
+// text like `$246`, and the shell that runs the body then reads that as a
+// positional parameter and substitutes it away — to the empty string, or for
+// session $0 to the shell's own name. Double quotes do not stop it; only
+// single quotes at the shell level do. `#{window_id}`, `#{pane_id}` and
+// `#{client_tty}` expand to `@N`, `%N` and a path, none of which the shell
+// touches, so those stay in the cheaper bg form.
+func bgQuoted(cmd string) string {
+	return fmt.Sprintf("run-shell -b \"%s%s\"", cmd, okGuard)
+}
+
 // Retired lists hook names earlier versions registered and that must now be
 // actively unset. A global hook outlives the binary that set it — it survives
 // daemon restarts and plugin reloads for the life of the tmux server — so
@@ -63,7 +79,7 @@ func Definitions(exe string) []Definition {
 	cycleCmd := fmt.Sprintf("%s cycle-pane", exe)
 	ensureDaemon := filepath.Join(filepath.Dir(filepath.Dir(exe)), "scripts", "ensure-daemon.sh")
 
-	ensureSidebar := fmt.Sprintf("%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"", hookCmd)
+	ensureSidebar := fmt.Sprintf("%s ensure-sidebar '#{session_id}' '#{window_id}'", hookCmd)
 	ensureContent := fmt.Sprintf("%s --ensure-content", cycleCmd)
 
 	join := func(parts ...string) string { return strings.Join(parts, "; ") }
@@ -73,7 +89,7 @@ func Definitions(exe string) []Definition {
 		{"after-resize-window", bg(fmt.Sprintf("%s on-pane-resize \"#{pane_id}\"", hookCmd))},
 		{"client-resized", join(
 			bg(fmt.Sprintf("%s client-resized \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"", hookCmd)),
-			bg(ensureSidebar),
+			bgQuoted(ensureSidebar),
 		)},
 		// refresh-client -S is what repaints the client after a window switch.
 		// Without it the client keeps serving the previous window's layout, so
@@ -81,7 +97,7 @@ func Definitions(exe string) []Definition {
 		// wrong pane or are dropped entirely.
 		{"after-select-window", join(
 			bg(fmt.Sprintf("%s after-select-window \"#{window_id}\"; tmux refresh-client -S 2>/dev/null", hookCmd)),
-			bg(ensureSidebar),
+			bgQuoted(ensureSidebar),
 			bg(ensureContent),
 		)},
 		// A reattaching client can land on a session whose daemon has already
@@ -89,8 +105,8 @@ func Definitions(exe string) []Definition {
 		{"client-attached", join(
 			bg(fmt.Sprintf("%s \"\" \"\" \"#{client_tty}\"", ensureDaemon)),
 			bg(fmt.Sprintf("%s client-attached", hookCmd)),
-			bg(ensureSidebar),
-			bg(fmt.Sprintf("%s stabilize-client-resize \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"", hookCmd)),
+			bgQuoted(ensureSidebar),
+			bgQuoted(fmt.Sprintf("%s stabilize-client-resize '#{session_id}' '#{window_id}' '#{client_tty}' '#{client_width}' '#{client_height}'", hookCmd)),
 			bg(ensureContent),
 		)},
 	}
