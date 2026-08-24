@@ -144,7 +144,7 @@ func Run(allArgs []string) int {
 		value = args[1]
 
 	case "toggle-pane-collapse":
-		target = os.Getenv("TMUX_PANE")
+		target = currentPaneID()
 		for i := 0; i < len(args); i++ {
 			if (args[i] == "-t" || args[i] == "--target") && i+1 < len(args) {
 				target = args[i+1]
@@ -153,7 +153,7 @@ func Run(allArgs []string) int {
 		}
 
 	case "kill-pane":
-		target = os.Getenv("TMUX_PANE")
+		target = currentPaneID()
 		for i := 0; i < len(args); i++ {
 			if (args[i] == "-t" || args[i] == "--target") && i+1 < len(args) {
 				target = args[i+1]
@@ -187,7 +187,7 @@ func Run(allArgs []string) int {
 		target = args[0]
 		if len(args) > 1 {
 			value = args[1]
-		} else if pane := os.Getenv("TMUX_PANE"); pane != "" {
+		} else if pane := currentPaneID(); pane != "" {
 			value = pane
 		}
 
@@ -207,12 +207,7 @@ func Run(allArgs []string) int {
 		// diagnostic logging (NAV_KEY_TRIGGER) so multi-client phone
 		// vs desktop traces can be distinguished. Daemon ignores
 		// non-window targets here, so behaviour is unchanged.
-		target = os.Getenv("TMUX_PANE")
-		if target == "" {
-			if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
-				target = strings.TrimSpace(string(out))
-			}
-		}
+		target = currentPaneID()
 		// Capture two TTYs to disambiguate which client fired the
 		// binding. `display-message` without -c uses tmux's "default
 		// client" — when run-shell is dispatched from a key binding,
@@ -253,7 +248,7 @@ func Run(allArgs []string) int {
 
 	case "toggle-minimize-window":
 		// Default to current active pane; daemon resolves its window.
-		target = os.Getenv("TMUX_PANE")
+		target = currentPaneID()
 		for i := 0; i < len(args); i++ {
 			if (args[i] == "-t" || args[i] == "--target") && i+1 < len(args) {
 				target = args[i+1]
