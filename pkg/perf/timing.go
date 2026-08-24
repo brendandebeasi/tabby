@@ -9,10 +9,10 @@ import (
 
 var (
 	// Set TABBY_PERF=1 to enable performance logging
-	enabled   = os.Getenv("TABBY_PERF") == "1"
-	logFile   *os.File
-	logMutex  sync.Mutex
-	initOnce  sync.Once
+	enabled  = os.Getenv("TABBY_PERF") == "1"
+	logFile  *os.File
+	logMutex sync.Mutex
+	initOnce sync.Once
 )
 
 func init() {

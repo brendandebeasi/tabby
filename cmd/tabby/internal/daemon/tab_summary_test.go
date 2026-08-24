@@ -26,10 +26,10 @@ func TestTruncateSummary(t *testing.T) {
 		// they never reach the sidebar (the small LLMs we use sometimes
 		// ignore the prompt's English-only constraint on non-English input).
 		{"deploy 部署 fix", 3, 0, "deploy fix"},
-		{"тест работы", 3, 0, ""},     // pure Cyrillic -> empty (caller skips)
+		{"тест работы", 3, 0, ""},            // pure Cyrillic -> empty (caller skips)
 		{"build 🚀 done", 3, 0, "build done"}, // emoji dropped
-		{"CAFÉ deploy", 3, 0, "caf deploy"},   // é dropped (no transliteration), CAFE lowercased
-		{"UPPER case", 3, 0, "upper case"},    // ASCII uppercase folded to lowercase
+		{"CAFÉ deploy", 3, 0, "caf deploy"},  // é dropped (no transliteration), CAFE lowercased
+		{"UPPER case", 3, 0, "upper case"},   // ASCII uppercase folded to lowercase
 		// Char cap: drop whole trailing words until it fits.
 		{"deploy the staging fix", 0, 10, "deploy the"}, // "deploy the staging" is 18 > 10
 		{"deploy fix", 0, 20, "deploy fix"},             // already fits, untouched

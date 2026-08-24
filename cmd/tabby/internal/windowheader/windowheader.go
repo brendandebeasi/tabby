@@ -655,8 +655,8 @@ func (m *rendererModel) sendSubscribe() {
 	colorProfile := "TrueColor"
 
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgSubscribe,
-		Target:   m.target,
+		Type:   daemon.MsgSubscribe,
+		Target: m.target,
 		Payload: daemon.ResizePayload{
 			Width:        m.width,
 			Height:       m.height,
@@ -668,8 +668,8 @@ func (m *rendererModel) sendSubscribe() {
 
 func (m *rendererModel) sendUnsubscribe() {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgUnsubscribe,
-		Target:   m.target,
+		Type:   daemon.MsgUnsubscribe,
+		Target: m.target,
 	})
 }
 
@@ -678,8 +678,8 @@ func (m *rendererModel) sendResize() {
 		inputLog.Printf("SEND_RESIZE client=%s width=%d height=%d pane=%s", m.clientID, m.width, m.height, m.headerPaneID)
 	}
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgResize,
-		Target:   m.target,
+		Type:   daemon.MsgResize,
+		Target: m.target,
 		Payload: daemon.ResizePayload{
 			Width:  m.width,
 			Height: m.height,
@@ -690,16 +690,16 @@ func (m *rendererModel) sendResize() {
 
 func (m *rendererModel) sendInput(input *daemon.InputPayload) {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgInput,
-		Target:   m.target,
-		Payload:  input,
+		Type:    daemon.MsgInput,
+		Target:  m.target,
+		Payload: input,
 	})
 }
 
 func (m *rendererModel) sendPing() {
 	m.sendMessage(daemon.Message{
-		Type:     daemon.MsgPing,
-		Target:   m.target,
+		Type:   daemon.MsgPing,
+		Target: m.target,
 	})
 }
 

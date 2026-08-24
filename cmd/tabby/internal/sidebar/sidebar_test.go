@@ -102,10 +102,10 @@ func TestRenderMenuLinesIncludesTitleAndBorders(t *testing.T) {
 
 func TestRenderMenuLinesUsesThemeColors(t *testing.T) {
 	m := rendererModel{
-		width:         20,
-		height:        10,
-		menuY:         0,
-		menuTitle:     "Menu",
+		width:     20,
+		height:    10,
+		menuY:     0,
+		menuTitle: "Menu",
 		menuItems: []daemon.MenuItemPayload{
 			{Label: "Header", Header: true},
 			{Label: "Item", Key: "i"},

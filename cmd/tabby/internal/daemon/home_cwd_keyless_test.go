@@ -16,12 +16,12 @@ func TestCwdIsHome(t *testing.T) {
 		want      bool
 	}{
 		{"/Users/b", "/Users/b", true},
-		{"/Users/b/", "/Users/b", true},      // trailing slash normalized
-		{"/Users/b/./", "/Users/b", true},    // cleaned
-		{"/Users/b/git/tabby", home, false},  // a project under home
-		{"/Users/bob", home, false},          // prefix but different dir
-		{"", home, false},                    // empty cwd
-		{"/Users/b", "", false},              // unresolved home -> never home
+		{"/Users/b/", "/Users/b", true},     // trailing slash normalized
+		{"/Users/b/./", "/Users/b", true},   // cleaned
+		{"/Users/b/git/tabby", home, false}, // a project under home
+		{"/Users/bob", home, false},         // prefix but different dir
+		{"", home, false},                   // empty cwd
+		{"/Users/b", "", false},             // unresolved home -> never home
 	}
 	for _, tc := range cases {
 		if got := cwdIsHome(tc.cwd, tc.home); got != tc.want {

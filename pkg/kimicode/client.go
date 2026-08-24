@@ -25,8 +25,8 @@ type Usages struct {
 			Level string `json:"level"` // e.g. "LEVEL_STANDARD"
 		} `json:"membership"`
 	} `json:"user"`
-	Usage   Quota         `json:"usage"`   // weekly (7d) window
-	Limits  []WindowLimit `json:"limits"`  // rate-limit windows; the 300-minute one is the session (5h) window
+	Usage    Quota         `json:"usage"`  // weekly (7d) window
+	Limits   []WindowLimit `json:"limits"` // rate-limit windows; the 300-minute one is the session (5h) window
 	Parallel struct {
 		Limit string `json:"limit"`
 	} `json:"parallel"`

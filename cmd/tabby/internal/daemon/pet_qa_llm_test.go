@@ -565,8 +565,8 @@ func TestLLMQuestionGen_LoadSkipsMalformedLines(t *testing.T) {
 	mixed := strings.Join([]string{
 		string(rawGood1),
 		"not json at all {{{",
-		"",                       // empty line — should be silently skipped
-		`{"id":"","text":""}`,   // empty required fields — skipped
+		"",                    // empty line — should be silently skipped
+		`{"id":"","text":""}`, // empty required fields — skipped
 		string(rawGood2),
 	}, "\n")
 	if err := os.WriteFile(bufferPath, []byte(mixed), 0644); err != nil {

@@ -82,15 +82,15 @@ func TestAtoiSafe(t *testing.T) {
 		want int
 		err  bool
 	}{
-		"0":         {0, false},
-		"42":        {42, false},
-		"  120  ":   {120, false},
-		"-5":        {-5, false},
-		"":          {0, true},
-		"abc":       {0, true},
-		"12a":       {0, true},
-		"  ":        {0, true},
-		"-":         {0, true}, // bare minus is not a valid int
+		"0":       {0, false},
+		"42":      {42, false},
+		"  120  ": {120, false},
+		"-5":      {-5, false},
+		"":        {0, true},
+		"abc":     {0, true},
+		"12a":     {0, true},
+		"  ":      {0, true},
+		"-":       {0, true}, // bare minus is not a valid int
 	}
 	for in, want := range cases {
 		t.Run(in, func(t *testing.T) {
@@ -220,7 +220,6 @@ func TestLooksMalformedLayout(t *testing.T) {
 		})
 	}
 }
-
 
 func TestPlanWindowSizesFromSkipsWindowsAlreadyAtTarget(t *testing.T) {
 	geoms := []windowGeom{

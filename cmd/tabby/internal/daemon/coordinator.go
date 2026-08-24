@@ -12390,8 +12390,8 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	// Style: active pane bold+bright, others dimmed
 	isActive := foundPane.Active && isWindowActive
-	segStyle := baseStyle.Copy()
-	btnStyle := baseStyle.Copy()
+	segStyle := baseStyle
+	btnStyle := baseStyle
 
 	// Always use group's fg color - no manipulation
 	if headerFg != "" {
@@ -12415,7 +12415,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 	spacerWidth := btnAreaStart - currentCol
 
 	// Pad the full line with the header background
-	fullLineStyle := baseStyle.Copy().Width(width)
+	fullLineStyle := baseStyle.Width(width)
 
 	line := groupAccent + " " +
 		renderedLabel +
@@ -12934,8 +12934,8 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 	}
 
 	isActive := foundPane.Active && isWindowActive
-	segStyle := baseStyle.Copy()
-	btnStyle2 := baseStyle.Copy()
+	segStyle := baseStyle
+	btnStyle2 := baseStyle
 	if headerFg != "" {
 		segStyle = segStyle.Foreground(lipgloss.Color(headerFg))
 		btnStyle2 = btnStyle2.Foreground(lipgloss.Color(headerFg))
@@ -12954,7 +12954,7 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 		btnAreaStart = currentCol
 	}
 	spacerWidth := btnAreaStart - currentCol
-	fullLineStyle := baseStyle.Copy().Width(width)
+	fullLineStyle := baseStyle.Width(width)
 
 	line := groupAccent + " " +
 		renderedLabel +
@@ -14223,7 +14223,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				windowCollapseStyle = windowCollapseStyle.Foreground(lipgloss.Color(disclosureColor))
 			}
 
-			contentStyle := style.Copy()
+			contentStyle := style
 			if bgColor != "" {
 				contentStyle = contentStyle.Background(lipgloss.Color(bgColor))
 			}

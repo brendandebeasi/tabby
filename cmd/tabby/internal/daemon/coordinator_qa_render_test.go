@@ -426,11 +426,11 @@ func TestUpdatePetState_QAPick_SkipsDuringAdventure(t *testing.T) {
 	c.pet.QuestionCooldown = time.Time{}
 	c.pet.PendingQuestion = nil
 	c.pet.Adventure = adventureState{
-		Active:        true,
-		Phase:         advPhaseExploring,
-		PhaseStart:    time.Now(),
-		PhaseDuration: 24 * time.Hour, // never advances during the test
-		Biome:         "meadow",
+		Active:            true,
+		Phase:             advPhaseExploring,
+		PhaseStart:        time.Now(),
+		PhaseDuration:     24 * time.Hour, // never advances during the test
+		Biome:             "meadow",
 		ManuallyTriggered: true, // avoids the "adventure disabled in config" reset path
 	}
 
@@ -628,7 +628,7 @@ func extractMenuChoices(args []string) []menuChoice {
 // injection / parse failure when a choice contains a single quote (e.g.
 // "don't know" or an LLM-generated choice with an apostrophe). The
 // embedded choice text is wrapped in single quotes, so a literal ' must
-// be escaped via the '\'' close-reopen trick.
+// be escaped via the '\” close-reopen trick.
 func TestBuildQuestionMenuArgs_EscapesSingleQuotes(t *testing.T) {
 	pending := &daemon.PendingQuestion{
 		ID:      "test",

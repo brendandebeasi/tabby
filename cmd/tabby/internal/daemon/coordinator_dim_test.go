@@ -26,10 +26,10 @@ func TestClampColorByte(t *testing.T) {
 
 func TestComputeDimBG(t *testing.T) {
 	tests := []struct {
-		name      string
-		termBG    string
-		opacity   float64
-		expected  string
+		name     string
+		termBG   string
+		opacity  float64
+		expected string
 	}{
 		{"empty bg returns empty", "", 0.9, ""},
 		{"invalid hex returns empty", "#xyz", 0.9, ""},

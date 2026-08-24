@@ -574,19 +574,19 @@ var lastLLMDistillation time.Time
 // distillation pass to fire on this tick. Pure — no side effects, safe to
 // call under a read lock. Conditions:
 //
-//	1. Feature gate on (qa.LLMQuestions). Without this every other check
-//	   is moot.
-//	2. User hasn't opted out (pet.QAOptedOut). Privacy guardrail — if
-//	   they said "No thanks" we never call any LLM about them.
-//	3. At least one undistilled free-text answer exists. Otherwise there
-//	   is literally nothing to distill.
-//	4. Either:
-//	     - undistilled-count >= llmDistillThreshold, or
-//	     - llmDistillCadence has elapsed since the last completed pass.
-//	   The cadence is on the AGE of the last completed pass, not the
-//	   age of the cat, so a fresh install can fire as soon as there are
-//	   undistilled answers (lastLLMDistillation is zero on startup).
-//	5. Not already in flight (llmDistillInFlight CAS handled by caller).
+//  1. Feature gate on (qa.LLMQuestions). Without this every other check
+//     is moot.
+//  2. User hasn't opted out (pet.QAOptedOut). Privacy guardrail — if
+//     they said "No thanks" we never call any LLM about them.
+//  3. At least one undistilled free-text answer exists. Otherwise there
+//     is literally nothing to distill.
+//  4. Either:
+//     - undistilled-count >= llmDistillThreshold, or
+//     - llmDistillCadence has elapsed since the last completed pass.
+//     The cadence is on the AGE of the last completed pass, not the
+//     age of the cat, so a fresh install can fire as soon as there are
+//     undistilled answers (lastLLMDistillation is zero on startup).
+//  5. Not already in flight (llmDistillInFlight CAS handled by caller).
 //
 // Returns the slice of undistilled answers ready to send to the LLM so
 // the caller doesn't have to walk the history twice.
