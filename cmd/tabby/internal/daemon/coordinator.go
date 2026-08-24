@@ -12999,6 +12999,43 @@ func headerBoolDefault(p *bool) bool {
 	return *p
 }
 
+// headerSubjectWindowID resolves the window whose identity the sidebar header
+// should reflect. A sidebar renderer's clientID IS the id of the window it
+// lives in, so that window is the subject: in grouped sessions one window's
+// sidebar pane is shared between the peer sessions, and keying the header off
+// "the session's active window" made every peer daemon stamp its own active
+// window's marker and colors onto panes belonging to other windows -- so the
+// header disagreed with the tab the sidebar had highlighted. Non-window
+// clients (phone, dashboard) fall back to the session's active window.
+func (c *Coordinator) headerSubjectWindowID(clientID string) string {
+	for i := range c.windows {
+		if c.windows[i].ID == clientID {
+			return clientID
+		}
+	}
+	for i := range c.windows {
+		if c.windows[i].Active {
+			return c.windows[i].ID
+		}
+	}
+	return ""
+}
+
+// getWindowGroupTheme returns the theme of the group containing windowID.
+func (c *Coordinator) getWindowGroupTheme(windowID string) *config.Theme {
+	if windowID == "" {
+		return nil
+	}
+	for i, group := range c.grouped {
+		for _, win := range group.Windows {
+			if win.ID == windowID {
+				return &c.grouped[i].Theme
+			}
+		}
+	}
+	return nil
+}
+
 // getActiveWindowGroupTheme returns the theme of the active window's group.
 // Returns nil if no active window or group is found.
 func (c *Coordinator) getActiveWindowGroupTheme() *config.Theme {
@@ -13118,15 +13155,22 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 	activeColor := headerBoolDefault(hdr.ActiveColor)
 	bold := headerBoolDefault(hdr.Bold)
 
-	// Mirror the active tab's marker into the header: if the current window has a
+	// The header belongs to the window this sidebar lives in, which is what
+	// clientID names for a sidebar renderer (see the window list, where
+	// isActive is win.ID == clientID). Falling back to the session's active
+	// window is only for non-sidebar clients (phone, dashboard) whose clientID
+	// is not a window id.
+	subjectID := c.headerSubjectWindowID(clientID)
+
+	// Mirror the subject tab's marker into the header: if that window has a
 	// marker (@tabby_icon), flank the header text with it on BOTH sides so "TABBY"
-	// reads e.g. "🚀 TABBY 🚀". Re-rendered per active window, so it switches on
+	// reads e.g. "🚀 TABBY 🚀". Re-rendered per window, so it switches on
 	// window switch. Read lock-free like the active-color block below (the render
 	// path already holds the state RLock; taking it again would deadlock).
 	for i := range c.windows {
-		if c.windows[i].Active {
+		if c.windows[i].ID == subjectID {
 			groupIcon := ""
-			if gt := c.getActiveWindowGroupTheme(); gt != nil {
+			if gt := c.getWindowGroupTheme(subjectID); gt != nil {
 				groupIcon = gt.Icon
 			}
 			if mk := effectiveWindowMarker(c.windows[i].Icon, groupIcon); mk != "" {
@@ -13150,15 +13194,8 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 		bgColor = ""
 	}
 	if activeColor && (fgColor == "" || bgColor == "") {
-		activeWindowID := ""
-		for i := range c.windows {
-			if c.windows[i].Active {
-				activeWindowID = c.windows[i].ID
-				break
-			}
-		}
-		if activeWindowID != "" {
-			if tabFg, tabBg, ok := c.getWindowTabColors(activeWindowID, true); ok {
+		if subjectID != "" {
+			if tabFg, tabBg, ok := c.getWindowTabColors(subjectID, true); ok {
 				if fgColor == "" {
 					fgColor = tabFg
 				}

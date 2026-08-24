@@ -181,6 +181,31 @@ func TestGenerateSidebarHeader_WithActiveWindow(t *testing.T) {
 	assert.NotEmpty(t, content)
 }
 
+// A sidebar renderer's clientID is the id of the window it lives in, so the
+// header marker must come from THAT window, not from whichever window the
+// session happens to have active. In grouped sessions the sidebar pane is
+// shared between peers, and keying off the session-active window made each
+// peer daemon stamp its own marker onto other windows' sidebars.
+func TestGenerateSidebarHeader_MarkerFollowsClientWindow(t *testing.T) {
+	c := newRenderCoordinator(t)
+	c.config.Sidebar.Header.Text = config.Ptr("TABBY")
+	c.stateMu.Lock()
+	c.windows = []tmux.Window{
+		{ID: "@1", Index: 1, Name: "one", Icon: "🐈", Active: true},
+		{ID: "@2", Index: 2, Name: "two", Icon: "💵"},
+	}
+	c.grouped = []grouping.GroupedWindows{{Name: "Default", Windows: c.windows}}
+	c.stateMu.Unlock()
+
+	own, _ := c.generateSidebarHeader(30, "@2")
+	assert.Contains(t, own, "💵")
+	assert.NotContains(t, own, "🐈")
+
+	// Non-window clients (phone, dashboard) still follow the active window.
+	fallback, _ := c.generateSidebarHeader(30, "phone:abc")
+	assert.Contains(t, fallback, "🐈")
+}
+
 func TestGenerateMainContent_EmptyGrouped(t *testing.T) {
 	c := newRenderCoordinator(t)
 	content, regions, _ := c.generateMainContent("test-client", 30, 24)
