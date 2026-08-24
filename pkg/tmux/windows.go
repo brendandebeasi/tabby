@@ -173,7 +173,12 @@ func HasIdleIcon(title string) bool {
 // ("✳ Skedaddling… (5s · thinking)", "✽ Symbioting… (27s · ↓ 1.2k tokens)").
 // The finished form of the same line carries no parenthesized counter
 // ("✻ Brewed for 2m 29s"), which is what separates working from done.
-var workingLineRe = regexp.MustCompile(`(?i)^\s*[✻✳✽*]\s+\S+\s*\(\d+[hms]|esc to interrupt`)
+//
+// opencode writes the same state in its own dialect: a braille spinner and a
+// bare gerund ("⠙ Thinking") with the interrupt hint spelled "esc interrupt".
+// Its title stays fixed on a status string, so the body is the only place its
+// progress appears at all.
+var workingLineRe = regexp.MustCompile(`(?i)^\s*[✻✳✽*]\s+\S+\s*\(\d+[hms]|^\s*[\x{2801}-\x{28FF}]\s+\S|esc (to )?interrupt`)
 
 // HasWorkingLine reports whether an AI pane's visible output says a turn is
 // still running. Panes whose title is set by a tool hook carry a fixed project

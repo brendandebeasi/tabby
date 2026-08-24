@@ -1353,3 +1353,31 @@ func TestListWindowsWithPanes_FiltersSidebarPanes(t *testing.T) {
 		}
 	})
 }
+
+func TestHasWorkingLineOpencode(t *testing.T) {
+	// Real opencode footer: braille spinner in the body, interrupt hint spelled
+	// without "to", and a title that stays parked on a status string.
+	working := "  ┃\n     ⠙ Thinking\n\n     ▣  Build · Kimi K3\n" +
+		"   ⬝⬝⬝■■■■■  esc interrupt        105.0K (10%)  ctrl+p commands    • OpenCode 1.18.21"
+	if !HasWorkingLine(working) {
+		t.Error("opencode working footer should read as working")
+	}
+
+	idle := "  ┃\n  ┃  can we add better behavior here?\n  ┃  8:53 PM\n" +
+		"   Build · Kimi K3 Kimi For Coding · low        ~/git/teamclaude-legacy:master"
+	if HasWorkingLine(idle) {
+		t.Error("opencode idle footer should not read as working")
+	}
+}
+
+func TestHasWorkingLineClaudeStillMatches(t *testing.T) {
+	if !HasWorkingLine("✽ Churning… (3m 47s · ↓ 15.7k tokens)") {
+		t.Error("claude ticking counter should read as working")
+	}
+	if !HasWorkingLine("  ✻ Puzzling… (12s · esc to interrupt)") {
+		t.Error("claude esc-to-interrupt should read as working")
+	}
+	if HasWorkingLine("✻ Brewed for 2m 29s") {
+		t.Error("claude finished line should not read as working")
+	}
+}
