@@ -5095,20 +5095,14 @@ func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
 	// Run the tmux set-option commands outside the lock with a timeout.
 	runTmuxBatches(colorArgs, tmuxCmdTimeout)
 
-	// Execute deferred AI tool state tmux set-option ops outside the lock.
-	for _, op := range aiToolOps {
-		if op.unset {
-			tmuxRun("set-option", "-w", "-t", op.windowID, "-u", op.key)
-		} else {
-			tmuxRun("set-option", "-w", "-t", op.windowID, op.key, op.value)
-		}
-	}
-
-	// Execute deferred window rename ops outside the lock.
-	for _, op := range pendingRenames {
-		tmuxRun("rename-window", "-t", op.windowID, op.desiredName)
-		tmuxRun("set-window-option", "-t", op.windowID, "@tabby_name_locked", "0")
-	}
+	// Execute deferred AI tool state and rename ops outside the lock, batched
+	// per window. These used to be one fork per option and two per rename, run
+	// back to back and counted against handleRefreshTick's 8s budget — the
+	// sequential tail that showed up as LOOP_STALL task=refresh_tick, which
+	// presents as the cat's animation stopping dead. tmuxCmdTimeout bounds a
+	// single hung call, but nothing bounded the SUM.
+	runTmuxBatches(aiToolOptionBatches(aiToolOps), tmuxCmdTimeout)
+	runTmuxBatches(windowRenameBatches(pendingRenames), tmuxCmdTimeout)
 
 	// Execute deferred window move ops outside the lock. -d is load-bearing:
 	// without it move-window SELECTS the window it moves, so renumbering an
@@ -6574,6 +6568,63 @@ func flattenTmuxBatches(batches [][]string) []string {
 		flat = append(flat, b...)
 	}
 	return flat
+}
+
+// aiToolOptionBatches groups deferred @tabby_* window-option writes into one
+// argv per window. Windows are kept in first-seen order so the writes still
+// land in the order they were queued; grouping is safe because each op targets
+// a distinct (window, key), so reordering across windows cannot change the
+// final state.
+//
+// Per WINDOW rather than one big batch is the point: a window that died between
+// the refresh snapshot and this write makes its own batch fail, and
+// runTmuxBatches then retries the others individually instead of losing every
+// indicator queued behind the stale target.
+func aiToolOptionBatches(ops []tmuxSetOption) [][]string {
+	if len(ops) == 0 {
+		return nil
+	}
+	order := make([]string, 0, len(ops))
+	byWindow := make(map[string][]string, len(ops))
+	for _, op := range ops {
+		args, seen := byWindow[op.windowID]
+		if !seen {
+			order = append(order, op.windowID)
+		}
+		if len(args) > 0 {
+			args = append(args, ";")
+		}
+		if op.unset {
+			args = append(args, "set-option", "-w", "-t", op.windowID, "-u", op.key)
+		} else {
+			args = append(args, "set-option", "-w", "-t", op.windowID, op.key, op.value)
+		}
+		byWindow[op.windowID] = args
+	}
+	batches := make([][]string, 0, len(order))
+	for _, id := range order {
+		batches = append(batches, byWindow[id])
+	}
+	return batches
+}
+
+// windowRenameBatches pairs each rename with the @tabby_name_locked reset that
+// has to follow it, one batch per window. The two must stay in this order and
+// in the same batch: the reset says "this name came from the directory, not
+// from the user", and a rename that landed without it would be treated as an
+// explicit rename and never sync again.
+func windowRenameBatches(ops []tmuxWindowRename) [][]string {
+	if len(ops) == 0 {
+		return nil
+	}
+	batches := make([][]string, 0, len(ops))
+	for _, op := range ops {
+		batches = append(batches, []string{
+			"rename-window", "-t", op.windowID, op.desiredName,
+			";", "set-window-option", "-t", op.windowID, "@tabby_name_locked", "0",
+		})
+	}
+	return batches
 }
 
 // runTmuxBatches applies the batches in one tmux invocation, and on failure
