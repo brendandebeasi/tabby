@@ -87,18 +87,27 @@ WINDOW_INDEX=""
 PANE_NUM=""
 TMUX_TARGET=""
 SESSION_NAME=""
+PANE_PATH=""
 
 if [ -n "${TMUX_PANE:-}" ]; then
     WINDOW_NAME=$($TMUX_CMD display-message -t "$TMUX_PANE" -p '#W' 2>/dev/null || true)
     WINDOW_INDEX=$($TMUX_CMD display-message -t "$TMUX_PANE" -p '#I' 2>/dev/null || true)
     PANE_NUM=$($TMUX_CMD display-message -t "$TMUX_PANE" -p '#P' 2>/dev/null || true)
     SESSION_NAME=$($TMUX_CMD display-message -t "$TMUX_PANE" -p '#{session_name}' 2>/dev/null || true)
+    PANE_PATH=$($TMUX_CMD display-message -t "$TMUX_PANE" -p '#{pane_current_path}' 2>/dev/null || true)
     TMUX_TARGET="${SESSION_NAME}:${WINDOW_INDEX}.${PANE_NUM}"
 fi
 
 
 # ── Query OpenCode DB ─────────────────────────────────────────────────────
 OPENCODE_DB="$HOME/.local/share/opencode/opencode.db"
+
+# Escape a value for interpolation into a single-quoted SQL literal. Session
+# titles are model-authored prose and routinely contain apostrophes, which
+# would otherwise break the query (and hand the DB an injection point).
+sql_quote() {
+    printf '%s' "$1" | sed "s/'/''/g"
+}
 
 # Get the most recently updated session's ID and directory
 get_latest_session_info() {
@@ -117,8 +126,41 @@ get_session_info_by_id() {
         return
     fi
     sqlite3 "$OPENCODE_DB" "
-        SELECT id, directory FROM session WHERE id = '$session_id' LIMIT 1
+        SELECT id, directory FROM session WHERE id = '$(sql_quote "$session_id")' LIMIT 1
     " 2>/dev/null
+}
+
+# Find the OpenCode session this hook actually belongs to, without an id.
+# The notifier plugin's documented argument list carries no session id, so the
+# only alternative used to be "whichever session was touched most recently" --
+# which, with two agents running side by side, is regularly the *other* one.
+# A session records the directory it was started in, and the pane that fired
+# this hook is sitting in that directory, so match on that first and fall back
+# to the session title the notifier did pass us.
+#
+# Returns: session_id|directory
+get_session_info_by_context() {
+    local dir="${1:-}"
+    local title="${2:-}"
+    if ! command -v sqlite3 &>/dev/null || [ ! -f "$OPENCODE_DB" ]; then
+        return
+    fi
+    local found=""
+    if [ -n "$dir" ]; then
+        found=$(sqlite3 "$OPENCODE_DB" "
+            SELECT id, directory FROM session
+            WHERE directory = '$(sql_quote "$dir")'
+            ORDER BY time_updated DESC LIMIT 1
+        " 2>/dev/null)
+    fi
+    if [ -z "$found" ] && [ -n "$title" ]; then
+        found=$(sqlite3 "$OPENCODE_DB" "
+            SELECT id, directory FROM session
+            WHERE title = '$(sql_quote "$title")'
+            ORDER BY time_updated DESC LIMIT 1
+        " 2>/dev/null)
+    fi
+    printf '%s' "$found"
 }
 
 get_last_assistant_text() {
@@ -127,18 +169,27 @@ get_last_assistant_text() {
     if ! command -v sqlite3 &>/dev/null || [ ! -f "$OPENCODE_DB" ]; then
         return
     fi
-    local where_clause
-    if [ -n "$session_id" ]; then
-        where_clause="WHERE m.session_id = '$session_id'"
-    else
-        where_clause="WHERE m.session_id = (SELECT id FROM session ORDER BY time_updated DESC LIMIT 1)"
-    fi
+    [ -z "$session_id" ] && return
+    # Only ever read the *newest* assistant message. Most assistant messages in
+    # a working session are tool calls with no prose at all -- in a sample of
+    # this repo's own history, 30 of the last 37 -- so a query that just takes
+    # the newest text part in the whole session walks straight back over them
+    # and returns an answer from several turns ago. That is what produced
+    # notifications quoting content the user had already read: a permission
+    # prompt fires while a tool-call message is the newest one, and the body
+    # came out as the previous turn's summary. When the newest message has no
+    # prose this returns nothing and the caller uses its event-specific
+    # fallback, which is stale-free by construction.
     sqlite3 "$OPENCODE_DB" "
         SELECT substr(json_extract(p.data, '\$.text'), 1, $max_chars)
         FROM part p
-        JOIN message m ON p.message_id = m.id
-        $where_clause
-          AND json_extract(m.data, '\$.role') = 'assistant'
+        WHERE p.message_id = (
+            SELECT m.id FROM message m
+            WHERE m.session_id = '$(sql_quote "$session_id")'
+              AND json_extract(m.data, '\$.role') = 'assistant'
+            ORDER BY m.time_created DESC
+            LIMIT 1
+          )
           AND json_extract(p.data, '\$.type') = 'text'
           AND length(json_extract(p.data, '\$.text')) > 5
         ORDER BY p.time_created DESC
@@ -239,12 +290,24 @@ send_notification() {
         return
     fi
 
-    local session_info session_id session_dir
+    # Resolve the session most-specific-first. The global-latest lookup is the
+    # last resort rather than the usual path: it is the one branch that can
+    # attribute another agent's transcript to this pane.
+    local session_info="" session_id session_dir session_src=none
     if [ -n "$SESSION_ID_ARG" ]; then
         session_info=$(get_session_info_by_id "$SESSION_ID_ARG")
+        session_src=arg
     fi
     if [ -z "$session_info" ]; then
+        session_info=$(get_session_info_by_context "$PANE_PATH" "$SESSION_TITLE")
+        session_src=context
+    fi
+    if [ -z "$session_info" ] && [ -z "$SESSION_ID_ARG" ]; then
+        # No id and nothing matched this pane. Guessing at the newest session
+        # is better than no deep link, but its transcript may belong to a
+        # different agent, so the body is left to the fallback message.
         session_info=$(get_latest_session_info)
+        session_src=latest-unverified
     fi
     session_id=$(echo "$session_info" | cut -d'|' -f1)
     session_dir=$(echo "$session_info" | cut -d'|' -f2)
@@ -265,7 +328,7 @@ send_notification() {
 
     # Body: last assistant message from DB, stripped of markdown
     local db_text=""
-    if [ -n "$session_id" ]; then
+    if [ -n "$session_id" ] && [ "$session_src" != latest-unverified ]; then
         db_text=$(get_last_assistant_text "$session_id" 300 | strip_markdown)
     fi
     local message="${NOTIFIER_MESSAGE:-${db_text:-$fallback_message}}"
@@ -292,8 +355,10 @@ send_notification() {
         emoji_image=$(get_emoji_image "$group_emoji")
     fi
 
-    printf "%s notification: title=%s subtitle=%s group=%s focus=%s open=%s emoji=%s\n" \
-        "$(date '+%Y-%m-%d %H:%M:%S')" "$title" "$subtitle" "$group_id" "${focus_cmd:-none}" "${open_url:-none}" "${group_emoji:-none}" >> "$LOG_FILE"
+    printf "%s notification: title=%s subtitle=%s group=%s focus=%s open=%s emoji=%s session=%s/%s body=%s\n" \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$title" "$subtitle" "$group_id" "${focus_cmd:-none}" "${open_url:-none}" "${group_emoji:-none}" \
+        "${session_src:-none}" "${session_id:-none}" \
+        "$([ -n "$NOTIFIER_MESSAGE" ] && echo notifier || { [ -n "$db_text" ] && echo db || echo fallback; })" >> "$LOG_FILE"
 
     if $use_growlrrr; then
         local args=(

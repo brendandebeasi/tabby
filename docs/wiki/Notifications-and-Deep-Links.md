@@ -184,6 +184,32 @@ Create `~/.config/opencode/opencode-notifier.json`:
 Leave `sound` and `notification` false. The hook script sends the notification
 itself, and leaving OpenCode's own enabled gives you two for every event.
 
+Add `"{sessionID}"` as a fifth argument if your notifier build exposes it. The
+hook uses it to read the right transcript; without it, it identifies the
+session by matching the firing pane's working directory against the directory
+each OpenCode session records, and falls back to the session title.
+
+### Where the notification body comes from
+
+In order of preference:
+
+1. `{message}` — whatever OpenCode passed for this event.
+2. The prose in the **newest** assistant message of the resolved session.
+3. A fixed per-event string ("Task complete", "Needs input", "Error occurred").
+
+Step 2 is deliberately restricted to the newest message. Most assistant
+messages in a working session are tool calls carrying no prose, so a search
+that walks back through the session for the last message that *did* have some
+will happily return an answer from several turns ago — which is what used to
+make a permission prompt quote a summary the user had already read. When the
+newest message is a tool call, there is nothing current to say and the hook
+uses the fixed string instead.
+
+If no session can be matched to the firing pane, the hook still deep-links to
+the most recently updated session but refuses to quote it, because that
+transcript may belong to a different agent. `/tmp/tabby-opencode-hook.log`
+records which path was taken as `session=<source>/<id> body=<origin>`.
+
 ## Grok CLI
 
 xAI's Grok Build ships a Claude-compatible hooks system, so the wiring is
