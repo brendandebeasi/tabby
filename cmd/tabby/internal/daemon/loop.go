@@ -468,9 +468,17 @@ func (l *Loop) handleRendererInput(e RendererInputEvent) {
 const (
 	loopNewWindowReadyHold    = 900 * time.Millisecond
 	loopNewWindowReadyTimeout = 3 * time.Second
-	loopPostReadyStabilize    = 2500 * time.Millisecond
-	loopPaneLayoutCooldown    = 150 * time.Millisecond
-	loopFullRefreshCooldown   = 100 * time.Millisecond
+	// loopNewWindowInFlightTimeout bounds the "inFlight" half of the
+	// new-window handshake, which had no expiry at all while "ready" has had
+	// one since the start. See NewWindowStatus for why an unbounded inFlight
+	// freezes the loop. Deliberately much longer than the ready timeout: an
+	// early clear only costs one window's worth of phantom-click suppression
+	// and lets pane-layout ops race the spawn, whereas a legitimate spawn
+	// finishes in well under a second even on a loaded box.
+	loopNewWindowInFlightTimeout = 10 * time.Second
+	loopPostReadyStabilize       = 2500 * time.Millisecond
+	loopPaneLayoutCooldown       = 150 * time.Millisecond
+	loopFullRefreshCooldown      = 100 * time.Millisecond
 	// loopStructuralDriftWindow bounds the "was this active-window drift caused
 	// by our own park/unlink churn?" test. If tmux's active drifts off the
 	// window the daemon knows is active within this window of structural churn

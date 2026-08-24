@@ -979,13 +979,41 @@ func (c *Coordinator) GetWindows() []tmux.Window {
 	return result
 }
 
+// NewWindowStatus returns the current new-window handshake state, expiring a
+// stale "inFlight" on the way out.
+//
+// The expiry is not an optimisation. "inFlight" is set either by a hook event
+// or by createNewWindow before it forks bin/new-window, and it is only left
+// behind by a *second* event reporting the window ready. When that second
+// event never arrives — the hook's run-shell child died, the spawn hung, the
+// daemon restarted mid-handshake — every consumer of this state gives up
+// permanently rather than temporarily: updateActiveWindow returns before it
+// can track the active window, doPaneLayoutOps skips the header spawn/cleanup,
+// and four more sites in main.go bail out. "ready" has carried a 3s timeout
+// for exactly this reason; "inFlight" carried none, so the failure mode was a
+// daemon that quietly stopped following focus until it was restarted.
+//
+// Clearing here rather than in the loop covers all consumers at once, and the
+// state is only ever cleared, never advanced, so a late "ready" event still
+// lands correctly.
 func (c *Coordinator) NewWindowStatus() NewWindowStatus {
-	c.newWindowMu.RLock()
-	defer c.newWindowMu.RUnlock()
+	c.newWindowMu.Lock()
 	status := c.newWindowStatus
 	if status.State == "" {
 		status.State = "none"
 	}
+	// A zero Created carries no age to judge, so it is left alone rather than
+	// treated as infinitely old. Both setters stamp it; only a struct built by
+	// hand can reach here unstamped.
+	if status.State == "inFlight" && !status.Created.IsZero() &&
+		time.Since(status.Created) > loopNewWindowInFlightTimeout {
+		c.newWindowStatus = NewWindowStatus{State: "none"}
+		c.newWindowMu.Unlock()
+		logEvent("NEW_WINDOW_INFLIGHT_TIMEOUT_CLEAR group=%s firing_tty=%s age_ms=%d",
+			status.Group, status.FiringTTY, time.Since(status.Created).Milliseconds())
+		return NewWindowStatus{State: "none"}
+	}
+	c.newWindowMu.Unlock()
 	return status
 }
 
