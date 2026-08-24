@@ -377,7 +377,8 @@ func (l *Loop) handleRendererInput(e RendererInputEvent) {
 	input := e.Input
 	resolvedAction := strings.TrimSpace(input.ResolvedAction)
 	pinFocus := true
-	if daemon.KindOf(clientID) == daemon.TargetHook && (resolvedAction == "" || resolvedAction == "exit_if_no_main" || resolvedAction == "exit_if_no_main_windows") {
+	isExitCheck := daemon.KindOf(clientID) == daemon.TargetHook && (resolvedAction == "" || resolvedAction == "exit_if_no_main" || resolvedAction == "exit_if_no_main_windows")
+	if isExitCheck {
 		pinFocus = false
 	}
 	if pinFocus {
@@ -441,6 +442,16 @@ func (l *Loop) handleRendererInput(e RendererInputEvent) {
 		// once.
 		l.SubmitRefresh()
 		logEvent("INPUT_SIGNALED_REFRESH client=%s", clientID)
+	} else if isExitCheck {
+		// The exit check is a liveness probe, not a state change: it either
+		// kills the session or does nothing visible. tmux fires window-unlinked
+		// once per window, so opening a window in a grouped session delivers a
+		// burst of these — eight in under a second, live — and each one used to
+		// fan out a full render to every attached client right as the new
+		// window was settling. That storm is what made the new window judder.
+		// The requesting client is a short-lived hook process with no renderer
+		// (RENDER_SKIP reason=not_found), so there is nothing to send it either.
+		logEvent("INPUT_SKIP_BROADCAST client=%s reason=exit_check", clientID)
 	} else {
 		// Internal-only state change (e.g. toggle_group) - render the
 		// requesting client immediately for snappy response, then broadcast
@@ -879,6 +890,17 @@ type ReconcileResult struct {
 func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 	activeWin := strings.TrimSpace(opts.ActiveWindowID)
 	if activeWin == "" {
+		// Ask the elected physical client, not tmux's idea of "the current
+		// session". Unqualified display-message answers for this daemon's own
+		// session, which in a grouped pair is not the session the client is
+		// attached to — so a reconcile fired seconds after a new window opened
+		// planned widths and header heights against the OLD window while the
+		// user was already looking at the new one, and the two passes fought
+		// (observed as back-to-back HEADER_HEIGHT_SYNC activeClient=@9 then
+		// activeClient=@1). See clientDisplayedWindowID.
+		activeWin = clientDisplayedWindowID()
+	}
+	if activeWin == "" {
 		activeWin = tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
 	}
 
@@ -1020,7 +1042,12 @@ func (l *Loop) handleClientGeomTick() {
 			lockTo = &ac
 		}
 		l.Reconcile(ReconcileOpts{
-			Reason:              "geometry_tick",
+			Reason: "geometry_tick",
+			// The client we just elected is the one whose geometry changed, so
+			// plan against the window IT is showing. Letting Reconcile fall back
+			// to an unqualified query re-answers for the daemon's own session
+			// and, in a grouped pair, names the wrong window.
+			ActiveWindowID:      windowIDForClientTTY(ac.TTY),
 			ForceWidthSync:      true,
 			LockWindowsToActive: lockTo,
 		})

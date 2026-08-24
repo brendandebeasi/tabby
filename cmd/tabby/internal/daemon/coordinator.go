@@ -834,6 +834,7 @@ type Coordinator struct {
 	hookPaneActive     map[string]bool   // pane ID → hooks detected (seen @tabby_busy=1)
 	hookPaneBusyIdleAt map[string]int64  // pane ID → unix timestamp when hook-busy but process looks idle
 	aiQuestion         map[string]bool   // pane ID → tool asked a question; "?" persists (through visits) until it works again
+	aiQuestionAt       map[string]int64  // pane ID → last time a standing question was re-verified against the pane
 	aiBusySince        map[string]int64  // pane ID → unix timestamp the current busy stretch began
 	aiBellUntil        map[int]int64     // window index → unix timestamp when bell expires (window-level)
 	aiWorking          map[string]bool   // pane ID → pane body showed a live progress line (cached, see paneWorking)
@@ -1581,6 +1582,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		hookPaneActive:     make(map[string]bool),
 		hookPaneBusyIdleAt: make(map[string]int64),
 		aiQuestion:         make(map[string]bool),
+		aiQuestionAt:       make(map[string]int64),
 		aiBusySince:        make(map[string]int64),
 		aiWorking:          make(map[string]bool),
 		aiWorkingAt:        make(map[string]int64),
@@ -1662,7 +1664,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 	// This handles the case where a phone client previously collapsed sidebars
 	// and the daemon restarted with desktop active.
 	if c.globalWidth >= 10 {
-		out, _ := tmuxCmd("list-panes", "-s", "-F", "#{pane_id}|#{pane_current_command}|#{pane_width}|#{pane_start_command}").Output()
+		out, _ := tmuxCmd(sessionScopedListPanesArgs("#{pane_id}|#{pane_current_command}|#{pane_width}|#{pane_start_command}")...).Output()
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.SplitN(line, "|", 4)
 			if len(parts) >= 4 && isSidebarPaneCommand(parts[1], parts[3]) {
@@ -5531,6 +5533,12 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 				// Steady-state idle: no progress line, no spinner, nothing new
 				// in the title. A question raised on an earlier edge stays up
 				// until the tool works again — reading it doesn't answer it.
+				// Answering it is the other way out, and that leaves no edge to
+				// catch, so a standing question is re-verified against the pane.
+				if c.aiQuestion[pid] && c.questionResolved(pid, now) {
+					logEvent("AI_QUESTION_CLEAR pane=%s window=%d reason=answered", pid, idx)
+					delete(c.aiQuestion, pid)
+				}
 				pane.AIBusy = false
 				pane.AIInput = c.aiQuestion[pid]
 				c.prevPaneBusy[pid] = false
@@ -5601,6 +5609,7 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			delete(c.hookPaneActive, pid)
 			delete(c.hookPaneBusyIdleAt, pid)
 			delete(c.aiQuestion, pid)
+			delete(c.aiQuestionAt, pid)
 			delete(c.aiBusySince, pid)
 			delete(c.aiWorking, pid)
 			delete(c.aiWorkingAt, pid)
@@ -5618,6 +5627,25 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 // question when it stops working. Enough to cover a wrapped prompt plus the
 // boxed permission dialog and the footer chrome below it.
 const aiQuestionScanLines = 40
+
+// aiQuestionRecheckSecs throttles re-reading a pane that still shows "?". Only
+// panes actually displaying one are ever captured, so the cost is bounded by
+// the number of unanswered questions on screen.
+const aiQuestionRecheckSecs = 15
+
+// questionResolved reports whether a standing question has since been answered.
+// A tool whose title is hook-set to a fixed "✳ project" trips none of the busy
+// signals — hasIdle suppresses the title-change and CPU checks, and there is no
+// spinner — so the busy edge that would clear the question may never arrive.
+// Without this the "?" outlives the question that raised it for the rest of the
+// session.
+func (c *Coordinator) questionResolved(paneID string, now int64) bool {
+	if at, ok := c.aiQuestionAt[paneID]; ok && now-at < aiQuestionRecheckSecs {
+		return false
+	}
+	c.aiQuestionAt[paneID] = now
+	return !tmux.HasQuestion(capturePaneText(paneID, aiQuestionScanLines))
+}
 
 // aiWorkingScanLines is how much of an AI pane's tail is inspected for a live
 // progress line. The status line sits just above the input box, so only the last
@@ -10248,8 +10276,19 @@ func (c *Coordinator) attachedClientWidthSpread() bool {
 // attached to a grouped peer session.
 func clientDisplayedWindowID() string {
 	_, _, tty, _, ok := activeClientGeometry()
+	if !ok {
+		return ""
+	}
+	return windowIDForClientTTY(tty)
+}
+
+// windowIDForClientTTY answers "which window is the client on this tty
+// showing?". Callers that have already elected a client pass its tty directly
+// rather than going through clientDisplayedWindowID, which would re-run the
+// election and can pick a different client mid-churn.
+func windowIDForClientTTY(tty string) string {
 	tty = strings.TrimSpace(tty)
-	if !ok || tty == "" {
+	if tty == "" {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -10465,7 +10504,8 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	// can reject a sidebar that currently spans its whole window.
 	windowWidths := make(map[string]int)
 	paneCtx, paneCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	if paneOut, err := exec.CommandContext(paneCtx, "tmux", "list-panes", "-s", "-F", "#{pane_id}|#{pane_current_command}|#{window_id}|#{pane_width}|#{window_width}|#{pane_start_command}").Output(); err == nil {
+	paneArgs := sessionScopedListPanesArgs("#{pane_id}|#{pane_current_command}|#{window_id}|#{pane_width}|#{window_width}|#{pane_start_command}")
+	if paneOut, err := exec.CommandContext(paneCtx, "tmux", paneArgs...).Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
 			parts := strings.SplitN(line, "|", 6)
 			if len(parts) == 6 && isSidebarPaneCommand(parts[1], parts[5]) {
@@ -10732,6 +10772,14 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	for _, op := range ops {
 		paneID := op.paneID
 		if paneID == "" {
+			// The window's sidebar pane was missing from the list-panes
+			// snapshot. Dropping the op silently leaves the drift in place for
+			// the next audit to find and re-plan identically, forever, while
+			// WIDTH_SYNC_EXEC still reports ops>0 — which is exactly how a
+			// mis-scoped snapshot hid a permanent 5s command storm. A steady
+			// stream of these means the snapshot isn't covering this daemon's
+			// own windows.
+			logEvent("WIDTH_SYNC_DROP client=%s target=%d reason=no_sidebar_pane_in_snapshot", op.clientID, op.targetWidth)
 			continue
 		}
 		out = append(out, ResizeOp{
