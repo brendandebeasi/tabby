@@ -638,6 +638,7 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 		// so we must ask tmux directly. This also catches renderers from other daemons.
 		// Dead system panes (from a crashed daemon) are killed here so focus can escape them.
 		hasRenderer := false
+		liveFirstPane := ""
 		if rawOut, err := tmuxCmd("list-panes", "-t", windowID, "-F",
 			"#{pane_id}|||#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}").Output(); err == nil {
 			for _, rawLine := range strings.Split(strings.TrimSpace(string(rawOut)), "\n") {
@@ -659,6 +660,9 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 					logEvent("CLEANUP_DEAD_SYSTEM_PANE window=%s pane=%s cmd=%s", windowID, paneID, curCmd)
 					tmuxCmd("kill-pane", "-t", paneID).Run()
 					continue
+				}
+				if !dead && !isSystem && liveFirstPane == "" {
+					liveFirstPane = paneID
 				}
 				if !dead && isSystem {
 					// Reject renderers from a different session — they're orphans
@@ -695,11 +699,17 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 			continue
 		}
 
-		// Get first pane in window for splitting (use cached panes)
-		if len(win.Panes) == 0 {
+		// Get first pane in window for splitting
+		if len(win.Panes) == 0 && liveFirstPane == "" {
 			continue
 		}
-		firstPane := win.Panes[0].ID
+		// Prefer a pane tmux reported just now over the cached list: a pane
+		// that died since the snapshot makes split-window fail with
+		// "can't find pane", and the retry repeats every tick.
+		firstPane := liveFirstPane
+		if firstPane == "" {
+			firstPane = win.Panes[0].ID
+		}
 		// Minimized/parked windows live in the holding session and only appear as
 		// synthetic entries (pane "%parked"); there's no real pane to split against,
 		// so skip them — otherwise every refresh fires a failing split-window
