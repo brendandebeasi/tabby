@@ -464,3 +464,45 @@ func TestIsAIPane(t *testing.T) {
 		assert.False(t, isAIPane(tmux.Pane{Command: "ssh", Title: "b@host: ~"}))
 	})
 }
+
+func TestCountContentPanes(t *testing.T) {
+	const sidebarStart = `"printf '\033[?25l\033[2J\033[H' && exec -a sidebar-renderer '/Users/b/.tmux/plugins/tabby/bin/tabby' render sidebar -session '$1' -window '@1' "`
+
+	tests := []struct {
+		name string
+		out  string
+		want int
+	}{
+		{
+			// The regression: pane_current_command is "tabby" for the sidebar,
+			// so counting it alone yielded 2 and C-b x killed the pane instead
+			// of the window, leaving a sidebar-only window behind.
+			name: "sidebar plus one content pane",
+			out:  "tabby|||" + sidebarStart + "\nzsh|||",
+			want: 1,
+		},
+		{
+			name: "sidebar plus two content panes",
+			out:  "tabby|||" + sidebarStart + "\nzsh|||\nvim|||",
+			want: 2,
+		},
+		{
+			name: "sidebar only",
+			out:  "tabby|||" + sidebarStart,
+			want: 0,
+		},
+		{name: "no panes", out: "", want: 0},
+		{name: "blank lines ignored", out: "zsh|||\n\n", want: 1},
+		{
+			name: "pane header is auxiliary",
+			out:  "tabby|||tabby render pane-header\nzsh|||",
+			want: 1,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, countContentPanes(tt.out))
+		})
+	}
+}

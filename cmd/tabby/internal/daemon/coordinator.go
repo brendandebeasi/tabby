@@ -18402,14 +18402,13 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		windowIDOut, _ := tmuxCmd("display-message", "-t", paneID, "-p", "#{window_id}").Output()
 		windowID := strings.TrimSpace(string(windowIDOut))
 		if windowID != "" {
-			panesOut, _ := tmuxCmd("list-panes", "-t", windowID, "-F", "#{pane_current_command}").Output()
-			contentCount := 0
-			for _, cmd := range strings.Split(strings.TrimSpace(string(panesOut)), "\n") {
-				if !isAuxiliaryPaneCommand(cmd) {
-					contentCount++
-				}
-			}
-			if contentCount <= 1 {
+			// pane_current_command is just "tabby" for every renderer pane
+			// post-consolidation, so the start command is what distinguishes a
+			// sidebar from real content. Counting on current-command alone made
+			// the sidebar look like a second content pane, so closing the last
+			// real pane left a window containing nothing but its sidebar.
+			panesOut, _ := tmuxCmd("list-panes", "-t", windowID, "-F", "#{pane_current_command}|||#{pane_start_command}").Output()
+			if countContentPanes(string(panesOut)) <= 1 {
 				// Last content pane — kill the window
 				tmuxCmd("kill-window", "-t", windowID).Run()
 				return true
@@ -21952,6 +21951,29 @@ func fixHeaderHeightsInWindow(paneID string) {
 			tmuxCmd("resize-pane", "-t", parts[0], "-y", targetStr).Run()
 		}
 	}
+}
+
+// countContentPanes counts the real (user-facing) panes in the output of
+// `list-panes -F "#{pane_current_command}|||#{pane_start_command}"`.
+//
+// Both fields are needed: pane_current_command is just "tabby" for every
+// renderer pane post-consolidation, so the start command is the only thing
+// that distinguishes a sidebar from real content. Counting on current-command
+// alone made the sidebar look like a second content pane, so closing the last
+// real pane left a window containing nothing but its sidebar instead of
+// closing the window.
+func countContentPanes(listPanesOutput string) int {
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(listPanesOutput), "\n") {
+		cur, start, _ := strings.Cut(line, "|||")
+		if cur == "" && start == "" {
+			continue
+		}
+		if !isAuxiliaryPaneCommand(cur) && !isAuxiliaryPaneCommand(start) && !isSidebarPaneCommand(cur, start) {
+			n++
+		}
+	}
+	return n
 }
 
 func isAuxiliaryPaneCommand(cmd string) bool {
