@@ -105,7 +105,7 @@ func newTestCoordinator(t *testing.T) *Coordinator {
 		prevPaneTitle:      make(map[string]string),
 		hookPaneActive:     make(map[string]bool),
 		hookPaneBusyIdleAt: make(map[string]int64),
-		aiBellUntil:        make(map[int]int64),
+		aiBellUntil:        make(map[string]int64),
 		pendingMenus:       make(map[string][]menuItemDef),
 		lastWindowSelect:   make(map[string]time.Time),
 		lastWindowByClient: make(map[string]time.Time),

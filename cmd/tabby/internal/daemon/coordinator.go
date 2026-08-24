@@ -839,9 +839,15 @@ type Coordinator struct {
 	aiQuestion         map[string]bool   // pane ID → tool asked a question; "?" persists (through visits) until it works again
 	aiQuestionAt       map[string]int64  // pane ID → last time a standing question was re-verified against the pane
 	aiBusySince        map[string]int64  // pane ID → unix timestamp the current busy stretch began
-	aiBellUntil        map[int]int64     // window index → unix timestamp when bell expires (window-level)
-	aiWorking          map[string]bool   // pane ID → pane body showed a live progress line (cached, see paneWorking)
-	aiWorkingAt        map[string]int64  // pane ID → unix timestamp aiWorking was last measured
+	// aiBellUntil is keyed by window ID, not window index. tmux reuses and
+	// shifts indexes as windows come and go, so an index key let a pending
+	// "done working" bell outlive its window and re-surface on whichever window
+	// later landed on that index -- a notification about work the user never
+	// started. Every sibling AI map here is keyed by a stable id for the same
+	// reason.
+	aiBellUntil map[string]int64 // window ID → unix timestamp when bell expires (window-level)
+	aiWorking   map[string]bool  // pane ID → pane body showed a live progress line (cached, see paneWorking)
+	aiWorkingAt map[string]int64 // pane ID → unix timestamp aiWorking was last measured
 
 	// Callback to sync sidebar client widths in the server's client map.
 	// Called after a width change (e.g. grow/shrink) to update server-side Width
@@ -1585,7 +1591,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		lastPaneMenuOpen:   make(map[string]time.Time),
 		prevPaneBusy:       make(map[string]bool),
 		prevPaneTitle:      make(map[string]string),
-		aiBellUntil:        make(map[int]int64),
+		aiBellUntil:        make(map[string]int64),
 		hookPaneActive:     make(map[string]bool),
 		hookPaneBusyIdleAt: make(map[string]int64),
 		aiQuestion:         make(map[string]bool),
@@ -5310,17 +5316,17 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 		// re-asserted win.Bell every cycle until it aged out — so the ◆ came
 		// straight back when you switched away. Drop both on view.
 		if viewed {
-			delete(c.aiBellUntil, idx)
+			delete(c.aiBellUntil, win.ID)
 			if win.Bell {
 				win.Bell = false
 				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", unset: true})
 			}
-		} else if expiry, ok := c.aiBellUntil[idx]; ok {
+		} else if expiry, ok := c.aiBellUntil[win.ID]; ok {
 			// Check for expiring bell indicators (window-level)
 			if now < expiry {
 				win.Bell = true
 			} else {
-				delete(c.aiBellUntil, idx)
+				delete(c.aiBellUntil, win.ID)
 			}
 		}
 
@@ -5348,7 +5354,7 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			if anyPrevAI && !viewed {
 				win.Bell = true
 				win.Input = false
-				c.aiBellUntil[idx] = now + 30
+				c.aiBellUntil[win.ID] = now + 30
 				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", value: "1"})
 				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_input", value: ""})
 			}
@@ -5467,7 +5473,7 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 						pid, idx, pane.Command)
 				}
 				c.prevPaneBusy[pid] = true
-				pending = c.clearDoneBell(win, idx, pending)
+				pending = c.clearDoneBell(win, pending)
 				c.prevPaneTitle[pid] = pane.Title
 				continue
 			}
@@ -5491,7 +5497,7 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 				if _, ok := c.aiBusySince[pid]; !ok {
 					c.aiBusySince[pid] = now
 				}
-				pending = c.clearDoneBell(win, idx, pending)
+				pending = c.clearDoneBell(win, pending)
 				pane.AIBusy = true
 				pane.AIInput = false
 				c.prevPaneBusy[pid] = true
@@ -5558,7 +5564,7 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 				pane.AIInput = false
 				c.prevPaneBusy[pid] = true
 				delete(c.aiQuestion, pid)
-				pending = c.clearDoneBell(win, idx, pending)
+				pending = c.clearDoneBell(win, pending)
 				if _, ok := c.aiBusySince[pid]; !ok {
 					c.aiBusySince[pid] = now
 				}
@@ -5732,8 +5738,8 @@ func (c *Coordinator) paneWorking(paneID string, now int64) bool {
 // again. The bell says a turn finished without you seeing it; once the next turn
 // is under way that is no longer true, so it goes whether or not the window was
 // ever viewed.
-func (c *Coordinator) clearDoneBell(win *tmux.Window, idx int, pending []tmuxSetOption) []tmuxSetOption {
-	delete(c.aiBellUntil, idx)
+func (c *Coordinator) clearDoneBell(win *tmux.Window, pending []tmuxSetOption) []tmuxSetOption {
+	delete(c.aiBellUntil, win.ID)
 	if win.Bell {
 		win.Bell = false
 		pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", unset: true})
@@ -5761,7 +5767,7 @@ func (c *Coordinator) settleAIPane(pane *tmux.Pane, win *tmux.Window, viewed boo
 		// A question supersedes any "done working" bell left over from an
 		// earlier stretch in this window — it is the more specific signal, and
 		// the two would otherwise both be pending when the question resolves.
-		delete(c.aiBellUntil, win.Index)
+		delete(c.aiBellUntil, win.ID)
 		if win.Bell {
 			win.Bell = false
 			pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", unset: true})
@@ -5780,7 +5786,7 @@ func (c *Coordinator) settleAIPane(pane *tmux.Pane, win *tmux.Window, viewed boo
 		return pending
 	}
 	win.Bell = true
-	c.aiBellUntil[win.Index] = now + aiDoneBellSeconds
+	c.aiBellUntil[win.ID] = now + aiDoneBellSeconds
 	logEvent("AI_DONE_BELL pane=%s window=%d", pane.ID, win.Index)
 	return append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", value: "1"})
 }
