@@ -497,17 +497,20 @@ EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby hook exit-if-no-main"
 # sidebar spawning, and renderer management.
 SIGNAL_CMD="$CURRENT_DIR/scripts/signal-daemon.sh"
 # refresh-client needs a current client, and a backgrounded run-shell fired
-# by a hook whose originating client has already gone away has none. The
-# refresh is best-effort status repaint, so swallow that failure rather than
-# printing "... returned 1" into every attached client on each such hook.
-REFRESH_CMD="tmux refresh-client -S 2>/dev/null || true"
+# by a hook whose originating client has already gone away has none.
+REFRESH_CMD="tmux refresh-client -S 2>/dev/null"
 ENSURE_DAEMON_CMD="$CURRENT_DIR/scripts/ensure-daemon.sh"
+# tmux prints '<command> returned N' into every attached client when a hook
+# body exits nonzero, so a single missing client turns into a screenful of
+# noise on every window switch. Hook bodies are best-effort housekeeping and
+# nothing consumes their status, so every one of them ends in `true`.
+HOOK_OK="true"
 
-tmux set-hook -g window-linked "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD'"
-tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
-tmux set-hook -g after-new-window "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD'"
-tmux set-hook -g after-resize-pane "run-shell -b '$HOOK_BIN on-pane-resize \"#{hook_pane}\"'"
-tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $CYCLE_PANE_BIN --ensure-content'"
+tmux set-hook -g window-linked "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $HOOK_OK'"
+tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK'"
+tmux set-hook -g after-new-window "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $HOOK_OK'"
+tmux set-hook -g after-resize-pane "run-shell -b '$HOOK_BIN on-pane-resize \"#{hook_pane}\"; $HOOK_OK'"
+tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
 
 # prefix+, opens the per-pane actions menu (close, zoom, splits, break-pane,
 # swap, mark). Works in any window — the menu picks items based on whether the
@@ -528,22 +531,22 @@ tmux bind-key r command-prompt -I "#W" "rename-window '%%' ; set-window-option @
 # In the dashboard we instead run cycle-pane --main-follow, which only acts when
 # the layout is an "-auto" mode (Main+stack/row, active) — keeping the focused
 # pane in the big slot as focus moves; it's a cheap no-op for other layouts.
-tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' 'run-shell -b \"$CYCLE_PANE_BIN --main-follow\"' 'run-shell -b \"$SIGNAL_CMD\"'"
+tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' 'run-shell -b \"$CYCLE_PANE_BIN --main-follow; $HOOK_OK\"' 'run-shell -b \"$SIGNAL_CMD; $HOOK_OK\"'"
 # after-split-window: daemon handles window name preservation (PreserveWindowNames)
-tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_CMD'"
+tmux set-hook -g after-split-window "run-shell -b '$SIGNAL_CMD; $HOOK_OK'"
 
 # When a pane is killed: preserve ratios synchronously (must happen before tmux
 # reflows), then signal daemon in background. The daemon's USR1 handler takes
 # care of orphan cleanup and sidebar spawning.
 PRESERVE_RATIOS_CMD="$HOOK_BIN preserve-pane-ratios"
-tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"'; run-shell -b '$SIGNAL_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
+tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"; $HOOK_OK'; run-shell -b '$SIGNAL_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK'"
 
 # Restore sidebar when client reattaches to session
-tmux set-hook -g client-attached "run-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"';run-shell '$RESTORE_SIDEBAR_CMD'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
+tmux set-hook -g client-attached "run-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"; $HOOK_OK';run-shell '$RESTORE_SIDEBAR_CMD; $HOOK_OK'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"; $HOOK_OK'; run-shell -b '$CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
 
 # Client resize: resize windows to client geometry, signal daemon
-tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
-tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'; run-shell -b '$CYCLE_PANE_BIN --ensure-content'"
+tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"; $HOOK_OK'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $HOOK_OK'; run-shell -b '$CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
+tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"; $HOOK_OK'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $HOOK_OK'; run-shell -b '$CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
 
 # session-created: ensure the new session has a daemon before signalling. A
 # session created after plugin load (most easily a grouped clone, which shares
@@ -551,16 +554,16 @@ tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{clien
 # works via the shared windows' renderer panes while every input hook derives
 # its socket from the current session id and drops the keypress.
 # Sidebar spawning itself is handled by the daemon via USR1.
-tmux set-hook -g session-created "run-shell -b '$ENSURE_DAEMON_CMD; $SIGNAL_CMD'"
+tmux set-hook -g session-created "run-shell -b '$ENSURE_DAEMON_CMD; $SIGNAL_CMD; $HOOK_OK'"
 
 # client-session-changed: a client moving between sessions (switch-client, or
 # detach/attach onto a grouped peer) leaves the session it entered possibly
 # daemonless — the old session's daemon idle-quits 30s after going clientless,
 # and nothing else fires for the session being entered.
-tmux set-hook -g client-session-changed "run-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"'"
+tmux set-hook -g client-session-changed "run-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"; $HOOK_OK'"
 
 # Maintain sidebar width after terminal resize
-tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"'"
+tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"; $HOOK_OK'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $HOOK_OK'"
 
 # tmux-resurrect integration (options are inert if resurrect is not installed)
 RESURRECT_SAVE_CMD="$HOOK_BIN resurrect-save"
