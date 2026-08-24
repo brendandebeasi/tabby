@@ -782,20 +782,51 @@ func cleanupSidebarsForClosedWindows(server *daemon.Server, windows []tmux.Windo
 		}
 	}
 
-	// Check each connected client - if their window no longer exists, disconnect them
-	for _, clientID := range server.GetAllClientIDs() {
-		// Clients are usually window IDs (e.g. "@1") or "window-header:@1" or "header:%1"
-		targetID := clientID
-		if isHeaderClient(clientID) {
-			// Window/pane headers die naturally when their window/pane closes.
-			continue
-		}
+	for _, clientID := range newlyMissingWindowClients(server.GetAllClientIDs(), currentWindows, reportedMissingWindows) {
+		// This is an observation, not an action: a client goes away when its
+		// socket closes, and if the sidebar process outlives its window (a pane
+		// parked in _tabby_limbo, say) it never does. Logging that every full
+		// refresh buried real events under hundreds of copies of one line.
+		debugLog.Printf("Window %s no longer exists, its sidebar client is still connected", clientID)
+	}
+}
 
-		if !currentWindows[targetID] {
-			debugLog.Printf("Window %s no longer exists, client will be cleaned up", clientID)
-			// The client will disconnect when the pane closes
+// reportedMissingWindows dedupes the "window no longer exists" observation per
+// client. Only ever touched from cleanupSidebarsForClosedWindows, which runs on
+// the refresh loop goroutine.
+var reportedMissingWindows = map[string]bool{}
+
+// newlyMissingWindowClients returns the clients whose window has just gone
+// missing, updating `reported` so each one is named once rather than on every
+// full refresh. A client is re-armed when its window comes back (un-minimize)
+// or when it disconnects, so a genuine second disappearance is reported again.
+func newlyMissingWindowClients(clientIDs []string, currentWindows, reported map[string]bool) []string {
+	connected := make(map[string]bool, len(clientIDs))
+	for _, id := range clientIDs {
+		connected[id] = true
+	}
+	for id := range reported {
+		if !connected[id] {
+			delete(reported, id) // gone for real; don't hold the note
 		}
 	}
+	var fresh []string
+	for _, clientID := range clientIDs {
+		// Clients are usually window IDs (e.g. "@1") or "window-header:@1" or "header:%1".
+		// Window/pane headers die naturally when their window/pane closes.
+		if isHeaderClient(clientID) {
+			continue
+		}
+		if currentWindows[clientID] {
+			delete(reported, clientID)
+			continue
+		}
+		if !reported[clientID] {
+			reported[clientID] = true
+			fresh = append(fresh, clientID)
+		}
+	}
+	return fresh
 }
 
 // cleanupOrphanedSidebars closes sidebar panes in windows where all other panes were closed
