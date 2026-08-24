@@ -25,15 +25,15 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TABBY_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
 INDICATOR="$TABBY_DIR/bin/tabby hook set-indicator"
 LOG="/tmp/tabby-crash-handler.log"
-CRASH_LOG="/tmp/tabby-daemon-${SESSION_ID}-crash.log"
+CRASH_LOG="/tmp/${TABBY_RUNTIME_PREFIX}tabby-daemon-${SESSION_ID}-crash.log"
 # Hyphen, not dot. The daemon has always written -events.log (see
 # daemon.RuntimePath); the dotted name here matched nothing, so every crash
 # report ever filed silently omitted its Events Log section.
-EVENTS_LOG="/tmp/tabby-daemon-${SESSION_ID}-events.log"
+EVENTS_LOG="/tmp/${TABBY_RUNTIME_PREFIX}tabby-daemon-${SESSION_ID}-events.log"
 # Where a panic actually lands: the watchdog points the daemon's stderr here and
 # runs it under GOTRACEBACK=crash. Without this the "panic / fatal error" reports
 # carried no stack at all.
-STDERR_LOG="/tmp/tabby-daemon-${SESSION_ID}-stderr.log"
+STDERR_LOG="/tmp/${TABBY_RUNTIME_PREFIX}tabby-daemon-${SESSION_ID}-stderr.log"
 
 # ── Logging ───────────────────────────────────────────────────────────────
 log() {

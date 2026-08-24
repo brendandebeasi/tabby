@@ -1513,7 +1513,7 @@ func (l *Loop) handleIdleTick() {
 			// sentinel the SIGTERM handler deliberately never writes.
 			// Without it an unused grouped session respawns forever: the
 			// watchdog restarts us, we find no clients again, quit again.
-			os.WriteFile(fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", l.deps.SessionID), []byte("idle-timeout"), 0644)
+			os.WriteFile(daemon.RuntimePath(l.deps.SessionID, ".clean-stop"), []byte("idle-timeout"), 0644)
 			select {
 			case l.deps.SigCh <- syscall.SIGTERM:
 			default:

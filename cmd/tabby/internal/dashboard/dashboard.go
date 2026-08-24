@@ -31,7 +31,7 @@ func Run(args []string) int {
 		return 1
 	}
 
-	sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
+	sockPath := daemon.SocketPath(sessionID)
 	// Retry briefly so a transient daemon-down (e.g. during a watchdog
 	// respawn triggered by an earlier dashboard command, or by a build sync)
 	// doesn't surface as a "returned 1" in tmux's run-shell output. Each dial

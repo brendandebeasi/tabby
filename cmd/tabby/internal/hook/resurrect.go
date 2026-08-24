@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 // doResurrectSave replaces resurrect_save_hook.sh:
@@ -83,11 +85,11 @@ func doResurrectRestore(args []string) {
 
 	// 3. Clean runtime files
 	patterns := []string{
-		"/tmp/tabby-daemon-*.pid",
-		"/tmp/tabby-daemon-*.sock",
+		daemon.RuntimeGlob(".pid"),
+		daemon.RuntimeGlob(".sock"),
 		"/tmp/tabby-sidebar-*.state",
-		"/tmp/tabby-daemon-*-events.log",
-		"/tmp/tabby-daemon-*-input.log",
+		daemon.RuntimeGlob("-events.log"),
+		daemon.RuntimeGlob("-input.log"),
 		"/tmp/tabby-ensure-debounce-*",
 	}
 	for _, pat := range patterns {

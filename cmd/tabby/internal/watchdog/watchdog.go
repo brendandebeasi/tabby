@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/tmuxhooks"
+	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 const (
@@ -61,10 +62,10 @@ func Run(args []string) int {
 		return 0
 	}
 
-	sentinel := fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", sessionID)
-	watchdogPidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.watchdog.pid", sessionID)
-	crashLog := fmt.Sprintf("/tmp/tabby-daemon-%s-crash.log", sessionID)
-	daemonPidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
+	sentinel := daemonpkg.RuntimePath(sessionID, ".clean-stop")
+	watchdogPidFile := daemonpkg.RuntimePath(sessionID, ".watchdog.pid")
+	crashLog := daemonpkg.RuntimePath(sessionID, "-crash.log")
+	daemonPidFile := daemonpkg.PidPath(sessionID)
 
 	binDir := filepath.Dir(exe)
 	crashHook := filepath.Join(binDir, "..", "scripts", "crash-handler.sh")
@@ -102,7 +103,7 @@ func Run(args []string) int {
 		// genuine fault dump a full stack so we can tell a signal-kill apart from
 		// a real panic next time.
 		cmd.Stdout = os.Stdout
-		stderrLog := fmt.Sprintf("/tmp/tabby-daemon-%s-stderr.log", sessionID)
+		stderrLog := daemonpkg.RuntimePath(sessionID, "-stderr.log")
 		// Trim before opening, not from the daemon's own startup rotation: the
 		// daemon would rename the file this loop already holds open, leaving the
 		// new run's stderr appended to a .prev nobody reads.

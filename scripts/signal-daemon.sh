@@ -11,5 +11,5 @@ if [ -z "$SESSION" ]; then
     SESSION=$(tmux display-message -p '#{session_id}' 2>/dev/null || true)
 fi
 [ -z "$SESSION" ] && exit 0
-PID=$(cat "/tmp/tabby-daemon-${SESSION}.pid" 2>/dev/null)
+PID=$(cat "/tmp/${TABBY_RUNTIME_PREFIX}tabby-daemon-${SESSION}.pid" 2>/dev/null)
 [ -n "$PID" ] && kill -USR1 "$PID" 2>/dev/null || true

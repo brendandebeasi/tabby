@@ -594,8 +594,8 @@ func ensureSidebar(sessionID, windowID string) {
 		}
 	}
 
-	sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
-	pidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
+	sockPath := daemon.SocketPath(sessionID)
+	pidFile := daemon.PidPath(sessionID)
 
 	// Check daemon alive
 	daemonRunning := false
@@ -611,7 +611,7 @@ func ensureSidebar(sessionID, windowID string) {
 
 	if !daemonRunning {
 		// Check if watchdog is already running
-		watchdogPidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.watchdog.pid", sessionID)
+		watchdogPidFile := daemon.RuntimePath(sessionID, ".watchdog.pid")
 		watchdogAlive := false
 		if fileExists(watchdogPidFile) {
 			wpData, _ := os.ReadFile(watchdogPidFile)
@@ -864,7 +864,7 @@ func sendHook(kind string, args map[string]string) error {
 	if err != nil {
 		return nil
 	}
-	sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
+	sockPath := daemon.SocketPath(sessionID)
 	conn, err := net.DialTimeout("unix", sockPath, 200*time.Millisecond)
 	if err != nil {
 		// Daemon down or starting up — silent no-op matches signalDaemon.
@@ -898,7 +898,7 @@ func signalDaemon(sig string) {
 		if err != nil {
 			return
 		}
-		pidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
+		pidFile := daemon.PidPath(sessionID)
 		data, err := os.ReadFile(pidFile)
 		if err != nil {
 			return
@@ -990,7 +990,7 @@ func dialDaemon(sessionIDs []string) (net.Conn, string, error) {
 		if sid == "" {
 			continue
 		}
-		sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sid)
+		sockPath := daemon.SocketPath(sid)
 		if primary == "" {
 			primary = sockPath
 		}

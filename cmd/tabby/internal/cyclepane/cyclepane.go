@@ -14,6 +14,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashlayout"
 	"github.com/brendandebeasi/tabby/pkg/config"
+	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 // skipCommands are never dimmed and never cycled (sidebar, pane-header).
@@ -582,7 +583,7 @@ func signalDaemon() {
 		return
 	}
 	sessionID := strings.TrimSpace(string(out))
-	data, err := os.ReadFile(fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID))
+	data, err := os.ReadFile(daemonpkg.PidPath(sessionID))
 	if err != nil {
 		return
 	}

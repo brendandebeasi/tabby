@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 // doFocusPane replaces focus_pane.sh: focus a specific tmux
@@ -95,7 +97,7 @@ func parsePaneTarget(target string) (session, window, pane string) {
 
 // signalDaemonForSession sends a signal to the daemon for a specific session.
 func signalDaemonForSession(sessionID, sig string) {
-	pidFile := "/tmp/tabby-daemon-" + sessionID + ".pid"
+	pidFile := daemon.PidPath(sessionID)
 	data, err := readFileBytes(pidFile)
 	if err != nil {
 		return

@@ -518,3 +518,11 @@ func SocketPath(sessionID string) string {
 func PidPath(sessionID string) string {
 	return RuntimePath(sessionID, ".pid")
 }
+
+// RuntimeGlob builds a glob matching one runtime suffix across every session of
+// THIS instance: /tmp/{prefix}tabby-daemon-*{suffix}. Sweepers must use this
+// rather than a literal "/tmp/tabby-daemon-*" pattern, which under a prefix
+// would skip its own files and match a different instance's instead.
+func RuntimeGlob(suffix string) string {
+	return RuntimePath("*", suffix)
+}

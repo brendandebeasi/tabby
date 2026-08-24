@@ -56,9 +56,13 @@ esac
 MODE=$(tmux show-options -gqv @tabby_sidebar 2>/dev/null || echo "")
 [ "$MODE" = "enabled" ] || [ -z "$MODE" ] || exit 0
 
-SOCK="/tmp/tabby-daemon-${SESSION}.sock"
-PIDF="/tmp/tabby-daemon-${SESSION}.pid"
-WDF="/tmp/tabby-daemon-${SESSION}.watchdog.pid"
+# Mirror pkg/daemon.RuntimePath: TABBY_RUNTIME_PREFIX isolates a demo/test
+# instance, and the daemon derives its own socket and pidfile from it. Probing
+# the unprefixed paths here would find no daemon for a prefixed instance and
+# start a second one on top of it.
+SOCK="/tmp/${TABBY_RUNTIME_PREFIX}tabby-daemon-${SESSION}.sock"
+PIDF="/tmp/${TABBY_RUNTIME_PREFIX}tabby-daemon-${SESSION}.pid"
+WDF="/tmp/${TABBY_RUNTIME_PREFIX}tabby-daemon-${SESSION}.watchdog.pid"
 
 if [ -S "$SOCK" ] && [ -f "$PIDF" ]; then
     PID=$(cat "$PIDF" 2>/dev/null || echo "")

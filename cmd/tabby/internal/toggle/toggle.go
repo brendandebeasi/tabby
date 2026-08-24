@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/tmuxhooks"
+	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 // Run is the subcommand entry point. args are the tokens following
@@ -36,10 +37,10 @@ func Run(args []string) int {
 	}
 
 	stateFile := fmt.Sprintf("/tmp/tabby-sidebar-%s.state", sessionID)
-	sockPath := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
-	pidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
-	cleanStopSentinel := fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", sessionID)
-	watchdogPidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.watchdog.pid", sessionID)
+	sockPath := daemonpkg.SocketPath(sessionID)
+	pidFile := daemonpkg.PidPath(sessionID)
+	cleanStopSentinel := daemonpkg.RuntimePath(sessionID, ".clean-stop")
+	watchdogPidFile := daemonpkg.RuntimePath(sessionID, ".watchdog.pid")
 
 	// Concurrency guard — remove stale locks older than 30s
 	toggleLock := fmt.Sprintf("/tmp/tabby-toggle-%s.lock", sessionID)

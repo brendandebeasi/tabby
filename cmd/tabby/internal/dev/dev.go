@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
 )
 
 func Run(args []string) int {
@@ -73,7 +75,7 @@ func doReload(exe, baseDir string) int {
 	if state == "enabled" {
 		fmt.Println("Tabby: restarting sidebar...")
 
-		pidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
+		pidFile := daemonpkg.PidPath(sessionID)
 		killFromPidFile(pidFile)
 		os.Remove(pidFile)
 
@@ -133,8 +135,8 @@ func doStatus(exe, sessionArg string) int {
 		sessionName = strings.TrimSpace(string(out))
 	}
 
-	pidFile := fmt.Sprintf("/tmp/tabby-daemon-%s.pid", sessionID)
-	sockFile := fmt.Sprintf("/tmp/tabby-daemon-%s.sock", sessionID)
+	pidFile := daemonpkg.PidPath(sessionID)
+	sockFile := daemonpkg.SocketPath(sessionID)
 
 	binInfo, err := os.Stat(exe)
 	if err != nil {

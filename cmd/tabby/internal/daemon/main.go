@@ -2784,7 +2784,7 @@ func Run(args []string) int {
 	if err := tmuxCmd("has-session", "-t", *sessionID).Run(); err != nil {
 		logEvent("SHUTDOWN_REASON session=%s reason=session_gone_at_startup", *sessionID)
 		debugLog.Printf("refusing to start daemon for missing session %s", *sessionID)
-		os.WriteFile(fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", *sessionID), []byte("session-gone"), 0644)
+		os.WriteFile(daemon.RuntimePath(*sessionID, ".clean-stop"), []byte("session-gone"), 0644)
 		return 0
 	}
 
@@ -2798,7 +2798,7 @@ func Run(args []string) int {
 			debugLog.Printf("refusing to start daemon for internal session %s (%s)", *sessionID, name)
 			// Write the clean-stop sentinel so the watchdog does NOT respawn us in a
 			// tight loop (a bare exit reads as a crash).
-			os.WriteFile(fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", *sessionID), []byte("internal-session"), 0644)
+			os.WriteFile(daemon.RuntimePath(*sessionID, ".clean-stop"), []byte("internal-session"), 0644)
 			return 0
 		}
 	}
