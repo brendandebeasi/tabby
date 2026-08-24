@@ -2677,8 +2677,7 @@ func planAllWindowsToClient(width, height int, reason string) []ResizeOp {
 	if width <= 0 || height <= 0 {
 		return nil
 	}
-	ids := listAllWindowIDs()
-	ops := planWindowSizes(width, height, ids)
+	ops := planWindowSizesFrom(width, height, listWindowGeoms())
 	for i := range ops {
 		ops[i].Reason = reason
 	}
@@ -2758,6 +2757,18 @@ func Run(args []string) int {
 		SetCoordinatorDebugLog(debugLog)
 	} else {
 		debugLog = log.New(os.Stderr, "", 0)
+	}
+
+	// Never run a daemon for a session that no longer exists. Without a live
+	// session every tmux query scoped to it fails, and the daemon spends the
+	// ten seconds until its first idle tick reconciling against whatever it
+	// can still see. Stop before any of that, and leave the clean-stop
+	// sentinel so the watchdog retires instead of respawning us.
+	if err := tmuxCmd("has-session", "-t", *sessionID).Run(); err != nil {
+		logEvent("SHUTDOWN_REASON session=%s reason=session_gone_at_startup", *sessionID)
+		debugLog.Printf("refusing to start daemon for missing session %s", *sessionID)
+		os.WriteFile(fmt.Sprintf("/tmp/tabby-daemon-%s.clean-stop", *sessionID), []byte("session-gone"), 0644)
+		return 0
 	}
 
 	// Never run a daemon for tabby's internal holding/stash sessions. A peek or

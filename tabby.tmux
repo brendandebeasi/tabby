@@ -496,13 +496,18 @@ EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby hook exit-if-no-main"
 # pane dimming, window history, layout save, border color, status exclusivity,
 # sidebar spawning, and renderer management.
 SIGNAL_CMD="$CURRENT_DIR/scripts/signal-daemon.sh"
+# refresh-client needs a current client, and a backgrounded run-shell fired
+# by a hook whose originating client has already gone away has none. The
+# refresh is best-effort status repaint, so swallow that failure rather than
+# printing "... returned 1" into every attached client on each such hook.
+REFRESH_CMD="tmux refresh-client -S 2>/dev/null || true"
 ENSURE_DAEMON_CMD="$CURRENT_DIR/scripts/ensure-daemon.sh"
 
-tmux set-hook -g window-linked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S'"
-tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
-tmux set-hook -g after-new-window "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S'"
+tmux set-hook -g window-linked "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD'"
+tmux set-hook -g window-unlinked "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $EXIT_IF_NO_MAIN_WINDOWS_CMD'"
+tmux set-hook -g after-new-window "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD'"
 tmux set-hook -g after-resize-pane "run-shell -b '$HOOK_BIN on-pane-resize \"#{hook_pane}\"'"
-tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; tmux refresh-client -S; $ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $CYCLE_PANE_BIN --ensure-content'"
+tmux set-hook -g after-select-window "run-shell -b '$SIGNAL_CMD; $REFRESH_CMD; $ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $CYCLE_PANE_BIN --ensure-content'"
 
 # prefix+, opens the per-pane actions menu (close, zoom, splits, break-pane,
 # swap, mark). Works in any window — the menu picks items based on whether the

@@ -75,6 +75,16 @@ func Run(args []string) int {
 	windowStart := time.Now()
 
 	for {
+		// A daemon outlives its session only to thrash: with no session to
+		// scope its tmux queries to it falls back to server-wide ones and
+		// resizes every window of every other session until the idle tick
+		// notices, ~10s later, and exits — at which point this loop starts
+		// it again. Killing a session must retire its supervisor too.
+		if !sessionExists(sessionID) {
+			logCrash(crashLog, "WATCHDOG_SESSION_GONE session=%s", sessionID)
+			return 0
+		}
+
 		os.Remove(sentinel)
 
 		// Register hooks before daemon starts so resize/focus events are captured
@@ -184,6 +194,22 @@ func Run(args []string) int {
 
 		time.Sleep(restartDelay)
 	}
+}
+
+// sessionExists reports whether the tmux session is still present. A failure
+// to reach tmux at all is reported as "exists" so a transient error never
+// retires a healthy supervisor.
+func sessionExists(sessionID string) bool {
+	if sessionID == "" {
+		return true
+	}
+	cmd := exec.Command("tmux", "has-session", "-t", sessionID)
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false
+		}
+	}
+	return true
 }
 
 func logCrash(path, format string, args ...interface{}) {

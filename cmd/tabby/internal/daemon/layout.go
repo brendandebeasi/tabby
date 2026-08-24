@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // ResizeOp describes a single deferred tmux resize. Builders return slices
@@ -109,13 +111,47 @@ func fmtInt(i int) string { return fmt.Sprintf("%d", i) }
 // Replaces the per-window exec.Command loop in resizeAllWindowsToClient
 // (one subprocess per window → one chained command for all windows).
 func planWindowSizes(width, height int, windowIDs []string) []ResizeOp {
-	if width <= 0 || height <= 0 || len(windowIDs) == 0 {
+	return planWindowSizesFrom(width, height, idsWithUnknownSize(windowIDs))
+}
+
+// windowGeom is one window's id and its current size, as read from tmux.
+type windowGeom struct {
+	ID     string
+	Width  int
+	Height int
+}
+
+// idsWithUnknownSize adapts a bare id list to the geometry form. A zero
+// width/height means "size unknown", which never matches the target, so
+// every id survives the no-op filter.
+func idsWithUnknownSize(windowIDs []string) []windowGeom {
+	geoms := make([]windowGeom, 0, len(windowIDs))
+	for _, wid := range windowIDs {
+		geoms = append(geoms, windowGeom{ID: wid})
+	}
+	return geoms
+}
+
+// planWindowSizesFrom is planWindowSizes over windows whose current size is
+// known, skipping the ones already at the target.
+//
+// The skip is what stops a resize feedback loop: `resize-window` fires
+// after-resize-pane / after-resize-window whether or not the size actually
+// changed, those hooks signal the daemon, and the daemon's next reconcile
+// re-emits the same resize. Without the filter a single client sits in a
+// permanent storm of resize-window plus one run-shell per window per cycle,
+// which reflows every window and re-pins client focus continuously.
+func planWindowSizesFrom(width, height int, geoms []windowGeom) []ResizeOp {
+	if width <= 0 || height <= 0 || len(geoms) == 0 {
 		return nil
 	}
-	ops := make([]ResizeOp, 0, len(windowIDs))
-	for _, wid := range windowIDs {
-		wid = strings.TrimSpace(wid)
+	ops := make([]ResizeOp, 0, len(geoms))
+	for _, g := range geoms {
+		wid := strings.TrimSpace(g.ID)
 		if wid == "" {
+			continue
+		}
+		if g.Width == width && g.Height == height {
 			continue
 		}
 		ops = append(ops, ResizeOp{
@@ -130,25 +166,42 @@ func planWindowSizes(width, height int, windowIDs []string) []ResizeOp {
 	return ops
 }
 
-// listAllWindowIDs queries tmux for every window id. Used by the planning
-// phase of a reconcile so callers don't each have to issue their own
-// list-windows.
-func listAllWindowIDs() []string {
+// sessionScopedListWindowsArgs builds `list-windows` args restricted to this
+// daemon's own session, falling back to the server-wide `-a` only when the
+// session is unknown. A daemon must never resize windows belonging to an
+// unrelated session: with several session families on one tmux server, `-a`
+// let each daemon lock every other family's windows to its own client
+// geometry, so switching to another session found it reflowed.
+func sessionScopedListWindowsArgs(format string) []string {
+	if target := tmux.SessionTarget(); target != "" {
+		return []string{"list-windows", "-t", target, "-F", format}
+	}
+	return []string{"list-windows", "-a", "-F", format}
+}
+
+// listWindowGeoms queries tmux for this session's windows and their current
+// sizes. Used by the planning phase of a reconcile so callers don't each have
+// to issue their own list-windows.
+func listWindowGeoms() []windowGeom {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{window_id}").Output()
+	args := sessionScopedListWindowsArgs("#{window_id}|#{window_width}|#{window_height}")
+	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
 	if err != nil {
 		return nil
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	ids := make([]string, 0, len(lines))
+	geoms := make([]windowGeom, 0, len(lines))
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			ids = append(ids, line)
+		parts := strings.Split(strings.TrimSpace(line), "|")
+		if len(parts) != 3 || parts[0] == "" {
+			continue
 		}
+		w, _ := strconv.Atoi(parts[1])
+		h, _ := strconv.Atoi(parts[2])
+		geoms = append(geoms, windowGeom{ID: parts[0], Width: w, Height: h})
 	}
-	return ids
+	return geoms
 }
 
 // listSidebarPanesByWindow queries tmux once for every sidebar pane and
@@ -246,8 +299,8 @@ type windowLayoutSnapshot struct {
 func snapshotWindowLayouts() []windowLayoutSnapshot {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F",
-		"#{window_id}|||#{window_width}|||#{window_panes}|||#{window_layout}").Output()
+	args := sessionScopedListWindowsArgs("#{window_id}|||#{window_width}|||#{window_panes}|||#{window_layout}")
+	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
 	if err != nil {
 		return nil
 	}

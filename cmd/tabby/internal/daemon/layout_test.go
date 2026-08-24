@@ -3,6 +3,8 @@ package daemon
 import (
 	"strings"
 	"testing"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 func TestPlanWindowSizes(t *testing.T) {
@@ -219,3 +221,53 @@ func TestLooksMalformedLayout(t *testing.T) {
 	}
 }
 
+
+func TestPlanWindowSizesFromSkipsWindowsAlreadyAtTarget(t *testing.T) {
+	geoms := []windowGeom{
+		{ID: "@1", Width: 167, Height: 46},
+		{ID: "@2", Width: 167, Height: 45},
+		{ID: "@3", Width: 80, Height: 46},
+		{ID: "@4"}, // size unknown
+	}
+	ops := planWindowSizesFrom(167, 46, geoms)
+	if len(ops) != 3 {
+		t.Fatalf("ops count: got %d want 3 (%v)", len(ops), ops)
+	}
+	for _, op := range ops {
+		if op.Target == "@1" {
+			t.Fatalf("@1 already at 167x46 but was resized: %v", ops)
+		}
+		if op.X != 167 || op.Y != 46 {
+			t.Fatalf("op %v: want 167x46", op)
+		}
+	}
+}
+
+func TestPlanWindowSizesFromAllAtTargetIsEmpty(t *testing.T) {
+	geoms := []windowGeom{
+		{ID: "@1", Width: 100, Height: 40},
+		{ID: "@2", Width: 100, Height: 40},
+	}
+	if ops := planWindowSizesFrom(100, 40, geoms); len(ops) != 0 {
+		t.Fatalf("want no ops when every window matches, got %v", ops)
+	}
+}
+
+func TestSessionScopedListWindowsArgs(t *testing.T) {
+	orig := tmux.SessionTarget()
+	defer tmux.SetSessionTarget(orig)
+
+	tmux.SetSessionTarget("$7")
+	got := sessionScopedListWindowsArgs("#{window_id}")
+	want := []string{"list-windows", "-t", "$7", "-F", "#{window_id}"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("scoped args: got %v want %v", got, want)
+	}
+
+	tmux.SetSessionTarget("")
+	got = sessionScopedListWindowsArgs("#{window_id}")
+	want = []string{"list-windows", "-a", "-F", "#{window_id}"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("unscoped args: got %v want %v", got, want)
+	}
+}

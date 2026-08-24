@@ -104,6 +104,11 @@ func SetSessionTarget(sessionID string) {
 	sessionTarget = strings.TrimSpace(sessionID)
 }
 
+// SessionTarget returns the session queries are scoped to, or "" when
+// unscoped. Callers that build their own tmux command lines use it to stay
+// inside this daemon's session instead of reaching across the whole server.
+func SessionTarget() string { return sessionTarget }
+
 // ConfigureBusyDetection applies user config to idle/busy detection.
 // extraIdle adds commands to the idle list.
 // aiTools lists interactive AI tools that distinguish busy vs waiting-for-input.
