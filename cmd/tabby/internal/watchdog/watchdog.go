@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/tmuxhooks"
 )
 
 const (
@@ -241,7 +243,8 @@ func fileExists(path string) bool {
 }
 
 // registerHooks ensures tmux hooks for resize/focus/select are registered.
-// Invokes the consolidated `tabby hook` and `tabby cycle-pane` subcommands.
+// The bodies live in package tmuxhooks, shared with `tabby toggle` so the two
+// registration paths cannot drift apart or from tabby.tmux.
 //
 // Step 4 of the daemon refactor (see
 // /Users/b/.claude/plans/nifty-jingling-tulip.md): tmux hooks now flow into
@@ -255,19 +258,10 @@ func fileExists(path string) bool {
 // every real size change. Removing them eliminates a redundant resize storm
 // (4-8 RESIZE_ALL_WINDOWS per opencode launch → 1).
 func registerHooks(exe string) {
-	hookCmd := fmt.Sprintf("%s hook", exe)
-	cycleCmd := fmt.Sprintf("%s cycle-pane", exe)
-
-	type hook struct{ name, cmd string }
-	hooks := []hook{
-		{"after-resize-pane", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{hook_pane}\"'", hookCmd)},
-		{"after-resize-window", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{pane_id}\"'", hookCmd)},
-		{"client-resized", fmt.Sprintf("run-shell -b '%s client-resized \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'", hookCmd, hookCmd)},
-		{"after-select-window", fmt.Sprintf("run-shell -b '%s after-select-window \"#{window_id}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --ensure-content'", hookCmd, hookCmd, cycleCmd)},
-		{"after-rename-window", fmt.Sprintf("run-shell -b '%s after-rename-window \"#{window_id}\"'", hookCmd)},
-		{"client-attached", fmt.Sprintf("run-shell -b '%s client-attached'; run-shell -b '%s --ensure-content'", hookCmd, cycleCmd)},
+	for _, name := range tmuxhooks.Retired() {
+		exec.Command("tmux", "set-hook", "-gu", name).Run()
 	}
-	for _, h := range hooks {
-		exec.Command("tmux", "set-hook", "-g", h.name, h.cmd).Run()
+	for _, h := range tmuxhooks.Definitions(exe) {
+		exec.Command("tmux", "set-hook", "-g", h.Name, h.Cmd).Run()
 	}
 }

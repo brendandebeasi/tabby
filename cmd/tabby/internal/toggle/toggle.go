@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/tmuxhooks"
 )
 
 // Run is the subcommand entry point. args are the tokens following
@@ -215,25 +217,19 @@ func enable(sessionID, exe, pidFile, sockPath, watchdogPidFile, stateFile string
 	// `kill -USR1` / `kill -USR2`. The daemon retains its SIGUSR handlers
 	// for backward compat. `client-active` and `client-focus-in` were
 	// dropped — `client-resized` already covers every real geometry change.
-	hookCmd := fmt.Sprintf("%s hook", exe)
-	cycleCmd := fmt.Sprintf("%s cycle-pane", exe)
-
-	// Register hooks in parallel
+	// Register hooks in parallel. Bodies live in package tmuxhooks, shared
+	// with the watchdog so the two registration paths cannot drift apart or
+	// from tabby.tmux.
 	var hookWg sync.WaitGroup
-	hooks := [][2]string{
-		{"after-resize-pane", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{hook_pane}\"'", hookCmd)},
-		{"after-resize-window", fmt.Sprintf("run-shell -b '%s on-pane-resize \"#{pane_id}\"'", hookCmd)},
-		{"client-resized", fmt.Sprintf("run-shell -b '%s client-resized \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'", hookCmd, hookCmd)},
-		{"after-select-window", fmt.Sprintf("run-shell -b '%s after-select-window \"#{window_id}\"'; run-shell -b '%s ensure-sidebar \"#{session_id}\" \"#{window_id}\"'; run-shell -b '%s --ensure-content'", hookCmd, hookCmd, cycleCmd)},
-		{"after-rename-window", fmt.Sprintf("run-shell -b '%s after-rename-window \"#{window_id}\"'", hookCmd)},
-		{"client-attached", fmt.Sprintf("run-shell -b '%s client-attached'; run-shell -b '%s --ensure-content'", hookCmd, cycleCmd)},
+	for _, name := range tmuxhooks.Retired() {
+		run("tmux", "set-hook", "-gu", name)
 	}
-	for _, h := range hooks {
+	for _, h := range tmuxhooks.Definitions(exe) {
 		hookWg.Add(1)
 		go func(name, cmd string) {
 			defer hookWg.Done()
 			run("tmux", "set-hook", "-g", name, cmd)
-		}(h[0], h[1])
+		}(h.Name, h.Cmd)
 	}
 	hookWg.Wait()
 
