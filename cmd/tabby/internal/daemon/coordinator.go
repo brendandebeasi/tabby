@@ -5080,7 +5080,30 @@ func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
 	// unrelated window (e.g. one that just got categorized into a group) steals
 	// focus to it and the restore below has to yank it back — the visible
 	// lose-focus-then-regain flicker.
+	//
+	// ...but only for windows that DON'T currently hold focus. For the active
+	// window -d is actively harmful: move-window unlinks the window it moves,
+	// tmux falls back to some other window when the one it dropped was current,
+	// and -d then forbids re-selecting it. So renumbering the active window
+	// always dips focus off it, and the restore below can at best yank it back
+	// a frame later — that round trip IS the visible judder on a new tab, which
+	// gets renumbered to index 1 the moment it is categorized. Moving the
+	// active window WITHOUT -d re-selects it, which for the window that already
+	// had focus is a no-op: the dip never happens.
+	//
+	// Per-client current windows don't exist in tmux 3.x (see the note below),
+	// so "the active window" is unambiguous here.
+	activeBeforeMoves := activeWindowID
+	if len(pendingMoves) > 0 {
+		if fresh := tmuxOutputTrimmed("display-message", "-p", "#{window_id}"); fresh != "" {
+			activeBeforeMoves = fresh
+		}
+	}
 	for _, op := range pendingMoves {
+		if op.src == activeBeforeMoves {
+			tmuxRun("move-window", "-s", op.src, "-t", op.dst)
+			continue
+		}
 		tmuxRun("move-window", "-d", "-s", op.src, "-t", op.dst)
 	}
 	// Restore focus to the pending new window ONLY when this RefreshWindows
@@ -5110,9 +5133,27 @@ func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
 	// user off the tab they had just connected on.
 	pendingStatus := c.NewWindowStatus()
 	if movesInclude(pendingMoves, pendingStatus.WindowID) {
-		if focusTarget := preferredWindowFocusTarget(c, activeWindowID); focusTarget != "" {
+		// activeWindowID comes from the snapshot taken at the TOP of
+		// RefreshWindows — before the move-window batch above ran. That is the
+		// one value we must not decide on here, because move-window is exactly
+		// what perturbs the active window: relocating the current window
+		// unlinks it, tmux falls back to another window, and -d then forbids
+		// re-selecting it. Judged on the stale value the legacy path below
+		// concludes "pending already equals active, nothing to do" at the
+		// precise moment focus has just been handed to the old window, and the
+		// new tab loses focus ~150ms after gaining it. The FiringTTY path in
+		// preferredWindowFocusTarget re-reads tmux for this reason; the legacy
+		// path has to be given an equally fresh value.
+		activeAfterMoves := tmuxOutputTrimmed("display-message", "-p", "#{window_id}")
+		if activeAfterMoves == "" {
+			activeAfterMoves = activeWindowID
+		}
+		if activeAfterMoves != activeWindowID {
+			logEvent("RESTORE_WINDOW_FOCUS_REREAD before=%s after=%s pending=%s", activeWindowID, activeAfterMoves, pendingStatus.WindowID)
+		}
+		if focusTarget := preferredWindowFocusTarget(c, activeAfterMoves); focusTarget != "" {
 			restoreWindowFocus(focusTarget)
-			logEvent("RESTORE_WINDOW_FOCUS target=%s active=%s pending_moves=%d", focusTarget, activeWindowID, len(pendingMoves))
+			logEvent("RESTORE_WINDOW_FOCUS target=%s active=%s pending_moves=%d", focusTarget, activeAfterMoves, len(pendingMoves))
 		}
 	} else if pendingStatus.State == "ready" && pendingStatus.WindowID != "" {
 		// Diagnostic: confirm we're skipping the restore on the cycling path.
