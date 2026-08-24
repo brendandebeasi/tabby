@@ -170,8 +170,15 @@ func Run(allArgs []string) int {
 		// "toggle_collapse_sidebar" action handler.
 
 	case "new-group":
+		// args: <name> [window-id]. The optional window id comes from the
+		// window context menu's "New Group..." item, which creates the group
+		// and moves that window into it in one step; the sidebar's own
+		// new-group button passes a name only.
 		if len(args) > 0 {
 			target = args[0]
+		}
+		if len(args) > 1 {
+			value = args[1]
 		}
 
 	case "kill-window":

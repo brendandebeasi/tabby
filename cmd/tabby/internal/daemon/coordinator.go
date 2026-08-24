@@ -18239,6 +18239,12 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 				tmuxCmd("display-message", fmt.Sprintf("Error: %v", err)).Run()
 				return false
 			}
+			// The window context menu's "New Group..." item carries the window
+			// it was opened on, so creating the group and moving the window
+			// into it is one step rather than two trips through the menu.
+			if windowID := strings.TrimSpace(input.PickerValue); windowID != "" {
+				tmuxCmd("set-window-option", "-t", windowID, "@tabby_group", newGroup.Name).Run()
+			}
 			return true
 		}
 		// No name provided — prompt user, then call back via `tabby hook new-group`.
@@ -20698,6 +20704,12 @@ func (c *Coordinator) showWindowContextMenu(clientID string, windowTarget string
 		args = append(args, "  Remove from Group", "0", removeCmd)
 	}
 
+	// Creating a group used to be reachable only from the sidebar's own
+	// new-group button, so moving a window somewhere new meant leaving the
+	// menu, making the group, then reopening the menu to move into it. The
+	// window id rides along so the daemon can do both in one step.
+	args = append(args, "  + New Group...", "n", newGroupMenuCommand(c.getHookPath(), wid))
+
 	// Set Color submenu
 	args = append(args, "-Set Tab Color", "", "")
 	colorTarget := base64.StdEncoding.EncodeToString([]byte(wid))
@@ -21167,11 +21179,7 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 		args = append(args, "Set Working Directory", "w", setWorkingDirCmd)
 	}
 
-	newGroupCmd := fmt.Sprintf(
-		"command-prompt -p 'New group name:' \"run-shell '%s new-group %%%%  '\"",
-		hookPath,
-	)
-	args = append(args, "Create New Group", "G", newGroupCmd)
+	args = append(args, "Create New Group", "G", newGroupMenuCommand(hookPath, ""))
 
 	// --- Destructive actions ---
 	// Skip the separator when neither item below applies, rather than trailing
@@ -21554,6 +21562,25 @@ func (c *Coordinator) getHookPath() string {
 		return "tabby hook"
 	}
 	return filepath.Join(filepath.Dir(exe), "tabby") + " hook"
+}
+
+// newGroupMenuCommand builds the menu command that prompts for a group name
+// and creates it. When windowID is non-empty the window is moved into the new
+// group as part of the same step — otherwise creating a group and putting a
+// window in it means closing the menu, creating the group, and reopening it.
+//
+// The %% substitution is wrapped in escaped double quotes on purpose: bare,
+// tmux hands "Side Projects" to the shell as two words and the group comes out
+// named "Side". The escaping survives one round of tmux command parsing,
+// whether the menu runs through display-menu or through the daemon's overlay
+// (which sources the string from a temp file) — verified against a live
+// command-prompt with a multi-word name.
+func newGroupMenuCommand(hookPath, windowID string) string {
+	inner := fmt.Sprintf("%s new-group \\\"%%%%\\\"", hookPath)
+	if windowID != "" {
+		inner += " " + windowID
+	}
+	return fmt.Sprintf("command-prompt -p 'New group name:' \"run-shell '%s'\"", inner)
 }
 
 func (c *Coordinator) getScriptPath(name string) string {
