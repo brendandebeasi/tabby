@@ -3400,21 +3400,6 @@ func (c *Coordinator) saveCollapsedGroupsLocked() {
 	}
 }
 
-// getCollapsedGroupsJSON returns the collapsed groups as a JSON array string.
-func (c *Coordinator) getCollapsedGroupsJSON() string {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	names := make([]string, 0, len(c.collapsedGroups))
-	for name := range c.collapsedGroups {
-		names = append(names, name)
-	}
-	if len(names) == 0 {
-		return "[]"
-	}
-	data, _ := json.Marshal(names)
-	return string(data)
-}
-
 // petStatePath returns the path to the shared pet state file
 func petStatePath() string {
 	paths.EnsureStateDir()
@@ -13547,6 +13532,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	if collapsedIcon == "" {
 		collapsedIcon = "⊞"
 	}
+	// The disclosure cell is as wide as the wider of the two icons, in both
+	// states. Sizing it from whichever icon is currently showing made the
+	// toggle's hit zone — and the group name's start column — move when the
+	// group collapsed, so a click that collapsed a group could land on the
+	// name region and fail to expand it again. Only bites when the two
+	// configured icons differ in width; the defaults are both one cell.
+	disclosureW := disclosureCellWidth(expandedIcon, collapsedIcon)
 
 	// Tree color
 	treeStyle := lipgloss.NewStyle()
@@ -13658,7 +13650,11 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				bg = ""
 			}
 			if hasWindows {
-				prefix := collapseStyle.Render(collapseIcon)
+				iconPad := disclosureW - uniseg.StringWidth(collapseIcon)
+				if iconPad < 0 {
+					iconPad = 0
+				}
+				prefix := collapseStyle.Render(collapseIcon + strings.Repeat(" ", iconPad))
 				prefixW := uniseg.StringWidth(stripAnsi(prefix))
 				menuBtnW := 2 // " ⋮"
 				restW := width - prefixW - menuBtnW
@@ -13744,10 +13740,9 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		}
 
 		if hasWindows {
-			iconWidth := uniseg.StringWidth(stripAnsi(collapseStyle.Render(collapseIcon)))
-			if iconWidth < 1 {
-				iconWidth = 1
-			}
+			// Must match the padded prefix rendered above, not the current
+			// icon's own width, so the toggle zone stays put across states.
+			iconWidth := disclosureW
 			regions = append(regions, daemon.ClickableRegion{
 				StartLine: groupStartLine,
 				EndLine:   currentLine - 1,
@@ -19169,27 +19164,24 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if name == "" || action == "" {
 			return false
 		}
-		if action == "collapse" {
-			c.stateMu.Lock()
-			if c.collapsedGroups == nil {
-				c.collapsedGroups = make(map[string]bool)
-			}
-			c.collapsedGroups[name] = true
-			c.stateMu.Unlock()
-			// Persist to tmux option
-			collapsed := c.getCollapsedGroupsJSON()
-			tmuxCmd("set-option", "@tabby_collapsed_groups", collapsed).Run()
-		} else {
-			c.stateMu.Lock()
-			delete(c.collapsedGroups, name)
-			c.stateMu.Unlock()
-			collapsed := c.getCollapsedGroupsJSON()
-			if collapsed == "[]" {
-				tmuxCmd("set-option", "-u", "@tabby_collapsed_groups").Run()
-			} else {
-				tmuxCmd("set-option", "@tabby_collapsed_groups", collapsed).Run()
-			}
+		c.stateMu.Lock()
+		if c.collapsedGroups == nil {
+			c.collapsedGroups = make(map[string]bool)
 		}
+		if action == "collapse" {
+			c.collapsedGroups[name] = true
+		} else {
+			delete(c.collapsedGroups, name)
+		}
+		c.stateMu.Unlock()
+		// Persist exactly the way the disclosure icon does. This used to write
+		// @tabby_collapsed_groups, which loadCollapsedGroups treats as the
+		// legacy format: it is read once at startup, migrated, then unset. So
+		// the menu's collapse survived a restart only by accident, and its
+		// expand — which unsets that option when the last group expands — left
+		// the per-group @tabby_grp_collapsed_* options untouched, so every
+		// group collapsed via the icon reappeared collapsed on restart.
+		go c.saveCollapsedGroups()
 		return true
 
 	case "group_menu":
