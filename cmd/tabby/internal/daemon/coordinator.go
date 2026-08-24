@@ -119,7 +119,7 @@ func clientTTYForWindow(windowID string) string {
 	if windowID == "" {
 		return ""
 	}
-	out, err := tmuxOutputCtx("list-clients", "-F", "#{client_tty}|||#{window_id}|||#{client_activity}")
+	out, err := tmuxOutputCtx(listClientsArgs("#{client_tty}|||#{window_id}|||#{client_activity}")...)
 	if err != nil {
 		return ""
 	}
@@ -160,7 +160,7 @@ func clientTTYForWindow(windowID string) string {
 // indicators only once they've genuinely been seen.
 func attachedClientWindows() map[string]bool {
 	set := map[string]bool{}
-	out, err := tmuxOutputCtx("list-clients", "-F", "#{client_tty}|||#{window_id}")
+	out, err := tmuxOutputCtx(listClientsArgs("#{client_tty}|||#{window_id}")...)
 	if err != nil {
 		return set
 	}
@@ -354,6 +354,9 @@ func navIDFromValue(pickerValue string) string {
 }
 
 func tmuxClientWindowSnapshot() string {
+	// server-wide list-clients: a diagnostic dump for the event log. It is meant
+	// to show every client on the server, including other sessions, because that
+	// cross-session picture is exactly what the log reader needs.
 	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}=#{window_id}(#{client_flags})").Output()
 	if err != nil {
 		return ""
@@ -3217,7 +3220,7 @@ func (c *Coordinator) SelectPreviousWindow() {
 func attachedClientTTYs() map[string]bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-clients", "-F", "#{client_tty}").Output()
+	out, err := exec.CommandContext(ctx, "tmux", listClientsArgs("#{client_tty}")...).Output()
 	if err != nil {
 		return nil
 	}
@@ -9008,6 +9011,9 @@ func (c *Coordinator) parkWindow(windowID string, setFlag bool) bool {
 	// FIRST so no client follows the window into _tabby_minimized.
 	origin := c.dashboardSession()
 	if origin != "" {
+		// server-wide list-clients: any client on the server could be sitting on
+		// the window we are about to move, so all of them must be checked and the
+		// matching ones nudged off it first.
 		out, _ := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_session}|#{session_id}").Output()
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.Split(line, "|")
@@ -9970,6 +9976,8 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 	// `client_session` is the session NAME; `session_id` is the `$N` form the
 	// daemon keys everything by, and it is what a switch-client target must be
 	// qualified with below.
+	// server-wide list-clients: per-client navigation walks every client and
+	// filters on session_id in the loop below, so the rows must not be pre-filtered.
 	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_session}|#{client_window}|#{session_id}").Output()
 	if err != nil {
 		logEvent("WINDOW_NAV_PERCLIENT_LIST_ERR err=%v", err)
@@ -10333,7 +10341,7 @@ func distinctClientWidths(listClientsOutput string) int {
 func (c *Coordinator) attachedClientWidthSpread() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-clients", "-F", "#{client_width}").Output()
+	out, err := exec.CommandContext(ctx, "tmux", listClientsArgs("#{client_width}")...).Output()
 	if err != nil {
 		return false
 	}
@@ -10946,7 +10954,7 @@ func (c *Coordinator) desiredWindowHeaderHeightForWidth(windowWidth int) int {
 
 // attachedClientCount returns the number of tmux clients attached to the session.
 func (c *Coordinator) attachedClientCount() int {
-	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}").Output()
+	out, err := tmuxCmd(listClientsArgs("#{client_tty}")...).Output()
 	if err != nil {
 		return 1
 	}

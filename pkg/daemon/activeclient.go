@@ -57,6 +57,16 @@ type ClientElector struct {
 	lastMultiFocusKey  string
 	lastMultiFocusTime time.Time
 
+	// session scopes client enumeration to one tmux session. A tmux server
+	// can host several sessions, and under grouped sessions they share a
+	// window set while each keeps its own current window. An unscoped
+	// `list-clients` therefore lets a daemon elect a client belonging to a
+	// different session, then measure that client's geometry and ask it
+	// which window is active — answering for a session it does not own.
+	// Empty means "every client on the server", which is only correct for
+	// a single-session server.
+	session string
+
 	log func(format string, args ...interface{})
 }
 
@@ -79,6 +89,29 @@ func NewClientElector(log func(format string, args ...interface{}), preferredMax
 		log:             log,
 		preferredMaxAge: preferredMaxAge,
 	}
+}
+
+// SetSession scopes every client enumeration to the given tmux session (an id
+// like "$1" or a session name). Call it once at startup with the daemon's own
+// session; passing "" restores server-wide enumeration.
+func (e *ClientElector) SetSession(session string) {
+	session = strings.TrimSpace(session)
+	e.mu.Lock()
+	e.session = session
+	e.mu.Unlock()
+}
+
+// listClientsArgs builds a `list-clients` argv scoped to e.session. The -t flag
+// is omitted rather than passed empty, which tmux rejects.
+func (e *ClientElector) listClientsArgs(format string) []string {
+	e.mu.Lock()
+	session := e.session
+	e.mu.Unlock()
+	args := []string{"list-clients"}
+	if session != "" {
+		args = append(args, "-t", session)
+	}
+	return append(args, "-F", format)
 }
 
 // Pin forces the given tty to be chosen as active for up to preferredMaxAge.
@@ -110,8 +143,8 @@ func (e *ClientElector) Pin(tty, reason string) {
 func (e *ClientElector) Elect() ElectionResult {
 	const idleWindow = int64(1500)
 	now := time.Now().Unix()
-	out, err := exec.Command("tmux", "list-clients", "-F",
-		"#{client_tty}|||#{client_width}|||#{client_height}|||#{client_flags}|||#{client_activity}").Output()
+	out, err := exec.Command("tmux", e.listClientsArgs(
+		"#{client_tty}|||#{client_width}|||#{client_height}|||#{client_flags}|||#{client_activity}")...).Output()
 	if err != nil {
 		return ElectionResult{}
 	}
@@ -308,8 +341,8 @@ func (e *ClientElector) reportMultiFocus(focused []focusedClientRef, elected str
 // when we know we want "whoever just did something" rather than "whoever is
 // active right now" — subtly different after heuristic kicks in.
 func (e *ClientElector) LatestAttachedTTY() string {
-	out, err := exec.Command("tmux", "list-clients", "-F",
-		"#{client_tty}|||#{client_flags}|||#{client_activity}").Output()
+	out, err := exec.Command("tmux", e.listClientsArgs(
+		"#{client_tty}|||#{client_flags}|||#{client_activity}")...).Output()
 	if err != nil {
 		return ""
 	}

@@ -2706,7 +2706,7 @@ func resetTerminalModes(sessionID string) {
 	// Use tmux's refresh-client to reset terminal state
 	// The -S flag forces a full refresh which can help reset stuck modes
 	// We must refresh ALL clients to handle multi-client scenarios correctly
-	if out, err := tmuxCmd("list-clients", "-F", "#{client_tty}").Output(); err == nil {
+	if out, err := tmuxCmd(listClientsArgs("#{client_tty}")...).Output(); err == nil {
 		for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			if tty == "" {
 				continue
@@ -2818,6 +2818,9 @@ func Run(args []string) int {
 		}
 		logEvent(format, args...)
 	}, 0)
+	// Scope the election to our own session: an unscoped list-clients lets this
+	// daemon elect another session's client and then measure and query it.
+	activeClientElector.SetSession(*sessionID)
 
 	// Create server
 	server := daemon.NewServer(*sessionID)
@@ -3036,7 +3039,7 @@ func Run(args []string) int {
 			}
 			threshold := time.Duration(hours) * time.Hour
 			activeTTY := displayMessageIn(*sessionID, "#{client_tty}")
-			out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_activity}").Output()
+			out, err := tmuxCmd(listClientsArgs("#{client_tty}|#{client_activity}")...).Output()
 			if err != nil {
 				return
 			}

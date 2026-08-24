@@ -94,8 +94,8 @@ func selectStaleClients(clients []attachedClient, now time.Time, idleThreshold t
 func listAttachedClients() ([]attachedClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-clients", "-F",
-		"#{client_tty}|#{client_width}|#{client_height}|#{client_activity}").Output()
+	out, err := exec.CommandContext(ctx, "tmux",
+		listClientsArgs("#{client_tty}|#{client_width}|#{client_height}|#{client_activity}")...).Output()
 	if err != nil {
 		return nil, err
 	}

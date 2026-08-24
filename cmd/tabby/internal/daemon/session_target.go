@@ -109,6 +109,19 @@ func (c *Coordinator) SessionID() string {
 	return discoverSessionID()
 }
 
+// listClientsArgs builds a `list-clients` argv scoped to this daemon's session.
+// The same reasoning as displayMessageArgs applies: a tmux server hosts several
+// sessions, and an unscoped list-clients hands us clients we do not own — whose
+// geometry we would then measure and whose active window we would then trust.
+// The -t flag is omitted rather than passed empty, which tmux rejects.
+func listClientsArgs(format string) []string {
+	args := []string{"list-clients"}
+	if sess := daemonSessionID(); sess != "" {
+		args = append(args, "-t", sess)
+	}
+	return append(args, "-F", format)
+}
+
 // daemonSessionID returns the session this daemon was started for, from the
 // -session flag. Used by the call sites that have no Coordinator in scope.
 func daemonSessionID() string {

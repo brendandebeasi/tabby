@@ -1014,7 +1014,7 @@ func (c *Coordinator) maybeExitDashboardForPhone() {
 	if c.dashboardWindowID == "" {
 		return
 	}
-	out, err := tmuxOutputCtx("list-clients", "-F", "#{client_width}")
+	out, err := tmuxOutputCtx(listClientsArgs("#{client_width}")...)
 	if err != nil {
 		return
 	}

@@ -69,3 +69,37 @@ func TestReportMultiFocus(t *testing.T) {
 		t.Fatalf("single focused client should not log; got %d: %v", len(logs), logs)
 	}
 }
+
+func TestClientElectorListClientsArgs(t *testing.T) {
+	e := NewClientElector(nil, 0)
+
+	// Unscoped by default: a single-session server is the only case where
+	// enumerating every client on the server is the right answer.
+	got := e.listClientsArgs("#{client_tty}")
+	want := []string{"list-clients", "-F", "#{client_tty}"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("unscoped args = %v, want %v", got, want)
+	}
+
+	e.SetSession("$1")
+	got = e.listClientsArgs("#{client_tty}")
+	want = []string{"list-clients", "-t", "$1", "-F", "#{client_tty}"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("scoped args = %v, want %v", got, want)
+	}
+
+	// Whitespace-only is not a session, and an empty -t is a tmux error
+	// rather than "unspecified" — so it must clear the scope, not pass through.
+	e.SetSession("   ")
+	got = e.listClientsArgs("#{client_tty}")
+	for i, a := range got {
+		if a == "-t" {
+			t.Fatalf("blank session produced -t %q: %v", got[i+1], got)
+		}
+	}
+
+	e.SetSession("")
+	if got := strings.Join(e.listClientsArgs("#{client_tty}"), " "); got != "list-clients -F #{client_tty}" {
+		t.Fatalf("empty session did not clear the scope: %q", got)
+	}
+}
