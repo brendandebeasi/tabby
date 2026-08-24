@@ -213,7 +213,7 @@ func TestSyncWindowIndices_MismatchReturnsPending(t *testing.T) {
 
 func TestBuildPaneHeaderColorArgs_EmptyGrouped(t *testing.T) {
 	c := newTestCoordinator(t)
-	args := c.buildPaneHeaderColorArgs()
+	args := flattenTmuxBatches(c.buildPaneHeaderColorArgs())
 	assert.Empty(t, args)
 }
 
@@ -226,7 +226,7 @@ func TestBuildPaneHeaderColorArgs_OneWindowNoAutoBorder(t *testing.T) {
 			{ID: "@1", Index: 1, Name: "bash"},
 		},
 	}}
-	args := c.buildPaneHeaderColorArgs()
+	args := flattenTmuxBatches(c.buildPaneHeaderColorArgs())
 	assert.NotEmpty(t, args)
 	found := false
 	for _, arg := range args {
@@ -249,7 +249,7 @@ func TestBuildPaneHeaderColorArgs_AutoBorderEnabled(t *testing.T) {
 			}},
 		},
 	}}
-	args := c.buildPaneHeaderColorArgs()
+	args := flattenTmuxBatches(c.buildPaneHeaderColorArgs())
 	found := false
 	for _, arg := range args {
 		if arg == "pane-active-border-style" {
@@ -268,7 +268,7 @@ func TestBuildPaneHeaderColorArgs_ShellIntegrationIcon(t *testing.T) {
 		Theme:   config.Theme{Bg: "#2c3e50", Icon: "★"},
 		Windows: []tmux.Window{{ID: "@1", Index: 1}},
 	}}
-	args := c.buildPaneHeaderColorArgs()
+	args := flattenTmuxBatches(c.buildPaneHeaderColorArgs())
 	found := false
 	for _, arg := range args {
 		if arg == "@tabby_prompt_icon" {

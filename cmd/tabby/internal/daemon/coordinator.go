@@ -5052,11 +5052,7 @@ func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
 	rwUnlocked := time.Now()
 
 	// Run the tmux set-option commands outside the lock with a timeout.
-	if len(colorArgs) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		exec.CommandContext(ctx, "tmux", colorArgs...).Run()
-	}
+	runTmuxBatches(colorArgs, tmuxCmdTimeout)
 
 	// Execute deferred AI tool state tmux set-option ops outside the lock.
 	for _, op := range aiToolOps {
@@ -6355,9 +6351,21 @@ func (c *Coordinator) ApplyThemeToPane(paneID string) {
 	}
 }
 
-// buildPaneHeaderColorArgs builds the tmux set-option args for pane header colors.
-// Called under stateMu; returns the args without executing (caller runs tmux outside the lock).
-func (c *Coordinator) buildPaneHeaderColorArgs() []string {
+// buildPaneHeaderColorArgs builds the tmux set-option args for pane header
+// colors, one argv batch per window. Called under stateMu; returns the args
+// without executing (caller runs tmux outside the lock).
+//
+// The grouping matters: tmux ABORTS a ";"-separated command sequence at the
+// first command that fails, so one stale @window_id in a single flat argv would
+// silently drop the styling for every window after it — the window's pane
+// header then renders with @tabby_pane_active unset (black text) until some
+// later refresh happens to succeed. Keeping the batches separate lets the
+// caller retry per window so a stale id costs only that window.
+//
+// Within a window the order is load-bearing for the same reason: the header
+// colors come first and the per-pane border styles last, so a dead pane id
+// can only cost the trailing pane styling, never the header.
+func (c *Coordinator) buildPaneHeaderColorArgs() [][]string {
 	grouped := c.grouped
 	nativeBorders := c.config.PaneHeader.Native != nil && *c.config.PaneHeader.Native
 	// Native mode owns per-window border styling via applyNativeBorders. Skip
@@ -6382,7 +6390,7 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 	// (applyDashboardBorders); exclude it so this per-refresh restyle can't
 	// overwrite the tile label colors.
 	dashWin := dashboardActiveWindowID(c.dashboardSession())
-	var args []string
+	var batches [][]string
 	for _, group := range grouped {
 		baseBg := group.Theme.Bg
 		for _, win := range group.Windows {
@@ -6411,11 +6419,17 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 			if winTarget == "" {
 				continue
 			}
-			if len(args) > 0 {
-				args = append(args, ";")
+			// One batch per window; add() inserts the ";" separators so the
+			// batch never carries a leading or trailing one.
+			var args []string
+			add := func(cmd ...string) {
+				if len(args) > 0 {
+					args = append(args, ";")
+				}
+				args = append(args, cmd...)
 			}
-			args = append(args, "set-window-option", "-t", winTarget, "@tabby_pane_active", tabBg)
-			args = append(args, ";", "set-window-option", "-t", winTarget, "@tabby_pane_inactive", tabBg)
+			add("set-window-option", "-t", winTarget, "@tabby_pane_active", tabBg)
+			add("set-window-option", "-t", winTarget, "@tabby_pane_inactive", tabBg)
 			// Shell prompt integration: store effective icon per window
 			if shellIntegration {
 				effectiveIcon := group.Theme.Icon
@@ -6425,7 +6439,7 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 				if effectiveIcon == "" {
 					effectiveIcon = promptFallbackIcon
 				}
-				args = append(args, ";", "set-window-option", "-t", winTarget, "@tabby_prompt_icon", effectiveIcon)
+				add("set-window-option", "-t", winTarget, "@tabby_prompt_icon", effectiveIcon)
 			}
 
 			if autoBorder || borderFromTab {
@@ -6446,8 +6460,7 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 				if activeStyle == "" {
 					activeStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
 				}
-				args = append(args, ";", "set-window-option", "-t", winTarget,
-					"pane-active-border-style", activeStyle)
+				add("set-window-option", "-t", winTarget, "pane-active-border-style", activeStyle)
 
 				// Inactive border: desaturate when dim_inactive is enabled
 				iFg := bFg
@@ -6468,8 +6481,7 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 				if inactiveStyle == "" {
 					inactiveStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
 				}
-				args = append(args, ";", "set-window-option", "-t", winTarget,
-					"pane-border-style", inactiveStyle)
+				add("set-window-option", "-t", winTarget, "pane-border-style", inactiveStyle)
 			}
 
 			if autoBorder {
@@ -6497,13 +6509,58 @@ func (c *Coordinator) buildPaneHeaderColorArgs() []string {
 					if inactiveStyle == "" {
 						inactiveStyle = fmt.Sprintf("fg=%s,bg=%s", bFg, bBg)
 					}
-					args = append(args, ";", "set-option", "-p", "-t", p.ID,
-						"pane-border-style", inactiveStyle)
+					add("set-option", "-p", "-t", p.ID, "pane-border-style", inactiveStyle)
 				}
 			}
+
+			batches = append(batches, args)
 		}
 	}
-	return args
+	return batches
+}
+
+// flattenTmuxBatches joins per-window argv batches into a single tmux argv,
+// separating the batches with ";" so one fork applies them all.
+func flattenTmuxBatches(batches [][]string) []string {
+	var flat []string
+	for _, b := range batches {
+		if len(b) == 0 {
+			continue
+		}
+		if len(flat) > 0 {
+			flat = append(flat, ";")
+		}
+		flat = append(flat, b...)
+	}
+	return flat
+}
+
+// runTmuxBatches applies the batches in one tmux invocation, and on failure
+// retries them one batch at a time.
+//
+// tmux aborts a ";"-separated sequence at the first failing command, so a
+// single stale target in the combined argv would drop everything after it. The
+// happy path still costs one fork; the per-batch retry only runs when tmux
+// actually reported an error, which in practice means a window or pane died
+// between the refresh snapshot and this write.
+func runTmuxBatches(batches [][]string, timeout time.Duration) {
+	flat := flattenTmuxBatches(batches)
+	if len(flat) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "tmux", flat...).Run(); err == nil {
+		return
+	}
+	for _, b := range batches {
+		if len(b) == 0 {
+			continue
+		}
+		bctx, bcancel := context.WithTimeout(context.Background(), timeout)
+		exec.CommandContext(bctx, "tmux", b...).Run()
+		bcancel()
+	}
 }
 
 // GetWindowsHash returns a hash of current window state for change detection.
