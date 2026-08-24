@@ -83,6 +83,26 @@ const (
 	presentTTL    = 10 * time.Minute
 )
 
+// clampAdventureX keeps an adventure sprite inside the play area.
+//
+// maxX is already the last column a two-cell emoji fits in (it is derived as
+// width-5 for exactly that reason), and the renderer draws a sprite only while
+// its column is inside the row — so anything past maxX does not overflow the
+// row, it silently vanishes. Everything the chase moves has to come back
+// through here, or the cat is left stalking a bird that is no longer on screen.
+func clampAdventureX(x, maxX int) int {
+	if maxX < 0 {
+		maxX = 0
+	}
+	if x < 0 {
+		return 0
+	}
+	if x > maxX {
+		return maxX
+	}
+	return x
+}
+
 // adventureIdleDwell is how long the cat has to have been doing nothing before
 // it will wander off. Without it the cat can leave the instant you put a toy
 // down, because "idle" is only ever one frame away.

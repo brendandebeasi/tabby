@@ -201,3 +201,86 @@ func TestPresentsAreCappedExpiredAndAccepted(t *testing.T) {
 		t.Fatalf("presents = %d after the TTL, want the cat to take them back", len(c.pet.Presents))
 	}
 }
+
+func TestClampAdventureX(t *testing.T) {
+	cases := []struct{ x, maxX, want int }{
+		{x: 5, maxX: 34, want: 5},
+		{x: 0, maxX: 34, want: 0},
+		{x: 34, maxX: 34, want: 34},
+		{x: 35, maxX: 34, want: 34},
+		{x: 400, maxX: 34, want: 34},
+		{x: -1, maxX: 34, want: 0},
+		// A sidebar too narrow to have a play area at all still has to give a
+		// drawable answer rather than a negative one.
+		{x: 3, maxX: 0, want: 0},
+		{x: 3, maxX: -2, want: 0},
+	}
+	for _, tc := range cases {
+		if got := clampAdventureX(tc.x, tc.maxX); got != tc.want {
+			t.Errorf("clampAdventureX(%d, %d) = %d, want %d", tc.x, tc.maxX, got, tc.want)
+		}
+	}
+}
+
+// TestAdventureMaxXIsDrawable ties the simulation's bound to the renderer's.
+// updatePet derives maxX as width-5 and the renderer draws a sprite only while
+// its column is below safePlayWidth (width-1); a two-cell emoji at maxX has to
+// fit entirely inside that. If either side is ever retuned without the other,
+// sprites go missing instead of overflowing, which is a much harder bug to see.
+func TestAdventureMaxXIsDrawable(t *testing.T) {
+	const emojiCells = 2
+	for width := 10; width <= 200; width++ {
+		maxX := width - 5
+		safePlayWidth := width - 1
+		if maxX+emojiCells > safePlayWidth {
+			t.Fatalf("width %d: a sprite at maxX=%d spills past safePlayWidth=%d", width, maxX, safePlayWidth)
+		}
+	}
+}
+
+// TestEncounterKeepsCatAndPreyOnScreen runs the chase and insists both sprites
+// stay in columns the renderer will actually draw. The prey used to be allowed
+// to wander to maxX+5 before being snapped back, and the cat — which walks
+// toward w.X with no bound of its own — followed it out of the play area.
+func TestEncounterKeepsCatAndPreyOnScreen(t *testing.T) {
+	const maxX = 34 // a 39-column sidebar
+
+	for _, species := range []string{"bird", "mouse", "squirrel", "bug", "lizard", "butterfly"} {
+		for seed := 0; seed < 40; seed++ {
+			c := newAdventureTestCoordinator()
+			data := adventureWildlife[species]
+			c.pet.Adventure = adventureState{
+				Active: true,
+				Phase:  advPhaseEncounter,
+				Biome:  "meadow",
+				CatX:   maxX / 2,
+				HomeX:  4,
+				Wildlife: &wildlifeEncounter{
+					Type:        species,
+					Emoji:       data.Emoji,
+					X:           maxX,
+					Y:           data.YLevel,
+					Speed:       data.Speed,
+					CatchChance: data.CatchChance,
+				},
+			}
+			now := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+			for frame := 0; frame < 600; frame++ {
+				c.pet.AnimFrame = frame
+				c.updateEncounter(now, maxX)
+				adv := &c.pet.Adventure
+				if adv.CatX < 0 || adv.CatX > maxX {
+					t.Fatalf("%s seed %d frame %d: cat wandered to %d (bounds 0..%d)",
+						species, seed, frame, adv.CatX, maxX)
+				}
+				if adv.Wildlife != nil && (adv.Wildlife.X < 0 || adv.Wildlife.X > maxX) {
+					t.Fatalf("%s seed %d frame %d: prey wandered to %d (bounds 0..%d)",
+						species, seed, frame, adv.Wildlife.X, maxX)
+				}
+				if adv.Wildlife != nil && (adv.Wildlife.Caught || adv.Wildlife.Escaped) {
+					break
+				}
+			}
+		}
+	}
+}

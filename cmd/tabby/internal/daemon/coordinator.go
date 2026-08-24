@@ -8012,13 +8012,7 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 
 	if w.Pounced {
 		if w.PounceFrames > 0 {
-			adv.CatX = w.X
-			if adv.CatX < 0 {
-				adv.CatX = 0
-			}
-			if adv.CatX > maxX {
-				adv.CatX = maxX
-			}
+			adv.CatX = clampAdventureX(w.X, maxX)
 			c.pet.State = "jumping"
 			c.pet.Pos.Y = w.Y
 			w.PounceFrames--
@@ -8124,6 +8118,13 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 		if c.pet.AnimFrame%stepEvery == 0 {
 			if adv.CatX < w.X-stopDist {
 				adv.CatX++
+				// The cat has no bound of its own here — it walks toward w.X,
+				// so it goes wherever the prey is allowed to go. That is how
+				// the cat used to follow the prey off the right-hand edge.
+				// Clamping w.X below is enough to keep this in range today;
+				// this makes the cat's own bound local, so the next change to
+				// the prey's movement can't quietly walk it out again.
+				adv.CatX = clampAdventureX(adv.CatX, maxX)
 			}
 		}
 
@@ -8140,12 +8141,16 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 				w.X--
 			}
 			w.X += rand.Intn(3) - 1
+			// Keep the prey off the very left edge so the cat always has room
+			// to close in from behind it.
 			if w.X < 3 {
 				w.X = 3
 			}
-			if w.X > maxX+5 {
-				w.X = maxX
-			}
+			// This used to allow maxX+5 before snapping back, so the prey spent
+			// whole stretches of the chase sitting in columns the renderer
+			// never draws — it just disappeared off the right-hand side, and
+			// the cat followed it out.
+			w.X = clampAdventureX(w.X, maxX)
 		}
 
 		// Check if close enough to pounce
@@ -8157,13 +8162,7 @@ func (c *Coordinator) updateEncounter(now time.Time, maxX int) {
 			w.Pounced = true
 			w.PounceFrames = 4
 			w.WillCatch = rand.Intn(100) < w.CatchChance
-			adv.CatX = w.X
-			if adv.CatX < 0 {
-				adv.CatX = 0
-			}
-			if adv.CatX > maxX {
-				adv.CatX = maxX
-			}
+			adv.CatX = clampAdventureX(w.X, maxX)
 			c.pet.State = "jumping"
 			c.pet.Pos.Y = w.Y
 			return
