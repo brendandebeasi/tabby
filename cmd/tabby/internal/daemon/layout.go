@@ -92,11 +92,28 @@ func flushOpsBatched(ops []ResizeOp, reason string) {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		err := exec.CommandContext(ctx, "tmux", args...).Run()
+		out, err := exec.CommandContext(ctx, "tmux", args...).CombinedOutput()
 		cancel()
 		if err != nil {
-			logEvent("RECONCILE_FLUSH_ERR reason=%s chunk_start=%d chunk_size=%d err=%v",
-				reason, i, len(chunk), err)
+			logEvent("RECONCILE_FLUSH_ERR reason=%s chunk_start=%d chunk_size=%d err=%v out=%s",
+				reason, i, len(chunk), err, strings.TrimSpace(string(out)))
+			// An explicit-size resize-window is rejected ("adjustment invalid")
+			// when tmux's own client constraints disagree — a linked window
+			// another session pins to a narrow client, or stale latest-client
+			// bookkeeping after a focus flip. The op is then lost and the
+			// window stays phone-sized for every client forever ("window 1
+			// thinks it's mobile"). Retry those ops with -A: tmux recalculates
+			// the size from window-size=latest itself, which it always accepts,
+			// and lands on the most recently active client's geometry.
+			for _, op := range chunk {
+				if op.Kind != OpResizeWindow {
+					continue
+				}
+				rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+				rerr := exec.CommandContext(rctx, "tmux", "resize-window", "-A", "-t", op.Target).Run()
+				rcancel()
+				logEvent("RECONCILE_OP_FALLBACK_AUTO target=%s err=%v", op.Target, rerr)
+			}
 		} else {
 			logEvent("RECONCILE_FLUSH reason=%s chunk_start=%d chunk_size=%d", reason, i, len(chunk))
 		}
