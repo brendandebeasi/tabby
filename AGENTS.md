@@ -24,12 +24,15 @@ per-pane `pane-header` clients.
 ```text
 tabby/
 ├── cmd/
-│   ├── tabby-daemon/        # Session coordinator + render payloads
-│   ├── sidebar-renderer/    # Per-window sidebar TUI client
-│   ├── pane-header/         # Per-pane header TUI client
+│   ├── tabby/               # Single binary: daemon, renderers, hooks
+│   │   └── internal/
+│   │       ├── daemon/      # Session coordinator + render payloads
+│   │       ├── sidebar/     # Per-window sidebar TUI client
+│   │       ├── paneheader/  # Per-pane header TUI client
+│   │       ├── windowheader/
+│   │       └── hook/
 │   ├── render-status/       # Native tmux status rendering helpers
-│   ├── render-tab/
-│   ├── manage-group/
+│   └── render-tab/
 ├── pkg/
 │   ├── config/              # YAML config loading + schema structs
 │   ├── daemon/              # Daemon protocol payloads
@@ -43,9 +46,8 @@ tabby/
 └── tabby.tmux               # Plugin entrypoint + hooks + bindings
 ```
 
-The sidebar has two modes:
-- Old: Multiple independent sidebar processes (one per window)
-- New: Single daemon + lightweight renderers (`TABBY_USE_RENDERER=1`)
+The sidebar has one daemon per session plus per-window renderer processes
+spawned by the daemon with argv[0] `sidebar-renderer`.
 
 ## Config & State Paths
 
@@ -79,48 +81,46 @@ pkill -f "tabby daemon"; pkill -f "sidebar-renderer"; rm -f /tmp/tabby-daemon-*
 
 ## Build and Install
 
-Always build to the `bin/` directory -- scripts expect binaries there. Do NOT build to the repo root (`./tabby-daemon`).
+Everything ships in the single `bin/tabby` binary (daemon, renderers, hooks);
+renderers are spawned with argv[0] set to a legacy name (`sidebar-renderer`,
+`pane-header`) so pane detection still works.
 
 ```bash
-# Build individual binaries
-go build -o bin/tabby-daemon ./cmd/tabby-daemon
-go build -o bin/sidebar-renderer ./cmd/sidebar-renderer
-
 # Build and install all runtime binaries
 ./scripts/install.sh
 
 # Reload tmux config/plugin
 tmux source-file ~/.tmux.conf
-tmux run-shell ~/.tmux/plugins/tabby/tabby.tmux
+tmux run-shell ~/git/tabby/tabby.tmux
 ```
 
 ### Restarting the Sidebar
 
 After rebuilding, restart with:
 ```bash
-pkill -f "tabby daemon"; pkill -f "sidebar-renderer"; rm -f /tmp/tabby-daemon-*
-TABBY_USE_RENDERER=1 /Users/b/git/tabby/scripts/toggle_sidebar_daemon.sh
+pkill -f "tabby daemon"; pkill -f "render sidebar"; pkill -f "render pane-header"; pkill -f "render window-header"; rm -f /tmp/tabby-daemon-*
+bash scripts/ensure-daemon.sh
 ```
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `cmd/tabby-daemon/coordinator.go` | Core rendering + interaction behavior |
-| `cmd/tabby-daemon/main.go` | Daemon loops, tickers, server wiring |
-| `cmd/sidebar-renderer/main.go` | Sidebar input client and modal rendering |
-| `cmd/pane-header/main.go` | Pane header input client and hit testing |
+| `cmd/tabby/internal/daemon/coordinator.go` | Core rendering + interaction behavior |
+| `cmd/tabby/internal/daemon/main.go` | Daemon loops, tickers, server wiring |
+| `cmd/tabby/internal/sidebar/sidebar.go` | Sidebar input client and modal rendering |
+| `cmd/tabby/internal/paneheader/paneheader.go` | Pane header input client and hit testing |
 | `pkg/tmux/windows.go` | tmux window/pane inventory and metadata |
 | `pkg/paths/paths.go` | XDG config/state path resolution |
 | `scripts/_config_path.sh` | Config path resolver for shell scripts |
-| `scripts/toggle_sidebar.sh` | Main user toggle entrypoint |
+| `bin/tabby toggle` | Main user toggle entrypoint |
 | `bin/tabby dev status` | Fresh/stale runtime verification |
 | `bin/tabby dev reload` | Rebuild + restart workflow (opt-in) |
 | `tabby.tmux` | Hooks, keybindings, mode setup |
 | `bin/tabby hook focus-pane` | Deep link: activate terminal + navigate to pane |
 | `bin/tabby hook set-indicator` | Set sidebar indicators (busy, bell, input) |
 | `scripts/opencode-tabby-hook.sh` | Built-in OpenCode notification hook |
-| `scripts/ensure_sidebar.sh` | Sidebar recovery + `@tabby_spawning` guard |
+| `scripts/ensure-daemon.sh` | Daemon recovery + `@tabby_spawning` guard |
 | `bin/tabby hook resurrect-save` | tmux-resurrect post-save: strips Tabby panes from save file |
 | `bin/tabby hook resurrect-restore` | tmux-resurrect post-restore: cleans state + re-inits Tabby |
 
@@ -128,7 +128,7 @@ TABBY_USE_RENDERER=1 /Users/b/git/tabby/scripts/toggle_sidebar_daemon.sh
 
 ```bash
 # Unit/command tests
-go test ./cmd/tabby-daemon ./cmd/sidebar-renderer ./cmd/pane-header
+go test ./cmd/tabby/internal/daemon ./cmd/tabby/internal/sidebar ./cmd/tabby/internal/paneheader
 
 # Integration
 bash tests/integration/tmux_test.sh
