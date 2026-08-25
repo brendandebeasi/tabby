@@ -787,6 +787,7 @@ type Coordinator struct {
 	windowFirstSeen        map[string]time.Time // When each window was first observed by width sync (a brand-new window's sidebar width is spawn output, never a user drag)
 	pendingAdopt           pendingWidthAdopt    // Ambiguous active-window sidebar width awaiting confirmation by a second pass (see confirmWidthAdoptCandidate)
 	adoptConfirmTimer      *time.Timer          // one-shot follow-up pass that corroborates pendingAdopt; armed when a candidate is set
+	parkMu                 sync.Mutex           // serializes EnforceSingleActiveClient passes
 	windowHistory          []string             // LIFO stack of recently visited window IDs (most recent first, max 20)
 	clientWindowHistory    map[string][]string  // Per-client LIFO stacks, keyed by client tty. Two terminals attached to one session each need their own back-target; a single shared stack restored one client's close to the other client's last window.
 	widthSyncMu            sync.Mutex
@@ -17938,6 +17939,7 @@ func (c *Coordinator) HasElectedClient() bool {
 // tmux reattach (client-attached only nudges a refresh; the actual profile
 // flip is observed here in the geometry tick).
 func (c *Coordinator) SetActiveClient(ac daemon.ActiveClient) {
+	prev := c.activeClient.Load()
 	prevWidth := int(c.activeClientWidth.Load())
 	// Store a copy so callers can't mutate our state through the original.
 	stored := ac
@@ -17945,6 +17947,12 @@ func (c *Coordinator) SetActiveClient(ac daemon.ActiveClient) {
 	if ac.Width > 0 {
 		c.activeClientWidth.Store(int64(ac.Width))
 		c.maybeScheduleProfileTransition(prevWidth, ac.Width)
+	}
+	// A different client winning the election means the previous one's
+	// session may still be pinning the shared windows' geometry. Async —
+	// the pass is all tmux round-trips and must not block the caller.
+	if prev != nil && ac.TTY != "" && prev.TTY != ac.TTY {
+		go c.EnforceSingleActiveClient("election:" + ac.TTY)
 	}
 }
 

@@ -1371,6 +1371,11 @@ func (l *Loop) handleRefreshSignal() {
 		if windowChanged {
 			l.coord.SetActiveWindowOptimistic(l.activeWindowID)
 			l.server.SendRenderToClient(l.activeWindowID)
+			// The active window may be contested by an idle grouped session
+			// pinning it to the wrong geometry — park it. Election changes
+			// cover the device flip; this covers the desktop walking onto a
+			// window the phone's session points at.
+			go l.coord.EnforceSingleActiveClient("window:" + l.activeWindowID)
 		}
 
 		l.coord.RefreshWindows()
