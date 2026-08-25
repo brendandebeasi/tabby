@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 
 if [ ! -d "$ROOT_DIR/.git" ]; then
   echo "Not a git repository: $ROOT_DIR" >&2

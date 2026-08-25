@@ -19,7 +19,7 @@
 # As in signal-daemon.sh, callers in tmux hooks must NOT pass #{session_id}:
 # tmux expands it to strings like "$5" which bash reads as a positional
 # parameter. Pass nothing and let the lookup below resolve it.
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CURRENT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Both args are optional; the plugin's fast path passes them so this stays a
 # single fork on the init hot path.

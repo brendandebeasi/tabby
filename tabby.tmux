@@ -6,7 +6,7 @@
 #   Phase 1 (sync):  pre-start daemon + split sidebar pane (~20ms)
 #   Phase 2 (async): hooks, bindings, options via TABBY_DEFERRED=1 re-entry
 
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CURRENT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Optional kill-switch for troubleshooting.
 TABBY_ENABLED=$(tmux show-option -gqv "@tabby_enabled")

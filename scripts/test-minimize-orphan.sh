@@ -29,7 +29,7 @@ set -uo pipefail
 
 TABBY_TEST_SOCKET="${TABBY_TEST_SOCKET:-tabby-minimize-test}"
 RUNTIME_PREFIX="${TABBY_TEST_RUNTIME_PREFIX:-minimize-orphan-test-}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN="/tmp/tabby-minimize-orphan-test-bin"
 WRAP_DIR="/tmp/tabby-minimize-orphan-test-tmux-wrap"

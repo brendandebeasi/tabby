@@ -6,7 +6,7 @@
 #
 # Usage: scripts/vm-test.sh <vm-script-path-relative-to-repo> [args...]
 set -u
-SELF="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+SELF="$(CDPATH= cd -- "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 REPO="$(cd "$SELF/.." && pwd)"
 # Accept either an absolute path or one relative to the repo root.
 SCRIPT="$1"; shift || true
