@@ -1732,6 +1732,16 @@ func NewCoordinator(sessionID string) *Coordinator {
 	// Initialize global width from tmux option
 	if out, err := tmuxCmd("show-option", "-gqv", "@tabby_sidebar_width").Output(); err == nil {
 		if w, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && w > 0 {
+			// The persisted width can be poisoned (an adopt measuring a
+			// mid-reflow pane wrote 15, 72, 113 in the wild). A sidebar
+			// outside 5..80 is never a deliberate drag; fall back to the
+			// default and overwrite the option so the poison does not
+			// survive into the next restart.
+			if w < 5 || w > 80 {
+				logEvent("WIDTH_OPTION_CORRUPT value=%d action=reset_default", w)
+				w = 25
+				tmuxCmd("set-option", "-gq", "@tabby_sidebar_width", "25").Run()
+			}
 			c.globalWidth = w
 		} else {
 			c.globalWidth = 25 // Default
@@ -8966,6 +8976,16 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 		go c.OnRefreshLayout()
 	}
 
+	// Chrome mutations (stash/restore/kill) belong to the group's elected
+	// layout owner. A non-owner's daemon still tracks the profile for its own
+	// rendering, but must not break-pane the shared sidebars out from under
+	// the owner's client — observed live as the phone session's daemon
+	// stashing every sidebar 2s after a desktop took the lease.
+	chromeAllowed := c.OwnsGroupLayout()
+	if !chromeAllowed {
+		logEvent("PROFILE_TRANSITION_CHROME_SKIP target=%s reason=not_group_layout_owner", newProfile)
+	}
+
 	if newProfile == "desktop" {
 		narrow := hasNarrowClient()
 		stashed := sidebarIsStashed()
@@ -8973,7 +8993,7 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 			newProfile, narrow, stashed, c.sidebarHidden)
 		if narrow {
 			logEvent("PROFILE_TRANSITION_SKIP_DESKTOP reason=phone_client_still_attached")
-		} else {
+		} else if chromeAllowed {
 			// If a phone full-width sidebar is open, restore its content first — a
 			// desktop client must never be shown a content-less window.
 			if fs := fullscreenSidebarActiveWindowID(c.dashboardSession()); fs != "" {
@@ -9015,7 +9035,9 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 		// spawnRenderersForNewWindows incorrectly spawns sidebars for windows
 		// created with -no-sidebar, causing visible layout thrash.
 		c.sidebarHidden = true
-		if !sidebarIsStashed() {
+		if !chromeAllowed {
+			// State only: the owner stashes the shared panes.
+		} else if !sidebarIsStashed() {
 			go func() {
 				c.hideSidebarPanes()
 				coordinatorDebugLog.Printf("profile transition desktop->phone: auto-stashed sidebars")
@@ -10935,7 +10957,15 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 			activeHeight := clientHeightSnapshot[activeWindowID]
 			atKeyboardClamp := atKeyboardWidthClamp(
 				effectiveActive, c.globalWidth, keyboardWidth, keyboardThreshold, activeHeight, keyboardHoldPending)
-			if clientGeometryChanged {
+			// Hard plausibility bound, ahead of every heuristic below: a
+			// sidebar narrower than 5 or wider than 80 columns is never a
+			// drag. The mid-reflow measurements that produced global widths
+			// of 15, 72, and 113 in the wild all sailed through the subtler
+			// guards during a phone/desktop geometry flip; this one cannot.
+			implausible := effectiveActive < 5 || effectiveActive > 80
+			if implausible {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=implausible_width active=%s measured=%d global=%d", activeWindowID, effectiveActive, c.globalWidth)
+			} else if clientGeometryChanged {
 				// The elected physical client just changed size (phone<->desktop
 				// flip / reattach, or a height-only reflow). The measured
 				// discrepancy is a stale clamp or a mid-reflow transient about to
