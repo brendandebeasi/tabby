@@ -297,9 +297,10 @@ type layoutOwnerCache struct {
 func (c *Coordinator) OwnsGroupLayout() bool {
 	now := time.Now()
 	c.layoutOwner.mu.Lock()
-	defer c.layoutOwner.mu.Unlock()
 	if now.Before(c.layoutOwner.checkAt) {
-		return c.layoutOwner.owns
+		owns := c.layoutOwner.owns
+		c.layoutOwner.mu.Unlock()
+		return owns
 	}
 	groups, clients := groupLayoutState()
 	owner := electGroupLayoutOwner(c.sessionID, groups, clients)
@@ -309,6 +310,7 @@ func (c *Coordinator) OwnsGroupLayout() bool {
 		owner = stickyGroupLayoutOwner(group, owner, groups, clients, now)
 	}
 	owns := owner == c.sessionID
+	gained := owns && c.layoutOwner.elected && !c.layoutOwner.owns
 	if !c.layoutOwner.elected || owner != c.layoutOwner.owner {
 		logEvent("GROUP_LAYOUT_OWNER session=%s owner=%q owns=%v clients=%d",
 			c.sessionID, owner, owns, len(clients))
@@ -317,5 +319,30 @@ func (c *Coordinator) OwnsGroupLayout() bool {
 	c.layoutOwner.owner = owner
 	c.layoutOwner.owns = owns
 	c.layoutOwner.checkAt = now.Add(layoutOwnerRecheck)
+	c.layoutOwner.mu.Unlock()
+
+	if gained {
+		c.onLayoutOwnershipGained()
+	}
 	return owns
+}
+
+// onLayoutOwnershipGained runs when the lease hands this daemon the group's
+// layout mid-run. A profile transition that fired while we were not the owner
+// had its chrome step skipped (PROFILE_TRANSITION_CHROME_SKIP), and nothing
+// re-fired it when the handoff committed — the phone's bottom bar only
+// appeared when some later tick happened to notice. The lease's 3s hold has
+// already absorbed the activity blips the 750ms debounce exists to catch, so
+// apply the current profile's chrome now, skipping that debounce.
+func (c *Coordinator) onLayoutOwnershipGained() {
+	profileTransitionMu.Lock()
+	if profileTransitionTimer != nil {
+		profileTransitionTimer.Stop()
+		profileTransitionTimer = nil
+		pendingProfile = ""
+	}
+	profileTransitionMu.Unlock()
+	target := c.ActiveClientProfile()
+	logEvent("PROFILE_TRANSITION_FAST target=%s reason=ownership_gained", target)
+	c.executeProfileTransition(target)
 }

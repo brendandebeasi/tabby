@@ -3104,6 +3104,11 @@ func Run(args []string) int {
 		loop.SubmitRefresh()
 	}
 	coordinator.OnKillPhoneWindowHeaders = func() { killPhoneWindowHeaders(*sessionID) }
+	coordinator.OnSpawnPhoneChrome = func() {
+		cfg := coordinator.GetConfig()
+		customBorder := cfg.PaneHeader.CustomBorder
+		spawnWindowHeaders(server, *sessionID, customBorder, coordinator.desiredWindowHeaderHeight(), coordinator.GetWindows(), coordinator)
+	}
 
 	// Register SIGUSR1/SIGUSR2 handlers BEFORE server.Start() creates the
 	// socket. ensure_sidebar.sh sends USR1 the moment it detects the socket,

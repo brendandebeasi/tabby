@@ -908,6 +908,9 @@ type Coordinator struct {
 	// on the debounced doPaneLayoutOps path that loopFullRefreshCooldown can
 	// skip.
 	OnKillPhoneWindowHeaders func()
+	// OnSpawnPhoneChrome spawns the phone bottom bars right inside a profile
+	// transition, instead of waiting out the layout loop's cooldown and tick.
+	OnSpawnPhoneChrome func()
 
 	// Context menu state (for in-renderer menus). pendingMenus,
 	// lastWindowSelect/lastWindowByClient, and lastPaneMenuOpen are loop-only
@@ -9000,20 +9003,18 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 				c.closeFullscreenSidebar(fs, false)
 				coordinatorDebugLog.Printf("profile transition phone->desktop: closed full-width sidebar %s", fs)
 			}
-			// Kill the phone window-header (button bar) immediately, in the same
-			// tick as the sidebar restore. spawnWindowHeaders would eventually do
-			// this on its own, but only after loopFullRefreshCooldown elapses —
-			// leaving the bar visible alongside a restored sidebar in the
-			// interim.
+			// Kill the phone window-header (button bar) and restore the sidebars
+			// SYNCHRONOUSLY and in this order: both ran in bare goroutines before,
+			// so the bar died after the sidebar returned (or vice versa) and the
+			// user watched the switch happen in several confused partial states
+			// instead of one flip.
 			if c.OnKillPhoneWindowHeaders != nil {
-				go c.OnKillPhoneWindowHeaders()
+				c.OnKillPhoneWindowHeaders()
 			}
 			if stashed {
 				c.sidebarHidden = false
-				go func() {
-					c.restoreSidebarPanes()
-					coordinatorDebugLog.Printf("profile transition phone->desktop: auto-restored stashed sidebars")
-				}()
+				c.restoreSidebarPanes()
+				coordinatorDebugLog.Printf("profile transition phone->desktop: auto-restored stashed sidebars")
 			}
 		}
 	}
@@ -9038,12 +9039,20 @@ func (c *Coordinator) executeProfileTransition(newProfile string) {
 		if !chromeAllowed {
 			// State only: the owner stashes the shared panes.
 		} else if !sidebarIsStashed() {
-			go func() {
-				c.hideSidebarPanes()
-				coordinatorDebugLog.Printf("profile transition desktop->phone: auto-stashed sidebars")
-			}()
+			// Synchronous on purpose: the phone bottom bar must not spawn
+			// until the sidebar panes are physically out of the windows, or
+			// the user watches a squashed sidebar and the bar share the
+			// window for a beat.
+			c.hideSidebarPanes()
+			coordinatorDebugLog.Printf("profile transition desktop->phone: auto-stashed sidebars")
 		} else {
 			logEvent("PROFILE_TRANSITION_PHONE_ALREADY_STASHED sidebarHidden=true (no-op hide)")
+		}
+		// Spawn the phone bottom bars immediately rather than leaving them to
+		// the next layout-loop pass — the cooldown-plus-tick gap was a visible
+		// "chromeless" beat in the middle of every desktop->phone switch.
+		if chromeAllowed && c.OnSpawnPhoneChrome != nil {
+			c.OnSpawnPhoneChrome()
 		}
 	}
 }
