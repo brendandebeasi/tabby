@@ -167,10 +167,14 @@ func writeHeartbeatLoop(sessionID string, done <-chan struct{}) {
 	defer ticker.Stop()
 
 	writeHeartbeat := func() {
-		content := fmt.Sprintf("%s\npid=%d\nuptime=%s\n",
+		heartbeatMu.Lock()
+		lastBeat := lastHeartbeat
+		heartbeatMu.Unlock()
+		content := fmt.Sprintf("%s\npid=%d\nuptime=%s\nloop_age_ms=%d\n",
 			time.Now().Format(time.RFC3339),
 			pid,
-			time.Since(daemonStartTime).Truncate(time.Second))
+			time.Since(daemonStartTime).Truncate(time.Second),
+			time.Since(time.Unix(0, lastBeat)).Milliseconds())
 		os.WriteFile(heartbeatPath, []byte(content), 0644)
 	}
 
@@ -2290,8 +2294,6 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 		}
 		return top != nil && top.height >= headerRows+2
 	}
-	auditAliveSessions := map[string]bool{}
-	auditAliveDaemons := map[string]bool{}
 
 	for winID, win := range byWindow {
 		if profile == "desktop" {
@@ -2300,10 +2302,12 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 					winID, len(win.windowHeaders), fixOrLog("kill_desktop"))
 				if panelAuditApplyFixes {
 					for _, p := range win.windowHeaders {
-						if headerOwnedByLivePeer(p.startCmd, sessionID, auditAliveSessions, auditAliveDaemons) {
-							logEvent("AUDIT_WINDOW_HEADER_SKIP window=%s pane=%s reason=peer_session_alive", winID, p.paneID)
-							continue
-						}
+						// No peer-ownership guard here: panelAudit only runs
+						// on the group's elected layout owner, and the bars
+						// being killed are typically the PREVIOUS owner's
+						// phone chrome — exactly what a desktop-profile audit
+						// must reap. The peer's daemon skips layout while we
+						// own it, so nothing respawns them.
 						markSkipPreserveForWindow(p.paneID)
 						tmuxCmd("kill-pane", "-t", p.paneID).Run()
 					}
@@ -2339,10 +2343,9 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 				winID, len(sorted), fixOrLog("dedup"))
 			if panelAuditApplyFixes {
 				for _, p := range sorted[1:] {
-					if headerOwnedByLivePeer(p.startCmd, sessionID, auditAliveSessions, auditAliveDaemons) {
-						logEvent("AUDIT_WINDOW_HEADER_SKIP window=%s pane=%s reason=peer_session_alive", winID, p.paneID)
-						continue
-					}
+					// Owner-gated like the desktop kill above: reaping a
+					// peer-spawned duplicate is safe because only the layout
+					// owner reaches this code.
 					markSkipPreserveForWindow(p.paneID)
 					tmuxCmd("kill-pane", "-t", p.paneID).Run()
 				}
