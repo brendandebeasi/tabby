@@ -2,9 +2,11 @@ package sidebarpopup
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/textwidth"
 )
 
 // buildContent makes an n-line content blob so resolveClick's viewport
@@ -86,5 +88,56 @@ func TestResolveClickReachesLastVisibleRow(t *testing.T) {
 	}
 	if a, tgt := m.resolveClick(10, visible-1); a != "select_window" || tgt != "@parked" {
 		t.Fatalf("last visible row not reachable: got (%q,%q)", a, tgt)
+	}
+}
+
+// The phone corruption bug: a content line wider than the popup wraps
+// physically on the pty while tea's renderer counts it as one row, and every
+// diffed frame after that lands a row off (duplicated clock, torn bands above
+// the Close button). Every row the View emits must fit the popup width.
+func TestViewClampsOverwideLines(t *testing.T) {
+	m := popupModel{
+		width:       43,
+		height:      34,
+		connected:   true,
+		content:     "short\nwide:" + strings.Repeat("x", 100) + "\n🐈 emoji line " + strings.Repeat("y", 60),
+		sidebarBg:   "#223344",
+		sendMu:      &sync.Mutex{},
+		pinnedHeight: 0,
+	}
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) != 34 {
+		t.Fatalf("View produced %d rows, want exactly 34 (popup height)", len(lines))
+	}
+	for i, l := range lines {
+		if w := textwidth.Display(textwidth.StripANSI(l)); w > 43 {
+			t.Fatalf("row %d is %d columns (max 43): %q", i, w, l)
+		}
+	}
+}
+
+// Same invariant for the pinned widget band, which used to be appended
+// unclamped.
+func TestViewClampsPinnedContent(t *testing.T) {
+	m := popupModel{
+		width:         43,
+		height:        34,
+		connected:     true,
+		content:       "row",
+		pinnedContent: "pinned:" + strings.Repeat("z", 100),
+		pinnedHeight:  1,
+		sidebarBg:     "#223344",
+		sendMu:        &sync.Mutex{},
+	}
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) != 34 {
+		t.Fatalf("View produced %d rows, want exactly 34", len(lines))
+	}
+	for i, l := range lines {
+		if w := textwidth.Display(textwidth.StripANSI(l)); w > 43 {
+			t.Fatalf("row %d is %d columns (max 43)", i, w)
+		}
 	}
 }

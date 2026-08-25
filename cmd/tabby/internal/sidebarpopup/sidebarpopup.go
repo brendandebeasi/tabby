@@ -24,6 +24,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
+	"github.com/brendandebeasi/tabby/pkg/textwidth"
 )
 
 var sessionID *string
@@ -255,10 +256,16 @@ func (m popupModel) View() string {
 	}
 
 	bgStyle := m.bgStyle()
-	// bgPad returns s padded to the full width with bg-coloured spaces (so the
-	// right-hand gap never shows the dark popup default).
+	// bgPad returns s at exactly the popup width: padded with bg-coloured
+	// spaces when short, CLAMPED when long. Without the clamp, a line wider
+	// than the pane wraps physically while tea's renderer still counts it as
+	// one row — every later frame's diffed rows then land one row off, which
+	// is the torn/duplicated bottom-of-popup corruption on the phone.
 	bgPad := func(s string) string {
-		lw := runewidth.StringWidth(stripAnsi(s))
+		lw := textwidth.Display(textwidth.StripANSI(s))
+		if lw > m.width {
+			return textwidth.Clamp(s, m.width)
+		}
 		if lw < m.width {
 			return s + bgStyle.Render(strings.Repeat(" ", m.width-lw))
 		}
@@ -299,7 +306,9 @@ func (m popupModel) View() string {
 
 	result := strings.Join(out, "\n")
 	if m.pinnedContent != "" {
-		result += "\n" + m.pinnedContent
+		for _, l := range strings.Split(m.pinnedContent, "\n") {
+			result += "\n" + bgPad(l)
+		}
 	}
 	result += "\n" + m.closeButtonRows()
 	return result
@@ -357,25 +366,6 @@ func max0(x int) int {
 		return 0
 	}
 	return x
-}
-
-func stripAnsi(s string) string {
-	var b strings.Builder
-	inEsc := false
-	for _, r := range s {
-		if inEsc {
-			if r == 'm' {
-				inEsc = false
-			}
-			continue
-		}
-		if r == '\x1b' {
-			inEsc = true
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
 }
 
 func (m *popupModel) receiveLoop() {
@@ -505,11 +495,12 @@ func Run(args []string) int {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		resetTerminal()
 		if p != nil {
-			p.Send(tea.Quit())
+			// Kill needs no tty I/O, so it works even when the pane's pty
+			// buffer is full — the state that parks a graceful quit mid-write
+			// and used to wedge this handler before it could act.
+			p.Kill()
 		}
-		time.Sleep(100 * time.Millisecond)
 		resetTerminal()
 	}()
 
