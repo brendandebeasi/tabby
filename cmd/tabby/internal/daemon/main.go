@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -156,6 +157,65 @@ func checkPreviousCrash(sessionID string) {
 
 	crashLog.Printf("=== END PREVIOUS CRASH FORENSICS ===")
 	logEvent("PREVIOUS_CRASH pid=%d", pid)
+}
+
+// daemonStatusFile is the per-session status snapshot every observability
+// surface reads (dev status, tabby-watch): what the daemon is doing, and for
+// each connected renderer its geometry and how long since it last spoke. The
+// events log answers "what happened"; this answers "what is true right now".
+type daemonStatusFile struct {
+	Session          string                  `json:"session"`
+	PID              int                     `json:"pid"`
+	UpdatedAt        string                  `json:"updated_at"`
+	UptimeMs         int64                   `json:"uptime_ms"`
+	LoopAgeMs        int64                   `json:"loop_age_ms"`
+	Profile          string                  `json:"profile"`
+	GlobalWidth      int                     `json:"global_width"`
+	GroupLayoutOwner bool                    `json:"group_layout_owner"`
+	Clients          []daemon.ClientSnapshot `json:"clients"`
+}
+
+// writeStatusLoop snapshots daemon+client state to /tmp/tabby-daemon-<sess>-status.json
+// on the heartbeat cadence. Writes are atomic-ish (tmp + rename) so readers
+// never see a torn file.
+func writeStatusLoop(sessionID string, c *Coordinator, srv *daemon.Server, done <-chan struct{}) {
+	path := daemon.RuntimePath(sessionID, "-status.json")
+	write := func() {
+		heartbeatMu.Lock()
+		lastBeat := lastHeartbeat
+		heartbeatMu.Unlock()
+		st := daemonStatusFile{
+			Session:          sessionID,
+			PID:              os.Getpid(),
+			UpdatedAt:        time.Now().Format(time.RFC3339),
+			UptimeMs:         time.Since(daemonStartTime).Milliseconds(),
+			LoopAgeMs:        time.Since(time.Unix(0, lastBeat)).Milliseconds(),
+			Profile:          c.ActiveClientProfile(),
+			GlobalWidth:      c.GetGlobalWidth(),
+			GroupLayoutOwner: c.OwnsGroupLayout(),
+			Clients:          srv.ClientSnapshots(),
+		}
+		data, err := json.Marshal(st)
+		if err != nil {
+			return
+		}
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, data, 0644); err != nil {
+			return
+		}
+		os.Rename(tmp, path)
+	}
+	write()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			write()
+		}
+	}
 }
 
 // writeHeartbeatLoop periodically writes a heartbeat file with PID and timestamp.
@@ -3157,6 +3217,7 @@ func Run(args []string) int {
 	// Start heartbeat writer (detects hangs on next startup)
 	heartbeatDone := make(chan struct{})
 	go writeHeartbeatLoop(*sessionID, heartbeatDone)
+	go writeStatusLoop(*sessionID, coordinator, server, heartbeatDone)
 
 	// Idle-client reaper: opt-in via @tabby_client_idle_timeout_hours (>0).
 	// Detaches only clients idle longer than the threshold, never the currently

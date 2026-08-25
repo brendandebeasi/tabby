@@ -8975,6 +8975,12 @@ func (c *Coordinator) maybeScheduleProfileTransition(prevWidth, newWidth int) {
 }
 
 func (c *Coordinator) executeProfileTransition(newProfile string) {
+	transitionStart := time.Now()
+	defer func() {
+		// End-to-end cost of a chrome swap, so a slow phone<->desktop switch
+		// is measurable from the events log instead of reconstructed by hand.
+		logEvent("PROFILE_TRANSITION_DONE target=%s elapsed_ms=%d", newProfile, time.Since(transitionStart).Milliseconds())
+	}()
 	if c.OnRefreshLayout != nil {
 		go c.OnRefreshLayout()
 	}

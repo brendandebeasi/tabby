@@ -8,6 +8,7 @@
 package dev
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -183,6 +184,7 @@ func doStatus(exe, sessionArg string) int {
 	fmt.Printf("started: %s (pid file)\n", pidMtime.Format("2006-01-02 15:04:05"))
 	fmt.Printf("socket:  %s (%s)\n", sockStatus, sockFile)
 	fmt.Printf("cmd:     %s\n", runningCmd)
+	printStatusSnapshot(sessionID)
 
 	fresh := true
 	if pidMtime.Before(binMtime) {
@@ -201,6 +203,45 @@ func doStatus(exe, sessionArg string) int {
 	fmt.Println("status:  STALE (daemon older than current build or mismatched binary)")
 	fmt.Println(fixHint)
 	return 1
+}
+
+// printStatusSnapshot renders the daemon's live status file
+// (/tmp/tabby-daemon-<sess>-status.json, written every 5s): profile, sidebar
+// width, loop liveness, and one line per connected renderer with its geometry
+// and how long since it last spoke. Absent file = older daemon; say so and
+// move on.
+func printStatusSnapshot(sessionID string) {
+	data, err := os.ReadFile(daemonpkg.RuntimePath(sessionID, "-status.json"))
+	if err != nil {
+		return
+	}
+	var st struct {
+		Profile          string `json:"profile"`
+		GlobalWidth      int    `json:"global_width"`
+		LoopAgeMs        int64  `json:"loop_age_ms"`
+		GroupLayoutOwner bool   `json:"group_layout_owner"`
+		Clients          []struct {
+			ID          string `json:"id"`
+			Kind        string `json:"kind"`
+			WindowID    string `json:"window_id,omitempty"`
+			Width       int    `json:"width"`
+			Height      int    `json:"height"`
+			LastSeenAge int64  `json:"last_seen_age_ms"`
+		} `json:"clients"`
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return
+	}
+	fmt.Printf("profile: %s  width: %d  loop: %dms ago  layout-owner: %v\n",
+		st.Profile, st.GlobalWidth, st.LoopAgeMs, st.GroupLayoutOwner)
+	fmt.Printf("clients: %d\n", len(st.Clients))
+	for _, c := range st.Clients {
+		win := c.WindowID
+		if win == "" {
+			win = "-"
+		}
+		fmt.Printf("  %-14s %-5s %dx%d  last-seen %dms\n", c.Kind, win, c.Width, c.Height, c.LastSeenAge)
+	}
 }
 
 func resolveSession(target string) (string, string) {

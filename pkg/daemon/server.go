@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ type ClientInfo struct {
 	ColorProfile    string     // "Ascii", "ANSI", "ANSI256", "TrueColor"
 	lastContentHash uint32     // hash of last sent content to deduplicate renders
 	writeMu         sync.Mutex // serialises concurrent writes to Conn
+	lastSeenNano    int64      // last message received, for liveness (atomic)
 }
 
 // Server is the daemon server that manages connected renderers
@@ -302,6 +304,13 @@ func (s *Server) handleClient(conn net.Conn) {
 			}
 			continue
 		}
+		if clientID != "" {
+			s.clientsMu.RLock()
+			if ci, ok := s.clients[clientID]; ok {
+				atomic.StoreInt64(&ci.lastSeenNano, time.Now().UnixNano())
+			}
+			s.clientsMu.RUnlock()
+		}
 
 		switch msg.Type {
 		case MsgSubscribe:
@@ -342,6 +351,7 @@ func (s *Server) handleClient(conn net.Conn) {
 				Width:        width,
 				Height:       height,
 				ColorProfile: colorProfile,
+				lastSeenNano: time.Now().UnixNano(),
 			}
 			s.clientsMu.Unlock()
 			if s.OnConnect != nil {
@@ -832,6 +842,41 @@ func (s *Server) GetAllClientIDs() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// ClientSnapshot is one connected renderer's liveness and geometry, for
+// status surfaces (dev status, the per-session status file, tabby-watch).
+type ClientSnapshot struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	WindowID    string `json:"window_id,omitempty"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	LastSeenAge int64  `json:"last_seen_age_ms"` // ms since the client's last message
+}
+
+// ClientSnapshots returns every connected renderer's snapshot, ID-sorted.
+func (s *Server) ClientSnapshots() []ClientSnapshot {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+	now := time.Now().UnixNano()
+	out := make([]ClientSnapshot, 0, len(s.clients))
+	for id, ci := range s.clients {
+		age := int64(0)
+		if last := atomic.LoadInt64(&ci.lastSeenNano); last > 0 {
+			age = (now - last) / int64(time.Millisecond)
+		}
+		out = append(out, ClientSnapshot{
+			ID:          id,
+			Kind:        string(ci.Target.Kind),
+			WindowID:    ci.Target.WindowID,
+			Width:       ci.Width,
+			Height:      ci.Height,
+			LastSeenAge: age,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // UpdateClientSize updates the stored width/height for a client

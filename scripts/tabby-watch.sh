@@ -160,6 +160,46 @@ else
 	ok wedged-loop
 fi
 
+# --- stale-client ------------------------------------------------------------
+# Reads the daemon status snapshots (-status.json): a renderer that has not
+# spoken to its daemon in 90s is frozen regardless of what its socket shows.
+STALE=""
+for f in /tmp/tabby-daemon-*-status.json; do
+	[ -e "$f" ] || continue
+	[ "$(stat -f %m "$f")" -lt "$CUTOFF" ] && continue
+	while read -r id age; do
+		[ "$age" -gt 90000 ] && STALE="$STALE ${id}($((age / 1000))s)"
+	done < <(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+for c in d.get("clients", []):
+    print(c.get("id", "?"), c.get("last_seen_age_ms", 0))
+' "$f" 2>/dev/null)
+done
+if [ -n "$STALE" ]; then
+	finding stale-client "renderer silent >90s:$STALE"
+else
+	ok stale-client
+fi
+
+# --- width-flap --------------------------------------------------------------
+# Sidebar-width adopts are rare in a healthy system (user drags). More than 2
+# in 15min means the measurement loop is eating mid-reflow widths again.
+ADOPTS=0
+for f in /tmp/tabby-daemon-*-events.log; do
+	[ -e "$f" ] || continue
+	[ "$(stat -f %m "$f")" -lt "$CUTOFF" ] && continue
+	while read -r ts rest; do
+		ep=$(line_epoch "$ts")
+		[ "$ep" -ge "$CUTOFF" ] && ADOPTS=$((ADOPTS + 1))
+	done < <(grep 'WIDTH_SYNC_ADOPT ' "$f" | sed 's/\[event\] //' | awk '{print $1, $2, $0}')
+done
+if [ "$ADOPTS" -gt 2 ]; then
+	finding width-flap "$ADOPTS sidebar width adopts in 15min"
+else
+	ok width-flap
+fi
+
 # --- summary -----------------------------------------------------------------
 if [ "$FINDINGS" -gt 0 ]; then
 	echo "SUMMARY: $FINDINGS finding(s)"
