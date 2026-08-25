@@ -703,7 +703,6 @@ func Run(args []string) int {
 	// Reset terminal state before starting to clean up any stale modes
 	resetTerminal := func() {
 		renderer.ResetTerminal()
-		os.Stdout.Sync()
 	}
 
 	// Clean start
@@ -719,7 +718,7 @@ func Run(args []string) int {
 		sendMu:       &sync.Mutex{},
 	}
 
-	p := tea.NewProgram(model, tea.WithMouseCellMotion(), tea.WithReportFocus())
+	p := tea.NewProgram(model, tea.WithMouseCellMotion(), tea.WithReportFocus(), tea.WithOutput(renderer.StdoutSink))
 	globalProgram = p
 
 	// External ticker for keepalive/pane-check (avoids returning Cmds from Update

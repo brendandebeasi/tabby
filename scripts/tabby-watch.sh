@@ -141,6 +141,25 @@ else
 	ok log-bloat
 fi
 
+# --- wedged-loop -------------------------------------------------------------
+# The daemon's main loop heartbeats each iteration; the file heartbeat writer
+# (a separate goroutine) keeps beating while the loop is wedged, so a fresh
+# file alone proves nothing. loop_age_ms is the real signal.
+WEDGED=""
+for h in /tmp/tabby-daemon-*.heartbeat; do
+	[ -e "$h" ] || continue
+	[ "$(stat -f %m "$h")" -lt "$CUTOFF" ] && continue
+	age=$(awk -F= '$1 == "loop_age_ms" {print $2}' "$h")
+	if [ -n "$age" ] && [ "$age" -gt 30000 ]; then
+		WEDGED="$WEDGED $(basename "$h" .heartbeat)(loop_age_ms=$age)"
+	fi
+done
+if [ -n "$WEDGED" ]; then
+	finding wedged-loop "daemon loop not dispatching:$WEDGED — it self-terminates after 30s on current builds; older builds need a manual kill"
+else
+	ok wedged-loop
+fi
+
 # --- summary -----------------------------------------------------------------
 if [ "$FINDINGS" -gt 0 ]; then
 	echo "SUMMARY: $FINDINGS finding(s)"

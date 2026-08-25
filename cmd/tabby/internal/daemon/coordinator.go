@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -599,6 +600,7 @@ func StartDeadlockWatchdog() {
 	heartbeatMu.Unlock()
 
 	go func() {
+		warnings := 0
 		for deadlockWatchdog {
 			time.Sleep(1 * time.Second)
 
@@ -608,12 +610,29 @@ func StartDeadlockWatchdog() {
 
 			elapsed := time.Since(time.Unix(0, lastBeat))
 			if elapsed > deadlockThreshold {
+				warnings++
 				coordinatorDebugLog.Printf("DEADLOCK WARNING: No heartbeat for %v", elapsed)
 
 				// Also write to crash log (debug log may be /dev/null in non-debug mode)
 				if crashLog != nil {
 					crashLog.Printf("DEADLOCK WARNING: No heartbeat for %v", elapsed)
 				}
+				// A loop that has not heartbeated in 30s is not coming back:
+				// handlers run on the loop goroutine with 8s task timeouts, so
+				// six straight warnings means a wedge, not a slow task. Die and
+				// let the supervisor start a healthy daemon — observed live as a
+				// daemon that heartbeated its file, served stale renders, and
+				// never ticked again until SIGQUIT by hand.
+				if warnings >= 6 {
+					if crashLog != nil {
+						crashLog.Printf("DEADLOCK FATAL: no loop heartbeat for %v, self-terminating", elapsed)
+					}
+					logEvent("DEADLOCK_FATAL age_ms=%d", elapsed.Milliseconds())
+					syscall.Kill(os.Getpid(), syscall.SIGTERM)
+					return
+				}
+			} else {
+				warnings = 0
 			}
 		}
 	}()

@@ -2336,7 +2336,6 @@ func Run(args []string) int {
 
 	resetTerminal := func() {
 		renderer.ResetTerminal()
-		os.Stdout.Sync()
 	}
 
 	resetTerminal()
@@ -2357,7 +2356,7 @@ func Run(args []string) int {
 		sendMu:        &sync.Mutex{},
 	}
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus(), tea.WithOutput(renderer.StdoutSink))
 	globalProgram = p
 
 	// Handle signals for graceful shutdown
