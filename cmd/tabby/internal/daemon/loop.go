@@ -1168,7 +1168,12 @@ func (l *Loop) handleWatchdogTick() {
 	l.flags.watchdog.Store(false)
 	l.deps.RunLoopTask("watchdog", 6*time.Second, func() {
 		logInput("HEALTH clients=%d", l.server.ClientCount())
-		watchdogCheckRenderers(l.server, l.deps.SessionID, l.coord)
+		// watchdogCheckRenderers kills/respawns panes — chrome mutation,
+		// owner-only like every other repair path (a non-owner daemon killed
+		// the owner's full-width sidebar as "corrupt" mid-session).
+		if l.coord.OwnsGroupLayout() {
+			watchdogCheckRenderers(l.server, l.deps.SessionID, l.coord)
+		}
 		panelAudit(l.deps.SessionID, l.coord)
 	})
 }

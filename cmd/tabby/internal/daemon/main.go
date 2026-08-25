@@ -2067,7 +2067,15 @@ func watchdogCheckRenderers(server *daemon.Server, sessionID string, coordinator
 		// If pane_width >= window_width-2 the split direction has been flipped (e.g.
 		// by tmux source ~/.tmux.conf recalculating layouts). Kill and respawn so the
 		// next watchdog / spawnRenderersForNewWindows cycle restores the left sidebar.
-		if isSidebar && !sidebarHidden && windowWidth > 0 && paneWidth >= windowWidth-2 {
+		// EXEMPTION: the phone full-width sidebar mode is exactly this shape on
+		// purpose (window option set by openFullscreenSidebar).
+		fsOpen := coordinator.fullscreenSidebarWinID == windowID
+		if !fsOpen {
+			if v := tmuxOutputTrimmed("show-window-option", "-v", "-t", windowID, "@tabby_fullscreen_sidebar"); v == "1" {
+				fsOpen = true
+			}
+		}
+		if isSidebar && !fsOpen && !sidebarHidden && windowWidth > 0 && paneWidth >= windowWidth-2 {
 			logEvent("LAYOUT_CORRUPT_SIDEBAR pane=%s window=%s pane_w=%d win_w=%d -- killing flipped sidebar",
 				paneID, windowID, paneWidth, windowWidth)
 			markSkipPreserveForWindow(paneID)
@@ -2222,7 +2230,7 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 	// sidebar slivers next to the content and the layout loop churning on
 	// them every pass. The audit is owner-gated, so stashing from here is
 	// safe; once stashed, sidebarIsStashed stays true and this never repeats.
-	if profile == "phone" && coordinator.sidebarHidden && !sidebarIsStashed() {
+	if profile == "phone" && coordinator.sidebarHidden && !sidebarIsStashed() && coordinator.fullscreenSidebarWinID == "" {
 		logEvent("AUDIT_SIDEBAR_STASH action=stash reason=phone_profile_unstashed")
 		coordinator.hideSidebarPanes()
 	}

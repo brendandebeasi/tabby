@@ -9951,11 +9951,39 @@ func fullscreenSidebarPanes(winID string) (content []string, footerPane string, 
 	return content, footerPane, footerHeight
 }
 
-// openFullscreenSidebar (phone) hides the window's CONTENT and fills the content
-// area with a full-width sidebar renderer, keeping the window-header carousel as a
-// bottom footer. The content pane(s) are break-pane'd into the detached _tabby_limbo
-// session (tagged @tabby_fs_origin) and restored on close. V1 supports single-pane
-// content windows; multi-pane windows are left unchanged (deferred).
+// stashedSidebarPaneForWindow returns the pane id of the sidebar renderer
+// parked in the limbo stash window for winID, or "" when no stash exists.
+func stashedSidebarPaneForWindow(winID string) string {
+	out := tmuxOutputTrimmed("list-panes", "-t", stashNameForWindow(winID), "-F", "#{pane_id}")
+	lines := dashLines(out)
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(lines[0])
+}
+
+// killLimboWindowsNamed removes any limbo windows carrying name. Leftover
+// stash windows from a failed open/close cycle collide by name: on restore,
+// two same-named stash windows join back as duplicate sidebars. The pane
+// being (re)stashed now is always the live one, so anything already parked
+// under its name is stale.
+func killLimboWindowsNamed(name string) {
+	out := tmuxOutputTrimmed("list-windows", "-t", sidebarLimboSession, "-F", "#{window_id}\t#{window_name}")
+	for _, line := range dashLines(out) {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) == 2 && parts[1] == name {
+			tmuxCmd("kill-window", "-t", parts[0]).Run()
+		}
+	}
+}
+
+// openFullscreenSidebar (phone) hides the window's CONTENT and expands the
+// window's EXISTING sidebar renderer to fill the area above the footer.
+// Reusing the stashed renderer (rather than spawning a second one) avoids a
+// client-key collision at the daemon and the spawn delay, and it is what makes
+// close cheap: break-pane it back into its stash. The content pane sits
+// untouched in a tagged limbo stash window and is restored on close. V1
+// supports single-pane content windows; multi-pane windows are left unchanged.
 func (c *Coordinator) openFullscreenSidebar(winID string) {
 	winID = strings.TrimSpace(winID)
 	if winID == "" || c.fullscreenSidebarWinID != "" {
@@ -9984,6 +10012,7 @@ func (c *Coordinator) openFullscreenSidebar(winID string) {
 
 	// Stash the content pane into the limbo session, tagged with its origin window.
 	stashName := contentStashNameForWindow(winID)
+	killLimboWindowsNamed(stashName)
 	sw, err := tmuxCmd("break-pane", "-d", "-P", "-F", "#{window_id}", "-s", content[0], "-n", stashName).Output()
 	if err != nil {
 		coordinatorDebugLog.Printf("openFullscreenSidebar: break-pane failed for %s: %v", content[0], err)
@@ -9996,29 +10025,25 @@ func (c *Coordinator) openFullscreenSidebar(winID string) {
 			"-t", fmt.Sprintf("%s:%d", sidebarLimboSession, sidebarStashParkBase)).Run()
 	}
 
-	// Kill any EXISTING sidebar pane(s) in the window (on a multi-client session the
-	// sidebar may be shown, not stashed) so we don't end up with two sidebars
-	// squeezing the footer. A fresh full-width one is spawned next.
-	killOut := tmuxOutputTrimmed("list-panes", "-t", winID, "-F",
-		"#{pane_id}\t#{pane_current_command}\t#{pane_start_command}")
-	for _, line := range dashLines(killOut) {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		if isSidebarPaneCommand(parts[1], parts[2]) {
-			tmuxCmd("kill-pane", "-t", parts[0]).Run()
+	// Join the stashed sidebar pane back in above the footer — stacked
+	// (join-pane default split), so as the only other pane it becomes
+	// full-width. Fall back to a fresh renderer spawn when no stash exists
+	// (e.g. desktop-mode with an inline sidebar).
+	reused := false
+	if sbPane := stashedSidebarPaneForWindow(winID); sbPane != "" {
+		if err := tmuxCmd("join-pane", "-d", "-b", "-s", sbPane, "-t", footerPane).Run(); err != nil {
+			coordinatorDebugLog.Printf("openFullscreenSidebar: join sidebar failed: %v", err)
+		} else {
+			reused = true
 		}
 	}
-
-	// Spawn a full-width sidebar renderer ABOVE the footer (-v -b -f), then pin the
-	// footer back to its height so the sidebar fills the rest. -f = full window
-	// width, so the sidebar is full-width with NO width clamp.
-	if rendererBin := getRendererBin(); rendererBin != "" {
-		cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -window '%s'",
-			rendererBin, c.dashboardSession(), winID)
-		if err := tmuxCmd("split-window", "-d", "-v", "-b", "-f", "-t", footerPane, cmdStr).Run(); err != nil {
-			coordinatorDebugLog.Printf("openFullscreenSidebar: sidebar spawn failed: %v", err)
+	if !reused {
+		if rendererBin := getRendererBin(); rendererBin != "" {
+			cmdStr := fmt.Sprintf("printf '\\033[?25l\\033[2J\\033[H' && %s -session '%s' -window '%s'",
+				rendererBin, c.dashboardSession(), winID)
+			if err := tmuxCmd("split-window", "-d", "-v", "-b", "-f", "-t", footerPane, cmdStr).Run(); err != nil {
+				coordinatorDebugLog.Printf("openFullscreenSidebar: sidebar spawn failed: %v", err)
+			}
 		}
 	}
 	if footerH > 0 {
@@ -10027,7 +10052,7 @@ func (c *Coordinator) openFullscreenSidebar(winID string) {
 
 	tmuxCmd("set-window-option", "-t", winID, "@tabby_fullscreen_sidebar", "1").Run()
 	c.fullscreenSidebarWinID = winID
-	logEvent("FULLSCREEN_OPEN window=%s", winID)
+	logEvent("FULLSCREEN_OPEN window=%s reused_stash=%v", winID, reused)
 }
 
 // closeFullscreenSidebar reverses openFullscreenSidebar: kill the full-width
@@ -10041,7 +10066,9 @@ func (c *Coordinator) closeFullscreenSidebar(winID string, focusContent bool) {
 	_ = tmuxRun("set-option", "-g", "@tabby_spawning", "1")
 	defer tmuxRun("set-option", "-gu", "@tabby_spawning")
 
-	// Kill the full-width sidebar pane(s) in the window (leave the footer).
+	// Return the full-width sidebar pane to its limbo stash (the renderer
+	// process survives break-pane; no respawn on either side of the swap),
+	// then rejoin the stashed content above the footer.
 	content, footerPane, _ := fullscreenSidebarPanes(winID)
 	footerH := 0
 	if v := tmuxOutputTrimmed("show-window-option", "-v", "-t", winID, "@tabby_fs_footer_height"); v != "" {
@@ -10055,8 +10082,15 @@ func (c *Coordinator) closeFullscreenSidebar(winID string, focusContent bool) {
 		if len(parts) < 3 {
 			continue
 		}
-		if isSidebarPaneCommand(parts[1], parts[2]) {
-			tmuxCmd("kill-pane", "-t", parts[0]).Run()
+		if !isSidebarPaneCommand(parts[1], parts[2]) {
+			continue
+		}
+		killLimboWindowsNamed(stashNameForWindow(winID))
+		if sw, err := tmuxCmd("break-pane", "-d", "-P", "-F", "#{window_id}", "-s", parts[0], "-n", stashNameForWindow(winID)).Output(); err == nil {
+			if stashWin := strings.TrimSpace(string(sw)); stashWin != "" {
+				tmuxCmd("move-window", "-d", "-a", "-s", stashWin,
+					"-t", fmt.Sprintf("%s:%d", sidebarLimboSession, sidebarStashParkBase)).Run()
+			}
 		}
 	}
 
@@ -10072,7 +10106,7 @@ func (c *Coordinator) closeFullscreenSidebar(winID string, focusContent bool) {
 			stashWin := strings.TrimSpace(parts[0])
 			cpane := firstToken(tmuxOutputTrimmed("list-panes", "-t", stashWin, "-F", "#{pane_id}"), "%")
 			if cpane != "" {
-				tmuxCmd("join-pane", "-d", "-v", "-b", "-s", cpane, "-t", footerPane).Run()
+				tmuxCmd("join-pane", "-d", "-b", "-s", cpane, "-t", footerPane).Run()
 			}
 		}
 		if footerH > 0 {
@@ -18920,40 +18954,16 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// the source window afterward. activeClientGeometry resolves via the
 		// ClientElector that was just pinned by the input handler.
 		_, _, userTTY, _, _ := activeClientGeometry()
-		// On a PHONE, the hamburger opens the full-width sidebar as a display-popup
-		// OVERLAY (the sidebar-popup renderer at 100%x100%). This is the SAFE
-		// re-enable of the old full-width mode: an overlay never break-panes content
-		// out to _tabby_limbo, so the content-loss bug that got the previous
-		// full-width mode disabled (nav bypassing the close-first guard -> emptied
-		// window reaped with its stashed content) simply cannot happen — the content
-		// panes sit untouched behind the popup, which closes on tab-select / Esc.
-		// Targeted at the exact phone client (-c <tty>) so it lands on the right
-		// screen in a multi-client setup. Desktop keeps the inline hide/show below.
+		// On a PHONE, the hamburger toggles the full-width sidebar IN PLACE:
+		// the window's own sidebar renderer expands above the footer bar and
+		// the content pane parks in a tagged limbo stash. No popup overlay, no
+		// second renderer — the footer (with this same hamburger) stays put as
+		// the touch-sized close button. Desktop keeps the inline hide/show.
 		if c.ActiveClientProfile() == "phone" {
-			sessID := c.SessionID()
-			if sessID == "" {
-				sessID = c.sessionID
-			}
-			popupBin := getPopupBin()
-			if popupBin != "" && sessID != "" {
-				// display-popup's shell-command must be ONE argv string, or tmux
-				// execs it as a literal program name and the popup flashes shut
-				// (see launchQuestionPopup).
-				escSess := strings.ReplaceAll(sessID, "'", `'\''`)
-				popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
-				// -B: no popup border. -s bg=<sidebarBg>: paint the popup SURFACE with
-				// the sidebar background so no dark tmux-default shows through before/
-				// around the renderer's own fill (the popup was rendering on a dark bg).
-				args := []string{"display-popup", "-E", "-B", "-w", "100%", "-h", "100%"}
-				if sbBg := c.GetSidebarBg(); sbBg != "" {
-					args = append(args, "-s", fmt.Sprintf("bg=%s", sbBg))
-				}
-				if userTTY != "" {
-					args = append(args, "-c", userTTY)
-				}
-				args = append(args, "--", popupCmd)
-				go tmuxCmd(args...).Run()
-				logEvent("HAMBURGER_FULLWIDTH_POPUP session=%s tty=%s", sessID, userTTY)
+			if c.fullscreenSidebarWinID != "" {
+				c.closeFullscreenSidebar(c.fullscreenSidebarWinID, true)
+			} else {
+				c.openFullscreenSidebar(sourceWindowID)
 			}
 			return false
 		}
