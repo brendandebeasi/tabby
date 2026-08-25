@@ -862,9 +862,11 @@ func (l *Loop) handleWindowCheckTick() {
 		}
 		logEvent("WINDOW_CHECK_LIST count=%d ids=%v", len(windows), windowIDs)
 
-		spawnRenderersForNewWindows(l.server, l.deps.SessionID, windows, l.coord)
-		cleanupOrphanedSidebars(windows, l.coord)
-		cleanupOrphanWindowsByTmux(l.deps.SessionID, l.coord)
+		if l.coord.OwnsGroupLayout() {
+			spawnRenderersForNewWindows(l.server, l.deps.SessionID, windows, l.coord)
+			cleanupOrphanedSidebars(windows, l.coord)
+			cleanupOrphanWindowsByTmux(l.deps.SessionID, l.coord)
+		}
 		// Width sync as fallback for missed events, only when active context changed
 		activeTTY := ""
 		activeW := 0
@@ -948,7 +950,18 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 	var layoutOps int
 
 	lockedWidth := 0
-	if opts.LockWindowsToActive != nil {
+	// Grouped sessions share these windows: a non-owner reconcile resizes
+	// sidebars to ITS client's geometry, the owner measures the result and
+	// adopts it, and the two daemons ping-pong the global width (observed
+	// live as WIDTH_SYNC_ADOPT 15 -> 72 -> 15 within a minute, sidebars
+	// visibly flapping). All tmux mutations below belong to the elected
+	// layout owner, same as doPaneLayoutOps; rendering and broadcast are
+	// unaffected.
+	mutatesAllowed := l.coord.OwnsGroupLayout()
+	if !mutatesAllowed {
+		logEvent("RECONCILE_SKIP reason=not_group_layout_owner trigger=%s active=%s", opts.Reason, activeWin)
+	}
+	if mutatesAllowed && opts.LockWindowsToActive != nil {
 		ac := opts.LockWindowsToActive
 		if ac.Width > 0 && ac.Height > 0 {
 			lockedWidth = ac.Width
@@ -1010,15 +1023,22 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 	logEvent("RECONCILE_START reason=%s active=%s force=%v lock_windows=%v locked_width=%d",
 		opts.Reason, activeWin, opts.ForceWidthSync, opts.LockWindowsToActive != nil, lockedWidth)
 
-	widthOps := l.coord.PlanWidthSync(activeWin, opts.ForceWidthSync)
-	// Header heights need the POST-lock window width: this same batch will
-	// resize every window to lockedWidth before the resize-pane ops fire,
-	// so window-headers must target desiredHeight(lockedWidth), not
-	// desiredHeight(current_tmux_width). Pass lockedWidth through so the
-	// touch tab bar follows a desktop→phone switch in the same frame.
-	headerOps := l.coord.PlanHeaderHeights(activeWin, lockedWidth)
-	ops = append(ops, widthOps...)
-	ops = append(ops, headerOps...)
+	// PlanWidthSync/PlanHeaderHeights are not pure: planning measures the
+	// shared windows and can ADOPT a measured sidebar width into the global
+	// option. A non-owner running it still poisons the group width even with
+	// its ops unflushed, so planning is owner-only too.
+	var widthOps, headerOps []ResizeOp
+	if mutatesAllowed {
+		widthOps = l.coord.PlanWidthSync(activeWin, opts.ForceWidthSync)
+		// Header heights need the POST-lock window width: this same batch will
+		// resize every window to lockedWidth before the resize-pane ops fire,
+		// so window-headers must target desiredHeight(lockedWidth), not
+		// desiredHeight(current_tmux_width). Pass lockedWidth through so the
+		// touch tab bar follows a desktop→phone switch in the same frame.
+		headerOps = l.coord.PlanHeaderHeights(activeWin, lockedWidth)
+		ops = append(ops, widthOps...)
+		ops = append(ops, headerOps...)
+	}
 
 	// Sync the in-memory client snapshot against the geometry we are about
 	// to apply. Done after planning, before flush, so render-time clamps
@@ -1027,7 +1047,7 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 
 	if len(ops) > 0 {
 		flushOpsBatched(ops, "reconcile:"+opts.Reason)
-	} else {
+	} else if mutatesAllowed {
 		logEvent("RECONCILE_NOOP reason=%s active=%s", opts.Reason, activeWin)
 	}
 
