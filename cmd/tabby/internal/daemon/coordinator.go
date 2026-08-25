@@ -786,6 +786,7 @@ type Coordinator struct {
 	activeWindowChangeTime time.Time            // When the active window changed (for grace period)
 	windowFirstSeen        map[string]time.Time // When each window was first observed by width sync (a brand-new window's sidebar width is spawn output, never a user drag)
 	pendingAdopt           pendingWidthAdopt    // Ambiguous active-window sidebar width awaiting confirmation by a second pass (see confirmWidthAdoptCandidate)
+	adoptConfirmTimer      *time.Timer          // one-shot follow-up pass that corroborates pendingAdopt; armed when a candidate is set
 	windowHistory          []string             // LIFO stack of recently visited window IDs (most recent first, max 20)
 	clientWindowHistory    map[string][]string  // Per-client LIFO stacks, keyed by client tty. Two terminals attached to one session each need their own back-target; a single shared stack restored one client's close to the other client's last window.
 	widthSyncMu            sync.Mutex
@@ -1157,7 +1158,7 @@ func (c *Coordinator) UpdateClientSizeSnapshot(clientID string, width int, heigh
 		}
 		c.clientHeights[clientID] = height
 	}
-	c.updateKeyboardHoldLocked(clientID, height)
+	c.updateKeyboardHoldLocked(clientID, width, height)
 	c.clientWidthsMu.Unlock()
 	c.SetClientProfile(clientID, c.computeProfile(width))
 }
@@ -10761,6 +10762,59 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	}
 	c.clientWidthsMu.RUnlock()
 
+	// Read actual tmux pane widths AND sidebar pane IDs in one round-trip.
+	// Capturing the paneID here means the execution phase doesn't need a
+	// per-window list-panes call to resolve the sidebar — it can hand the
+	// resolved IDs directly to flushOpsBatched as one chained tmux command.
+	// window_width rides along so the adopt guard below can reject a sidebar
+	// that currently spans its whole window.
+	// Wrapped in a bounded context so a stalled tmux server cannot hold
+	// widthSyncMu indefinitely (this runs before the lock is taken).
+	actualPaneWidths := make(map[string]int)
+	sidebarPaneIDs := make(map[string]string)
+	windowWidths := make(map[string]int)
+	paneCtx, paneCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	paneArgs := sessionScopedListPanesArgs("#{pane_id}|#{pane_current_command}|#{window_id}|#{pane_width}|#{window_width}|#{pane_start_command}")
+	if paneOut, err := exec.CommandContext(paneCtx, "tmux", paneArgs...).Output(); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
+			parts := strings.SplitN(line, "|", 6)
+			if len(parts) == 6 && isSidebarPaneCommand(parts[1], parts[5]) {
+				if w, err := strconv.Atoi(parts[3]); err == nil {
+					actualPaneWidths[parts[2]] = w
+				}
+				if w, err := strconv.Atoi(parts[4]); err == nil {
+					windowWidths[parts[2]] = w
+				}
+				if _, dup := sidebarPaneIDs[parts[2]]; !dup {
+					sidebarPaneIDs[parts[2]] = parts[0]
+				}
+			}
+		}
+	} else if paneCtx.Err() == context.DeadlineExceeded {
+		logEvent("WIDTH_SYNC_PANE_LIST_TIMEOUT ms=1500")
+	}
+	paneCancel()
+
+	// A daemon can hold the group's layout lease while serving only some (or
+	// none) of the sidebar renderers: in a grouped session the renderers
+	// subscribe to the daemon of the session that spawned them, but the lease
+	// follows the most recent challenger. Syncing only registered clients then
+	// leaves every other window's sidebar uncorrected — observed live as five
+	// windows pinned at 82 (proportional restore from the narrow geometry)
+	// while the owner looped over its single client. tmux pane widths are
+	// just as authoritative (the adopt path already prefers them), so merge
+	// them in for any window without a registered renderer.
+	mergedFromTmux := 0
+	for winID, w := range actualPaneWidths {
+		if _, ok := clientSnapshot[winID]; !ok {
+			clientSnapshot[winID] = w
+			mergedFromTmux++
+		}
+	}
+	if mergedFromTmux > 0 {
+		logEvent("WIDTH_SYNC_CLIENTS_FROM_TMUX merged=%d total=%d active=%s", mergedFromTmux, len(clientSnapshot), activeWindowID)
+	}
+
 	if len(clientSnapshot) == 0 {
 		logEvent("WIDTH_SYNC_SKIP reason=no_clients active=%s force=%v duration_ms=%d", activeWindowID, force, time.Since(start).Milliseconds())
 		return nil
@@ -10852,13 +10906,17 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	// oscillation from the global client profile.
 	multiClientSizes := c.attachedClientWidthSpread()
 
-	// Debounce: ignore resize events within 500ms of our last sync (unless forced)
+	// Debounce: ignore resize events within 500ms of our last sync (unless forced).
+	// A pending adopt candidate for the active window overrides the debounce:
+	// that candidate needs a second corroborating pass to confirm, and the
+	// follow-up pass typically arrives hot on the heels of the arming one.
 	var sinceLast time.Duration
 	hasLast := !c.lastWidthSync.IsZero()
 	if hasLast {
 		sinceLast = time.Since(c.lastWidthSync)
 	}
-	if !force && hasLast && sinceLast < 500*time.Millisecond {
+	pendingForActive := c.pendingAdopt.windowID != "" && c.pendingAdopt.windowID == activeWindowID
+	if !force && hasLast && sinceLast < 500*time.Millisecond && !pendingForActive {
 		logEvent("WIDTH_SYNC_SKIP reason=debounce active=%s force=%v since_last_ms=%d", activeWindowID, force, sinceLast.Milliseconds())
 		c.widthSyncMu.Unlock()
 		return nil
@@ -10881,39 +10939,6 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 		paneID      string // resolved upfront from list-panes; empty = skip
 	}
 	var ops []resizeOp
-
-	// Read actual tmux pane widths AND sidebar pane IDs in one round-trip.
-	// Capturing the paneID here means the execution phase doesn't need a
-	// per-window list-panes call to resolve the sidebar — it can hand the
-	// resolved IDs directly to flushOpsBatched as one chained tmux command.
-	// Wrapped in a bounded context so a stalled tmux server cannot hold
-	// widthSyncMu indefinitely.
-	actualPaneWidths := make(map[string]int)
-	sidebarPaneIDs := make(map[string]string)
-	// window_width rides along on the same round-trip so the adopt guard below
-	// can reject a sidebar that currently spans its whole window.
-	windowWidths := make(map[string]int)
-	paneCtx, paneCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	paneArgs := sessionScopedListPanesArgs("#{pane_id}|#{pane_current_command}|#{window_id}|#{pane_width}|#{window_width}|#{pane_start_command}")
-	if paneOut, err := exec.CommandContext(paneCtx, "tmux", paneArgs...).Output(); err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
-			parts := strings.SplitN(line, "|", 6)
-			if len(parts) == 6 && isSidebarPaneCommand(parts[1], parts[5]) {
-				if w, err := strconv.Atoi(parts[3]); err == nil {
-					actualPaneWidths[parts[2]] = w
-				}
-				if w, err := strconv.Atoi(parts[4]); err == nil {
-					windowWidths[parts[2]] = w
-				}
-				if _, dup := sidebarPaneIDs[parts[2]]; !dup {
-					sidebarPaneIDs[parts[2]] = parts[0]
-				}
-			}
-		}
-	} else if paneCtx.Err() == context.DeadlineExceeded {
-		logEvent("WIDTH_SYNC_PANE_LIST_TIMEOUT ms=1500")
-	}
-	paneCancel()
 
 	// If the active window's sidebar was resized by the user, adopt the new
 	// width as global BEFORE computing per-client targets. Without this,
@@ -11070,13 +11095,48 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 					adoptedActiveWidth = effectiveActive
 				}
 			} else {
-				coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global",
-					activeWindowID, c.globalWidth, effectiveActive)
-				logEvent("WIDTH_SYNC_ADOPT active=%s from=%d to=%d", activeWindowID, c.globalWidth, effectiveActive)
-				c.adoptGlobalSidebarWidth(activeWindowID, effectiveActive)
-				adoptedActiveWidth = effectiveActive
+				// Unambiguous on its face — but a lone agreeing sample is
+				// still not proof the layout has settled. A sidebar mid-
+				// restore (clamped width growing back to the global after a
+				// focus flip) sweeps through values with both measurements
+				// agreeing, and single-sample adoption persisted those
+				// transients as the user's chosen width (observed live:
+				// 25 -> 77 -> 34 -> 21 adopted within six seconds around a
+				// phone->desktop switch, clobbering @tabby_sidebar_width_desktop).
+				// Require the same two-sample confirmation as the ambiguous
+				// branch; a completed drag reproduces its width on the next
+				// pass, a transient does not.
+				confirmed, next := confirmWidthAdoptCandidate(prevAdoptCandidate, activeWindowID, effectiveActive, activeWinWidth, now)
+				c.pendingAdopt = next
+				if !confirmed {
+					deferActiveWindow = true
+					logEvent("WIDTH_SYNC_ADOPT_DEFER reason=first_sample active=%s measured=%d global=%d win_w=%d", activeWindowID, effectiveActive, c.globalWidth, activeWinWidth)
+				} else {
+					coordinatorDebugLog.Printf("Width sync: user resized active sidebar %s from %d to %d, updating global",
+						activeWindowID, c.globalWidth, effectiveActive)
+					logEvent("WIDTH_SYNC_ADOPT active=%s from=%d to=%d confirmed=2pass", activeWindowID, c.globalWidth, effectiveActive)
+					c.adoptGlobalSidebarWidth(activeWindowID, effectiveActive)
+					adoptedActiveWidth = effectiveActive
+				}
 			}
 		}
+	}
+
+	// A candidate left armed needs its corroborating second pass, and nothing
+	// guarantees one comes: a single drag gesture coalesces into one hook
+	// event, and the window-check tick stays silent while the context key is
+	// stable. Schedule that pass here — inside PlanWidthSync rather than in
+	// the Reconcile caller — because the panel audit's drift path reaches
+	// this code through RunWidthSync and bypasses Reconcile entirely.
+	if deferActiveWindow && c.adoptConfirmTimer == nil {
+		win := activeWindowID
+		c.adoptConfirmTimer = time.AfterFunc(650*time.Millisecond, func() {
+			c.widthSyncMu.Lock()
+			c.adoptConfirmTimer = nil
+			c.widthSyncMu.Unlock()
+			logEvent("WIDTH_SYNC_ADOPT_CONFIRM_TICK active=%s", win)
+			c.RunWidthSync(win, true)
+		})
 	}
 
 	for clientID, currentWidth := range clientSnapshot {
@@ -11449,8 +11509,21 @@ func (c *Coordinator) getMobileKeyboardSettings() (int, int) {
 	return keyboardWidth, keyboardThreshold
 }
 
-func (c *Coordinator) updateKeyboardHoldLocked(clientID string, reportedHeight int) {
+func (c *Coordinator) updateKeyboardHoldLocked(clientID string, width, reportedHeight int) {
 	if clientID == "" || isHeaderClient(clientID) {
+		return
+	}
+	// On-screen keyboards exist on phone/tablet-sized windows only. A
+	// desktop-width window that briefly reports few rows is not a keyboard —
+	// but the hold used to arm on height alone, so a window shrunk while a
+	// narrow client held the session geometry kept its hold after the
+	// desktop took back over, pinning the desktop sidebar to keyboard_width
+	// until expiry (observed: at_keyboard_clamp with height=45 on a 167-col
+	// desktop window, sidebar stuck at 15).
+	if width > sidebarTabletMaxWindowCols() {
+		if c.keyboardHoldUntil != nil {
+			delete(c.keyboardHoldUntil, clientID)
+		}
 		return
 	}
 	_, keyboardThreshold := c.getMobileKeyboardSettings()
