@@ -2155,6 +2155,18 @@ func panelAudit(sessionID string, coordinator *Coordinator) {
 		logEvent("AUDIT_SKIP reason=no_elected_client session=%s", sessionID)
 		return
 	}
+
+	// Phone mode with the sidebar state saying "hidden" but sidebar panes
+	// physically present in the windows: a daemon restart into phone profile
+	// sets sidebarHidden without ever running the stash, leaving 1-wide
+	// sidebar slivers next to the content and the layout loop churning on
+	// them every pass. The audit is owner-gated, so stashing from here is
+	// safe; once stashed, sidebarIsStashed stays true and this never repeats.
+	if profile == "phone" && coordinator.sidebarHidden && !sidebarIsStashed() {
+		logEvent("AUDIT_SIDEBAR_STASH action=stash reason=phone_profile_unstashed")
+		coordinator.hideSidebarPanes()
+	}
+
 	activeWindowID := ""
 	for _, w := range coordinator.GetWindows() {
 		if w.Active {
