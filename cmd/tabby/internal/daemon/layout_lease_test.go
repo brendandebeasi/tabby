@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -113,6 +115,7 @@ func TestGroupLayoutStateAsksTmuxForSessionIDNotName(t *testing.T) {
 }
 
 func TestOwnsGroupLayout_CachesTheElection(t *testing.T) {
+	stubGroupLayoutLease(t, nil)
 	calls := 0
 	orig := groupLayoutState
 	groupLayoutState = func() (map[string]string, []groupLayoutClient) {
@@ -132,6 +135,7 @@ func TestOwnsGroupLayout_CachesTheElection(t *testing.T) {
 }
 
 func TestOwnsGroupLayout_FalseWhenAPeerIsMoreRecentlyActive(t *testing.T) {
+	stubGroupLayoutLease(t, nil)
 	orig := groupLayoutState
 	groupLayoutState = func() (map[string]string, []groupLayoutClient) {
 		return map[string]string{"$1": "infras", "$2": "infras"},
@@ -144,4 +148,153 @@ func TestOwnsGroupLayout_FalseWhenAPeerIsMoreRecentlyActive(t *testing.T) {
 
 	assert.False(t, NewCoordinator("$1").OwnsGroupLayout())
 	assert.True(t, NewCoordinator("$2").OwnsGroupLayout())
+}
+
+// stubGroupLayoutLease replaces the lease-option read/write with an in-memory
+// map for the duration of one test, so the sticky layer never touches the
+// developer's real tmux server. Returns the map so a test can seed or inspect
+// the lease.
+func stubGroupLayoutLease(t *testing.T, initial map[string]string) map[string]string {
+	t.Helper()
+	if initial == nil {
+		initial = map[string]string{}
+	}
+	origRead := groupLayoutLeaseRead
+	origWrite := groupLayoutLeaseWrite
+	groupLayoutLeaseRead = func() map[string]string {
+		snap := map[string]string{}
+		for k, v := range initial {
+			snap[k] = v
+		}
+		return snap
+	}
+	groupLayoutLeaseWrite = func(name, value string) {
+		if value == "" {
+			delete(initial, name)
+		} else {
+			initial[name] = value
+		}
+	}
+	t.Cleanup(func() {
+		groupLayoutLeaseRead = origRead
+		groupLayoutLeaseWrite = origWrite
+	})
+	return initial
+}
+
+func leaseGroup() map[string]string {
+	return map[string]string{"$12": "infras", "$13": "infras"}
+}
+
+func leaseClients() []groupLayoutClient {
+	return []groupLayoutClient{
+		{name: "/dev/ttys001", session: "$12", activity: 100},
+		{name: "/dev/ttys002", session: "$13", activity: 200},
+	}
+}
+
+// The first election in a group has no incumbent to protect, so the claimant
+// takes ownership immediately — hysteresis must not add delay where there is
+// nothing to judder against.
+func TestStickyGroupLayoutOwner_FirstElectionIsImmediate(t *testing.T) {
+	lease := stubGroupLayoutLease(t, nil)
+
+	owner := stickyGroupLayoutOwner("infras", "$13", leaseGroup(), leaseClients(), time.Now())
+
+	assert.Equal(t, "$13", owner)
+	assert.Equal(t, "$13", lease["@tabby_layout_owner_infras"])
+}
+
+// The live judder: a stray bit of phone activity (mosh keepalive, focus
+// event) made it the most-recent client for a moment and the owner flipped
+// $12 -> $13 -> $12 inside 7 seconds, reflowing the whole group each way. A
+// challenger must not take the lease the instant it wins an election.
+func TestStickyGroupLayoutOwner_ChallengerBlipDoesNotFlip(t *testing.T) {
+	now := time.Now()
+	stubGroupLayoutLease(t, map[string]string{
+		"@tabby_layout_owner_infras": "$12",
+	})
+
+	owner := stickyGroupLayoutOwner("infras", "$13", leaseGroup(), leaseClients(), now)
+
+	assert.Equal(t, "$12", owner, "a challenger must hold most-active before the chrome reflows for it")
+}
+
+func TestStickyGroupLayoutOwner_ChallengerHeldPastDelayTakesOver(t *testing.T) {
+	now := time.Now()
+	lease := stubGroupLayoutLease(t, map[string]string{
+		"@tabby_layout_owner_infras":      "$12",
+		"@tabby_layout_challenger_infras": fmt.Sprintf("$13 %d", now.Add(-layoutOwnerHandoffDelay-time.Second).Unix()),
+	})
+
+	owner := stickyGroupLayoutOwner("infras", "$13", leaseGroup(), leaseClients(), now)
+
+	assert.Equal(t, "$13", owner)
+	assert.Equal(t, "$13", lease["@tabby_layout_owner_infras"])
+	assert.Empty(t, lease["@tabby_layout_challenger_infras"], "the challenger record is spent once it wins")
+}
+
+// The challenger clock restarts when the most-active session changes again —
+// two devices alternating activity must never accumulate toward a handoff.
+func TestStickyGroupLayoutOwner_ChallengerClockRestartsPerChallenger(t *testing.T) {
+	now := time.Now()
+	lease := stubGroupLayoutLease(t, map[string]string{
+		"@tabby_layout_owner_infras":      "$12",
+		"@tabby_layout_challenger_infras": fmt.Sprintf("$14 %d", now.Add(-time.Hour).Unix()),
+	})
+	groups := map[string]string{"$12": "infras", "$13": "infras", "$14": "infras"}
+	clients := []groupLayoutClient{
+		{name: "/dev/ttys001", session: "$12", activity: 100},
+		{name: "/dev/ttys002", session: "$13", activity: 200},
+		{name: "/dev/ttys003", session: "$14", activity: 150},
+	}
+
+	owner := stickyGroupLayoutOwner("infras", "$13", groups, clients, now)
+
+	assert.Equal(t, "$12", owner, "$13 only just became the challenger; $14's stale clock must not hand it the win")
+	assert.Contains(t, lease["@tabby_layout_challenger_infras"], "$13")
+}
+
+// When the incumbent's client is gone, nobody is using its layout — holding
+// the lease for the delay would leave the group drawn for a detached device.
+func TestStickyGroupLayoutOwner_DetachedIncumbentHandsOffImmediately(t *testing.T) {
+	now := time.Now()
+	stubGroupLayoutLease(t, map[string]string{
+		"@tabby_layout_owner_infras": "$12",
+	})
+	clients := []groupLayoutClient{
+		{name: "/dev/ttys002", session: "$13", activity: 200}, // $12 detached
+	}
+
+	owner := stickyGroupLayoutOwner("infras", "$13", leaseGroup(), clients, now)
+
+	assert.Equal(t, "$13", owner)
+}
+
+// An incumbent that regains most-active clears any pending challenger.
+func TestStickyGroupLayoutOwner_IncumbentRecoveryClearsChallenger(t *testing.T) {
+	now := time.Now()
+	lease := stubGroupLayoutLease(t, map[string]string{
+		"@tabby_layout_owner_infras":      "$12",
+		"@tabby_layout_challenger_infras": fmt.Sprintf("$13 %d", now.Unix()),
+	})
+
+	owner := stickyGroupLayoutOwner("infras", "$12", leaseGroup(), leaseClients(), now)
+
+	assert.Equal(t, "$12", owner)
+	assert.Empty(t, lease["@tabby_layout_challenger_infras"])
+}
+
+// A fully detached group owns nothing and must not disturb the stored lease —
+// when a client reattaches, the incumbent resumes instead of a fresh election
+// reflowing the chrome for no reason.
+func TestStickyGroupLayoutOwner_FullyDetachedKeepsLease(t *testing.T) {
+	lease := stubGroupLayoutLease(t, map[string]string{
+		"@tabby_layout_owner_infras": "$12",
+	})
+
+	owner := stickyGroupLayoutOwner("infras", "", leaseGroup(), nil, time.Now())
+
+	assert.Equal(t, "", owner)
+	assert.Equal(t, "$12", lease["@tabby_layout_owner_infras"])
 }

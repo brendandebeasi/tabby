@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,11 +27,15 @@ import (
 // shared windows. It cannot help here: every daemon above has a real client.
 // Someone has to lose, so exactly one daemon per group owns layout at a time.
 //
-// The owner is elected, not leased: there is no lock file and no negotiation.
-// Every daemon reads the same tmux state and applies the same deterministic
-// rule (most recently active client; ties broken by client name), so they all
-// independently arrive at the same answer. Ownership follows the user — the
-// client you are actually typing in wins, and its daemon lays out the group.
+// The owner is elected, not negotiated: there is no lock file. Every daemon
+// reads the same tmux state and applies the same deterministic rule (most
+// recently active client; ties broken by client name), so they all
+// independently arrive at the same answer. On top of the raw election sits a
+// sticky lease (stickyGroupLayoutOwner): ownership only moves after a
+// challenger has held most-active for layoutOwnerHandoffDelay, so a stray
+// keepalive or focus event on the phone stops flipping the whole group's
+// chrome. The lease lives in per-group tmux global options, which every
+// daemon — fresh-started ones included — reads identically.
 
 // groupLayoutClient is one attached tmux client considered for group layout
 // ownership.
@@ -50,6 +55,17 @@ type groupLayoutClient struct {
 // and is strictly better than the unbounded every-daemon-every-round fight it
 // replaces.
 const layoutOwnerRecheck = time.Second
+
+// layoutOwnerHandoffDelay is how long a challenger must hold most-active
+// before ownership actually moves. The election keys on client_activity, and
+// activity is cheap: a mosh keepalive, a focus event, or one stray keystroke
+// on the phone makes it the most-recent client for a moment. Without
+// hysteresis each such blip flipped the owner, and a flip is a full chrome
+// reflow (kill-pane + split-window across every shared window) — observed
+// live as the owner going $12 -> $13 -> $12 inside 7 seconds while the user
+// never left the desktop. Three seconds absorbs the blips; a deliberate
+// device switch keeps the challenger ahead for far longer than that.
+const layoutOwnerHandoffDelay = 3 * time.Second
 
 // groupLayoutState reads, from the live tmux server, which sessions belong to
 // which group and every attached client. Both halves have to come from the
@@ -141,6 +157,125 @@ func electGroupLayoutOwner(sessionID string, groups map[string]string, clients [
 	return candidates[0].session
 }
 
+// The sticky-ownership layer. electGroupLayoutOwner answers "who is active
+// right now"; what layout needs is "who has been active long enough to be
+// worth a full chrome reflow". The current owner and the pending challenger
+// are stored as per-group tmux global options so every daemon in the group —
+// including one that just restarted — reads the same lease and reaches the
+// same verdict. Daemon-local memory would lose the challenger's age on every
+// rebuild restart and hand ownership over instantly, which is exactly the
+// judder this layer exists to stop.
+//
+// Writes happen only on lease transitions (init, challenger noted/changed,
+// handoff), never on a steady-state recheck.
+
+func layoutLeaseOptionName(group string, kind string) string {
+	var b strings.Builder
+	for _, r := range group {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return "@tabby_layout_" + kind + "_" + b.String()
+}
+
+// groupLayoutLeaseRead fetches every @tabby_layout_* global option in one
+// fork/exec. It is a var so tests can stub the tmux server.
+var groupLayoutLeaseRead = func() map[string]string {
+	lease := map[string]string{}
+	out, err := tmuxOutputCtx("show-options", "-g")
+	if err != nil {
+		return lease
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "@tabby_layout_") {
+			continue
+		}
+		name, value, _ := strings.Cut(line, " ")
+		lease[name] = strings.Trim(value, `"`)
+	}
+	return lease
+}
+
+// groupLayoutLeaseWrite sets (or, for an empty value, unsets) one lease
+// option. A var so tests never touch the real tmux server.
+var groupLayoutLeaseWrite = func(name, value string) {
+	var args []string
+	if value == "" {
+		args = []string{"set-option", "-gu", name}
+	} else {
+		args = []string{"set-option", "-g", name, value}
+	}
+	if _, err := tmuxOutputCtx(args...); err != nil {
+		logEvent("GROUP_LAYOUT_LEASE_WRITE_ERR option=%s err=%v", name, err)
+	}
+}
+
+// stickyGroupLayoutOwner turns the instantaneous election winner into a lease.
+// group is the session's group name, claimant the electGroupLayoutOwner
+// result, groups/clients the same tmux snapshot the election ran on. now is
+// injectable for tests.
+func stickyGroupLayoutOwner(group, claimant string, groups map[string]string, clients []groupLayoutClient, now time.Time) string {
+	if claimant == "" {
+		// Fully detached group: nobody is watching, nobody owns. Leave the
+		// stored lease alone — when a client reattaches the incumbent resumes
+		// instead of a fresh election reflowing for no reason.
+		return ""
+	}
+	lease := groupLayoutLeaseRead()
+	ownerOpt := layoutLeaseOptionName(group, "owner")
+	challengerOpt := layoutLeaseOptionName(group, "challenger")
+	owner := lease[ownerOpt]
+
+	if owner == "" || owner == claimant {
+		if owner == "" {
+			groupLayoutLeaseWrite(ownerOpt, claimant)
+			logEvent("GROUP_LAYOUT_LEASE_INIT group=%s owner=%q", group, claimant)
+		}
+		if lease[challengerOpt] != "" {
+			groupLayoutLeaseWrite(challengerOpt, "")
+		}
+		return claimant
+	}
+
+	// A challenger is more recently active than the incumbent. Hand off at
+	// once when the incumbent cannot be using its layout — its client is
+	// gone or the session left the group — because waiting out the delay
+	// would leave the group laid out for a device nobody is on.
+	incumbentAlive := groups[owner] == group
+	if incumbentAlive {
+		incumbentAlive = false
+		for _, cl := range clients {
+			if cl.session == owner {
+				incumbentAlive = true
+				break
+			}
+		}
+	}
+	if incumbentAlive {
+		challengerSince := int64(0)
+		challengerSession := ""
+		if raw := lease[challengerOpt]; raw != "" {
+			fmt.Sscanf(raw, "%s %d", &challengerSession, &challengerSince)
+		}
+		if challengerSession != claimant {
+			groupLayoutLeaseWrite(challengerOpt, fmt.Sprintf("%s %d", claimant, now.Unix()))
+			logEvent("GROUP_LAYOUT_CHALLENGER group=%s owner=%q challenger=%q", group, owner, claimant)
+			return owner
+		}
+		if now.Unix()-challengerSince < int64(layoutOwnerHandoffDelay/time.Second) {
+			return owner
+		}
+		logEvent("GROUP_LAYOUT_HANDOFF group=%s from=%q to=%q", group, owner, claimant)
+	}
+	groupLayoutLeaseWrite(ownerOpt, claimant)
+	groupLayoutLeaseWrite(challengerOpt, "")
+	return claimant
+}
+
 // layoutOwnerCache memoizes the election for layoutOwnerRecheck.
 type layoutOwnerCache struct {
 	mu   sync.Mutex
@@ -168,6 +303,11 @@ func (c *Coordinator) OwnsGroupLayout() bool {
 	}
 	groups, clients := groupLayoutState()
 	owner := electGroupLayoutOwner(c.sessionID, groups, clients)
+	// Ungrouped sessions elect themselves; the sticky layer only arbitrates
+	// shared window sets.
+	if group := groups[c.sessionID]; group != "" {
+		owner = stickyGroupLayoutOwner(group, owner, groups, clients, now)
+	}
 	owns := owner == c.sessionID
 	if !c.layoutOwner.elected || owner != c.layoutOwner.owner {
 		logEvent("GROUP_LAYOUT_OWNER session=%s owner=%q owns=%v clients=%d",
