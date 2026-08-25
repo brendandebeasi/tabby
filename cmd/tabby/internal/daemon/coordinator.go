@@ -3059,6 +3059,16 @@ func (c *Coordinator) IsTransitionInProgress() bool {
 }
 
 func (c *Coordinator) SelectWindow(targetWindowID, reason, source string) error {
+	return c.selectWindowScoped(targetWindowID, reason, source, "")
+}
+
+// selectWindowScoped is SelectWindow with an optional source window: when
+// srcWindowID names the window the triggering client was viewing (a sidebar
+// tab click), attached clients on that window are moved per-client via
+// switch-client, so the CLICKING user's session changes rather than the
+// sidebar-owner daemon's session under grouped sessions. Falls back to the
+// global select-window when no client matches.
+func (c *Coordinator) selectWindowScoped(targetWindowID, reason, source, srcWindowID string) error {
 	targetWindowID = strings.TrimSpace(targetWindowID)
 	reason = strings.TrimSpace(reason)
 	source = strings.TrimSpace(source)
@@ -3084,19 +3094,28 @@ func (c *Coordinator) SelectWindow(targetWindowID, reason, source string) error 
 	// resolves to the newest session in the group, not ours. Fall back to the
 	// bare id if the qualified form fails — surfaceForActivate may have just
 	// moved the window in from the holding session.
-	selectTarget := targetWindowID
-	if sess := strings.TrimSpace(c.sessionID); sess != "" {
-		selectTarget = sess + ":" + targetWindowID
+	perClient := false
+	if srcWindowID != "" {
+		if switched := c.switchClientsOnWindow(srcWindowID, targetWindowID); len(switched) > 0 {
+			perClient = true
+			logEvent("SELECT_WINDOW_PERCLIENT source=%s target=%s switched=%v", srcWindowID, targetWindowID, switched)
+		}
 	}
-	if err := tmuxRun("select-window", "-t", selectTarget); err != nil {
-		if selectTarget == targetWindowID || tmuxRun("select-window", "-t", targetWindowID) != nil {
-			if reason == "" {
-				reason = "unspecified"
+	if !perClient {
+		selectTarget := targetWindowID
+		if sess := strings.TrimSpace(c.sessionID); sess != "" {
+			selectTarget = sess + ":" + targetWindowID
+		}
+		if err := tmuxRun("select-window", "-t", selectTarget); err != nil {
+			if selectTarget == targetWindowID || tmuxRun("select-window", "-t", targetWindowID) != nil {
+				if reason == "" {
+					reason = "unspecified"
+				}
+				if source == "" {
+					source = "unknown"
+				}
+				return fmt.Errorf("select window target=%s reason=%s source=%s: %w", targetWindowID, reason, source, err)
 			}
-			if source == "" {
-				source = "unknown"
-			}
-			return fmt.Errorf("select window target=%s reason=%s source=%s: %w", targetWindowID, reason, source, err)
 		}
 	}
 
@@ -10441,6 +10460,136 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 		c.settlePeek(target)
 	}
 	return len(switched) > 0
+}
+
+// switchClientsOnWindow moves every attached client currently viewing
+// sourceWindowID to targetWindowID via per-client `switch-client`, each
+// qualified with the client's OWN session. Sidebar tab clicks land here: a
+// sidebar pane is owned by whichever daemon spawned it, and under grouped
+// sessions (`new-session -t`) each session keeps its own current window —
+// so a daemon-scoped `select-window` switches the sidebar OWNER's session
+// while the clicking user's attached session never moves. Returns the ttys
+// switched; empty means the caller should fall back to the global
+// select-window path (no attached client is viewing the source window).
+func (c *Coordinator) switchClientsOnWindow(sourceWindowID, targetWindowID string) []string {
+	src := strings.TrimSpace(sourceWindowID)
+	target := strings.TrimSpace(targetWindowID)
+	if src == "" || !strings.HasPrefix(src, "@") || target == "" {
+		return nil
+	}
+
+	// server-wide list-clients: the clicking client can be attached to a peer
+	// session in the group (the sidebar pane is owned by one daemon but shared
+	// by every linked window), so rows must not be pre-filtered to our session.
+	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_session}|#{client_window}|#{session_id}").Output()
+	if err != nil {
+		return nil
+	}
+
+	c.stateMu.RLock()
+	idxToID := make(map[string]string, len(c.windows))
+	for i := range c.windows {
+		w := &c.windows[i]
+		idxToID[strconv.Itoa(w.Index)] = w.ID
+	}
+	c.stateMu.RUnlock()
+	daemonSession := strings.TrimSpace(c.sessionID)
+
+	type ttyResolution struct {
+		tty     string
+		window  string
+		session string
+	}
+	var fallbackTTYs []string
+	ttySession := map[string]string{}
+	resolutions := []ttyResolution{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 4)
+		if len(parts) < 3 {
+			continue
+		}
+		tty := strings.TrimSpace(parts[0])
+		sess := strings.TrimSpace(parts[1])
+		idx := strings.TrimSpace(parts[2])
+		sessID := sess
+		if len(parts) == 4 && strings.TrimSpace(parts[3]) != "" {
+			sessID = strings.TrimSpace(parts[3])
+		}
+		if tty == "" {
+			continue
+		}
+		ttySession[tty] = sessID
+		if sess == daemonSession || daemonSession == "" {
+			if winID, ok := idxToID[idx]; ok {
+				resolutions = append(resolutions, ttyResolution{tty: tty, window: winID, session: sessID})
+				continue
+			}
+		}
+		fallbackTTYs = append(fallbackTTYs, tty)
+	}
+
+	if len(fallbackTTYs) > 0 {
+		fallbackResults := make([]ttyResolution, len(fallbackTTYs))
+		var wg sync.WaitGroup
+		wg.Add(len(fallbackTTYs))
+		for i, tty := range fallbackTTYs {
+			i, tty := i, tty
+			go func() {
+				defer wg.Done()
+				curOut, _ := tmuxCmd("display-message", "-p", "-c", tty, "#{window_id}").Output()
+				fallbackResults[i] = ttyResolution{tty: tty, window: strings.TrimSpace(string(curOut)), session: ttySession[tty]}
+			}()
+		}
+		wg.Wait()
+		resolutions = append(resolutions, fallbackResults...)
+	}
+
+	ttys := []string{}
+	ttyTargets := map[string]string{}
+	for _, r := range resolutions {
+		if r.window != src {
+			continue
+		}
+		ttys = append(ttys, r.tty)
+		if sess := strings.TrimSpace(r.session); sess != "" {
+			ttyTargets[r.tty] = sess + ":" + target
+		} else {
+			ttyTargets[r.tty] = target
+		}
+	}
+	if len(ttys) == 0 {
+		return nil
+	}
+
+	switched := make([]string, len(ttys))
+	switchErrs := make([]error, len(ttys))
+	var swg sync.WaitGroup
+	swg.Add(len(ttys))
+	for i, tty := range ttys {
+		i, tty := i, tty
+		go func() {
+			defer swg.Done()
+			if err := tmuxCmd("switch-client", "-c", tty, "-t", ttyTargets[tty]).Run(); err != nil {
+				if ttyTargets[tty] == target || tmuxCmd("switch-client", "-c", tty, "-t", target).Run() != nil {
+					switchErrs[i] = err
+					return
+				}
+			}
+			switched[i] = tty
+		}()
+	}
+	swg.Wait()
+	successes := switched[:0]
+	for i, tty := range switched {
+		if switchErrs[i] != nil {
+			logEvent("SELECT_WINDOW_PERCLIENT_SWITCH_ERR tty=%s target=%s err=%v", ttys[i], target, switchErrs[i])
+			continue
+		}
+		if tty != "" {
+			successes = append(successes, tty)
+		}
+	}
+	return successes
 }
 
 // sidebarIsStashed reports whether any stash window exists.
@@ -18262,7 +18411,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			}
 			c.closeFullscreenSidebar(c.fullscreenSidebarWinID, false)
 			c.MarkUserWindowAction()
-			if err := c.SelectWindow(target, "fullscreen_select_window", clientID); err != nil {
+			if err := c.selectWindowScoped(target, "fullscreen_select_window", clientID, clientID); err != nil {
 				logEvent("FULLSCREEN_SELECT_ERR target=%s err=%v", target, err)
 			}
 			go autoPickContentPane(target)
@@ -18313,7 +18462,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		logEvent("SELECT_WINDOW client=%s raw=%s target=%s", clientID, rawTarget, targetWindow)
 
 		c.MarkUserWindowAction()
-		if err := c.SelectWindow(targetWindow, "semantic_select_window", clientID); err != nil {
+		if err := c.selectWindowScoped(targetWindow, "semantic_select_window", clientID, clientID); err != nil {
 			logEvent("SELECT_WINDOW_ERR client=%s raw=%s target=%s err=%v", clientID, rawTarget, targetWindow, err)
 			return false
 		}
@@ -18506,7 +18655,7 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			windowID := strings.TrimSpace(string(out))
 			if windowID != "" {
 				// Select the window first, then the pane
-				if err := c.SelectWindow(windowID, "semantic_select_pane_window", clientID); err != nil {
+				if err := c.selectWindowScoped(windowID, "semantic_select_pane_window", clientID, clientID); err != nil {
 					logEvent("SELECT_PANE_WINDOW_ERR pane=%s window=%s client=%s err=%v", paneID, windowID, clientID, err)
 					return false
 				}
