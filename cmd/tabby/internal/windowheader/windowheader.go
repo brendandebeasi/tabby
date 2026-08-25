@@ -4,6 +4,7 @@ package windowheader
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -759,7 +760,6 @@ func Run(args []string) int {
 	// Reset terminal state before starting to clean up any stale modes
 	resetTerminal := func() {
 		renderer.ResetTerminal()
-		os.Stdout.WriteString("\033[0m\033[?25h")
 		os.Stdout.Sync()
 	}
 
@@ -789,15 +789,16 @@ func Run(args []string) int {
 	go func() {
 		defer recoverAndLog("signal-handler")
 		<-sigCh
-		resetTerminal()
 		if p != nil {
-			p.Send(tea.Quit())
+			// Kill needs no tty I/O, so it works even when the pane's pty
+			// buffer is full — the state that parks a graceful quit mid-write
+			// and used to wedge this handler before it could act.
+			p.Kill()
 		}
-		time.Sleep(100 * time.Millisecond)
 		resetTerminal()
 	}()
 
-	if _, err := p.Run(); err != nil {
+	if _, err := p.Run(); err != nil && !errors.Is(err, tea.ErrProgramKilled) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		resetTerminal()
 		return 1
