@@ -718,7 +718,7 @@ func Run(args []string) int {
 		sendMu:       &sync.Mutex{},
 	}
 
-	p := tea.NewProgram(model, tea.WithMouseCellMotion(), tea.WithReportFocus(), tea.WithOutput(renderer.StdoutSink))
+	p := tea.NewProgram(model, tea.WithMouseCellMotion(), tea.WithReportFocus())
 	globalProgram = p
 
 	// External ticker for keepalive/pane-check (avoids returning Cmds from Update
