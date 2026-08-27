@@ -604,8 +604,15 @@ if [ -z "$KEY" ]; then KEY="Tab"; fi
 tmux bind-key "$KEY" run-shell -b "$CURRENT_DIR/bin/tabby toggle"
 
 # Double-click on pane or border: pass through mouse events normally
+# The deferred copy-pipe re-checks that the pane is still in copy mode: during
+# the 0.3s delay the pane can leave copy mode or die (window churn), and
+# copy-pipe against a dead copy state segfaults the tmux SERVER (observed:
+# SIGSEGV in window_copy_pipe_run/job_get_event, tmux 3.6b). The if-shell
+# target is the literal pane id expanded at click time — a dead pane fails
+# cleanly. ##{...} escapes one expansion round so the mode check is evaluated
+# after the delay, not at click time.
 tmux bind-key -T root DoubleClick1Pane \
-    "select-pane -t = ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send-keys -M } { copy-mode -H ; send-keys -X select-word ; run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }"
+    "select-pane -t = ; if-shell -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' 'send-keys -M' 'copy-mode -H ; send-keys -X select-word ; run-shell -d 0.3 ; if-shell -F -t #{pane_id} ##{?pane_in_mode,1,0} \"send-keys -X copy-pipe-and-cancel\"'"
 
 normalize_global_key() {
 	local key="$1"

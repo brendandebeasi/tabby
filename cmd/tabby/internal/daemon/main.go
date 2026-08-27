@@ -3108,6 +3108,10 @@ func Run(args []string) int {
 	// loop on app launches.
 	server.OnResize = func(clientID string, width, height int, paneID string) {
 		coordinator.UpdateClientSizeSnapshot(clientID, width, height)
+		// Arm a drag candidate from the renderer's own report: the plan-time
+		// arm only ever sees the active window, so a drag followed by a fast
+		// window switch otherwise never arms and the drag is reverted.
+		coordinator.ArmWidthAdoptCandidate(clientID, width)
 		if paneID != "" {
 			coordinator.ApplyThemeToPane(paneID)
 		}
@@ -3172,6 +3176,7 @@ func Run(args []string) int {
 		loop.SubmitRefresh()
 	}
 	coordinator.OnKillPhoneWindowHeaders = func() { killPhoneWindowHeaders(*sessionID) }
+	coordinator.OnGeometryRelock = func(reason string) { loop.RequestGeometryRelock(reason) }
 	coordinator.OnSpawnPhoneChrome = func() {
 		cfg := coordinator.GetConfig()
 		customBorder := cfg.PaneHeader.CustomBorder

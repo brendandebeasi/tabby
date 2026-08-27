@@ -161,6 +161,12 @@ type Loop struct {
 	// pendingGeomSince is when we first saw it. See geometrySettled.
 	pendingGeom      string
 	pendingGeomSince time.Time
+	// relockGeom, when set, makes the next geometry tick lock every window to
+	// the elected client even though lastClientGeom / lastResizeKey say the
+	// size is already handled. Written from the lease-election goroutine via
+	// RequestGeometryRelock, so it is atomic; every other field here is
+	// loop-goroutine only.
+	relockGeom atomic.Bool
 	// lastStaleClientPrune rate-limits PruneStaleClients; the geometry tick
 	// itself runs far too often to scan clients on every pass.
 	lastStaleClientPrune time.Time
@@ -1124,11 +1130,22 @@ func (l *Loop) handleClientGeomTick() {
 		}
 		res := l.elector.Elect()
 		if !res.OK {
+			// A genuine zero-attached-clients election (not a tmux error) means
+			// the last client detached: drop the stale active-client snapshot so
+			// the profile falls back to desktop instead of pinning whatever the
+			// departed client (e.g. a phone) left behind.
+			if res.Attached == 0 {
+				l.coord.ClearActiveClient("no_attached_clients")
+			}
 			return
 		}
 		ac := res.Client
+		// Cleared only once the forced reconcile below actually runs: an
+		// early return here (unsettled geometry) must leave the request
+		// standing for the next tick.
+		relock := l.relockGeom.Load()
 		geomKey := fmt.Sprintf("%s:%dx%d:%d", ac.TTY, ac.Width, ac.Height, res.Activity/5)
-		if geomKey == l.lastClientGeom {
+		if geomKey == l.lastClientGeom && !relock {
 			return
 		}
 		resizeKey := fmt.Sprintf("%s:%dx%d", ac.TTY, ac.Width, ac.Height)
@@ -1144,10 +1161,14 @@ func (l *Loop) handleClientGeomTick() {
 		logEvent("CLIENT_GEOMETRY_CHANGE tty=%s size=%dx%d activity=%d", ac.TTY, ac.Width, ac.Height, res.Activity)
 		l.coord.SetActiveClient(ac)
 		var lockTo *daemon.ActiveClient
-		if resizeKey != l.lastResizeKey {
+		if resizeKey != l.lastResizeKey || relock {
 			l.lastResizeKey = resizeKey
 			ac := ac // copy so we can take its address safely
 			lockTo = &ac
+		}
+		if relock {
+			l.relockGeom.Store(false)
+			logEvent("GEOMETRY_RELOCK tty=%s size=%dx%d", ac.TTY, ac.Width, ac.Height)
 		}
 		l.Reconcile(ReconcileOpts{
 			Reason: "geometry_tick",
@@ -1161,6 +1182,16 @@ func (l *Loop) handleClientGeomTick() {
 		})
 		l.coord.RunZoomSync("") // intentional no-op (kept for symmetry / future use)
 	})
+}
+
+// RequestGeometryRelock forces the next geometry tick to re-lock every window
+// to the elected client's size, ignoring the lastClientGeom / lastResizeKey
+// dedup. Also kicks a geometry tick so the relock lands now rather than at the
+// next size change. Safe to call from any goroutine.
+func (l *Loop) RequestGeometryRelock(reason string) {
+	l.relockGeom.Store(true)
+	logEvent("GEOMETRY_RELOCK_REQUEST reason=%s", reason)
+	l.submitCoalesced(&l.flags.geom, ClientGeomTickEvent{})
 }
 
 // handleWatchdogTick is the migrated body of the watchdogTicker case.

@@ -345,4 +345,15 @@ func (c *Coordinator) onLayoutOwnershipGained() {
 	target := c.ActiveClientProfile()
 	logEvent("PROFILE_TRANSITION_FAST target=%s reason=ownership_gained", target)
 	c.executeProfileTransition(target)
+
+	// Chrome is only half of it: the client_resized / geometry_tick reconcile
+	// that would have locked every window to this client's size was skipped
+	// while we were not the owner, and both paths commit lastResizeKey before
+	// reconciling — so the phone's size is already "handled" and no later tick
+	// re-applies it. The group stays laid out at the previous owner's
+	// geometry (desktop-sized windows on a phone screen) until something else
+	// changes size. Ask the loop for one forced re-lock.
+	if c.OnGeometryRelock != nil {
+		c.OnGeometryRelock("ownership_gained")
+	}
 }

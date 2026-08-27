@@ -101,6 +101,7 @@ ORPHANS=""
 for p in /tmp/tabby-daemon-*.pid; do
 	[ -e "$p" ] || continue
 	sess=$(basename "$p" .pid); sess=${sess#tabby-daemon-}
+	case "$sess" in *.watchdog) continue ;; esac
 	pid=$(cat "$p" 2>/dev/null)
 	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || continue
 	case " $LIVE_SESSIONS " in

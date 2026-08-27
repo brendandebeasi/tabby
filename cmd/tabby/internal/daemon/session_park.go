@@ -98,7 +98,22 @@ func (c *Coordinator) EnforceSingleActiveClient(trigger string) {
 		if !s.eligible || s.currentWindow != activeWin {
 			continue
 		}
-		dest := c.parkDestinationLocked(s, activeWin)
+		// Re-read the session's pointer before moving it: the active window
+		// was sampled at the top of this pass, and a nav landing mid-pass
+		// makes a stale contest park a session off a window nobody contests.
+		if cur := sessionCurrentWindow(s.name); cur != activeWin {
+			logEvent("PARK_SKIP session=%s reason=stale_contest sampled=%s current=%s trigger=%s", s.name, activeWin, cur, trigger)
+			continue
+		}
+		// Never park onto a window another session in the group points at —
+		// that just moves the clamp (and the visible reflow) elsewhere.
+		taken := map[string]bool{activeWin: true}
+		for _, other := range sessions {
+			if other.currentWindow != "" {
+				taken[other.currentWindow] = true
+			}
+		}
+		dest := c.parkDestinationLocked(s, activeWin, taken)
 		if dest == "" {
 			logEvent("PARK_SKIP session=%s reason=no_destination win=%s", s.name, activeWin)
 			continue
@@ -185,31 +200,62 @@ func sessionClientsIdle(sessionName string, idleLimit int) (bool, string) {
 	return eligible, tty
 }
 
-// parkDestinationLocked picks where a parked session should point instead:
-// its own window history first, then the shared one, then any live window
-// that isn't the contested one.
-func (c *Coordinator) parkDestinationLocked(s parkSessionInfo, contested string) string {
+// parkDestinationLocked picks where a parked session should point instead.
+// The destination must not be "taken" (pointed at by any session in the
+// group) — parking onto someone's current window just relocates the size
+// clamp and the reflow judder that comes with it. Preference order:
+// least-recently-used alive window first (the window the user is least
+// likely to visit next), then any untaken alive window, then the old
+// anything-alive behavior for window-starved cases.
+func (c *Coordinator) parkDestinationLocked(s parkSessionInfo, contested string, taken map[string]bool) string {
 	c.stateMu.RLock()
 	alive := make(map[string]bool, len(c.windows))
+	ids := make([]string, 0, len(c.windows))
 	for _, w := range c.windows {
 		alive[w.ID] = true
+		ids = append(ids, w.ID)
 	}
-	var candidates []string
+	history := append([]string(nil), c.windowHistory...)
+	var clientHistory []string
 	if s.clientTTY != "" {
-		candidates = append(candidates, c.clientWindowHistory[s.clientTTY]...)
-	}
-	candidates = append(candidates, c.windowHistory...)
-	for id := range alive {
-		candidates = append(candidates, id)
+		clientHistory = append(clientHistory, c.clientWindowHistory[s.clientTTY]...)
 	}
 	c.stateMu.RUnlock()
 
+	free := func(id string) bool {
+		return id != "" && alive[id] && !taken[id]
+	}
+
+	// LRU pass: windowHistory is MRU-first, so walk it backwards, oldest
+	// first; windows never visited come last, in list order.
 	seen := map[string]bool{contested: true}
-	for _, id := range candidates {
-		if id == "" || seen[id] {
+	for i := len(history) - 1; i >= 0; i-- {
+		id := history[i]
+		if seen[id] {
 			continue
 		}
 		seen[id] = true
+		if free(id) {
+			return id
+		}
+	}
+	for _, id := range ids {
+		if !seen[id] && free(id) {
+			return id
+		}
+		seen[id] = true
+	}
+
+	// Starved fallback: everything alive is taken — keep the session on any
+	// window other than the contested one (previous behavior).
+	mru := append(clientHistory, history...)
+	for id := range alive {
+		mru = append(mru, id)
+	}
+	for _, id := range mru {
+		if id == "" || id == contested {
+			continue
+		}
 		if alive[id] {
 			return id
 		}

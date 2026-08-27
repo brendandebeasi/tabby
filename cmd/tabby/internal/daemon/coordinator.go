@@ -914,6 +914,14 @@ type Coordinator struct {
 	// transition, instead of waiting out the layout loop's cooldown and tick.
 	OnSpawnPhoneChrome func()
 
+	// OnGeometryRelock asks the loop to re-lock every window to the elected
+	// client's size on its next geometry tick, bypassing the lastResizeKey
+	// dedup. Fired when the group layout lease hands us ownership: the
+	// resize that would have carried the new client's geometry was dropped
+	// as a non-owner mutation, but its key was already recorded, so nothing
+	// re-applies it.
+	OnGeometryRelock func(reason string)
+
 	// Context menu state (for in-renderer menus). pendingMenus,
 	// lastWindowSelect/lastWindowByClient, and lastPaneMenuOpen are loop-only
 	// dedup state — written and read exclusively from HandleInput on the
@@ -8850,6 +8858,58 @@ type pendingWidthAdopt struct {
 // forgotten rather than adopted much later out of context.
 const widthAdoptCandidateTTL = 5 * time.Second
 
+// ArmWidthAdoptCandidate records a renderer-reported off-global sidebar width
+// as a drag candidate ahead of the next width-sync pass. The plan-time arm
+// (the WIDTH_SYNC_ADOPT_DEFER branches) only ever sees the ACTIVE window, so a
+// drag followed by a fast window switch never arms at all — the first audit
+// pass after the switch then snaps the dragged pane back to the stale global
+// (observed live: RESIZE_APPLY 72, switch, WIDTH_SYNC_PLAN current=72
+// target=76 2.6s later). Arming from the renderer's resize report closes that
+// race. Adoption still goes through the plan-time guards: the normal confirm
+// re-measures with full context, and confirmWidthAdoptOnSwitch re-vets the
+// clamp shapes before adopting.
+func (c *Coordinator) ArmWidthAdoptCandidate(windowID string, width int) {
+	if windowID == "" || isHeaderClient(windowID) {
+		return
+	}
+	if width < 5 || width > 80 { // matches the plan-time plausibility bound
+		return
+	}
+	c.widthSyncMu.Lock()
+	defer c.widthSyncMu.Unlock()
+	if c.globalWidth == 0 || width == c.globalWidth {
+		return
+	}
+	if c.pendingAdopt.windowID == windowID && c.pendingAdopt.width == width {
+		return // already armed with this width
+	}
+	c.pendingAdopt = pendingWidthAdopt{windowID: windowID, width: width, at: time.Now()}
+	logEvent("WIDTH_SYNC_ADOPT_ARM win=%s width=%d global=%d", windowID, width, c.globalWidth)
+}
+
+// confirmWidthAdoptOnSwitch corroborates a pending drag candidate after a
+// window switch. A candidate belongs to the window it was measured in, not to
+// whichever window is active this pass: if the user drags a sidebar and
+// switches away before the second sample, every active-window guard keys on
+// the NEW window and the candidate dies unconfirmed — and the per-window loop
+// then snaps the dragged window back to the old global, losing the drag. The
+// dragged window still measuring the armed width IS the corroborating sample,
+// so adopt. Only vetted candidates reach pendingAdopt (guards run before
+// arming), so none are re-checked here.
+func confirmWidthAdoptOnSwitch(pending pendingWidthAdopt, activeWindowID string, paneWidths map[string]int, now time.Time) (int, bool) {
+	if pending.windowID == "" || pending.windowID == activeWindowID {
+		return 0, false
+	}
+	if now.Sub(pending.at) > widthAdoptCandidateTTL {
+		return 0, false
+	}
+	w, ok := paneWidths[pending.windowID]
+	if !ok || w != pending.width {
+		return 0, false
+	}
+	return pending.width, true
+}
+
 // confirmWidthAdoptCandidate decides whether an ambiguous measurement has been
 // corroborated. A measurement counts as a user drag once an independent pass
 // reads the same sidebar width in the same window at the same window width:
@@ -10308,9 +10368,12 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 	// `client_session` is the session NAME; `session_id` is the `$N` form the
 	// daemon keys everything by, and it is what a switch-client target must be
 	// qualified with below.
+	// client_activity rides along so parked/idle clients (a session stowed off
+	// the active window by EnforceSingleActiveClient still points at a window)
+	// don't get dragged along by someone else's keypress.
 	// server-wide list-clients: per-client navigation walks every client and
 	// filters on session_id in the loop below, so the rows must not be pre-filtered.
-	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_session}|#{client_window}|#{session_id}").Output()
+	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_session}|#{client_window}|#{session_id}|#{client_activity}").Output()
 	if err != nil {
 		logEvent("WINDOW_NAV_PERCLIENT_LIST_ERR err=%v", err)
 		return false
@@ -10330,17 +10393,19 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 	daemonSession := strings.TrimSpace(c.sessionID)
 
 	type ttyResolution struct {
-		tty     string
-		window  string
-		session string
+		tty      string
+		window   string
+		session  string
+		activity int64
 	}
 	var fallbackTTYs []string
 	// Each client's own session, so switch-client can name a
 	// session-qualified target below.
 	ttySession := map[string]string{}
+	ttyActivity := map[string]int64{}
 	resolutions := []ttyResolution{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "|", 4)
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 5)
 		if len(parts) < 3 {
 			continue
 		}
@@ -10348,7 +10413,7 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 		sess := strings.TrimSpace(parts[1])
 		idx := strings.TrimSpace(parts[2])
 		sessID := ""
-		if len(parts) == 4 {
+		if len(parts) >= 4 {
 			sessID = strings.TrimSpace(parts[3])
 		}
 		if tty == "" {
@@ -10358,10 +10423,14 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 			sessID = sess
 		}
 		ttySession[tty] = sessID
+		if len(parts) == 5 {
+			activity, _ := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64)
+			ttyActivity[tty] = activity
+		}
 		// Cache hit path: client is on our session, index resolves.
 		if sess == daemonSession || daemonSession == "" {
 			if winID, ok := idxToID[idx]; ok {
-				resolutions = append(resolutions, ttyResolution{tty: tty, window: winID, session: sessID})
+				resolutions = append(resolutions, ttyResolution{tty: tty, window: winID, session: sessID, activity: ttyActivity[tty]})
 				continue
 			}
 		}
@@ -10379,17 +10448,40 @@ func (c *Coordinator) selectNeighborWindowPerClient(sourceWindowID string, delta
 			go func() {
 				defer wg.Done()
 				curOut, _ := tmuxCmd("display-message", "-p", "-c", tty, "#{window_id}").Output()
-				fallbackResults[i] = ttyResolution{tty: tty, window: strings.TrimSpace(string(curOut)), session: ttySession[tty]}
+				fallbackResults[i] = ttyResolution{tty: tty, window: strings.TrimSpace(string(curOut)), session: ttySession[tty], activity: ttyActivity[tty]}
 			}()
 		}
 		wg.Wait()
 		resolutions = append(resolutions, fallbackResults...)
 	}
 
+	// A nav keypress comes from one active client; other clients on the
+	// source window are only there incidentally (a parked session's stale
+	// pointer, a sleeping phone). Dragging them along re-clamps the windows
+	// they get hauled through and fights the park machinery. When at least
+	// one matching client is active, switch only the active ones; when every
+	// matching client is idle, keep the old move-everyone behavior.
+	matches := []ttyResolution{}
+	for _, r := range resolutions {
+		if r.window == src {
+			matches = append(matches, r)
+		}
+	}
+	idleLimit := int64(parkIdleSeconds())
+	now := time.Now().Unix()
+	anyActive := false
+	for _, r := range matches {
+		if r.activity > 0 && now-r.activity < idleLimit {
+			anyActive = true
+			break
+		}
+	}
+
 	ttys := []string{}
 	ttyTargets := map[string]string{}
-	for _, r := range resolutions {
-		if r.window != src {
+	for _, r := range matches {
+		if anyActive && (r.activity == 0 || now-r.activity >= idleLimit) {
+			logEvent("WINDOW_NAV_PERCLIENT_SKIP_IDLE tty=%s session=%s idle_s=%d", r.tty, r.session, now-r.activity)
 			continue
 		}
 		ttys = append(ttys, r.tty)
@@ -11106,6 +11198,26 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 		// candidate, so clear it up front and re-arm only where it applies.
 		prevAdoptCandidate := c.pendingAdopt
 		c.pendingAdopt = pendingWidthAdopt{}
+
+		// Corroborate a pending candidate after a window switch (see
+		// confirmWidthAdoptOnSwitch) before any active-window guard can drop it.
+		// Candidates armed from a renderer report (ArmWidthAdoptCandidate) skip
+		// the plan-time guards, so re-vet the two clamp shapes here: a width
+		// sitting AT the profile or keyboard clamp is the clamp holding, not a
+		// drag — adopting it would flip the global down to the clamp.
+		if w, ok := confirmWidthAdoptOnSwitch(prevAdoptCandidate, activeWindowID, actualPaneWidths, now); ok {
+			profileClamp := c.boundedSidebarWidthForWindow(prevAdoptCandidate.windowID, c.globalWidth, 0)
+			keyboardWidth, _ := c.getMobileKeyboardSettings()
+			if w == profileClamp && profileClamp < c.globalWidth {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=switch_at_profile_clamp win=%s width=%d global=%d", prevAdoptCandidate.windowID, w, c.globalWidth)
+			} else if w == keyboardWidth && keyboardWidth < c.globalWidth {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=switch_at_keyboard_clamp win=%s width=%d global=%d", prevAdoptCandidate.windowID, w, c.globalWidth)
+			} else {
+				logEvent("WIDTH_SYNC_ADOPT active=%s from=%d to=%d confirmed=switch", prevAdoptCandidate.windowID, c.globalWidth, w)
+				c.adoptGlobalSidebarWidth(prevAdoptCandidate.windowID, w)
+				adoptedActiveWidth = w
+			}
+		}
 		effectiveActive := clientSnapshot[activeWindowID]
 		reportedActive := effectiveActive
 		haveActual := false
@@ -18105,6 +18217,30 @@ func (c *Coordinator) SetActiveClient(ac daemon.ActiveClient) {
 	}
 }
 
+// ClearActiveClient drops the elected-client snapshot when tmux reports zero
+// attached clients for our session (the last client detached). Without this,
+// the last client's width/profile — phone included — persisted forever: the
+// geometry tick early-returns on an empty election, so a daemon whose phone
+// roamed away kept profile=phone, and a later layout-lease handoff fired that
+// stale profile's chrome over the group's windows (observed live: a detached
+// session's daemon won the lease and stashed every sidebar).
+//
+// Clearing routes through maybeScheduleProfileTransition with a desktop-width
+// stand-in so a phone-profile daemon that IS the layout owner restores desktop
+// chrome right away instead of waiting for a reattach. The debounce's staleness
+// check (target vs current profile) cancels that fire if a narrow client
+// reattaches within the delay.
+func (c *Coordinator) ClearActiveClient(reason string) {
+	prev := int(c.activeClientWidth.Load())
+	if prev == 0 {
+		return
+	}
+	c.activeClientWidth.Store(0)
+	c.activeClient.Store(&daemon.ActiveClient{})
+	logEvent("CLIENT_GEOMETRY_CLEARED prev_width=%d reason=%s", prev, reason)
+	c.maybeScheduleProfileTransition(prev, 100)
+}
+
 // ActiveClientSnapshot returns a copy of the current elected-client state.
 // Safe to call from any goroutine.
 func (c *Coordinator) ActiveClientSnapshot() daemon.ActiveClient {
@@ -19575,8 +19711,15 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		if sessID == "" {
 			return false
 		}
-		panesOut, _ := tmuxCmd("list-panes", "-a", "-t", sessID, "-F",
+		panesOut, err := tmuxCmd("list-panes", "-a", "-t", sessID, "-F",
 			"#{pane_current_command}|#{pane_start_command}|#{pane_dead}").Output()
+		// A failed or empty listing must never read as "no main pane": a
+		// transient tmux error mid structural churn would otherwise
+		// kill-session a healthy session (observed live: infras-24 destroyed
+		// under a window create/kill burst, detaching its client).
+		if err != nil || strings.TrimSpace(string(panesOut)) == "" {
+			return false
+		}
 		hasMain := false
 		for _, line := range strings.Split(strings.TrimSpace(string(panesOut)), "\n") {
 			if line == "" {

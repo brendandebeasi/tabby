@@ -12,11 +12,15 @@ import (
 
 // ElectionResult is what ClientElector.Elect returns: the elected active client
 // plus the raw tmux activity timestamp (useful for dedup keys outside the
-// ActiveClient wire type) and an OK flag.
+// ActiveClient wire type) and an OK flag. Attached counts the session's
+// attached clients as observed, so OK=false can be told apart: Attached==0 is a
+// genuine "last client detached" (callers should drop stale client state),
+// while Attached==-1 means the tmux query itself failed (keep state, retry).
 type ElectionResult struct {
 	Client   ActiveClient
 	Activity int64
 	OK       bool
+	Attached int
 }
 
 // ClientElector owns the heuristic that decides which attached tmux client
@@ -146,7 +150,7 @@ func (e *ClientElector) Elect() ElectionResult {
 	out, err := exec.Command("tmux", e.listClientsArgs(
 		"#{client_tty}|||#{client_width}|||#{client_height}|||#{client_flags}|||#{client_activity}")...).Output()
 	if err != nil {
-		return ElectionResult{}
+		return ElectionResult{Attached: -1}
 	}
 
 	type clientInfo struct {
@@ -191,7 +195,7 @@ func (e *ClientElector) Elect() ElectionResult {
 		}
 	}
 	if len(attached) == 0 {
-		return ElectionResult{}
+		return ElectionResult{Attached: 0}
 	}
 
 	bestIdx := 0
@@ -280,6 +284,7 @@ func (e *ClientElector) Elect() ElectionResult {
 		},
 		Activity: best.activity,
 		OK:       true,
+		Attached: len(attached),
 	}
 }
 

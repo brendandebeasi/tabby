@@ -107,7 +107,15 @@ install: build
 # cached code signature for that path, so macOS AMFI SIGKILLs every subsequent
 # `tabby` exec (signal 9) — the watchdog can't respawn the daemon and the
 # sidebar dies. rm-then-cp + `codesign --force` avoids it.
+# A dev install often symlinks PLUGIN_DIR at this repo, which makes the
+# rm-then-cp below delete the binaries `build` just produced (bin/ IS the
+# install dir) and leave the plugin with none at all.
+SYNC_IS_SELF := $(shell [ "$$(cd $(PLUGIN_DIR) 2>/dev/null && pwd -P)" = "$$(pwd -P)" ] && echo 1)
+
 sync: build
+ifeq ($(SYNC_IS_SELF),1)
+	@echo "$(PLUGIN_DIR) is this repo (symlinked install) - build already deployed it"
+else
 	@rm -f $(PLUGIN_DIR)/bin/*
 	@cp $(BIN_DIR)/* $(PLUGIN_DIR)/bin/
 	@if [ "$$(uname)" = "Darwin" ]; then \
@@ -117,6 +125,7 @@ sync: build
 	@cp tabby.tmux $(PLUGIN_DIR)/
 	@test -f ~/.config/tabby/config.yaml || cp config.yaml ~/.config/tabby/config.yaml
 	@echo "Synced to $(PLUGIN_DIR)/ (config -> ~/.config/tabby/)"
+endif
 
 # Clean build artifacts
 clean:
