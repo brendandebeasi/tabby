@@ -17,6 +17,8 @@ Use the tabby clip path, picking the form that exists on this host:
 ```bash
 if command -v tabby >/dev/null 2>&1; then
   printf '%s' "$text" | tabby clip send --quiet
+elif [ -x "$HOME/bin/tabby-clip" ]; then
+  printf '%s' "$text" | "$HOME/bin/tabby-clip"
 else
   printf '%s' "$text" | tabby-clip
 fi

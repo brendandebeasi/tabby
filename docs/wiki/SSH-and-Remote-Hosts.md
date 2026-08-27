@@ -153,6 +153,15 @@ cat report.txt | tabby-clip
 make test 2>&1 | tabby-clip-tail 200
 ```
 
+The same file is also executable, which is the form to reach for on a host
+where you do not control the shell rc — an agent's box, or anything where a
+non-interactive shell has to be able to send:
+
+```bash
+chmod +x ~/bin/tabby-clip
+some-command | ~/bin/tabby-clip
+```
+
 If the remote shell is itself inside tmux, the escape is wrapped in a DCS
 passthrough envelope so the remote tmux forwards it upstream rather than
 consuming it. This happens automatically, on `$TMUX`, but the remote tmux has
@@ -191,18 +200,26 @@ for something on your clipboard.
 ### Getting it working over mosh, on iOS
 
 Mosh implements the write half of OSC 52 and accepts only the `c` selector.
-Everything Tabby emits is already in that shape, but tmux's own re-emission is
-not: tmux drives it from the `Ms` terminfo capability, and most `xterm-256color`
-entries have no `Ms`, so tmux silently sends nothing. Add one that hardcodes the
-selector:
+Everything Tabby emits is already in that shape, and so is what tmux re-emits:
+on 3.4 and 3.6, with stock `xterm-256color` or `tmux-256color`, tmux forwards
+exactly `ESC ] 52 ; c ; <base64> BEL` to its client. `set-clipboard on` is the
+only setting that matters.
+
+You will find advice to add a `terminal-overrides` line supplying the `Ms`
+terminfo capability, on the grounds that `xterm-256color` has none and tmux
+sends nothing without it:
 
 ```bash
 set -ag terminal-overrides ",xterm-256color:Ms=\\E]52;c%p1%.0s;%p2%s\\7"
 ```
 
-`%p1%.0s` consumes and discards the selection argument tmux would otherwise
-pass. The last piece is on the terminal app: it has to parse OSC 52 and write
-the system clipboard. Writing the pasteboard is unrestricted on iOS — it is
+That was true of much older tmux. It is not true of 3.4 or 3.6, which carry
+their own built-in defaults — capturing the pty on both versions shows the same
+bytes with the override and without it. The line is harmless, so keep it if you
+already have it, but it is not the thing to reach for when a send goes missing.
+
+The last piece is on the terminal app: it has to parse OSC 52 and write the
+system clipboard. Writing the pasteboard is unrestricted on iOS — it is
 *reading* that prompts — so this is the direction that works there.
 
 If there is a second tmux on the remote host, it needs `set-clipboard on` too.

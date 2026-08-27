@@ -1,8 +1,10 @@
+#!/usr/bin/env bash
 # tabby-clip.sh — push text from a remote shell up to the clipboard of the
 # device you are actually sitting at (laptop, phone), with no tabby binary and
 # no open socket on the remote host.
 #
-# Source this from your shell rc ON THE REMOTE HOST (the client-b* boxes), e.g.:
+# Works two ways. Source it from your shell rc ON THE REMOTE HOST (the
+# client-b* boxes) to get the functions:
 #
 #     # ~/.bashrc or ~/.zshrc
 #     [ -f ~/.tabby-clip.sh ] && . ~/.tabby-clip.sh
@@ -12,6 +14,12 @@
 #     tabby-clip < some-file
 #     some-command | tabby-clip
 #     tabby-clip "a literal string"
+#
+# Or run it directly, which is what an agent on a box with no rc hook of ours
+# should do — it needs nothing installed but the file itself:
+#
+#     some-command | ~/bin/tabby-clip
+#     ~/bin/tabby-clip "a literal string"
 #
 # How it works: it prints an OSC 52 clipboard-set escape to the terminal. Those
 # bytes ride the ssh connection into the local tmux pane, where tmux (with
@@ -80,3 +88,10 @@ tabby-clip-tail() {
 	local __tb_n=${1:-100}
 	tail -n "$__tb_n" | tabby-clip
 }
+
+# Executed rather than sourced: behave as the command. BASH_SOURCE is unset
+# when a zsh rc sources this, and differs from $0 when a bash rc does, so the
+# send only fires on the shebang path.
+if [ -n "${BASH_SOURCE:-}" ] && [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	tabby-clip "$@"
+fi

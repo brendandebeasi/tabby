@@ -27,8 +27,8 @@ the path.
 
 ## How to call it
 
-Two interchangeable forms. Try the binary first; fall back to the shell
-function on hosts that do not have tabby installed.
+Three interchangeable forms. Try the binary first, then the helper script, then
+the shell function.
 
 ```bash
 # Where the tabby binary exists (the user's Mac):
@@ -37,18 +37,22 @@ tabby clip send --text 'a literal string'
 tabby clip send --file ./report.txt
 tabby clip send --pane            # this pane's last 100 lines
 
-# On a remote host with no binary (the client-* boxes), where
-# ~/.tabby-clip.sh is sourced from the shell rc:
-printf '%s' "$text" | tabby-clip
-tabby-clip 'a literal string'
+# On a remote host with no binary (the client-* boxes):
+printf '%s' "$text" | ~/bin/tabby-clip
+~/bin/tabby-clip 'a literal string'
+
+# Same script sourced from a shell rc, where it is also a function:
 make test 2>&1 | tabby-clip-tail 200
 ```
 
-Pick between them by probing, so one instruction works on every host:
+`~/bin` is not on PATH on the client boxes, so call the script by its full
+path. Pick between the three by probing, so one instruction works everywhere:
 
 ```bash
 if command -v tabby >/dev/null 2>&1; then
   printf '%s' "$text" | tabby clip send --quiet
+elif [ -x "$HOME/bin/tabby-clip" ]; then
+  printf '%s' "$text" | "$HOME/bin/tabby-clip"
 else
   printf '%s' "$text" | tabby-clip
 fi
@@ -60,10 +64,11 @@ You cannot read the clipboard back — the transport is write-only, by design.
 A zero exit status means the escape was written to the terminal, not that the
 clipboard changed. Tell the user what you sent and let them check.
 
-If nothing arrives, the cause is almost always one of three settings on the
-user's Mac rather than anything on this host. Point them at
-`docs/wiki/SSH-and-Remote-Hosts.md`; the checks are `set -g set-clipboard on`,
-an `Ms` entry in `terminal-overrides`, and a terminal app that honours OSC 52.
+If nothing arrives, the cause is almost always a setting somewhere else on the
+chain rather than anything on this host. Point the user at
+`docs/wiki/SSH-and-Remote-Hosts.md`. The checks are `set -g set-clipboard on`
+on every tmux in the chain, `set -g allow-passthrough on` on any tmux running
+*here* on the remote host, and a terminal app that honours OSC 52.
 
 ## Direction
 
