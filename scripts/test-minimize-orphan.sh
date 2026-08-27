@@ -306,6 +306,63 @@ scenario_e_round_trip() {
 	fi
 }
 
+# ── refusal scenarios (F/G) ──────────────────────────────────────────────────
+# Parking is `move-window -d` out of the session, and tmux destroys a session
+# that just lost its last window — taking every grouped peer (one shared window
+# list) with it. Two windows must therefore refuse to park: the dashboard, whose
+# origin layout lives only in the daemon's memory and dies with it, and the last
+# remaining window. Both are destructive-if-broken, so they run last.
+
+scenario_g_dashboard_refuses() {
+	log_info "--- Scenario G: minimizing the dashboard is refused ---"
+	send_action "dashboard_toggle" ""
+	sleep 1
+	local dash
+	dash="$(tmux list-windows -t "$USER_SESSION" -F '#{window_id} #{@tabby_dashboard}' | awk '$2 == "1" { print $1; exit }')"
+	if [ -z "$dash" ]; then
+		log_fail "G: dashboard never came up; skipping"
+		return 1
+	fi
+	log_pass "G: dashboard window is $dash"
+
+	send_action "toggle_minimize_window" "$dash"
+	assert_eq "G: dashboard window stayed in the user session" "$(window_session "$dash")" "$USER_SESSION"
+	assert_empty "G: dashboard window not flagged minimized" "$(wopt "$dash" @tabby_minimized)"
+	if tmux has-session -t "$USER_SESSION" 2>/dev/null; then
+		log_pass "G: user session survived"
+	else
+		log_fail "G: user session was destroyed by minimizing the dashboard"
+		return 1
+	fi
+
+	send_action "dashboard_toggle" ""
+	sleep 1
+}
+
+scenario_f_last_window_refuses() {
+	log_info "--- Scenario F: minimizing the only window is refused ---"
+	local survivor
+	survivor="$(tmux display-message -p -t "$USER_SESSION" '#{window_id}')"
+	local w
+	for w in $(tmux list-windows -t "$USER_SESSION" -F '#{window_id}'); do
+		[ "$w" = "$survivor" ] || tmux kill-window -t "$w" 2>/dev/null
+	done
+	sleep 1
+	local count
+	count="$(tmux list-windows -t "$USER_SESSION" -F '#{window_id}' | wc -l | tr -d ' ')"
+	assert_eq "F: user session pared down to one window" "$count" "1"
+
+	send_action "toggle_minimize_window" "$survivor"
+	if tmux has-session -t "$USER_SESSION" 2>/dev/null; then
+		log_pass "F: user session survived"
+	else
+		log_fail "F: user session was destroyed by minimizing its last window"
+		return 1
+	fi
+	assert_eq "F: last window stayed put" "$(window_session "$survivor")" "$USER_SESSION"
+	assert_empty "F: last window not flagged minimized" "$(wopt "$survivor" @tabby_minimized)"
+}
+
 WIN_A=""
 WIN_B=""
 WIN_C=""
@@ -313,7 +370,7 @@ OTHER_SESSION_ID=""
 MAIN_BASELINE=""
 FOUNDING_PLACEHOLDER_ID=""
 
-prepare_scenario_a() {
+park_scenario_a() {
 	log_info "--- Scenario A prep: untagged orphan ---"
 	WIN_A=$(new_test_window "sc-a" "$USER_SESSION")
 	sleep 1
@@ -322,6 +379,9 @@ prepare_scenario_a() {
 		log_fail "A prep: window did not park"
 		return 1
 	fi
+}
+
+corrupt_scenario_a() {
 	# Simulate the exact observed bug: a prior daemon cleared the markers
 	# (e.g. mid-unpark crash) before the window made it out of the holding
 	# session, leaving it stranded and completely untagged.
@@ -332,7 +392,7 @@ prepare_scenario_a() {
 	log_pass "A prep: $WIN_A parked then stranded untagged in _tabby_minimized"
 }
 
-prepare_scenario_d2() {
+corrupt_scenario_d2() {
 	log_info "--- Scenario D2 prep: legacy (pre-upgrade) holding session, no placeholder tag ---"
 	# ensureMinimizedSession tagged the founding window when prepare_scenario_a
 	# first created the holding session. Strip that tag to simulate a session
@@ -347,7 +407,7 @@ prepare_scenario_d2() {
 	log_pass "D2 prep: stripped @tabby_min_placeholder from founding window $FOUNDING_PLACEHOLDER_ID"
 }
 
-prepare_scenario_b() {
+park_scenario_b() {
 	log_info "--- Scenario B prep: dead origin session ---"
 	WIN_B=$(new_test_window "sc-b" "$USER_SESSION")
 	sleep 1
@@ -356,11 +416,14 @@ prepare_scenario_b() {
 		log_fail "B prep: window did not park"
 		return 1
 	fi
+}
+
+corrupt_scenario_b() {
 	tmux set-window-option -t "$WIN_B" @tabby_min_origin '$999'
 	log_pass "B prep: $WIN_B retagged to dead session \$999"
 }
 
-prepare_scenario_c() {
+corrupt_scenario_c() {
 	log_info "--- Scenario C prep: window tagged to a foreign LIVE session ---"
 	tmux new-session -d -s "$OTHER_SESSION" -x 220 -y 50
 	OTHER_SESSION_ID="$(tmux display-message -p -t "$OTHER_SESSION" '#{session_id}')"
@@ -424,15 +487,27 @@ assert_scenario_d() {
 }
 
 run_reconciliation_scenarios() {
-	prepare_scenario_a || return 1
-	prepare_scenario_d2 || return 1
-	prepare_scenario_b || return 1
-	prepare_scenario_c || return 1
+	# Park through the live daemon first — parking is a daemon action.
+	park_scenario_a || return 1
+	park_scenario_b || return 1
+
+	# Then stop it before corrupting the tags. reconcileOrphanedMinimizedWindows
+	# runs on the watchdog tick as well as at startup, so a live daemon would heal
+	# these hand-made corruptions the moment they are written — mid-prep, before
+	# the baseline is captured. Stopping it makes the sweep fire exactly once, at
+	# the restart below, which is what the A/B/C/D assertions are written against.
+	log_info "stopping daemon before corrupting tags (tick sweep would heal them mid-prep)"
+	stop_daemon
+
+	corrupt_scenario_a || return 1
+	corrupt_scenario_d2 || return 1
+	corrupt_scenario_b || return 1
+	corrupt_scenario_c || return 1
 	capture_main_baseline
 
-	log_info "restarting daemon to trigger reconcileOrphanedMinimizedWindows"
-	if ! restart_daemon; then
-		log_fail "daemon restart failed; skipping A/B/C/D/D2 assertions"
+	log_info "starting daemon to trigger reconcileOrphanedMinimizedWindows"
+	if ! start_daemon; then
+		log_fail "daemon start failed; skipping A/B/C/D/D2 assertions"
 		return 1
 	fi
 
@@ -454,6 +529,10 @@ main() {
 	else
 		run_reconciliation_scenarios
 	fi
+
+	# Destructive: G leaves the dashboard toggled, F kills every other window.
+	scenario_g_dashboard_refuses
+	scenario_f_last_window_refuses
 
 	echo ""
 	echo "==================================================================="

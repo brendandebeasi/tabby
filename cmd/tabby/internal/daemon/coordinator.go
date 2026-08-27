@@ -9219,9 +9219,16 @@ func ensureLimboSession() {
 // cleanupLimboSessionIfEmpty kills the limbo session once no stash windows
 // remain anywhere (across all sessions). This also removes the placeholder
 // window new-session created, so the limbo session stops appearing in the
-// native session chooser the moment the sidebar is fully restored.
+// native session chooser the moment the sidebar is fully restored. Killing it
+// takes the stashed sidebar panes and any full-width content pane with it, so a
+// listing that FAILED must never be read as "nothing stashed".
 func cleanupLimboSessionIfEmpty() {
-	if sidebarIsStashed() || limboHasContentStash() {
+	sidebar, sidebarOK := anyWindowNamedWithPrefix(sidebarStashWindowPrefix)
+	content, contentOK := anyWindowNamedWithPrefix(contentStashWindowPrefix)
+	if !sidebarOK || !contentOK {
+		return // couldn't see the server — assume occupied rather than destroy
+	}
+	if sidebar || content {
 		return // sidebar OR content stashes still parked — keep the holder alive
 	}
 	if err := tmuxCmd("has-session", "-t", sidebarLimboSession).Run(); err == nil {
@@ -9230,20 +9237,29 @@ func cleanupLimboSessionIfEmpty() {
 	}
 }
 
+// anyWindowNamedWithPrefix reports whether any window on the server carries a name
+// starting with prefix. The second return says whether the listing succeeded, so a
+// caller that DESTROYS on "none found" can tell an empty server from an unreadable
+// one; callers that merely read state ignore it and take the false.
+func anyWindowNamedWithPrefix(prefix string) (bool, bool) {
+	out, err := tmuxCmd("list-windows", "-a", "-F", "#{window_name}").Output()
+	if err != nil {
+		return false, false
+	}
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(name, prefix) {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 // limboHasContentStash reports whether any full-width-sidebar CONTENT stash window
 // exists anywhere — used so cleanupLimboSessionIfEmpty never tears down the holder
 // (and the stashed content inside it) while a window is in full-width mode.
 func limboHasContentStash() bool {
-	out, err := tmuxCmd("list-windows", "-a", "-F", "#{window_name}").Output()
-	if err != nil {
-		return false
-	}
-	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.HasPrefix(name, contentStashWindowPrefix) {
-			return true
-		}
-	}
-	return false
+	has, _ := anyWindowNamedWithPrefix(contentStashWindowPrefix)
+	return has
 }
 
 // minimizedHoldingSession is a dedicated DETACHED session that holds MINIMIZED
@@ -9279,31 +9295,126 @@ func ensureMinimizedSession() {
 
 // minimizedSessionHasParkedWindows reports whether any parked window (one tagged
 // @tabby_min_origin — i.e. not the new-session placeholder) remains in the
-// holding session, across all origin sessions.
-func minimizedSessionHasParkedWindows() bool {
+// holding session, across all origin sessions. The second return reports whether
+// the listing actually succeeded: a caller that DESTROYS things on "no parked
+// windows" must not read a failed list-windows as an empty one.
+func minimizedSessionHasParkedWindows() (bool, bool) {
 	out, err := tmuxCmd("list-windows", "-t", minimizedHoldingSession, "-F",
 		"#{@tabby_min_origin}").Output()
 	if err != nil {
-		return false
+		return false, false
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if strings.TrimSpace(line) != "" {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, true
 }
 
 // cleanupMinimizedSessionIfEmpty kills the holding session once no parked windows
-// remain anywhere (also removing the new-session placeholder window).
+// remain anywhere (also removing the new-session placeholder window). Kills only
+// on a listing that SUCCEEDED and came back empty — a transient list-windows
+// failure used to read as "nothing parked", and killing the session takes every
+// parked window's panes with it.
 func cleanupMinimizedSessionIfEmpty() {
-	if minimizedSessionHasParkedWindows() {
+	if has, ok := minimizedSessionHasParkedWindows(); has || !ok {
 		return
 	}
 	if err := tmuxCmd("has-session", "-t", minimizedHoldingSession).Run(); err == nil {
 		tmuxCmd("kill-session", "-t", minimizedHoldingSession).Run()
 		coordinatorDebugLog.Printf("cleanupMinimizedSessionIfEmpty: killed %s", minimizedHoldingSession)
 	}
+}
+
+// minWindowBelongsHere reports whether a parked window tagged (origin, group)
+// belongs in the Minimized section of the session (mySession, myGroup).
+//
+// Grouped sessions share ONE window list, so every window a peer opens is already
+// mine — except a parked one, which has been moved out to the holding session and
+// carries only the id of whichever peer happened to be current when it was
+// minimized. Matching on that id alone means a window minimized on the phone's
+// peer session is invisible from the desktop's, which reads as the window having
+// been lost. Match on the group instead, falling back to the id when there is no
+// group. liveGroups (session id -> group name, from groupLayoutState) resolves the
+// group for rows parked before @tabby_min_group was recorded.
+func minWindowBelongsHere(origin, group, mySession, myGroup string, liveGroups map[string]string) bool {
+	origin, group = strings.TrimSpace(origin), strings.TrimSpace(group)
+	if origin != "" && origin == strings.TrimSpace(mySession) {
+		return true
+	}
+	if myGroup = strings.TrimSpace(myGroup); myGroup == "" {
+		return false // ungrouped session: only its own id counts
+	}
+	if group == "" {
+		group = strings.TrimSpace(liveGroups[origin]) // pre-@tabby_min_group backfill
+	}
+	return group != "" && group == myGroup
+}
+
+// minRowHasLiveOwner reports whether a parked window's tags still point at
+// something live: its origin session, or any live session sharing its recorded
+// group. Adopting a window away from a live peer would make it vanish from the
+// sidebar the peer is rendering, so the group has to count as an owner too.
+func minRowHasLiveOwner(origin, group string, liveGroups map[string]string) bool {
+	if _, ok := liveGroups[strings.TrimSpace(origin)]; ok {
+		return true
+	}
+	if group = strings.TrimSpace(group); group == "" {
+		return false
+	}
+	for _, g := range liveGroups {
+		if g == group {
+			return true
+		}
+	}
+	return false
+}
+
+// parkRefusalReason returns the user-facing reason a window must NOT be parked,
+// or "" when parking is safe. Parking is a move-window out of the session, and
+// tmux destroys a session whose last window leaves — taking every grouped peer
+// with it, since a group shares one window list. Two cases are refused:
+//
+//   - the dashboard window: enterDashboard gathers every content pane into it and
+//     kill-windows the emptied origins, so the origin names/colors/indexes exist
+//     only in this daemon's memory. Park it and the session dies, the daemon with
+//     it, and exitDashboard can never run — the whole layout is unrecoverable.
+//     Checked separately from the count because a window opened while the
+//     dashboard is up would push the count to 2 and let it through.
+//   - the only window: nothing to fall back to, so the session would end.
+func parkRefusalReason(sessionWindowCount int, isDashboard bool) string {
+	if isDashboard {
+		return "Can't minimize the dashboard — exit it first"
+	}
+	if sessionWindowCount <= 1 {
+		return "Can't minimize the only window"
+	}
+	return ""
+}
+
+// refuseParkReason reports why winID can't be parked out of the daemon's session
+// right now, or "" when it can. Parked windows live in the holding session and
+// stashes in limbo, so the session's own window list is exactly the real windows.
+func (c *Coordinator) refuseParkReason(winID string) string {
+	sess := c.dashboardSession()
+	if sess == "" {
+		return ""
+	}
+	count := 0
+	out, err := tmuxCmd("list-windows", "-t", sess, "-F", "#{window_id}").Output()
+	if err != nil {
+		// Can't see the session — don't guess, and don't block the user either;
+		// the dashboard check below is the one that must not be skipped.
+		count = 2
+	} else {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if strings.TrimSpace(line) != "" {
+				count++
+			}
+		}
+	}
+	return parkRefusalReason(count, winID == dashboardActiveWindowID(sess))
 }
 
 // isParkedWindow reports whether the window currently lives in the holding
@@ -9340,6 +9451,13 @@ func (c *Coordinator) parkWindow(windowID string, setFlag bool) bool {
 	if setFlag {
 		tmuxCmd("set-window-option", "-t", windowID, "@tabby_minimized", "1").Run()
 		tmuxCmd("set-window-option", "-t", windowID, "@tabby_min_origin", c.dashboardSession()).Run()
+		// Record the origin's session GROUP alongside its id (empty when
+		// ungrouped). Peers share every other window, so the Minimized section
+		// keys on this rather than the id of whichever peer was current — see
+		// minWindowBelongsHere.
+		if grp := tmuxOutputTrimmed("display-message", "-p", "-t", c.dashboardSession(), "#{session_group}"); grp != "" {
+			tmuxCmd("set-window-option", "-t", windowID, "@tabby_min_group", grp).Run()
+		}
 	}
 	// Root prevention for #23: if a client is attached to this window, move-window
 	// would drag it INTO the holding session (where it'd sit on only-minimized
@@ -9371,6 +9489,24 @@ func (c *Coordinator) parkWindow(windowID string, setFlag bool) bool {
 	return true
 }
 
+// resolveMinOrigin returns the session a parked window should be restored INTO:
+// its recorded origin when that session is still live, otherwise this daemon's
+// own session. Restoring is a move-window at a session target, and a tag naming a
+// session that has since died makes it fail — which the caller can only report as
+// the restore doing nothing, leaving the window stranded in the holding session.
+// Any live peer in the group is an equally good target: the group shares one
+// window list, so the window shows up on every peer either way.
+func (c *Coordinator) resolveMinOrigin(windowID string) string {
+	origin := tmuxOutputTrimmed("display-message", "-p", "-t", windowID, "#{@tabby_min_origin}")
+	if origin != "" {
+		if err := tmuxCmd("has-session", "-t", origin).Run(); err == nil {
+			return origin
+		}
+		coordinatorDebugLog.Printf("resolveMinOrigin: %s tagged to dead session %s, adopting", windowID, origin)
+	}
+	return c.dashboardSession()
+}
+
 // surfaceWindow moves a parked window back into its origin session WITHOUT
 // clearing @tabby_minimized — it stays flagged so it still shows in the Minimized
 // section and re-parks on blur (peek). No-op if not parked.
@@ -9379,10 +9515,7 @@ func (c *Coordinator) surfaceWindow(windowID string) bool {
 	if windowID == "" || !isParkedWindow(windowID) {
 		return false
 	}
-	origin := tmuxOutputTrimmed("display-message", "-p", "-t", windowID, "#{@tabby_min_origin}")
-	if origin == "" {
-		origin = c.dashboardSession()
-	}
+	origin := c.resolveMinOrigin(windowID)
 	if err := tmuxCmd("move-window", "-d", "-s", windowID, "-t", origin+":").Run(); err != nil {
 		coordinatorDebugLog.Printf("surfaceWindow: move-window failed for %s: %v", windowID, err)
 		return false
@@ -9405,10 +9538,7 @@ func (c *Coordinator) unparkWindow(windowID string) {
 		return
 	}
 	if isParkedWindow(windowID) {
-		origin := tmuxOutputTrimmed("display-message", "-p", "-t", windowID, "#{@tabby_min_origin}")
-		if origin == "" {
-			origin = c.dashboardSession()
-		}
+		origin := c.resolveMinOrigin(windowID)
 		if err := tmuxRun("move-window", "-d", "-s", windowID, "-t", origin+":"); err != nil {
 			coordinatorDebugLog.Printf("unparkWindow: move-window failed for %s: %v", windowID, err)
 			return
@@ -9419,6 +9549,7 @@ func (c *Coordinator) unparkWindow(windowID string) {
 	if err := tmuxRun("set-window-option", "-t", windowID, "-u", "@tabby_minimized", ";",
 		"set-window-option", "-t", windowID, "-u", "@tabby_min_origin", ";",
 		"set-window-option", "-t", windowID, "-u", "@tabby_min_dir", ";",
+		"set-window-option", "-t", windowID, "-u", "@tabby_min_group", ";",
 		"set-window-option", "-t", windowID, "-u", "@tabby_min_host"); err != nil {
 		coordinatorDebugLog.Printf("unparkWindow: marker clear failed for %s: %v", windowID, err)
 	}
@@ -9427,14 +9558,19 @@ func (c *Coordinator) unparkWindow(windowID string) {
 	coordinatorDebugLog.Printf("unparkWindow: unminimized %s", windowID)
 }
 
-// reconcileOrphanedMinimizedWindows sweeps the holding session at startup for
-// windows a prior daemon left stranded there: windows with no @tabby_min_origin
-// tag at all (a failed unparkWindow cleared the markers before the move could be
-// confirmed) are rehomed straight into this session and fully un-minimized;
-// windows tagged to a session id that no longer exists are adopted as minimized
-// into this session (retagged, left parked, so they reappear in the Minimized
-// section) rather than surfaced. Windows tagged to a still-live session belong
-// to another daemon and are left alone. The ensureMinimizedSession placeholder
+// reconcileOrphanedMinimizedWindows sweeps the holding session for windows left
+// stranded there: windows with no @tabby_min_origin tag at all (a failed
+// unparkWindow cleared the markers before the move could be confirmed) are
+// rehomed straight into this session and fully un-minimized; windows tagged to a
+// session that no longer exists AND has no surviving peer in its group are
+// adopted as minimized into this session (retagged, left parked, so they reappear
+// in the Minimized section) rather than surfaced. Windows whose origin or group
+// is still live belong to another daemon and are left alone.
+//
+// Runs at startup AND on the owner-gated watchdog tick (loop.go), because the
+// sessions that strand windows here — a peer that dies while holding the only
+// tag — come and go long after any daemon started. Idempotent: the rehome and
+// retag paths are both no-ops once they have run. The ensureMinimizedSession placeholder
 // window is excluded via @tabby_min_placeholder — except a session founded by a
 // pre-upgrade daemon (before that tag existed) has an untagged placeholder,
 // shape-identical to a stranded orphan. Its one reliable intrinsic property:
@@ -9450,24 +9586,22 @@ func (c *Coordinator) reconcileOrphanedMinimizedWindows() {
 	if sess == "" {
 		return
 	}
-	liveOut, err := tmuxOutputCtx("list-sessions", "-F", "#{session_id}")
-	if err != nil {
+	liveGroups, _ := groupLayoutState()
+	if len(liveGroups) == 0 {
+		// We are running, so at least our own session must be live: an empty map
+		// means the read failed, and treating it as "nothing is live" would adopt
+		// every parked window on the server away from its real owner.
 		return
 	}
-	live := make(map[string]bool)
-	for _, line := range strings.Split(strings.TrimSpace(string(liveOut)), "\n") {
-		if s := strings.TrimSpace(line); s != "" {
-			live[s] = true
-		}
-	}
+	myGroup := liveGroups[sess]
 	out, err := tmuxOutputCtx("list-windows", "-t", minimizedHoldingSession, "-F",
-		"#{window_id}\t#{window_index}\t#{@tabby_min_origin}\t#{@tabby_min_placeholder}")
+		"#{window_id}\t#{window_index}\t#{@tabby_min_origin}\t#{@tabby_min_placeholder}\t#{@tabby_min_group}")
 	if err != nil {
 		return
 	}
 	type minWinRow struct {
-		windowID, origin, placeholder string
-		index                         int
+		windowID, origin, placeholder, group string
+		index                                int
 	}
 	var rows []minWinRow
 	hasExplicitPlaceholder := false
@@ -9476,8 +9610,8 @@ func (c *Coordinator) reconcileOrphanedMinimizedWindows() {
 	// has trailing tabs that TrimSpace(line) would strip, collapsing the
 	// field count below 4 and silently dropping the row.
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		f := strings.SplitN(line, "\t", 4)
-		if len(f) < 4 {
+		f := strings.SplitN(line, "\t", 5)
+		if len(f) < 5 {
 			continue
 		}
 		idx, _ := strconv.Atoi(strings.TrimSpace(f[1]))
@@ -9486,6 +9620,7 @@ func (c *Coordinator) reconcileOrphanedMinimizedWindows() {
 			index:       idx,
 			origin:      strings.TrimSpace(f[2]),
 			placeholder: strings.TrimSpace(f[3]),
+			group:       strings.TrimSpace(f[4]),
 		}
 		if r.placeholder == "1" {
 			hasExplicitPlaceholder = true
@@ -9525,17 +9660,23 @@ func (c *Coordinator) reconcileOrphanedMinimizedWindows() {
 			if err := tmuxRun("set-window-option", "-t", windowID, "-u", "@tabby_minimized", ";",
 				"set-window-option", "-t", windowID, "-u", "@tabby_min_origin", ";",
 				"set-window-option", "-t", windowID, "-u", "@tabby_min_dir", ";",
+				"set-window-option", "-t", windowID, "-u", "@tabby_min_group", ";",
 				"set-window-option", "-t", windowID, "-u", "@tabby_min_host"); err != nil {
 				coordinatorDebugLog.Printf("reconcileOrphanedMinimizedWindows: marker clear failed for %s: %v", windowID, err)
 			}
 			rehomed++
 			continue
 		}
-		if live[origin] {
-			continue // owned by us already, or a live daemon still owns it
+		if minRowHasLiveOwner(origin, r.group, liveGroups) {
+			continue // ours already, or a live session/peer still owns it
 		}
-		// Tagged to a session that's gone: adopt it as ours, still minimized.
-		if err := tmuxRun("set-window-option", "-t", windowID, "@tabby_min_origin", sess); err != nil {
+		// Tagged to a session that's gone, with no surviving peer in its group:
+		// adopt it as ours, still minimized.
+		args := []string{"set-window-option", "-t", windowID, "@tabby_min_origin", sess}
+		if myGroup != "" {
+			args = append(args, ";", "set-window-option", "-t", windowID, "@tabby_min_group", myGroup)
+		}
+		if err := tmuxRun(args...); err != nil {
 			coordinatorDebugLog.Printf("reconcileOrphanedMinimizedWindows: retag failed for %s: %v", windowID, err)
 			continue
 		}
@@ -9695,11 +9836,14 @@ func (c *Coordinator) listParkedMinimizedWindowsUncached() ([]tmux.Window, []str
 		strings.Join([]string{
 			"#{window_id}", "#{window_index}", "#{window_name}", "#{@tabby_min_origin}",
 			"#{@tabby_color}", "#{@tabby_group}", "#{@tabby_icon}", "#{@tabby_ai_title}", "#{@tabby_min_dir}", "#{@tabby_min_host}",
-			"#{@tabby_color_seeded}", "#{@tabby_appearance_key}",
+			"#{@tabby_color_seeded}", "#{@tabby_appearance_key}", "#{@tabby_min_group}",
 		}, "\t")).Output()
 	if err != nil {
 		return nil, nil
 	}
+	// One server read for the whole listing; it is memoized behind parkedGen.
+	liveGroups, _ := groupLayoutState()
+	myGroup := liveGroups[origin]
 	var parked []tmux.Window
 	var allIDs []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -9711,8 +9855,12 @@ func (c *Coordinator) listParkedMinimizedWindowsUncached() ([]tmux.Window, []str
 			continue
 		}
 		allIDs = append(allIDs, strings.TrimSpace(f[0]))
-		if strings.TrimSpace(f[3]) != origin {
-			continue // parked by a different user session — not ours to show
+		rowGroup := ""
+		if len(f) >= 13 {
+			rowGroup = f[12]
+		}
+		if !minWindowBelongsHere(f[3], rowGroup, origin, myGroup, liveGroups) {
+			continue // parked by an unrelated user session — not ours to show
 		}
 		idx, _ := strconv.Atoi(strings.TrimSpace(f[1]))
 		w := tmux.Window{
@@ -10686,16 +10834,35 @@ func (c *Coordinator) switchClientsOnWindow(sourceWindowID, targetWindowID strin
 
 // sidebarIsStashed reports whether any stash window exists.
 func sidebarIsStashed() bool {
-	out, err := tmuxCmd("list-windows", "-a", "-F", "#{window_name}").Output()
-	if err != nil {
-		return false
+	has, _ := anyWindowNamedWithPrefix(sidebarStashWindowPrefix)
+	return has
+}
+
+// ReconcileStashedSidebars restores sidebars a phone episode left stashed
+// after the group is back under a desktop-profile owner with no narrow client
+// attached. The transition that should have restored them can be skipped
+// (PROFILE_TRANSITION_SKIP_DESKTOP while the phone was still attached) and
+// nothing re-fires it once the phone detaches — the desktop daemon's own
+// profile never changed, so no transition is ever scheduled again. Called from
+// the owner-gated watchdog tick so the residue self-heals instead of waiting
+// for a restart.
+func (c *Coordinator) ReconcileStashedSidebars() {
+	if c.ActiveClientProfile() == "phone" {
+		return
 	}
-	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.HasPrefix(name, sidebarStashWindowPrefix) {
-			return true
-		}
+	out, err := tmuxCmd("show-option", "-gqv", "@tabby_sidebar").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "enabled" {
+		return
 	}
-	return false
+	if !sidebarIsStashed() {
+		return
+	}
+	if hasNarrowClient() {
+		return
+	}
+	logEvent("SIDEBAR_STASH_RESIDUE_RESTORE")
+	c.sidebarHidden = false
+	c.restoreSidebarPanes()
 }
 
 // borderStylingBlocked is a legacy hook from the mobile border-hide experiment.
@@ -19180,6 +19347,14 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 			c.clearPeekIf(winID)
 			c.unparkWindow(winID)
 		} else {
+			// Parking is a move-window out of the session, which tmux answers by
+			// destroying a session that just lost its last window. Refuse rather
+			// than take the session (and, in a group, every peer) down with it.
+			if reason := c.refuseParkReason(winID); reason != "" {
+				logEvent("MINIMIZE_REFUSED window=%s reason=%q", winID, reason)
+				tmuxCmd("display-message", reason).Run()
+				return false
+			}
 			// Don't park the focused window out from under the user: move focus to a
 			// neighbor first when minimizing the active window.
 			if c.ActiveWindowID() == winID {

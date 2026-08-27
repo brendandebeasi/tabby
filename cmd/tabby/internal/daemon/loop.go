@@ -1203,6 +1203,11 @@ func (l *Loop) handleWatchdogTick() {
 		// owner-only like every other repair path (a non-owner daemon killed
 		// the owner's full-width sidebar as "corrupt" mid-session).
 		if l.coord.OwnsGroupLayout() {
+			l.coord.ReconcileStashedSidebars()
+			// Minimized windows stranded by a peer session that died still
+			// holding the only tag pointing at them. Owner-gated so peers don't
+			// race to adopt the same window.
+			l.coord.reconcileOrphanedMinimizedWindows()
 			watchdogCheckRenderers(l.server, l.deps.SessionID, l.coord)
 		}
 		panelAudit(l.deps.SessionID, l.coord)
