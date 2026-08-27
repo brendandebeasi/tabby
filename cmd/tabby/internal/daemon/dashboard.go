@@ -39,41 +39,90 @@ import (
 //
 // `#,` is the literal escape for a comma inside #{?…} branches.
 func paneBorderFormat() string {
-	const chrome = "#[align=centre#,fg=default#,bg=default] "
-	// Use pane_title only when it isn't trivially bash's default OSC string
-	// (which contains the host short name — e.g. "b@bdm1: ~" for any home-dir
-	// shell). When the title contains host_short, fall back to command + folder
-	// so the strip stays informative across a gathered dashboard of bash panes.
-	// The "tab name" portion prefers the origin window name (set per-pane on
-	// dashboard gather as @tabby_dash_origin_name) so dashboard tiles read with
-	// their origin name instead of "Dashboard" on every tile. When the option
-	// is unset (non-dashboard windows, or pre-existing dashboards from before
-	// this tag landed) it falls back to the live #{window_name}.
-	// Prefix the window's marker (@tabby_icon) when set, so the pane-border label
-	// mirrors the tab's marker — same as the sidebar row and TABBY header. The
-	// #{!=…,} empty-check matches the origin-name pattern below; the trailing
-	// space in the "then" branch separates the marker from the name.
-	// Marker: prefer the pane-local @tabby_dash_origin_icon (set on gathered
-	// dashboard tiles, whose window-scoped @tabby_icon no longer reflects their
-	// origin tab) and fall back to the window's own @tabby_icon on normal windows.
+	// Wide windows: every content pane's own strip describes that pane.
+	// Narrow windows: the only strip that carries a label is the one above the
+	// phone button bar, and it describes the window's ACTIVE pane rather than
+	// the button-bar pane it physically sits on.
+	direct := paneBorderLabel("#{pane_title}", "#{pane_current_command}", "#{b:pane_current_path}")
+	active := paneBorderLabel(
+		fromActivePane("#{pane_title}"),
+		fromActivePane("#{pane_current_command}"),
+		fromActivePane("#{b:pane_current_path}"))
+
+	contentPane := "#{?" + narrowWindow + "," + emptyStrip + "," + direct + "}"
+	chromePane := "#{?#{&&:" + narrowWindow + "," + windowHeaderMatch + "}," + active + "," + blankStrip + "}"
+	return "#{?" + chromeMatch + "," + chromePane + "," + contentPane + "}"
+}
+
+// blankStrip is a colour-neutral empty border row: it blends with the terminal
+// default bg so no visible divider is drawn above the pane.
+const blankStrip = "#[align=centre#,fg=default#,bg=default] "
+
+// emptyStrip blanks a border row outright, where blankStrip only overlays a
+// single space and leaves tmux's line drawn either side of it. Used for the
+// content pane's strip on a phone, which carries no label and would otherwise
+// draw a full-width rule across the top of the screen. The pad is any width
+// past the widest plausible window; tmux truncates it to the row.
+const emptyStrip = "#[align=left#,fg=default#,bg=default]#{p200: }"
+
+// narrowWindow is the format-level equivalent of computeProfile's phone test,
+// evaluated per window so a resize re-decides without a tmux write from Go.
+const narrowWindow = "#{e|<:#{window_width},100}"
+
+// windowHeaderMatch identifies the phone button-bar pane specifically, where
+// chromeMatch also covers the sidebar and the legacy pane-header.
+const windowHeaderMatch = "#{||:" +
+	"#{m:*window-header*,#{pane_current_command}}," +
+	"#{m:*window-header*,#{pane_start_command}}}"
+
+const chromeMatch = "#{||:" +
+	"#{m:*sidebar*,#{pane_current_command}}," +
+	"#{m:*header*,#{pane_current_command}}," +
+	"#{m:*sidebar*,#{pane_start_command}}," +
+	"#{m:*header*,#{pane_start_command}}}"
+
+// fromActivePane re-sources a pane-scoped format expression from the window's
+// active pane. #{P:…} expands its argument once per pane and concatenates, so
+// gating on pane_active yields exactly the active pane's value. Needed because
+// the phone label renders on the button-bar pane's border row.
+func fromActivePane(expr string) string {
+	return "#{P:#{?pane_active," + expr + ",}}"
+}
+
+// paneBorderLabel builds " <marker> <tab name> | <pane title>" with a
+// right-aligned actions hint, given the format expressions that describe the
+// pane being labelled.
+//
+// Uses pane_title only when it isn't trivially bash's default OSC string
+// (which contains the host short name — e.g. "b@bdm1: ~" for any home-dir
+// shell). When the title contains host_short, falls back to command + folder
+// so the strip stays informative across a gathered dashboard of bash panes.
+// The "tab name" portion prefers the origin window name (set per-pane on
+// dashboard gather as @tabby_dash_origin_name) so dashboard tiles read with
+// their origin name instead of "Dashboard" on every tile. When the option
+// is unset (non-dashboard windows, or pre-existing dashboards from before
+// this tag landed) it falls back to the live #{window_name}.
+// Marker: prefer the pane-local @tabby_dash_origin_icon (set on gathered
+// dashboard tiles, whose window-scoped @tabby_icon no longer reflects their
+// origin tab) and fall back to the window's own @tabby_icon on normal windows.
+//
+// NOTE: no #[fg=default] before the divider/title — that reset to the terminal
+// default (white) and washed out the title on a light INACTIVE-pane border bg
+// (only visible in multi-pane windows). Let the divider + title inherit the
+// contrast-aware border-STYLE fg tmux already sets per pane.
+func paneBorderLabel(paneTitle, paneCmd, panePath string) string {
 	const marker = "#{?#{!=:#{@tabby_dash_origin_icon},},#{@tabby_dash_origin_icon},#{@tabby_icon}}"
-	// NOTE: no #[fg=default] before the divider/title — that reset to the terminal
-	// default (white) and washed out the title on a light INACTIVE-pane border bg
-	// (only visible in multi-pane windows). Let the divider + title inherit the
-	// contrast-aware border-STYLE fg tmux already sets per pane.
-	const content = " #{?#{!=:" + marker + ",}," + marker + " ,}#{?#{!=:#{@tabby_dash_origin_name},},#{@tabby_dash_origin_name},#{window_name}} | " +
-		"#{?#{&&:#{!=:#{pane_title},}," +
-		"#{&&:#{!=:#{pane_title},#{host_short}}," +
-		"#{!=:#{m:*#{host_short}*,#{pane_title}},1}}}," +
-		"#{pane_title}," +
-		"#{pane_current_command}  #{b:pane_current_path}}" +
-		"#[align=right][prefix+#, for actions] "
-	const chromeMatch = "#{||:" +
-		"#{m:*sidebar*,#{pane_current_command}}," +
-		"#{m:*header*,#{pane_current_command}}," +
-		"#{m:*sidebar*,#{pane_start_command}}," +
-		"#{m:*header*,#{pane_start_command}}}"
-	return "#{?" + chromeMatch + "," + chrome + "," + content + "}"
+	return " #{?#{!=:" + marker + ",}," + marker + " ,}" +
+		"#{?#{!=:#{@tabby_dash_origin_name},},#{@tabby_dash_origin_name},#{window_name}} | " +
+		"#{?#{&&:#{!=:" + paneTitle + ",}," +
+		"#{&&:#{!=:" + paneTitle + ",#{host_short}}," +
+		"#{!=:#{m:*#{host_short}*," + paneTitle + "},1}}}," +
+		paneTitle + "," +
+		paneCmd + "  " + panePath + "}" +
+		// The right-aligned hint is 23 columns. On a phone-width window that
+		// leaves nothing for the name and title it is aligned against, so it is
+		// dropped below 100 cols — the same boundary computeProfile uses.
+		"#[align=right]#{?#{e|>=:#{window_width},100},[prefix+#, for actions] ,}"
 }
 
 // dashboardPaneBorderFormat wraps the shared pane-border label so EVERY dashboard
@@ -894,14 +943,12 @@ func (c *Coordinator) applyNativeBorders(winID, groupName string) {
 	if !c.HasElectedClient() {
 		return
 	}
-	// On a phone the window's chrome is the 3-row button bar along the bottom
-	// (renderPhoneCarousel). Tmux's native title strip would spend a fourth row
-	// of a ~34-row screen on chrome, so keep the border STYLING — the colours
-	// still track the tab — but leave the strip itself off.
+	// The title strip stays on for every profile. Turning it off on phone
+	// bought back a row the split already spent: with the strip off tmux still
+	// draws a plain separator line between the content pane and the button bar,
+	// so "off" saved one content row and lost the window/pane label on the one
+	// client with the least other chrome to identify a tab by.
 	borderStatus := "top"
-	if c.ActiveClientProfile() == "phone" {
-		borderStatus = "off"
-	}
 	activeFg := c.config.PaneHeader.ActiveFg
 	if activeFg == "" {
 		activeFg = "#ffffff"
