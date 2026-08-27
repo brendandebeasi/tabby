@@ -115,3 +115,105 @@ terminal has to allow it; most do by default, and tmux needs:
 ```bash
 set -g set-clipboard on
 ```
+
+### Sending without selecting
+
+Dragging a selection is fine on a laptop and impossible on a phone. `prefix + Y`
+sends the focused pane's last 100 lines to your clipboard instead, and the same
+thing is available as a command:
+
+```bash
+tabby clip send --text 'a literal string'
+tabby clip send --file ./report.txt
+tabby clip send --pane --lines 300
+some-command | tabby clip send
+```
+
+It carries text only, capped at 64 KiB, keeping the tail when it has to cut.
+
+### From a host with no Tabby
+
+The client-* boxes do not need the binary. Copy `scripts/tabby-clip.sh` to the
+remote host and source it from the shell rc:
+
+```bash
+# on your Mac
+scp scripts/tabby-clip.sh client-b1:~/.tabby-clip.sh
+
+# in the remote ~/.bashrc or ~/.zshrc
+[ -f ~/.tabby-clip.sh ] && . ~/.tabby-clip.sh
+```
+
+That defines `tabby-clip` and `tabby-clip-tail`, which emit the same escape in
+pure shell:
+
+```bash
+tabby-clip 'a literal string'
+cat report.txt | tabby-clip
+make test 2>&1 | tabby-clip-tail 200
+```
+
+If the remote shell is itself inside tmux, the escape is wrapped in a DCS
+passthrough envelope so the remote tmux forwards it upstream rather than
+consuming it. This happens automatically, on `$TMUX`, but the remote tmux has
+to be willing:
+
+```bash
+set -g allow-passthrough on
+```
+
+Without it the envelope is swallowed whole. Nothing reaches the clipboard and
+nothing reports an error — the send simply appears to do nothing, which is the
+one failure here you cannot diagnose from the symptom.
+
+### For agents on those boxes
+
+An agent working on a remote host has the same problem in a worse form: it has
+no way to know that `pbcopy` there is the wrong clipboard. Copy the skill and
+the command over so it does:
+
+```bash
+# on this machine, once
+mkdir -p ~/.claude/skills ~/.claude/commands
+cp -r skills/tabby-clip ~/.claude/skills/
+cp commands/clip.md ~/.claude/commands/
+
+# and on each remote box
+scp -r skills/tabby-clip client-b1:~/.claude/skills/
+scp commands/clip.md client-b1:~/.claude/commands/
+```
+
+Both are host-agnostic — they probe for the `tabby` binary and fall back to the
+shell function — so the same two files work on your Mac and on every client-*
+box. `/clip` sends by hand; the skill is what gets picked up when you just ask
+for something on your clipboard.
+
+### Getting it working over mosh, on iOS
+
+Mosh implements the write half of OSC 52 and accepts only the `c` selector.
+Everything Tabby emits is already in that shape, but tmux's own re-emission is
+not: tmux drives it from the `Ms` terminfo capability, and most `xterm-256color`
+entries have no `Ms`, so tmux silently sends nothing. Add one that hardcodes the
+selector:
+
+```bash
+set -ag terminal-overrides ",xterm-256color:Ms=\\E]52;c%p1%.0s;%p2%s\\7"
+```
+
+`%p1%.0s` consumes and discards the selection argument tmux would otherwise
+pass. The last piece is on the terminal app: it has to parse OSC 52 and write
+the system clipboard. Writing the pasteboard is unrestricted on iOS — it is
+*reading* that prompts — so this is the direction that works there.
+
+If there is a second tmux on the remote host, it needs `set-clipboard on` too.
+The escape chains as far as every layer forwards it.
+
+### Only upward
+
+This is one-way. OSC 52 defines a query form for reading the clipboard back,
+but mosh implements only the write half, so there is nothing to answer a query
+from your phone. Pulling a clip *down* needs a different channel entirely —
+a helper process on the outer device, not a terminal escape.
+
+Text is also the whole of it. OSC 52 carries base64 text and nothing else, so
+there is no way to push an image up this way.

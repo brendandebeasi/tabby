@@ -22,6 +22,7 @@ Usage: tabby <subcommand> [args...]
 | `tabby manage-group` | TUI for editing group entries in `config.yaml`. |
 | `tabby setup` | First-run configuration wizard. |
 | `tabby cycle-pane` | Cycle the active content pane, skipping sidebar and headers. |
+| `tabby clip send` | Push text up to the clipboard of the device you are sitting at. Bound to `prefix + Y`. |
 | `tabby pet <ask\|traits\|forget>` | Interact with the pet widget. |
 
 ### theme
@@ -47,6 +48,25 @@ tabby cycle-pane --dim-only         # just re-apply inactive-pane dimming
 
 `--ensure-content` is what the window-switch hooks call, so you never land on
 the sidebar after switching windows.
+
+### clip
+
+```
+tabby clip send                      # read stdin
+tabby clip send --text 'hello'       # send a literal string
+tabby clip send --file ./report.txt  # send a file's contents
+tabby clip send --pane               # send this pane's last 100 lines
+tabby clip send --pane %3 --lines 300
+```
+
+Options: `--tty PATH` to write the escape somewhere other than the pane's pty,
+`--max N` to change the 64 KiB cap, `--passthrough` for a nested remote tmux,
+`--quiet` to suppress the confirmation.
+
+Text only, one direction: up. See
+[SSH and Remote Hosts](SSH-and-Remote-Hosts.md#clipboard) for the mosh and iOS
+setup, and for `scripts/tabby-clip.sh`, which does the same thing in pure shell
+on hosts without the binary.
 
 ### pet
 

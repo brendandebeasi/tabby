@@ -39,6 +39,7 @@ Unlock Name to hand it back.
 | `prefix + 0` or `prefix + g` | Open the [dashboard](Dashboard.md) |
 | `prefix + L` | Dashboard layout picker |
 | `prefix + P` | Promote the focused pane to the main slot |
+| `prefix + Y` | Send this pane's last 100 lines to the clipboard of the device you are at |
 | `prefix + {` / `prefix + }` | Move the focused pane back / forward one slot |
 | `Cmd+Shift+\` | Collapse or restore the sidebar |
 | `Alt+;` / `Alt+'` | Previous / next window without the prefix |

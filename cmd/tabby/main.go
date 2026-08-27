@@ -20,6 +20,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/clip"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/cyclepane"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/daemon"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashboard"
@@ -48,6 +49,7 @@ type subcommand struct {
 }
 
 var subcommands = []subcommand{
+	{"clip", "push text up to the clipboard of the device you are sitting at", clip.Run},
 	{"cycle-pane", "cycle the active content pane and dim inactive panes", cyclepane.Run},
 	{"daemon", "run the tabby daemon (socket server + coordinator)", daemon.Run},
 	{"dashboard", "toggle the all-panes dashboard (gather panes into a tiled grid)", dashboard.Run},

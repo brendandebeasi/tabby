@@ -843,3 +843,17 @@ tmux run-shell -b "$FOCUS_RECOVERY_CMD \"#{session_id}\""
 tmux bind-key -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$CURRENT_DIR/scripts/osc52-copy \"#{pane_tty}\""
 tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "$CURRENT_DIR/scripts/osc52-copy \"#{pane_tty}\""
 tmux set-option -g copy-command "$CURRENT_DIR/scripts/osc52-copy"
+
+# -----------------------------------------------------------------------------
+# prefix + Y -> send this pane's scrollback tail up to your device's clipboard.
+#
+# Same OSC 52 path as the mouse-drag copy above, minus the selecting. The point
+# is the phone: when you are moshed in from iOS there is no way to drag-select
+# a screenful of output, and this gets the last 100 lines onto the pasteboard
+# in one keystroke.
+#
+# pane_id and pane_tty are both passed explicitly because run-shell does not
+# reliably export TMUX_PANE, and without them the command would capture and
+# target whichever pane tmux last considered current.
+# -----------------------------------------------------------------------------
+tmux bind-key 'Y' run-shell -b "$CURRENT_DIR/bin/tabby clip send --pane '#{pane_id}' --tty '#{pane_tty}' --quiet && tmux display-message 'tabby: pane sent to your clipboard'"
