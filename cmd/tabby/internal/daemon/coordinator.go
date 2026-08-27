@@ -15830,6 +15830,119 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 	return entries
 }
 
+// widgetZoneIDs lists every clickable zone that may appear in a widget zone.
+// These must match the zone.Mark calls in the widget renderers.
+//
+// Pet zones must match renderPetWidget / renderAdventurePlayArea. Dropped
+// entries (drop_yarn, clean_poop, pet_pet) were never marked; pet widget click
+// handling now relies on handlePetWidgetClick's custom hit-testing rather than
+// these regions, but the air/ground/feed entries are kept so the renderer can
+// still route obvious clicks via ResolvedAction.
+var widgetZoneIDs = []string{
+	// Pet zones
+	"pet:drop_food", "pet:air_high", "pet:air_low", "pet:ground",
+	// Button zones
+	"sidebar:new_tab", "sidebar:new_group", "sidebar:close_tab",
+	// TeamClaude degraded-model warning -> opens popup
+	"teamclaude:open_degraded",
+	// Sidebar zones
+	"sidebar:shrink", "sidebar:grow",
+	"sidebar:prev_window", "sidebar:next_window",
+	"sidebar:toggle_theme",
+}
+
+// zoneMarker returns the zero-width ANSI sequence BubbleZone wraps id's content
+// in. Mark() assigns each id a stable marker on first use, so calling it with a
+// sentinel body is a cheap way to ask "what does this id look like on the wire".
+func zoneMarker(id string) string {
+	marked := zone.Mark(id, "\x00")
+	i := strings.IndexByte(marked, 0)
+	if i <= 0 {
+		return ""
+	}
+	return marked[:i]
+}
+
+// scanZoneRegions strips BubbleZone markers out of raw and returns the clean
+// content along with the bounds of every id in ids that was marked in it.
+// Bounds are relative to raw: line 0 is the first line, EndCol is exclusive.
+//
+// This deliberately does not use zone.Scan + zone.Get. Scan() hands the parsed
+// bounds to a background goroutine, so an immediate Get() reads whatever the
+// *previous* scan stored -- nothing at all on the first frame, and stale bounds
+// after that. Worse, every Scan() ends by deleting zones left over from other
+// iterations, and we scan twice per frame (top zone then bottom zone), so the
+// two scans erase each other's zones. The upshot was that the sidebar's
+// shrink/grow and window-nav buttons rendered but never produced a clickable
+// region, so clicking them did nothing. We need the bounds of the content we
+// just rendered, synchronously, so do the scan here.
+func scanZoneRegions(raw string, ids []string) (string, []daemon.ClickableRegion) {
+	markerToID := make(map[string]string, len(ids))
+	for _, id := range ids {
+		if m := zoneMarker(id); m != "" {
+			markerToID[m] = id
+		}
+	}
+
+	type openZone struct{ line, col int }
+	open := make(map[string]openZone, 4)
+
+	var (
+		out       = make([]byte, 0, len(raw))
+		regions   []daemon.ClickableRegion
+		line      int
+		lineStart int
+	)
+
+	for i := 0; i < len(raw); {
+		switch {
+		case raw[i] == '\n':
+			out = append(out, '\n')
+			i++
+			line++
+			lineStart = len(out)
+			continue
+		case raw[i] == 0x1b && i+1 < len(raw) && raw[i+1] == '[':
+			// Zone markers are ESC [ <digits> z. Anything else is a normal
+			// escape sequence and passes through untouched.
+			j := i + 2
+			for j < len(raw) && raw[j] >= '0' && raw[j] <= '9' {
+				j++
+			}
+			if j == i+2 || j >= len(raw) || raw[j] != 'z' {
+				break
+			}
+			marker := raw[i : j+1]
+			col := lipgloss.Width(string(out[lineStart:]))
+			if start, ok := open[marker]; ok {
+				delete(open, marker)
+				if id, known := markerToID[marker]; known {
+					if parts := strings.SplitN(id, ":", 2); len(parts) == 2 {
+						regions = append(regions, daemon.ClickableRegion{
+							StartLine: start.line,
+							EndLine:   line,
+							StartCol:  start.col,
+							EndCol:    col, // exclusive
+							Target:    parts[0],
+							Action:    parts[1],
+						})
+						coordinatorDebugLog.Printf("BubbleZone extracted: %s -> lines %d-%d, cols %d-%d (exclusive)",
+							id, start.line, line, start.col, col)
+					}
+				}
+			} else {
+				open[marker] = openZone{line: line, col: col}
+			}
+			i = j + 1
+			continue
+		}
+		out = append(out, raw[i])
+		i++
+	}
+
+	return string(out), regions
+}
+
 // renderWidgetZone renders a list of widget entries into a single content string
 // and extracts BubbleZone-based click regions. Positions are relative to the
 // returned content (caller must offset them).
@@ -15848,46 +15961,9 @@ func (c *Coordinator) renderWidgetZone(entries []widgetEntry, width int) (string
 		return "", nil
 	}
 
-	// Scan for zone markers (BubbleZone)
-	scannedContent := zone.Scan(rawContent)
-
-	// Extract zone bounds for all known clickable areas.
-	// Pet zones must match the zone.Mark calls in renderPetWidget /
-	// renderAdventurePlayArea. Dropped entries (drop_yarn, clean_poop,
-	// pet_pet) were never marked; pet widget click handling now relies
-	// on handlePetWidgetClick's custom hit-testing rather than these
-	// regions, but the air/ground/feed entries are kept so the renderer
-	// can still route obvious clicks via ResolvedAction.
-	knownZones := []string{
-		// Pet zones
-		"pet:drop_food", "pet:air_high", "pet:air_low", "pet:ground",
-		// Button zones
-		"sidebar:new_tab", "sidebar:new_group", "sidebar:close_tab",
-		// TeamClaude degraded-model warning -> opens popup
-		"teamclaude:open_degraded",
-		// Sidebar zones
-		"sidebar:shrink", "sidebar:grow",
-		"sidebar:prev_window", "sidebar:next_window",
-		"sidebar:toggle_theme",
-	}
-	var regions []daemon.ClickableRegion
-	for _, zoneID := range knownZones {
-		if info := zone.Get(zoneID); info != nil && !info.IsZero() {
-			parts := strings.SplitN(zoneID, ":", 2)
-			if len(parts) == 2 {
-				regions = append(regions, daemon.ClickableRegion{
-					StartLine: info.StartY,
-					EndLine:   info.EndY,
-					StartCol:  info.StartX,
-					EndCol:    info.EndX + 1, // Convert from inclusive to exclusive
-					Action:    parts[1],
-					Target:    parts[0],
-				})
-				coordinatorDebugLog.Printf("BubbleZone extracted: %s -> lines %d-%d, cols %d-%d (exclusive)",
-					zoneID, info.StartY, info.EndY, info.StartX, info.EndX+1)
-			}
-		}
-	}
+	// Strip the zone markers and pull out the bounds of the content we just
+	// rendered. See scanZoneRegions for why we don't use zone.Scan/zone.Get.
+	scannedContent, regions := scanZoneRegions(rawContent, widgetZoneIDs)
 
 	coordinatorDebugLog.Printf("BubbleZone: extracted %d widget regions from zone", len(regions))
 
