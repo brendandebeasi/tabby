@@ -7,13 +7,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
 	"io"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
-	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -758,6 +758,5 @@ func Run(args []string) int {
 
 // stripAnsi removes ANSI escape codes from a string for accurate width calculation
 func stripAnsi(s string) string {
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
-	return ansiRegex.ReplaceAllString(s, "")
+	return ansi.Strip(s)
 }

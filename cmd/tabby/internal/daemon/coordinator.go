@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
 	"io"
 	"log"
 	"math"
@@ -17099,9 +17100,7 @@ func safeRandRange(minInclusive, maxInclusive int) int {
 
 // stripAnsi removes ANSI escape codes from a string for accurate width calculation
 func stripAnsi(s string) string {
-	// Simple regex to strip ANSI escape sequences
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
-	return ansiRegex.ReplaceAllString(s, "")
+	return ansi.Strip(s)
 }
 
 // clampSpriteX clamps a position so the sprite fits within the given width
@@ -23237,22 +23236,21 @@ func isSidebarPaneCommand(cur, start string) bool {
 // extractPaneArg extracts the -pane argument from a pane-header start command.
 // e.g. "pane-header -pane '%42'" -> "%42"
 func extractPaneArg(startCmd string) string {
-	// Try single-quoted
-	re := regexp.MustCompile(`-pane\s+'([^']+)'`)
-	if m := re.FindStringSubmatch(startCmd); len(m) > 1 {
-		return m[1]
-	}
-	// Try double-quoted
-	re2 := regexp.MustCompile(`-pane\s+"([^"]+)"`)
-	if m := re2.FindStringSubmatch(startCmd); len(m) > 1 {
-		return m[1]
-	}
-	// Try unquoted
-	re3 := regexp.MustCompile(`-pane\s+(\S+)`)
-	if m := re3.FindStringSubmatch(startCmd); len(m) > 1 {
-		return m[1]
+	for _, re := range paneArgPatterns {
+		if m := re.FindStringSubmatch(startCmd); len(m) > 1 {
+			return m[1]
+		}
 	}
 	return ""
+}
+
+// paneArgPatterns are tried in order: single-quoted, double-quoted, bare.
+// Compiled once at package scope; they used to be built inside extractPaneArg,
+// which recompiled all three on every call.
+var paneArgPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`-pane\s+'([^']+)'`),
+	regexp.MustCompile(`-pane\s+"([^"]+)"`),
+	regexp.MustCompile(`-pane\s+(\S+)`),
 }
 
 // findContentPane finds the first non-auxiliary pane in a window, preferring the active one.

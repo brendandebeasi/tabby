@@ -3231,6 +3231,7 @@ func Run(args []string) int {
 	}
 	debugLog.Printf("Server listening on %s", server.GetSocketPath())
 	logEvent("DAEMON_START session=%s pid=%d", *sessionID, os.Getpid())
+	startPprof()
 	resetTerminalModes(*sessionID)
 
 	// Start heartbeat writer (detects hangs on next startup)
