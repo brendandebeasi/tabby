@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
@@ -45,4 +48,22 @@ func TestCurrentPeekedWindow(t *testing.T) {
 	if got := c.currentPeekedWindow(); got != "" {
 		t.Errorf("clearPeekIf on the peeked window: got %q, want empty", got)
 	}
+}
+
+// A window minimized on one grouped session is parked by THAT session's daemon,
+// which is usually not the daemon rendering the sidebar you are looking at — a
+// peer's park bumps nothing in our process, so generation-only invalidation left
+// the peer serving a pre-minimize list forever and the Minimized section simply
+// never appeared on the windows it drew.
+func TestParkedCacheUsable_AgesOutForPeerParks(t *testing.T) {
+	now := time.Now()
+
+	assert.True(t, parkedCacheUsable(true, 3, 3, now.Add(-parkedCacheTTL/2), now),
+		"a fresh, current-generation entry is served without re-querying tmux")
+	assert.False(t, parkedCacheUsable(true, 3, 3, now.Add(-parkedCacheTTL-time.Millisecond), now),
+		"past the TTL we re-query, which is how a peer daemon's park becomes visible")
+	assert.False(t, parkedCacheUsable(false, 3, 3, now, now),
+		"an invalidated entry is never served, however fresh")
+	assert.False(t, parkedCacheUsable(true, 3, 4, now, now),
+		"a local park moved the generation on, so the entry is stale")
 }

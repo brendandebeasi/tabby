@@ -941,6 +941,7 @@ func TestInvalidateParkedCache_ForcesRequery(t *testing.T) {
 	c.parkedCache = []tmux.Window{{ID: "@1", Minimized: true}}
 	c.parkedCched = c.parkedGen
 	c.parkedValid = true
+	c.parkedAt = time.Now()
 
 	c.invalidateParkedCache()
 
@@ -1123,6 +1124,7 @@ func TestParkedAccessors_SplitOwnFromPeerParked(t *testing.T) {
 	c.parkedAllID = []string{"@7", "@23"}                      // @23 parked by a peer session
 	c.parkedCched = c.parkedGen
 	c.parkedValid = true
+	c.parkedAt = time.Now()
 
 	mine := c.listParkedMinimizedWindows()
 	if assert.Len(t, mine, 1) {

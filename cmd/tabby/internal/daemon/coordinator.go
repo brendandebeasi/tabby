@@ -735,10 +735,13 @@ type Coordinator struct {
 
 	// parkedMu guards the memoized listParkedMinimizedWindows result. That
 	// query is two forks (has-session + list-windows) on every RefreshWindows,
-	// reading state that only changes when a window is parked or surfaced —
-	// so it's invalidated explicitly by those two paths (parkedGen) rather
-	// than expiring on a timer, which would let the sidebar show a stale
-	// Minimized section right after a minimize/restore.
+	// so the local park/surface paths invalidate it explicitly (parkedGen) to
+	// keep the Minimized section instant right after a minimize/restore. A
+	// peer daemon's park bumps nothing here, though — grouped sessions each
+	// run their own daemon, and the one that renders a given window's sidebar
+	// is usually NOT the one that parked the window — so the entry also ages
+	// out after parkedCacheTTL. Without that the peer served a pre-minimize
+	// list forever and the section was simply absent on the windows it drew.
 	// petLeaseMu guards the memoized pet-ownership decision (see
 	// petLeaseRenewEvery). Its own mutex, never stateMu: stealPetOwnership
 	// runs from socket-action goroutines while the tick holds stateMu.
@@ -753,6 +756,7 @@ type Coordinator struct {
 	parkedGen   uint64
 	parkedCched uint64
 	parkedValid bool
+	parkedAt    time.Time
 
 	// Auto tab-summary generation (ai.tab_summary.auto_generate). The LLM client
 	// is built lazily once; summaryFetching coalesces the periodic background
@@ -9779,6 +9783,20 @@ func (c *Coordinator) maybeReparkPeeked() {
 // content pane so windowDirCode/firstPaneCWD can rebuild the tab label.
 // invalidateParkedCache marks the memoized parked-window list stale. Called by
 // every path that moves a window into or out of the holding session.
+// parkedCacheTTL bounds how long a daemon serves a memoized parked-window list
+// that only a PEER daemon's park or unpark would have changed. Short enough that
+// a window minimized on one grouped session appears in the Minimized section of
+// the windows a peer renders within a refresh or two; long enough that a burst of
+// refreshes still costs one listing.
+const parkedCacheTTL = 2 * time.Second
+
+// parkedCacheUsable reports whether the memoized parked-window list may still be
+// served: it has to be published, un-invalidated by a local park, and younger
+// than parkedCacheTTL (the only thing that catches a PEER daemon's park).
+func parkedCacheUsable(valid bool, cachedGen, gen uint64, at, now time.Time) bool {
+	return valid && cachedGen == gen && now.Sub(at) < parkedCacheTTL
+}
+
 func (c *Coordinator) invalidateParkedCache() {
 	c.parkedMu.Lock()
 	c.parkedGen++
@@ -9804,7 +9822,7 @@ func (c *Coordinator) AnyParkedWindowIDs() []string {
 
 func (c *Coordinator) listParkedMinimized() ([]tmux.Window, []string) {
 	c.parkedMu.Lock()
-	if c.parkedValid && c.parkedCched == c.parkedGen {
+	if parkedCacheUsable(c.parkedValid, c.parkedCched, c.parkedGen, c.parkedAt, time.Now()) {
 		cached, cachedAll := c.parkedCache, c.parkedAllID
 		c.parkedMu.Unlock()
 		return cached, cachedAll
@@ -9822,6 +9840,7 @@ func (c *Coordinator) listParkedMinimized() ([]tmux.Window, []string) {
 		c.parkedAllID = all
 		c.parkedCched = gen
 		c.parkedValid = true
+		c.parkedAt = time.Now()
 	}
 	c.parkedMu.Unlock()
 	return parked, all
