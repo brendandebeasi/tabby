@@ -17044,8 +17044,30 @@ func constrainWidgetWidth(content string, maxWidth int) string {
 		return content
 	}
 
+	// Almost every frame already fits. The loop below rebuilt a byte-identical
+	// copy of the content anyway, one line at a time, which made this one of
+	// the larger sources of render garbage. Look for an overflowing line first,
+	// walking the content in place, and hand back the original when there
+	// isn't one.
+	overflowed := false
+	for off := 0; off <= len(content); {
+		end := len(content)
+		if i := strings.IndexByte(content[off:], '\n'); i >= 0 {
+			end = off + i
+		}
+		if uniseg.StringWidth(stripAnsi(content[off:end])) > maxWidth {
+			overflowed = true
+			break
+		}
+		off = end + 1
+	}
+	if !overflowed {
+		return content
+	}
+
 	lines := strings.Split(content, "\n")
 	var result strings.Builder
+	result.Grow(len(content))
 	hadOverflow := false
 
 	for i, line := range lines {
@@ -23042,27 +23064,50 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 // matching the raw bg escapes the tab-row renderer already emits. Falls back to a
 // solid fromHex fill for any edge case (non-hex colours, empty width, multi-line
 // content), so it can never render worse than applyBackgroundFill.
-func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width int) string {
-	if width < 1 || strings.Contains(content, "\n") ||
-		len(fromHex) != 7 || fromHex[0] != '#' || len(toHex) != 7 || toHex[0] != '#' {
-		return c.applyBackgroundFill(content, fromHex, width)
+// gradientColumnsKey is everything a gradient row's per-column colours depend
+// on. Widths follow the sidebar and the colours come from the theme, so a
+// settled sidebar cycles through a handful of keys.
+type gradientColumnsKey struct {
+	from, to string
+	width    int
+}
+
+// gradientColumnsCache memoizes the per-column background escapes. Each column
+// used to cost two hex parses, a blend and a Sprintf, recomputed for every
+// gradient row of every frame even though the answer only moves on a resize or
+// a theme change.
+var (
+	gradientColumnsCache  sync.Map // key: gradientColumnsKey, value: []string
+	gradientColumnsCacheN atomic.Int64
+)
+
+// gradientColumnsCacheMax bounds the cache the same way smallButtonCacheMax
+// does: a drag-resize walks one width at a time, so drop the map whole at the
+// cap rather than let it track every width the sidebar ever had.
+const gradientColumnsCacheMax = 128
+
+// gradientColumns returns the background escape for each column of a width-wide
+// gradient row running from fromHex to toHex.
+//
+// The gradient lightens the base over the first ~85% of the row, then DARKENS
+// it over the final ~15% so the tail deepens into a shadowed edge instead of
+// flattening out at the base colour. The tail uses a smoothstep ease so it
+// blends IN gradually (no visible slope seam at the junction). darkEnd is the
+// base pushed toward black, also reused for the menu-button fill so the row's
+// right edge doesn't pop back to the base colour.
+func gradientColumns(fromHex, toHex string, width int) []string {
+	key := gradientColumnsKey{from: fromHex, to: toHex, width: width}
+	if v, ok := gradientColumnsCache.Load(key); ok {
+		return v.([]string)
 	}
-	// Compute a distinct colour PER COLUMN (no banding). The old banding read as
-	// visible steps; emit-on-change below (see `emit`) still collapses runs of
-	// identical rounded RGB into one escape, so the byte cost stays modest while
-	// the gradient looks smooth.
-	//
-	// The gradient lightens the base over the first ~85% of the row, then DARKENS
-	// it over the final ~15% so the tail deepens into a shadowed edge instead of
-	// flattening out at the base colour. The tail uses a smoothstep ease so it
-	// blends IN gradually (no visible slope seam at the junction). darkEnd is the
-	// base pushed toward black — also reused for the menu-button fill so the row's
-	// right edge doesn't pop back to the base colour.
+
 	const headEnd = 0.15 // leading-edge highlight zone (mirrors the dark tail)
 	const tailStart = 0.85
 	darkEnd := gradientTailColor(toHex)
 	lightHead := blendHexToward(fromHex, "#ffffff", 0.18) // extra-light left edge
-	bgAt := func(x int) string {
+
+	columns := make([]string, width)
+	for x := range columns {
 		frac := 0.0
 		if width > 1 {
 			frac = float64(x) / float64(width-1)
@@ -23084,11 +23129,36 @@ func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width in
 			hex = blendHexToward(toHex, darkEnd, t) // base -> dark tail
 		}
 		r, g, b := hexToRGB(hex)
-		return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+		columns[x] = fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
 	}
+
+	if gradientColumnsCacheN.Load() >= gradientColumnsCacheMax {
+		gradientColumnsCache.Clear()
+		gradientColumnsCacheN.Store(0)
+	}
+	if _, loaded := gradientColumnsCache.LoadOrStore(key, columns); !loaded {
+		gradientColumnsCacheN.Add(1)
+	}
+	return columns
+}
+
+func (c *Coordinator) applyGradientFill(content, fromHex, toHex string, width int) string {
+	if width < 1 || strings.Contains(content, "\n") ||
+		len(fromHex) != 7 || fromHex[0] != '#' || len(toHex) != 7 || toHex[0] != '#' {
+		return c.applyBackgroundFill(content, fromHex, width)
+	}
+	// Compute a distinct colour PER COLUMN (no banding). The old banding read as
+	// visible steps; emit-on-change below (see `emit`) still collapses runs of
+	// identical rounded RGB into one escape, so the byte cost stays modest while
+	// the gradient looks smooth. See gradientColumns for the shape of the ramp.
+	columns := gradientColumns(fromHex, toHex, width)
+	bgAt := func(x int) string { return columns[x] }
 	isTerm := func(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') }
 	reset := "\x1b[0m"
 	var b strings.Builder
+	// Escapes are only emitted where the rounded colour changes, so this is a
+	// floor rather than the worst case. It skips the first few doublings.
+	b.Grow(len(content) + width)
 	col := 0
 	lastEsc := ""
 	emit := func() {
