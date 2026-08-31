@@ -18204,15 +18204,54 @@ func (c *Coordinator) forceQuestionTeaser() {
 	coordinatorDebugLog.Printf("forceQuestionTeaser: teaser armed (question id=%q)", pending.ID)
 }
 
+// smallButtonKey is the full set of inputs renderSmallButton's output
+// depends on. Width follows the sidebar, the labels are literals at every
+// call site but one, and the colors come from the theme, so a settled
+// sidebar cycles through about a dozen distinct keys.
+type smallButtonKey struct {
+	width   int
+	label   string
+	bgColor string
+	fgColor string
+}
+
+// smallButtonCache memoizes renderSmallButton. Every Render call borrows an
+// ansi.Parser from a sync.Pool and re-grows its data buffer; at ~11 buttons
+// per frame that single call chain accounted for 55% of everything the
+// daemon allocated, which is what kept it collecting garbage nine times per
+// 30 seconds while sitting idle.
+var (
+	smallButtonCache  sync.Map // key: smallButtonKey, value: string
+	smallButtonCacheN atomic.Int64
+)
+
+// smallButtonCacheMax bounds the cache. A drag-resize walks the sidebar one
+// width at a time, so the key set grows during a drag and then goes static
+// again; dropping the whole map at the cap holds the ceiling at a few
+// hundred short strings and costs one re-render per live button.
+const smallButtonCacheMax = 256
+
 // renderSmallButton renders a single-line flat button with background color.
 func renderSmallButton(width int, label string, bgColor, fgColor string) string {
-	return lipgloss.NewStyle().
+	key := smallButtonKey{width: width, label: label, bgColor: bgColor, fgColor: fgColor}
+	if v, ok := smallButtonCache.Load(key); ok {
+		return v.(string)
+	}
+	out := lipgloss.NewStyle().
 		Background(lipgloss.Color(bgColor)).
 		Foreground(lipgloss.Color(fgColor)).
 		Bold(true).
 		Width(width).
 		Align(lipgloss.Center).
 		Render(label)
+	if smallButtonCacheN.Load() >= smallButtonCacheMax {
+		smallButtonCache.Clear()
+		smallButtonCacheN.Store(0)
+	}
+	if _, loaded := smallButtonCache.LoadOrStore(key, out); !loaded {
+		smallButtonCacheN.Add(1)
+	}
+	return out
 }
 
 // renderPinnedActionButtons renders New Tab, New Group, Close, and Touch Mode toggle
