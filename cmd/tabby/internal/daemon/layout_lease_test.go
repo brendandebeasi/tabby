@@ -114,8 +114,35 @@ func TestGroupLayoutStateAsksTmuxForSessionIDNotName(t *testing.T) {
 		"#{client_session} is the session name and will not match #{session_id} keys")
 }
 
+// stubSessionGroups pins the group map for the duration of one test.
+// NewCoordinator reads it on two paths that have nothing to do with the
+// election (parked-window listing and orphan reconcile), so leaving it live
+// would shell out to the developer's own tmux server.
+func stubSessionGroups(t *testing.T, groups map[string]string) {
+	t.Helper()
+	orig := sessionGroups
+	sessionGroups = func() map[string]string { return groups }
+	t.Cleanup(func() { sessionGroups = orig })
+}
+
+// groupLayoutState costs two fork/execs because the election needs the client
+// list as well as the group map. Callers that only want to place a session in
+// its group (the parked-window listing, the orphan reconcile) were calling it
+// and discarding the clients half, paying a list-clients per call for nothing
+// and putting two extra server reads inside NewCoordinator. Keep them on the
+// one-exec read.
+func TestOnlyTheElectionReadsClients(t *testing.T) {
+	src, err := os.ReadFile("coordinator.go")
+	if err != nil {
+		t.Fatalf("read coordinator.go: %v", err)
+	}
+	assert.NotContains(t, string(src), "groupLayoutState()",
+		"coordinator.go wants the group map only; call sessionGroups() instead")
+}
+
 func TestOwnsGroupLayout_CachesTheElection(t *testing.T) {
 	stubGroupLayoutLease(t, nil)
+	stubSessionGroups(t, map[string]string{"$1": "infras", "$2": "infras"})
 	calls := 0
 	orig := groupLayoutState
 	groupLayoutState = func() (map[string]string, []groupLayoutClient) {
@@ -136,6 +163,7 @@ func TestOwnsGroupLayout_CachesTheElection(t *testing.T) {
 
 func TestOwnsGroupLayout_FalseWhenAPeerIsMoreRecentlyActive(t *testing.T) {
 	stubGroupLayoutLease(t, nil)
+	stubSessionGroups(t, map[string]string{"$1": "infras", "$2": "infras"})
 	orig := groupLayoutState
 	groupLayoutState = func() (map[string]string, []groupLayoutClient) {
 		return map[string]string{"$1": "infras", "$2": "infras"},

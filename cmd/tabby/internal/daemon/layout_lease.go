@@ -67,23 +67,34 @@ const layoutOwnerRecheck = time.Second
 // device switch keeps the challenger ahead for far longer than that.
 const layoutOwnerHandoffDelay = 3 * time.Second
 
+// sessionGroups reads which sessions belong to which group, keyed by
+// #{session_id}. This is the cheaper half of groupLayoutState: the election
+// needs the clients too, but callers that only want to place a session in its
+// group pay one fork/exec here instead of two. A var so tests can stub it.
+var sessionGroups = func() map[string]string {
+	groups := map[string]string{}
+	out, err := tmuxOutputCtx("list-sessions", "-F", "#{session_id}|||#{session_group}")
+	if err != nil {
+		return groups
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.Split(strings.TrimSpace(line), "|||")
+		if len(parts) < 2 {
+			continue
+		}
+		if id := strings.TrimSpace(parts[0]); id != "" {
+			groups[id] = strings.TrimSpace(parts[1])
+		}
+	}
+	return groups
+}
+
 // groupLayoutState reads, from the live tmux server, which sessions belong to
 // which group and every attached client. Both halves have to come from the
 // same server read to be consistent, and it is a var so tests can stub it
 // rather than interrogating the developer's own tmux session.
 var groupLayoutState = func() (groups map[string]string, clients []groupLayoutClient) {
-	groups = map[string]string{}
-	if out, err := tmuxOutputCtx("list-sessions", "-F", "#{session_id}|||#{session_group}"); err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			parts := strings.Split(strings.TrimSpace(line), "|||")
-			if len(parts) < 2 {
-				continue
-			}
-			if id := strings.TrimSpace(parts[0]); id != "" {
-				groups[id] = strings.TrimSpace(parts[1])
-			}
-		}
-	}
+	groups = sessionGroups()
 	// The election is filtered to our session group below, so no client outside
 	// the group can win, and the usual hazards of reading every client
 	// (electing a stranger's geometry, trusting its active window) do not

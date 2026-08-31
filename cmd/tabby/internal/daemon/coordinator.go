@@ -9592,7 +9592,7 @@ func (c *Coordinator) reconcileOrphanedMinimizedWindows() {
 	if sess == "" {
 		return
 	}
-	liveGroups, _ := groupLayoutState()
+	liveGroups := sessionGroups()
 	if len(liveGroups) == 0 {
 		// We are running, so at least our own session must be live: an empty map
 		// means the read failed, and treating it as "nothing is live" would adopt
@@ -9863,7 +9863,7 @@ func (c *Coordinator) listParkedMinimizedWindowsUncached() ([]tmux.Window, []str
 		return nil, nil
 	}
 	// One server read for the whole listing; it is memoized behind parkedGen.
-	liveGroups, _ := groupLayoutState()
+	liveGroups := sessionGroups()
 	myGroup := liveGroups[origin]
 	var parked []tmux.Window
 	var allIDs []string
