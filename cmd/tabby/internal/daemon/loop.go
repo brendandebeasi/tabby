@@ -167,6 +167,16 @@ type Loop struct {
 	// RequestGeometryRelock, so it is atomic; every other field here is
 	// loop-goroutine only.
 	relockGeom atomic.Bool
+	// geomIdleTicks counts consecutive geometry ticks that elected the same
+	// single client and found nothing to do. It drives the tick's backoff
+	// (see geomTickInterval): every tick forks a `tmux list-clients`, so an
+	// idle daemon polling at the base rate forever is pure waste. Written on
+	// the loop goroutine, read by the ticker goroutine, hence atomic.
+	geomIdleTicks atomic.Int64
+	// lastActivityReconcile rate-limits the reconcile that an activity-only
+	// geometry wake would otherwise trigger every few seconds forever. See
+	// handleClientGeomTick.
+	lastActivityReconcile time.Time
 	// lastStaleClientPrune rate-limits PruneStaleClients; the geometry tick
 	// itself runs far too often to scan clients on every pass.
 	lastStaleClientPrune time.Time
@@ -253,6 +263,12 @@ func (l *Loop) Submit(ev Event) {
 	ch := l.events
 	if isPriorityEvent(ev) {
 		ch = l.inputs
+		// A user just did something. Whatever gap the geometry tick had
+		// widened to while idle, collapse it now, so the poll is back at full
+		// rate before the consequences of that action (a resize, a client
+		// switch) need noticing. This is what makes the backoff safe with
+		// several clients attached.
+		l.geomIdleTicks.Store(0)
 	}
 	select {
 	case ch <- ev:
@@ -358,6 +374,22 @@ func (l *Loop) dispatch(ev Event) {
 
 // runTicker drives a fn at cadence d until ctx is cancelled. Used by main.go
 // to fire one of the per-tick submitCoalesced calls.
+// runBackoffTicker is runTicker with an interval recomputed before every wait,
+// so a handler can widen its own polling gap as it goes idle. `interval` is
+// called on this goroutine and must not block.
+func runBackoffTicker(ctx context.Context, interval func() time.Duration, fn func()) {
+	for {
+		t := time.NewTimer(interval())
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+			fn()
+		}
+	}
+}
+
 func runTicker(ctx context.Context, d time.Duration, fn func()) {
 	t := time.NewTicker(d)
 	defer t.Stop()
@@ -1088,6 +1120,52 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 // clients. Detaching is user-visible, so this stays deliberately infrequent.
 const staleClientPruneInterval = time.Hour
 
+// clientGeomBase is the geometry tick's normal period, and clientGeomMax the
+// slowest it backs off to while idle. clientGeomIdleGrace is how many
+// consecutive do-nothing ticks must pass before backoff starts, so a brief
+// lull between keystrokes never costs responsiveness.
+//
+// Backoff is safe because the poll is a safety net rather than the primary
+// signal, and because it only survives genuine inactivity:
+//
+//   - A real resize arrives through tmux's own client-resized hook, which the
+//     plugin registers; the poll is the belt to that hook's braces.
+//   - Any priority event — a renderer input or a tmux hook, i.e. anything the
+//     user actually did — resets the count in Submit, so the tick is back at
+//     the base rate before that action's consequences need noticing.
+//
+// That second rule is what makes backoff safe with several clients attached:
+// the case the poll uniquely catches is the active-client election flipping
+// between them, and a client the user is touching generates priority events.
+const (
+	clientGeomBase      = 250 * time.Millisecond
+	clientGeomMax       = 2 * time.Second
+	clientGeomIdleGrace = 12
+)
+
+// activityReconcileInterval is the floor between reconciles triggered purely
+// by the client-activity clock advancing, with nothing else changed. Observed
+// before this floor: one every 5-13s, indefinitely. Kept well under a minute
+// so it still serves as the periodic full refresh it had become.
+const activityReconcileInterval = 30 * time.Second
+
+// geomTickInterval maps the idle-tick count to the next polling gap, doubling
+// from clientGeomBase up to clientGeomMax once the grace period is past.
+func (l *Loop) geomTickInterval() time.Duration {
+	idle := l.geomIdleTicks.Load() - clientGeomIdleGrace
+	if idle <= 0 {
+		return clientGeomBase
+	}
+	d := clientGeomBase
+	for i := int64(0); i < idle && d < clientGeomMax; i++ {
+		d *= 2
+	}
+	if d > clientGeomMax {
+		d = clientGeomMax
+	}
+	return d
+}
+
 // clientGeomSettle is how long a client's reported size must hold still before
 // chrome is reflowed for it. The geometry tick runs every 250ms, so this is two
 // ticks: long enough to swallow a renegotiation burst, short enough that a real
@@ -1142,6 +1220,11 @@ func (l *Loop) handleClientGeomTick() {
 			l.coord.PruneStaleClients()
 		}
 		res := l.elector.Elect()
+		if res.Attached < 0 {
+			// A tmux error, not an answer. Don't let a failing query look like
+			// a quiet one and coast into the slow rate.
+			l.geomIdleTicks.Store(0)
+		}
 		if !res.OK {
 			// A genuine zero-attached-clients election (not a tmux error) means
 			// the last client detached: drop the stale active-client snapshot so
@@ -1159,9 +1242,37 @@ func (l *Loop) handleClientGeomTick() {
 		relock := l.relockGeom.Load()
 		geomKey := fmt.Sprintf("%s:%dx%d:%d", ac.TTY, ac.Width, ac.Height, res.Activity/5)
 		if geomKey == l.lastClientGeom && !relock {
+			// Nothing changed, and no user action has arrived to reset us:
+			// this is the only path that may widen the gap.
+			l.geomIdleTicks.Add(1)
 			return
 		}
 		resizeKey := fmt.Sprintf("%s:%dx%d", ac.TTY, ac.Width, ac.Height)
+		// An activity-only wake: same client, same size, and the only thing
+		// that moved is the res.Activity/5 bucket in geomKey. On a machine
+		// where some pane is always drawing (a log tail, an AI session) that
+		// bucket rolls forever, so this fires every few seconds indefinitely
+		// and drags a full ForceWidthSync reconcile along with it — re-syncing
+		// widths to the values they already hold.
+		//
+		// The reconcile is not dropped, only rate-limited, because it doubles
+		// as a periodic full refresh that other state leans on. Between those,
+		// take the cheap half (the active-client snapshot) and skip the rest.
+		activityOnly := !relock && l.lastResizeKey != "" && resizeKey == l.lastResizeKey
+		if activityOnly && time.Since(l.lastActivityReconcile) < activityReconcileInterval {
+			l.lastClientGeom = geomKey
+			l.coord.SetActiveClient(ac)
+			// A rolling clock is not user activity, so this must not count as
+			// work: letting it reset the backoff would peg the poll at the
+			// base rate forever on exactly those always-drawing machines.
+			l.geomIdleTicks.Add(1)
+			return
+		}
+		// Past here the tick has real work, so snap back to the base rate.
+		l.geomIdleTicks.Store(0)
+		if activityOnly {
+			l.lastActivityReconcile = time.Now()
+		}
 		// Checked before lastClientGeom is committed: a deferred geometry must
 		// stay "changed" so the next tick re-examines it. Recording it here
 		// would make the settled size look already-handled, and the reflow it
@@ -1203,6 +1314,9 @@ func (l *Loop) handleClientGeomTick() {
 // next size change. Safe to call from any goroutine.
 func (l *Loop) RequestGeometryRelock(reason string) {
 	l.relockGeom.Store(true)
+	// The submit below lands the relock immediately; this just returns the
+	// ticker itself to the base rate rather than leaving it backed off.
+	l.geomIdleTicks.Store(0)
 	logEvent("GEOMETRY_RELOCK_REQUEST reason=%s", reason)
 	l.submitCoalesced(&l.flags.geom, ClientGeomTickEvent{})
 }

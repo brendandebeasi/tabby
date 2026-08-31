@@ -3446,7 +3446,7 @@ func Run(args []string) int {
 			SocketPath:          server.GetSocketPath(),
 			SigCh:               sigCh,
 		})
-		go runTicker(loopCtx, 250*time.Millisecond, func() { loop.submitCoalesced(&loop.flags.geom, ClientGeomTickEvent{}) })
+		go runBackoffTicker(loopCtx, loop.geomTickInterval, func() { loop.submitCoalesced(&loop.flags.geom, ClientGeomTickEvent{}) })
 		go runTicker(loopCtx, 100*time.Millisecond, func() { loop.submitCoalesced(&loop.flags.anim, AnimationTickEvent{}) })
 		go runTicker(loopCtx, 3*time.Second, func() { loop.submitCoalesced(&loop.flags.window, WindowCheckTickEvent{}) })
 		go runTicker(loopCtx, 30*time.Second, func() { loop.submitCoalesced(&loop.flags.refresh, RefreshTickEvent{}) })
