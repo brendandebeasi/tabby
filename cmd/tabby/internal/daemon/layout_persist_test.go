@@ -7,6 +7,23 @@ import (
 const testLayout1 = "abcd,80x24,0,0{39x24,0,0,1,40x24,40,0,2}"
 const testLayout2 = "efgh,100x24,0,0{39x24,0,0,1,60x24,40,0,2}"
 
+// The real cached layout that flickered the phone button bar: captured at
+// 55x45, replayed onto a 55x25 window, where select-layout scaled the 3-row
+// bar down. layoutOuterHeight is what lets Reconcile reject that replay.
+func TestLayoutOuterHeight(t *testing.T) {
+	cases := map[string]int{
+		"3747,55x45,0,0[55x41,0,0,321,55x3,0,42,488]": 45,
+		testLayout1: 24,
+		"":          0,
+		"garbage":   0,
+	}
+	for layout, want := range cases {
+		if got := layoutOuterHeight(layout); got != want {
+			t.Errorf("layoutOuterHeight(%q) = %d, want %d", layout, got, want)
+		}
+	}
+}
+
 // captureMirror swaps the tmux option writers for in-memory ones and returns
 // the map they write into.
 func captureMirror(t *testing.T) map[string]string {

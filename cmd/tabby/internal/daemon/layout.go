@@ -454,6 +454,22 @@ func snapshotWindowLayouts() []windowLayoutSnapshot {
 // string. The 5 hex digits + comma is the format; rest is the tree.
 var layoutOuterRe = regexp.MustCompile(`^[0-9a-f]+,(\d+)x(\d+),\d+,\d+`)
 
+// layoutOuterHeight returns the outer window height a tmux layout string was
+// captured at, or 0 if the prefix can't be parsed. Used to reject replaying a
+// cached layout onto a window of a different height, where select-layout would
+// scale it and squash fixed-height chrome (the phone button bar).
+func layoutOuterHeight(layout string) int {
+	m := layoutOuterRe.FindStringSubmatch(layout)
+	if m == nil {
+		return 0
+	}
+	h, err := strconv.Atoi(m[2])
+	if err != nil || h <= 0 {
+		return 0
+	}
+	return h
+}
+
 // layoutLeafRe matches every "WxH,X,Y,paneID" leaf in a tmux layout tree.
 // Non-leaf nodes have `[` or `{` after the position instead of `,paneID`.
 var layoutLeafRe = regexp.MustCompile(`(\d+)x(\d+),(\d+),(\d+),(\d+)`)

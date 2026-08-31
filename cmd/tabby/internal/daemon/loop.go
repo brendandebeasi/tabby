@@ -1014,6 +1014,19 @@ func (l *Loop) Reconcile(opts ReconcileOpts) ReconcileResult {
 				if cached == "" {
 					continue
 				}
+				// The cache is keyed by width only, but select-layout scales a
+				// height-mismatched layout to fit the window — and that scaling
+				// squashes the fixed-height phone button bar (3 rows) down,
+				// which the next header-height-sync then grows back, producing a
+				// visible flicker. With several differently-sized clients sharing
+				// a grouped session the cached height routinely disagrees with the
+				// window's current height, so replay only when the heights match;
+				// the resize-window above already gives a sane layout otherwise.
+				if h := layoutOuterHeight(cached); h > 0 && h != ac.Height {
+					logEvent("RESTORE_LAYOUT_SKIP window=%s width=%d cachedH=%d targetH=%d reason=height_mismatch",
+						op.Target, lockedWidth, h, ac.Height)
+					continue
+				}
 				ops = append(ops, ResizeOp{
 					Kind:    OpSelectLayout,
 					Target:  op.Target,
