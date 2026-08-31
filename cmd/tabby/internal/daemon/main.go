@@ -23,6 +23,7 @@ import (
 
 	zone "github.com/lrstanley/bubblezone"
 
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/tmuxhooks"
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/navtrace"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
@@ -3232,6 +3233,10 @@ func Run(args []string) int {
 	debugLog.Printf("Server listening on %s", server.GetSocketPath())
 	logEvent("DAEMON_START session=%s pid=%d", *sessionID, os.Getpid())
 	startPprof()
+	// Opens the daemon gate on hooks whose only work is to signal a daemon; see
+	// daemonGate in internal/tmuxhooks. Set after the socket is listening, so a
+	// hook that gets through has something to connect to.
+	tmuxhooks.MarkDaemonPresent(*sessionID)
 	resetTerminalModes(*sessionID)
 
 	// Start heartbeat writer (detects hangs on next startup)
@@ -3502,6 +3507,7 @@ func Run(args []string) int {
 	// self-termination, which is a crash and wants a fresh daemon.
 
 	close(heartbeatDone)
+	tmuxhooks.ClearDaemonPresent(*sessionID)
 	server.Stop()
 	return 0
 }

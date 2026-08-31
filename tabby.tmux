@@ -555,6 +555,31 @@ HOOK_OK="true"
 # #{session_id} (always `$N`), so hooks run normally with no daemon around.
 MUTE_GATE='#{?#{==:#{@tabby_mute},#{session_id}},0,1}'
 
+# DAEMON_GATE is MUTE_GATE plus a test for a daemon actually existing in the
+# session the hook fired in. Every step behind it is a message to a daemon, and
+# with none running the fire buys nothing but a forked shell that fails to read
+# a pid file that is not there.
+#
+# In a grouped set that is most of the fires. Only the sessions someone runs
+# tabby in have a daemon; the rest are along for the ride because they share
+# the window list. Of the ~400 window-linked fires one new-window produced here,
+# eight ninths were sessions with no daemon to signal.
+#
+# It gates only WINDOW- and PANE-level hooks, because those events are shared by
+# the whole group: the daemon's own session fires the same hook for the same
+# event, so dropping the peers' copies loses nothing. session-created and
+# client-session-changed keep the plain MUTE_GATE — they fire in one session
+# only, and they are what STARTS a daemon, so gating them on one would deadlock.
+#
+# @tabby_daemon is a SESSION option, set by the daemon on its own session for
+# the life of the process. A server-wide flag would only say "some daemon is
+# running somewhere" and open the gate for all nine sessions again — the same
+# reason @tabby_mute holds a session id rather than a boolean. A daemon that
+# dies without unsetting it leaves the gate open, which is exactly the behaviour
+# we have today, and a daemon still starting has not set it yet, so a few fires
+# are skipped and its own reconcile tick covers them.
+DAEMON_GATE='#{?#{&&:#{!=:#{@tabby_daemon},},#{!=:#{@tabby_mute},#{session_id}}},1,0}'
+
 # gated_hook <hook-name> <body> — install a hook body behind MUTE_GATE.
 # The body goes in the single-quoted true-branch, so any single quote it
 # contains (every #{session_id} carries a pair) has to leave and re-enter the
@@ -566,6 +591,13 @@ gated_hook() {
     # enough to reorder after-kill-pane's deliberately synchronous first step
     # (pane ratios must be recorded before the reflow) behind the rest.
     tmux set-hook -g "$1" "if-shell -F '$MUTE_GATE' '$_gh_body' ''"
+}
+
+# daemon_gated_hook <hook-name> <body> — as gated_hook, but behind DAEMON_GATE.
+# For hooks whose every step is a message to a daemon. See DAEMON_GATE.
+daemon_gated_hook() {
+    _dgh_body=$(printf '%s' "$2" | sed "s/'/'\\\\''/g")
+    tmux set-hook -g "$1" "if-shell -F '$DAEMON_GATE' '$_dgh_body' ''"
 }
 
 # Every backgrounded body in a hook is a separate tmux job, costing a
@@ -583,9 +615,9 @@ gated_hook() {
 # shell's own name). Shell double quotes do not stop it. #{window_id} and
 # #{client_tty} are safe either way, but quoting every format the same way is
 # what makes a merged body possible to reason about.
-gated_hook window-linked "if-shell -b \"$NOTIFY_CMD '#{session_id}' '#{session_attached}'; $HOOK_OK\" \"\""
-gated_hook window-unlinked "if-shell -b \"$NOTIFY_CMD '#{session_id}' '#{session_attached}'; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK\" \"\""
-gated_hook after-new-window "if-shell -b \"$NOTIFY_CMD '#{session_id}' '#{session_attached}'; $HOOK_OK\" \"\""
+daemon_gated_hook window-linked "if-shell -b \"$NOTIFY_CMD '#{session_id}' '#{session_attached}'; $HOOK_OK\" \"\""
+daemon_gated_hook window-unlinked "if-shell -b \"$NOTIFY_CMD '#{session_id}' '#{session_attached}'; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK\" \"\""
+daemon_gated_hook after-new-window "if-shell -b \"$NOTIFY_CMD '#{session_id}' '#{session_attached}'; $HOOK_OK\" \"\""
 
 # prefix+, opens the per-pane actions menu (close, zoom, splits, break-pane,
 # swap, mark). Works in any window — the menu picks items based on whether the
@@ -613,13 +645,13 @@ tmux bind-key r command-prompt -I "#W" "rename-window '%%' ; set-window-option @
 # selection's own hook then never runs.
 tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' 'if-shell -b \"$CYCLE_PANE_BIN --main-follow; $HOOK_OK\" \"\"' 'if-shell -b \"$NOTIFY_CMD --no-refresh; $HOOK_OK\" \"\"'"
 # after-split-window: daemon handles window name preservation (PreserveWindowNames)
-gated_hook after-split-window "if-shell -b \"$NOTIFY_CMD --no-refresh '#{session_id}'; $HOOK_OK\" \"\""
+daemon_gated_hook after-split-window "if-shell -b \"$NOTIFY_CMD --no-refresh '#{session_id}'; $HOOK_OK\" \"\""
 
 # When a pane is killed: preserve ratios synchronously (must happen before tmux
 # reflows), then signal daemon in background. The daemon's USR1 handler takes
 # care of orphan cleanup and sidebar spawning.
 PRESERVE_RATIOS_CMD="$HOOK_BIN preserve-pane-ratios"
-gated_hook after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"; $HOOK_OK'; if-shell -b \"$NOTIFY_CMD --no-refresh '#{session_id}'; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK\" \"\""
+daemon_gated_hook after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"; $HOOK_OK'; if-shell -b \"$NOTIFY_CMD --no-refresh '#{session_id}'; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK\" \"\""
 
 # session-created: ensure the new session has a daemon before signalling. A
 # session created after plugin load (most easily a grouped clone, which shares

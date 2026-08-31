@@ -119,6 +119,55 @@ const clearedMuteValue = "0"
 // ClearedMuteValue is clearedMuteValue for callers outside this package.
 const ClearedMuteValue = clearedMuteValue
 
+// daemonGate is muteGate plus a test for a daemon actually existing in the
+// session the hook fired in. It is for hooks whose every step is a message to a
+// daemon: with none running, the fire does nothing but fork a shell to fail at
+// reading a pid file that is not there.
+//
+// That is not a rounding error in a grouped set. Window and pane hooks fire once
+// per session a window is linked into, and only the sessions someone actually
+// runs tabby in have a daemon; the rest are along for the ride because they
+// share the window list. Measured on this 9-session group, one new-window drove
+// ~400 window-linked fires and eight ninths of them were sessions with no daemon
+// to signal.
+//
+// It gates only hooks whose trigger is a WINDOW- or PANE-level change, because
+// those are shared by the whole group: the daemon's own session gets its own
+// fire of the same event, so dropping the peers' copies loses no information.
+// Client- and session-level hooks (client-attached, client-resized,
+// client-session-changed, session-created) fire in one session only, which may
+// well be a daemonless peer whose request a peer daemon services via the
+// fallback in dialDaemon — and two of them exist to START a daemon, so gating
+// them on one would be a deadlock. Those keep the plain muteGate.
+//
+// DaemonOption is set on the daemon's own session, not the server, for the same
+// reason muteGate carries a session id: a server-wide flag would say "some
+// daemon is running somewhere" and open the gate for all nine sessions again.
+//
+// Every failure mode is fail-open or self-correcting. A daemon killed without
+// unsetting the option leaves the gate open, which is exactly today's behaviour.
+// A daemon still starting has not set it yet, so a few fires are skipped — and
+// the daemon reconciles on its own tick regardless, which is what makes every
+// step behind this gate best-effort in the first place.
+const daemonGate = "#{?#{&&:#{!=:#{" + DaemonOption + "},},#{!=:#{" + MuteOption + "},#{session_id}}},1,0}"
+
+// DaemonOption is the session option a running daemon sets on its own session
+// for the life of the process. Exported so the daemon names it from one place.
+const DaemonOption = "@tabby_daemon"
+
+// MarkDaemonPresent opens daemonGate for sessionID. Called once at daemon
+// startup; the value is unread, only its emptiness matters.
+func MarkDaemonPresent(sessionID string) {
+	exec.Command("tmux", "set-option", "-t", sessionID, DaemonOption, "1").Run()
+}
+
+// ClearDaemonPresent closes daemonGate for sessionID, on the daemon's way out.
+// Best-effort: a daemon that dies without reaching this leaves the gate open,
+// which costs the pointless fires this gate saves and nothing else.
+func ClearDaemonPresent(sessionID string) {
+	exec.Command("tmux", "set-option", "-t", sessionID, "-u", DaemonOption).Run()
+}
+
 // ClearMute forces the hook gate open. The option lives on the server, so a
 // daemon killed mid-batch leaves it set and every tabby hook stays silent for
 // the life of the server — tabby looks frozen and nothing in the logs says why.
@@ -176,6 +225,13 @@ func job(steps ...string) string {
 	return fmt.Sprintf("if-shell -F '%s' '%s' ''", muteGate, escapeSingle(body))
 }
 
+// daemonJob is job() behind daemonGate instead of muteGate, for hooks whose
+// every step is a message to a daemon. See daemonGate for which hooks qualify.
+func daemonJob(steps ...string) string {
+	body := fmt.Sprintf("if-shell -b \"%s%s\" \"\"", strings.Join(steps, "; "), okGuard)
+	return fmt.Sprintf("if-shell -F '%s' '%s' ''", daemonGate, escapeSingle(body))
+}
+
 // escapeSingle makes body safe to embed in the single-quoted branch of the
 // outer if-shell. tmux uses shell-style quoting, so a literal single quote must
 // leave and re-enter the quoted run.
@@ -225,8 +281,15 @@ func Definitions(exe string) []Definition {
 	ensureContent := "cycle-pane --ensure-content"
 
 	return []Definition{
-		{"after-resize-pane", job(fmt.Sprintf("%s hook on-pane-resize '#{hook_pane}'", exe))},
-		{"after-resize-window", job(fmt.Sprintf("%s hook on-pane-resize '#{pane_id}'", exe))},
+		// Pane geometry is a property of the window, so every session the window
+		// is linked into fires these for one resize. daemonJob keeps the fire in
+		// the daemon's own session and drops the daemonless peers' copies of the
+		// same event.
+		{"after-resize-pane", daemonJob(fmt.Sprintf("%s hook on-pane-resize '#{hook_pane}'", exe))},
+		{"after-resize-window", daemonJob(fmt.Sprintf("%s hook on-pane-resize '#{pane_id}'", exe))},
+		// Not daemonJob: a client resize fires only in the client's own session,
+		// which may be a daemonless peer whose request dialDaemon hands to a peer
+		// daemon. There is no second fire to fall back on.
 		{"client-resized", job(batch(
 			"hook client-resized '#{client_tty}' '#{client_width}' '#{client_height}'",
 			ensureSidebar,
