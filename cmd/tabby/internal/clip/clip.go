@@ -22,9 +22,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // Run is the subcommand entry point. args are the tokens following "clip".
@@ -232,7 +233,7 @@ func capturePane(target string, n int) ([]byte, error) {
 	if target != "" {
 		args = append(args, "-t", target)
 	}
-	out, err := exec.Command("tmux", args...).Output()
+	out, err := tmux.Cmd(args...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("capture-pane: %w", err)
 	}
@@ -285,7 +286,7 @@ func paneTTY(target string) string {
 	if target == "" {
 		return ""
 	}
-	out, err := exec.Command("tmux", "display", "-p", "-t", target, "#{pane_tty}").Output()
+	out, err := tmux.Cmd("display", "-p", "-t", target, "#{pane_tty}").Output()
 	if err != nil {
 		return ""
 	}

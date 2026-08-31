@@ -12,11 +12,11 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // Run is the subcommand entry point. args are the tokens following "theme".
@@ -116,7 +116,7 @@ func request(req *daemon.ThemeRequest) (*daemon.ThemeResponse, error) {
 
 // currentSessionID returns the tmux session id ("$2") for the caller's pane.
 func currentSessionID() (string, error) {
-	out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+	out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
 	if err != nil {
 		return "", err
 	}

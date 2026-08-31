@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
 	"io"
 	"log"
 	"net"
@@ -24,6 +23,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
@@ -32,6 +33,7 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
 	"github.com/brendandebeasi/tabby/pkg/textwidth"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 var (
@@ -73,7 +75,7 @@ func initInputLog() {
 // Caches result for 10 seconds to avoid excessive tmux calls
 func isInputLogEnabled() bool {
 	if time.Since(inputLogCheckTime) > 10*time.Second {
-		out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_input_log").Output()
+		out, err := tmux.Cmd("show-options", "-gqv", "@tabby_input_log").Output()
 		if err != nil {
 			inputLogEnabled = false
 		} else {
@@ -301,7 +303,7 @@ func connectCmd() tea.Cmd {
 		// a sidebar without a window id is a bug, not something to paper over.
 		windowIDStr := *windowID
 		if windowIDStr == "" {
-			if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+			if out, err := tmux.Cmd("display-message", "-p", "#{window_id}").Output(); err == nil {
 				windowIDStr = strings.TrimSpace(string(out))
 			}
 		}
@@ -348,13 +350,13 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		go func() {
 			time.Sleep(100 * time.Millisecond)
 			// Toggle mouse mode to force tmux to re-sync with terminal
-			exec.Command("tmux", "set", "-g", "mouse", "off").Run()
-			exec.Command("tmux", "set", "-g", "mouse", "on").Run()
+			tmux.Cmd("set", "-g", "mouse", "off").Run()
+			tmux.Cmd("set", "-g", "mouse", "on").Run()
 			// Refresh all clients to ensure mouse tracking is active
-			if out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output(); err == nil {
+			if out, err := tmux.Cmd("list-clients", "-F", "#{client_tty}").Output(); err == nil {
 				for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 					if tty != "" {
-						exec.Command("tmux", "refresh-client", "-t", tty, "-S").Run()
+						tmux.Cmd("refresh-client", "-t", tty, "-S").Run()
 					}
 				}
 			}
@@ -877,7 +879,7 @@ func (m *rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSi
 	// Get our actual pane ID (not client/window ID) for resize and context menus
 	paneID := os.Getenv("TMUX_PANE")
 	if paneID == "" {
-		out, _ := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output()
+		out, _ := tmux.Cmd("display-message", "-p", "#{pane_id}").Output()
 		paneID = strings.TrimSpace(string(out))
 	}
 
@@ -1108,14 +1110,14 @@ func (m *rendererModel) menuDismiss() {
 // menuFocusSidebar focuses the sidebar pane so keyboard events reach the renderer
 func (m *rendererModel) menuFocusSidebar() {
 	if m.sidebarPaneID != "" {
-		exec.Command("tmux", "select-pane", "-t", m.sidebarPaneID).Run()
+		tmux.Cmd("select-pane", "-t", m.sidebarPaneID).Run()
 	}
 }
 
 // menuRestoreFocus returns focus to the previously active pane
 func (m *rendererModel) menuRestoreFocus() {
 	// select-pane -l switches back to the last active pane
-	exec.Command("tmux", "select-pane", "-l").Run()
+	tmux.Cmd("select-pane", "-l").Run()
 }
 
 // menuStartY returns the computed screen Y where the menu starts rendering
@@ -2321,7 +2323,7 @@ func Run(args []string) int {
 
 	// Get session ID from environment if not provided
 	if *sessionID == "" {
-		out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+		out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
 		if err == nil {
 			*sessionID = strings.TrimSpace(string(out))
 		}
@@ -2345,7 +2347,7 @@ func Run(args []string) int {
 	// Get our own pane ID for focus management (context menu keyboard input)
 	sidebarPane := os.Getenv("TMUX_PANE")
 	if sidebarPane == "" {
-		if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
+		if out, err := tmux.Cmd("display-message", "-p", "#{pane_id}").Output(); err == nil {
 			sidebarPane = strings.TrimSpace(string(out))
 		}
 	}

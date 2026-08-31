@@ -1,10 +1,11 @@
 package hook
 
 import (
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // layoutLeafCell matches one leaf (pane-bearing) cell of a tmux layout string.
@@ -31,7 +32,7 @@ func layoutPaneIDs(layout string) map[int]bool {
 // strings use.
 func livePaneIDs(windowID string) map[int]bool {
 	ids := map[int]bool{}
-	out, err := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}").Output()
+	out, err := tmux.Cmd("list-panes", "-t", windowID, "-F", "#{pane_id}").Output()
 	if err != nil {
 		return ids
 	}
@@ -70,7 +71,7 @@ func doPreservePaneRatios(args []string) {
 		windowID = args[0]
 	}
 	if windowID == "" {
-		out, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+		out, _ := tmux.Cmd("display-message", "-p", "#{window_id}").Output()
 		windowID = strings.TrimSpace(string(out))
 	}
 	if windowID == "" {
@@ -78,14 +79,14 @@ func doPreservePaneRatios(args []string) {
 	}
 
 	// Daemon-managed system pane cleanup sets a one-shot skip flag
-	skip, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_skip_preserve_"+windowID).Output()
+	skip, _ := tmux.Cmd("show-option", "-gqv", "@tabby_skip_preserve_"+windowID).Output()
 	if strings.TrimSpace(string(skip)) == "1" {
-		exec.Command("tmux", "set-option", "-g", "@tabby_skip_preserve_"+windowID, "0").Run()
+		tmux.Cmd("set-option", "-g", "@tabby_skip_preserve_"+windowID, "0").Run()
 		return
 	}
 
 	// Check if we have a saved layout for this window
-	saved, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_layout_"+windowID).Output()
+	saved, _ := tmux.Cmd("show-option", "-gqv", "@tabby_layout_"+windowID).Output()
 	layout := strings.TrimSpace(string(saved))
 	if layout == "" {
 		return
@@ -135,5 +136,5 @@ func doPreservePaneRatios(args []string) {
 	}
 
 	// Apply the saved layout (may fail if pane count changed, that's fine)
-	exec.Command("tmux", "select-layout", "-t", windowID, layout).Run()
+	tmux.Cmd("select-layout", "-t", windowID, layout).Run()
 }

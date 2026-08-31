@@ -2,8 +2,9 @@ package hook
 
 import (
 	"os"
-	"os/exec"
 	"strings"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // currentPaneID returns the pane a hook invocation should act on.
@@ -42,13 +43,13 @@ func resolvePaneID(envPane string, exists func(string) bool, active func() strin
 // empty output is the signal here, not the exit status — checking only the exit
 // code would treat every dead id as live.
 func paneExists(pane string) bool {
-	out, err := exec.Command("tmux", "display-message", "-t", pane, "-p", "#{pane_id}").Output()
+	out, err := tmux.Cmd("display-message", "-t", pane, "-p", "#{pane_id}").Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 // activePaneID asks tmux for the pane of the client that dispatched this hook.
 func activePaneID() string {
-	out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output()
+	out, err := tmux.Cmd("display-message", "-p", "#{pane_id}").Output()
 	if err != nil {
 		return ""
 	}

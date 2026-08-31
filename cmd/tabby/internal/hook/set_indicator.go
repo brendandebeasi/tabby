@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // doSetIndicator replaces set-tabby-indicator.sh: set tabby indicators
@@ -21,7 +23,7 @@ func doSetIndicator(args []string) {
 	stateDir := "/tmp/tabby-state"
 	os.MkdirAll(stateDir, 0755)
 
-	sessionOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
+	sessionOut, _ := tmux.Cmd("display-message", "-p", "#{session_name}").Output()
 	session := strings.TrimSpace(string(sessionOut))
 
 	// Resolve the window for this indicator
@@ -108,7 +110,7 @@ func resolveIndicatorWindow(indicator, value, session, stateDir string) string {
 	tmuxPane := os.Getenv("TMUX_PANE")
 	if tmuxPane != "" {
 		// Verify pane still exists
-		out, err := exec.Command("tmux", "display-message", "-t", tmuxPane, "-p", "#{window_index}").Output()
+		out, err := tmux.Cmd("display-message", "-t", tmuxPane, "-p", "#{window_index}").Output()
 		if err == nil {
 			win := strings.TrimSpace(string(out))
 			if win != "" {
@@ -128,7 +130,7 @@ func resolveIndicatorWindow(indicator, value, session, stateDir string) string {
 		if err != nil || searchPID <= 1 {
 			break
 		}
-		out, _ := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_pid}|#{window_index}").Output()
+		out, _ := tmux.Cmd("list-panes", "-a", "-F", "#{pane_pid}|#{window_index}").Output()
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.SplitN(line, "|", 2)
 			if len(parts) == 2 && parts[0] == strconv.Itoa(searchPID) {
@@ -139,7 +141,7 @@ func resolveIndicatorWindow(indicator, value, session, stateDir string) string {
 
 	// Strategy 3: For busy=1, use active window (user just typed)
 	if indicator == "busy" && value == "1" {
-		out, _ := exec.Command("tmux", "display-message", "-p", "#{window_index}").Output()
+		out, _ := tmux.Cmd("display-message", "-p", "#{window_index}").Output()
 		win := strings.TrimSpace(string(out))
 		if win != "" {
 			return win
@@ -178,7 +180,7 @@ func resolveWindowFromState(session, stateDir string) string {
 	}
 
 	// Last resort: find window with @tabby_busy set
-	out, _ := exec.Command("tmux", "list-windows", "-F", "#{window_index} #{@tabby_busy}").Output()
+	out, _ := tmux.Cmd("list-windows", "-F", "#{window_index} #{@tabby_busy}").Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.Fields(line)
 		if len(parts) >= 2 && parts[1] != "" && parts[1] != "0" {
@@ -190,7 +192,7 @@ func resolveWindowFromState(session, stateDir string) string {
 }
 
 func windowExists(win string) bool {
-	out, _ := exec.Command("tmux", "list-windows", "-F", "#{window_index}").Output()
+	out, _ := tmux.Cmd("list-windows", "-F", "#{window_index}").Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == win {
 			return true
@@ -215,7 +217,7 @@ func emitOSCFallback(indicator, value string) {
 	// pane to address and the outer handler has nothing to intercept anyway.
 	target := ""
 	if pane := os.Getenv("TMUX_PANE"); pane != "" {
-		out, err := exec.Command("tmux", "display-message", "-t", pane, "-p", "#{pane_tty}").Output()
+		out, err := tmux.Cmd("display-message", "-t", pane, "-p", "#{pane_tty}").Output()
 		if err == nil {
 			target = strings.TrimSpace(string(out))
 		}
@@ -243,11 +245,11 @@ func emitOSCFallback(indicator, value string) {
 }
 
 func tmuxSetWindowOpt(target, key, value string) {
-	exec.Command("tmux", "set-option", "-t", target, "-w", key, value).Run()
+	tmux.Cmd("set-option", "-t", target, "-w", key, value).Run()
 }
 
 func tmuxUnsetWindowOpt(target, key string) {
-	exec.Command("tmux", "set-option", "-t", target, "-wu", key).Run()
+	tmux.Cmd("set-option", "-t", target, "-wu", key).Run()
 }
 
 func touchFile(path string) {

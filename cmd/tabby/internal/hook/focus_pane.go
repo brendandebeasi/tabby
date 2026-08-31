@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // doFocusPane replaces focus_pane.sh: focus a specific tmux
@@ -21,27 +22,27 @@ func doFocusPane(args []string) {
 	session, window, pane := parsePaneTarget(target)
 
 	// Validate session exists
-	if exec.Command("tmux", "has-session", "-t", session).Run() != nil {
+	if tmux.Cmd("has-session", "-t", session).Run() != nil {
 		return
 	}
 
 	// Select window and pane
 	windowTarget := session + ":" + window
 	paneTarget := session + ":" + window + "." + pane
-	exec.Command("tmux", "select-window", "-t", windowTarget).Run()
-	exec.Command("tmux", "select-pane", "-t", paneTarget).Run()
+	tmux.Cmd("select-window", "-t", windowTarget).Run()
+	tmux.Cmd("select-pane", "-t", paneTarget).Run()
 
 	time.Sleep(100 * time.Millisecond)
 
 	// Signal daemon to refresh
-	sessionID, _ := exec.Command("tmux", "display-message", "-t", session, "-p", "#{session_id}").Output()
+	sessionID, _ := tmux.Cmd("display-message", "-t", session, "-p", "#{session_id}").Output()
 	sid := strings.TrimSpace(string(sessionID))
 	if sid != "" {
 		signalDaemonForSession(sid, "USR1")
 	}
 
 	// Refresh status bar
-	exec.Command("tmux", "refresh-client", "-t", session, "-S").Run()
+	tmux.Cmd("refresh-client", "-t", session, "-S").Run()
 
 	// Read terminal_app from config and bring to foreground
 	configFile := resolveConfigFile()
@@ -79,7 +80,7 @@ func parsePaneTarget(target string) (session, window, pane string) {
 		session = target[:idx]
 		target = target[idx+1:]
 	} else {
-		out, _ := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+		out, _ := tmux.Cmd("list-sessions", "-F", "#{session_name}").Output()
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 		if len(lines) > 0 {
 			session = lines[0]

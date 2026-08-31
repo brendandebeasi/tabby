@@ -18,6 +18,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/tmuxhooks"
 	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // Run is the subcommand entry point. args are the tokens following
@@ -282,7 +283,7 @@ func run(args ...string) {
 func tmuxGetValue(args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 	defer cancel()
-	out, _ := exec.CommandContext(ctx, "tmux", args...).Output()
+	out, _ := tmux.CmdContext(ctx, args...).Output()
 	return strings.TrimSpace(string(out))
 }
 
@@ -290,7 +291,7 @@ func tmuxGetValue(args ...string) string {
 func tmuxOut(args ...string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 	defer cancel()
-	out, _ := exec.CommandContext(ctx, "tmux", args...).Output()
+	out, _ := tmux.CmdContext(ctx, args...).Output()
 	return out
 }
 
@@ -325,7 +326,7 @@ func killAuxPanes() {
 		}
 		cmd := strings.ToLower(parts[0])
 		if strings.HasPrefix(cmd, "sidebar") || strings.HasPrefix(cmd, "pane-header") || strings.HasPrefix(cmd, "tabby-daemon") || strings.HasPrefix(cmd, "tabby") {
-			exec.Command("tmux", "kill-pane", "-t", parts[1]).Run()
+			tmux.Cmd("kill-pane", "-t", parts[1]).Run()
 		}
 	}
 }

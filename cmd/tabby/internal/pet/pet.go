@@ -26,12 +26,12 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // stripControl removes control runes from s. Mirrors the popup's input
@@ -288,7 +288,7 @@ func request(req *daemon.PetQARequest) (*daemon.PetQAResponse, error) {
 // pane. Mirrors hook.getSessionID — kept local so this package doesn't
 // import the hook package for one helper.
 func currentSessionID() (string, error) {
-	out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+	out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
 	if err != nil {
 		return "", err
 	}

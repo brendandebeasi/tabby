@@ -14,6 +14,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/tmuxhooks"
 	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 const (
@@ -131,7 +132,7 @@ func Run(args []string) int {
 				if pidData, err := os.ReadFile(daemonPidFile); err == nil {
 					pid := strings.TrimSpace(string(pidData))
 					if pid != "" {
-						exec.Command("tmux", "set-option", "-g", "@tabby_daemon_pid", pid).Run()
+						tmux.Cmd("set-option", "-g", "@tabby_daemon_pid", pid).Run()
 						break
 					}
 				}
@@ -213,7 +214,7 @@ func sessionExists(sessionID string) bool {
 	if sessionID == "" {
 		return true
 	}
-	cmd := exec.Command("tmux", "has-session", "-t", sessionID)
+	cmd := tmux.Cmd("has-session", "-t", sessionID)
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return false

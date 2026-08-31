@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -36,6 +35,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // layoutChoice is one selectable arrangement: its tmux layout name, a short
@@ -222,7 +222,7 @@ func currentIndex(name string) int {
 // readCurrentLayout reads the persisted dashboard arrangement from the global
 // tmux option, or "" if unset.
 func readCurrentLayout() string {
-	out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_dash_layout").Output()
+	out, err := tmux.Cmd("show-option", "-gqv", "@tabby_dash_layout").Output()
 	if err != nil {
 		return ""
 	}
@@ -271,7 +271,7 @@ func Run(args []string) int {
 
 	sessionID := strings.TrimSpace(*sessionFlag)
 	if sessionID == "" {
-		if out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output(); err == nil {
+		if out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output(); err == nil {
 			sessionID = strings.TrimSpace(string(out))
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
 	"io"
 	"log"
 	"math"
@@ -21,6 +20,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
 
 	"github.com/charmbracelet/lipgloss"
 	kemoji "github.com/kenshaw/emoji"
@@ -95,14 +96,14 @@ func tmuxRun(args ...string) error {
 	noteTmuxMutation(args)
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "tmux", args...).Run()
+	return tmux.CmdContext(ctx, args...).Run()
 }
 
 // tmuxOutputCtx executes a tmux command with a timeout and returns stdout.
 func tmuxOutputCtx(args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	out, err := tmux.CmdContext(ctx, args...).Output()
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("tmux %s: timed out after %v", args[0], tmuxCmdTimeout)
 	}
@@ -498,7 +499,7 @@ func preferredWindowFocusTarget(c *Coordinator, activeWindowID string) string {
 	// Firing-TTY-scoped path: only restore if the originating client drifted.
 	if status.FiringTTY != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-c", status.FiringTTY, "#{window_id}").Output()
+		out, err := tmux.CmdContext(ctx, "display-message", "-p", "-c", status.FiringTTY, "#{window_id}").Output()
 		cancel()
 		if err == nil {
 			firingActive := strings.TrimSpace(string(out))
@@ -3351,7 +3352,7 @@ func (c *Coordinator) SelectPreviousWindow() {
 func attachedClientTTYs() map[string]bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", listClientsArgs("#{client_tty}")...).Output()
+	out, err := tmux.CmdContext(ctx, listClientsArgs("#{client_tty}")...).Output()
 	if err != nil {
 		return nil
 	}
@@ -5118,7 +5119,7 @@ func (c *Coordinator) fetchRefreshSnapshot() *refreshSnapshot {
 	prefixModeRaw := ""
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if out, err := exec.CommandContext(ctx, "tmux", "show-option", "-gqv", "@tabby_prefix_mode").Output(); err == nil {
+		if out, err := tmux.CmdContext(ctx, "show-option", "-gqv", "@tabby_prefix_mode").Output(); err == nil {
 			prefixModeRaw = strings.TrimSpace(string(out))
 		}
 		cancel()
@@ -6759,7 +6760,7 @@ func runTmuxBatches(batches [][]string, timeout time.Duration) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := exec.CommandContext(ctx, "tmux", flat...).Run(); err == nil {
+	if err := tmux.CmdContext(ctx, flat...).Run(); err == nil {
 		return
 	}
 	for _, b := range batches {
@@ -6767,7 +6768,7 @@ func runTmuxBatches(batches [][]string, timeout time.Duration) {
 			continue
 		}
 		bctx, bcancel := context.WithTimeout(context.Background(), timeout)
-		exec.CommandContext(bctx, "tmux", b...).Run()
+		tmux.CmdContext(bctx, b...).Run()
 		bcancel()
 	}
 }
@@ -6989,7 +6990,7 @@ func (c *Coordinator) RefreshSession() {
 	defer cancel()
 
 	var sessionName string
-	if out, err := exec.CommandContext(ctx, "tmux", c.displayMessageArgs("#{session_name}")...).Output(); err == nil {
+	if out, err := tmux.CmdContext(ctx, c.displayMessageArgs("#{session_name}")...).Output(); err == nil {
 		sessionName = strings.TrimSpace(string(out))
 	}
 
@@ -7001,7 +7002,7 @@ func (c *Coordinator) RefreshSession() {
 	}
 
 	sessionClients := 0
-	if out, err := exec.CommandContext(ctx, "tmux", "list-clients", "-t", sessionName).Output(); err == nil {
+	if out, err := tmux.CmdContext(ctx, "list-clients", "-t", sessionName).Output(); err == nil {
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 		if lines[0] != "" {
 			sessionClients = len(lines)
@@ -7009,7 +7010,7 @@ func (c *Coordinator) RefreshSession() {
 	}
 
 	windowCount := 0
-	if out, err := exec.CommandContext(ctx, "tmux", c.displayMessageArgs("#{session_windows}")...).Output(); err == nil {
+	if out, err := tmux.CmdContext(ctx, c.displayMessageArgs("#{session_windows}")...).Output(); err == nil {
 		windowCount, _ = strconv.Atoi(strings.TrimSpace(string(out)))
 	}
 
@@ -8647,7 +8648,7 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 	activeWindowID := ""
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if out, err := exec.CommandContext(ctx, "tmux", c.displayMessageArgs("#{window_id}")...).Output(); err == nil {
+	if out, err := tmux.CmdContext(ctx, c.displayMessageArgs("#{window_id}")...).Output(); err == nil {
 		activeWindowID = strings.TrimSpace(string(out))
 	}
 	isActive := (clientID == activeWindowID)
@@ -8715,13 +8716,13 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 
 		listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer listCancel()
-		if out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
+		if out, err := tmux.CmdContext(listCtx, "list-panes", "-t", clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
 			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 				parts := strings.SplitN(line, "|", 3)
 				if len(parts) >= 3 && isSidebarPaneCommand(parts[1], parts[2]) {
 					coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (inactive sync)", parts[0], targetWidth)
 					resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-					exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+					tmux.CmdContext(resizeCtx, "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
 					resizeCancel()
 					break
 				}
@@ -8755,13 +8756,13 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 		if needResize {
 			listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer listCancel()
-			if out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
+			if out, err := tmux.CmdContext(listCtx, "list-panes", "-t", clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
 				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 					parts := strings.SplitN(line, "|", 3)
 					if len(parts) >= 3 && isSidebarPaneCommand(parts[1], parts[2]) {
 						coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (adopt clamp)", parts[0], adopted)
 						resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-						exec.CommandContext(resizeCtx, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", adopted)).Run()
+						tmux.CmdContext(resizeCtx, "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", adopted)).Run()
 						resizeCancel()
 						break
 					}
@@ -8801,13 +8802,13 @@ func (c *Coordinator) handleWidthSync(clientID string, currentWidth int) {
 
 	listCtx2, listCancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 	defer listCancel2()
-	if out, err := exec.CommandContext(listCtx2, "tmux", "list-panes", "-t", clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
+	if out, err := tmux.CmdContext(listCtx2, "list-panes", "-t", clientID, "-F", "#{pane_id}|#{pane_current_command}|#{pane_start_command}").Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.SplitN(line, "|", 3)
 			if len(parts) >= 3 && isSidebarPaneCommand(parts[1], parts[2]) {
 				coordinatorDebugLog.Printf("RESIZE_SIDEBAR pane=%s width=%d (active sync)", parts[0], targetWidth)
 				resizeCtx2, resizeCancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-				exec.CommandContext(resizeCtx2, "tmux", "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
+				tmux.CmdContext(resizeCtx2, "resize-pane", "-t", parts[0], "-x", fmt.Sprintf("%d", targetWidth)).Run()
 				resizeCancel2()
 				break
 			}
@@ -11083,7 +11084,7 @@ func distinctClientWidths(listClientsOutput string) int {
 func (c *Coordinator) attachedClientWidthSpread() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", listClientsArgs("#{client_width}")...).Output()
+	out, err := tmux.CmdContext(ctx, listClientsArgs("#{client_width}")...).Output()
 	if err != nil {
 		return false
 	}
@@ -11114,7 +11115,7 @@ func windowIDForClientTTY(tty string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-c", tty, "-p", "#{window_id}").Output()
+	out, err := tmux.CmdContext(ctx, "display-message", "-c", tty, "-p", "#{window_id}").Output()
 	if err != nil {
 		return ""
 	}
@@ -11205,7 +11206,7 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 	windowWidths := make(map[string]int)
 	paneCtx, paneCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	paneArgs := sessionScopedListPanesArgs("#{pane_id}|#{pane_current_command}|#{window_id}|#{pane_width}|#{window_width}|#{pane_start_command}")
-	if paneOut, err := exec.CommandContext(paneCtx, "tmux", paneArgs...).Output(); err == nil {
+	if paneOut, err := tmux.CmdContext(paneCtx, paneArgs...).Output(); err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
 			parts := strings.SplitN(line, "|", 6)
 			if len(parts) == 6 && isSidebarPaneCommand(parts[1], parts[5]) {
@@ -18575,7 +18576,7 @@ func autoPickContentPane(targetWindow string) {
 	}()
 
 	activeCtx, activeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	activeOut, activeErr := exec.CommandContext(activeCtx, "tmux", "display-message", "-p", "-t", targetWindow,
+	activeOut, activeErr := tmux.CmdContext(activeCtx, "display-message", "-p", "-t", targetWindow,
 		"#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 	activeCancel()
 	if activeErr == nil {
@@ -18586,7 +18587,7 @@ func autoPickContentPane(targetWindow string) {
 	}
 
 	listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	out, err := exec.CommandContext(listCtx, "tmux", "list-panes", "-t", targetWindow,
+	out, err := tmux.CmdContext(listCtx, "list-panes", "-t", targetWindow,
 		"-F", "#{pane_id}|||#{pane_current_command}|||#{pane_start_command}").Output()
 	listCancel()
 	if err != nil {
@@ -18602,7 +18603,7 @@ func autoPickContentPane(targetWindow string) {
 		startCmd := parts[2]
 		if !isAuxiliaryPaneCommand(cmd) && !isAuxiliaryPaneCommand(startCmd) {
 			switchCtx, switchCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			exec.CommandContext(switchCtx, "tmux", "select-pane", "-t", paneID).Run()
+			tmux.CmdContext(switchCtx, "select-pane", "-t", paneID).Run()
 			switchCancel()
 			return
 		}
@@ -20795,7 +20796,7 @@ func (c *Coordinator) launchDashLayoutPopup(clientID string) {
 	popupCmd := fmt.Sprintf("%s --session '%s'", popupBin, escSess)
 	// Fixed geometry sized to the menu (7 choices) + a 5-line ASCII preview +
 	// title/footer/padding. Columns/rows, not %, so the box hugs content.
-	go exec.Command("tmux", "display-popup", "-E", "-w", "48", "-h", "24",
+	go tmux.Cmd("display-popup", "-E", "-w", "48", "-h", "24",
 		"--", popupCmd).Run()
 }
 

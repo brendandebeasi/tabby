@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -51,7 +50,7 @@ func ComputeResponsiveSidebarWidth(windowWidth, mobileMax, tabletMax, mobileWidt
 // Returns the responsive width as an int.
 func ResponsiveSidebarWidth(windowID string, globalWidth int) int {
 	// Get window width
-	windowWidthOut, err := exec.Command("tmux", "display-message", "-p", "-t", windowID, "#{window_width}").Output()
+	windowWidthOut, err := Cmd("display-message", "-p", "-t", windowID, "#{window_width}").Output()
 	if err != nil {
 		// Fall back to globalWidth on query failure
 		return globalWidth
@@ -63,14 +62,14 @@ func ResponsiveSidebarWidth(windowID string, globalWidth int) int {
 
 	// Read mobile/tablet thresholds
 	mobileMaxWindowCols := 110
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_window_cols").Output(); err == nil {
+	if out, err := Cmd("show-option", "-gqv", "@tabby_sidebar_mobile_max_window_cols").Output(); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 60 {
 			mobileMaxWindowCols = v
 		}
 	}
 
 	tabletMaxWindowCols := 170
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_tablet_max_window_cols").Output(); err == nil {
+	if out, err := Cmd("show-option", "-gqv", "@tabby_sidebar_tablet_max_window_cols").Output(); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= mobileMaxWindowCols {
 			tabletMaxWindowCols = v
 		}
@@ -81,7 +80,7 @@ func ResponsiveSidebarWidth(windowID string, globalWidth int) int {
 	if widthDesktop < 15 {
 		widthDesktop = 25
 	}
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_desktop").Output(); err == nil {
+	if out, err := Cmd("show-option", "-gqv", "@tabby_sidebar_width_desktop").Output(); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 15 {
 			widthDesktop = v
 		}
@@ -94,7 +93,7 @@ func ResponsiveSidebarWidth(windowID string, globalWidth int) int {
 
 	// Tablet: window > mobileMaxWindowCols
 	widthTablet := 20
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_tablet").Output(); err == nil {
+	if out, err := Cmd("show-option", "-gqv", "@tabby_sidebar_width_tablet").Output(); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 15 {
 			widthTablet = v
 		}
@@ -108,7 +107,7 @@ func ResponsiveSidebarWidth(windowID string, globalWidth int) int {
 
 	// Mobile: window <= mobileMaxWindowCols
 	widthMobile := 15
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_width_mobile").Output(); err == nil {
+	if out, err := Cmd("show-option", "-gqv", "@tabby_sidebar_width_mobile").Output(); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 {
 			widthMobile = v
 		}
@@ -116,14 +115,14 @@ func ResponsiveSidebarWidth(windowID string, globalWidth int) int {
 
 	// Apply mobile constraints: maxByFraction and maxByContent
 	maxPercent := 20
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_max_percent").Output(); err == nil {
+	if out, err := Cmd("show-option", "-gqv", "@tabby_sidebar_mobile_max_percent").Output(); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 10 && v <= 60 {
 			maxPercent = v
 		}
 	}
 
 	minContentCols := 40
-	if out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar_mobile_min_content_cols").Output(); err == nil {
+	if out, err := Cmd("show-option", "-gqv", "@tabby_sidebar_mobile_min_content_cols").Output(); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && v >= 20 {
 			minContentCols = v
 		}

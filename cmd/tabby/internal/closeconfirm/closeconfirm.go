@@ -21,7 +21,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -32,6 +31,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/brendandebeasi/tabby/pkg/renderer"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // choice identifies which of the two buttons is selected.
@@ -329,7 +329,7 @@ func Run(args []string) int {
 
 	win := *target
 	if win == "" {
-		if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+		if out, err := tmux.Cmd("display-message", "-p", "#{window_id}").Output(); err == nil {
 			win = strings.TrimSpace(string(out))
 		}
 	}
@@ -369,7 +369,7 @@ func Run(args []string) int {
 
 	if fm, ok := finalModel.(model); ok && fm.confirmed {
 		// Perform the kill outside the TUI so the terminal is already reset.
-		if err := exec.Command("tmux", "kill-window", "-t", win).Run(); err != nil {
+		if err := tmux.Cmd("kill-window", "-t", win).Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "close-confirm: kill-window: %v\n", err)
 			return 1
 		}

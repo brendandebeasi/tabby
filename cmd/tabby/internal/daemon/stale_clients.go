@@ -2,10 +2,11 @@ package daemon
 
 import (
 	"context"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // staleClientIdleThreshold is how long an attached client must have been
@@ -94,7 +95,7 @@ func selectStaleClients(clients []attachedClient, now time.Time, idleThreshold t
 func listAttachedClients() ([]attachedClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux",
+	out, err := tmux.CmdContext(ctx,
 		listClientsArgs("#{client_tty}|#{client_width}|#{client_height}|#{client_activity}")...).Output()
 	if err != nil {
 		return nil, err
@@ -116,7 +117,7 @@ func (c *Coordinator) PruneStaleClients() []string {
 	var detached []string
 	for _, sc := range stale {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		err := exec.CommandContext(ctx, "tmux", "detach-client", "-t", sc.TTY).Run()
+		err := tmux.CmdContext(ctx, "detach-client", "-t", sc.TTY).Run()
 		cancel()
 		if err != nil {
 			continue

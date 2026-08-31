@@ -14,11 +14,11 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // Run is the subcommand entry point. It takes no arguments.
@@ -73,7 +73,7 @@ func Run(args []string) int {
 }
 
 func tmuxValue(args ...string) string {
-	out, err := exec.Command("tmux", args...).Output()
+	out, err := tmux.Cmd(args...).Output()
 	if err != nil {
 		return ""
 	}

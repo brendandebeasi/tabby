@@ -7,18 +7,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
 	"io"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -27,6 +27,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 var (
@@ -66,7 +67,7 @@ func initInputLog() {
 
 func isInputLogEnabled() bool {
 	if time.Since(inputLogCheckTime) > 10*time.Second {
-		out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_input_log").Output()
+		out, err := tmux.Cmd("show-options", "-gqv", "@tabby_input_log").Output()
 		if err != nil {
 			inputLogEnabled = false
 		} else {
@@ -177,7 +178,7 @@ func connectCmd() tea.Cmd {
 		// Resolve the tmux pane id this header renders. No PID fallback.
 		paneIDStr := *paneID
 		if paneIDStr == "" {
-			if out, err := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output(); err == nil {
+			if out, err := tmux.Cmd("display-message", "-p", "#{pane_id}").Output(); err == nil {
 				paneIDStr = strings.TrimSpace(string(out))
 			}
 		}
@@ -243,7 +244,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Check if target pane still exists -- exit if it was closed
 		if *paneID != "" {
-			if _, err := exec.Command("tmux", "display-message", "-t", *paneID, "-p", "#{pane_id}").Output(); err != nil {
+			if _, err := tmux.Cmd("display-message", "-t", *paneID, "-p", "#{pane_id}").Output(); err != nil {
 				debugLog.Printf("Target pane %s no longer exists, exiting", *paneID)
 				return m, tea.Quit
 			}
@@ -302,9 +303,9 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // It reads the stored mouse position from tmux options and simulates a click
 func (m rendererModel) handleFocusGain() (tea.Model, tea.Cmd) {
 	// Read the stored click position from tmux
-	xOut, errX := exec.Command("tmux", "show-option", "-gqv", "@tabby_last_click_x").Output()
-	yOut, errY := exec.Command("tmux", "show-option", "-gqv", "@tabby_last_click_y").Output()
-	paneOut, errP := exec.Command("tmux", "show-option", "-gqv", "@tabby_last_click_pane").Output()
+	xOut, errX := tmux.Cmd("show-option", "-gqv", "@tabby_last_click_x").Output()
+	yOut, errY := tmux.Cmd("show-option", "-gqv", "@tabby_last_click_y").Output()
+	paneOut, errP := tmux.Cmd("show-option", "-gqv", "@tabby_last_click_pane").Output()
 
 	if errX != nil || errY != nil || errP != nil {
 		debugLog.Printf("handleFocusGain: couldn't read click position")
@@ -477,7 +478,7 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSim
 	// Get our pane ID for context menus
 	paneIDStr := *paneID
 	if paneIDStr == "" {
-		out, _ := exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output()
+		out, _ := tmux.Cmd("display-message", "-p", "#{pane_id}").Output()
 		paneIDStr = strings.TrimSpace(string(out))
 	}
 
@@ -679,7 +680,7 @@ func Run(args []string) int {
 
 	// Get session ID from environment if not provided
 	if *sessionID == "" {
-		out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+		out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
 		if err == nil {
 			*sessionID = strings.TrimSpace(string(out))
 		}

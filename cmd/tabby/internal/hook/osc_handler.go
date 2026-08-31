@@ -5,8 +5,9 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // tabbyOSCPrefix is the raw OSC sequence emitted by emitOSCFallback.
@@ -197,12 +198,12 @@ func applyRemoteCWDPayload(payload string) {
 		return
 	}
 	// Skip the write when unchanged (avoids churn from per-prompt reports).
-	if cur, err := exec.Command("tmux", "show-options", "-pqv", "-t", pane, "@tabby_remote_cwd").Output(); err == nil {
+	if cur, err := tmux.Cmd("show-options", "-pqv", "-t", pane, "@tabby_remote_cwd").Output(); err == nil {
 		if strings.TrimSpace(string(cur)) == payload {
 			return
 		}
 	}
-	exec.Command("tmux", "set-option", "-p", "-t", pane, "@tabby_remote_cwd", payload).Run()
+	tmux.Cmd("set-option", "-p", "-t", pane, "@tabby_remote_cwd", payload).Run()
 }
 
 // applyIndicatorPayload parses "indicator;value" and calls doSetIndicator.

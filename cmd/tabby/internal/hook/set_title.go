@@ -2,10 +2,10 @@ package hook
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/brendandebeasi/tabby/pkg/config"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // doSetTitle sets a display-only AI summary as the window's tab title.
@@ -24,7 +24,7 @@ func doSetTitle(args []string) {
 	// scripts can find the right window even when invoked from subprocesses.
 	stateDir := "/tmp/tabby-state"
 	os.MkdirAll(stateDir, 0755)
-	sessionOut, _ := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
+	sessionOut, _ := tmux.Cmd("display-message", "-p", "#{session_name}").Output()
 	session := strings.TrimSpace(string(sessionOut))
 	win := resolveIndicatorWindow("input", "1", session, stateDir)
 	if win == "" {

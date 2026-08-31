@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,6 +14,7 @@ import (
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/dashlayout"
 	"github.com/brendandebeasi/tabby/pkg/config"
 	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // skipCommands are never dimmed and never cycled (sidebar, pane-header).
@@ -73,7 +73,7 @@ func Run(args []string) int {
 	switch {
 	case ensureContent:
 		if len(content) >= 1 && activeIsUtility(panes) {
-			_ = exec.Command("tmux", "select-pane", "-t", content[0].id).Run()
+			_ = tmux.Cmd("select-pane", "-t", content[0].id).Run()
 			selected = content[0].id
 		}
 	case !dimOnly && len(content) >= 2:
@@ -88,7 +88,7 @@ func Run(args []string) int {
 // inDashboardWindow reports whether the current window is the tabby dashboard
 // (window-option @tabby_dashboard=1).
 func inDashboardWindow() bool {
-	out, err := exec.Command("tmux", "show-options", "-wqv", "@tabby_dashboard").Output()
+	out, err := tmux.Cmd("show-options", "-wqv", "@tabby_dashboard").Output()
 	if err != nil {
 		return false
 	}
@@ -105,7 +105,7 @@ func activeIsUtility(panes []paneInfo) bool {
 }
 
 func listPanes() []paneInfo {
-	out, err := exec.Command("tmux", "list-panes", "-F",
+	out, err := tmux.Cmd("list-panes", "-F",
 		"#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_left}\t#{pane_start_command}").Output()
 	if err != nil {
 		return nil
@@ -185,7 +185,7 @@ func cyclePane(content []paneInfo) string {
 	}
 	nextIdx := (activeIdx + 1) % len(content)
 	target := content[nextIdx].id
-	_ = exec.Command("tmux", "select-pane", "-t", target).Run()
+	_ = tmux.Cmd("select-pane", "-t", target).Run()
 	return target
 }
 
@@ -246,9 +246,9 @@ func movePane(dir string) int {
 	// `select-layout <named>` afterward: named tmux layouts assign the main
 	// pane by pane *index*, not position, so a reflow would immediately revert
 	// the swap and snap the original pane back to primary.
-	_ = exec.Command("tmux", "swap-pane", "-s", activeID, "-t", targetID).Run()
+	_ = tmux.Cmd("swap-pane", "-s", activeID, "-t", targetID).Run()
 	// Keep focus following the pane we moved into its new slot.
-	_ = exec.Command("tmux", "select-pane", "-t", activeID).Run()
+	_ = tmux.Cmd("select-pane", "-t", activeID).Run()
 
 	// In the dashboard, skip dim + daemon signal (mirrors the focus-cycle
 	// dashboard branch — the sidebar content doesn't change on a pane reorder).
@@ -262,7 +262,7 @@ func movePane(dir string) int {
 // dashLayout returns the persisted dashboard arrangement (global
 // @tabby_dash_layout option), defaulting to "tiled" when unset.
 func dashLayout() string {
-	out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_dash_layout").Output()
+	out, err := tmux.Cmd("show-option", "-gqv", "@tabby_dash_layout").Output()
 	if err != nil {
 		return "tiled"
 	}
@@ -307,12 +307,12 @@ func mainFollow() int {
 		args = append(args, "swap-pane", "-s", sw[0], "-t", sw[1])
 	}
 	args = append(args, ";", "select-pane", "-t", active)
-	_ = exec.Command("tmux", args...).Run()
+	_ = tmux.Cmd(args...).Run()
 	return 0
 }
 
 func isSpawning() bool {
-	out, err := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output()
+	out, err := tmux.Cmd("show-option", "-gqv", "@tabby_spawning").Output()
 	if err != nil {
 		return false
 	}
@@ -363,9 +363,9 @@ func applyDim(activePaneID string) {
 				clearPaneDimFlag(p.id)
 			}
 		}
-		if out, err := exec.Command("tmux", "show-options", "-gqv", "pane-active-border-style").Output(); err == nil {
+		if out, err := tmux.Cmd("show-options", "-gqv", "pane-active-border-style").Output(); err == nil {
 			if s := strings.TrimSpace(string(out)); s != "" {
-				_ = exec.Command("tmux", "set-option", "-g", "pane-border-style", s).Run()
+				_ = tmux.Cmd("set-option", "-g", "pane-border-style", s).Run()
 			}
 		}
 		return
@@ -444,17 +444,17 @@ func applyDim(activePaneID string) {
 // every other pane from window-style; writing only the former would leave the
 // pane the user is actually looking at untinted.
 func setPaneStyle(paneID, style string) {
-	_ = exec.Command("tmux", "set-option", "-p", "-t", paneID, "window-style", style).Run()
+	_ = tmux.Cmd("set-option", "-p", "-t", paneID, "window-style", style).Run()
 }
 
 func setPaneStyles(paneID, inactive, active string) {
-	_ = exec.Command("tmux",
+	_ = tmux.Cmd(
 		"set-option", "-p", "-t", paneID, "window-style", inactive, ";",
 		"set-option", "-p", "-t", paneID, "window-active-style", active).Run()
 }
 
 func unsetPaneStyle(paneID string) {
-	_ = exec.Command("tmux",
+	_ = tmux.Cmd(
 		"set-option", "-p", "-u", "-t", paneID, "window-style", ";",
 		"set-option", "-p", "-u", "-t", paneID, "window-active-style").Run()
 }
@@ -463,7 +463,7 @@ func unsetPaneStyle(paneID string) {
 // window. The daemon owns the color/group state, so this is a read-only handoff
 // rather than a second implementation of the same resolution.
 func windowTintBG() string {
-	out, err := exec.Command("tmux", "show-options", "-wqv", "@tabby_tint_bg").Output()
+	out, err := tmux.Cmd("show-options", "-wqv", "@tabby_tint_bg").Output()
 	if err != nil {
 		return ""
 	}
@@ -504,7 +504,7 @@ func dimFgPair(cfg *config.Config) (string, string) {
 }
 
 func readGlobalOption(name string) string {
-	out, err := exec.Command("tmux", "show-options", "-gqv", name).Output()
+	out, err := tmux.Cmd("show-options", "-gqv", name).Output()
 	if err != nil {
 		return ""
 	}
@@ -523,11 +523,11 @@ func setPaneDimFlag(paneID string, dimmed bool) {
 	if dimmed {
 		val = "1"
 	}
-	_ = exec.Command("tmux", "set-option", "-p", "-t", paneID, "@tabby_pane_dim", val).Run()
+	_ = tmux.Cmd("set-option", "-p", "-t", paneID, "@tabby_pane_dim", val).Run()
 }
 
 func clearPaneDimFlag(paneID string) {
-	_ = exec.Command("tmux", "set-option", "-p", "-u", "-t", paneID, "@tabby_pane_dim").Run()
+	_ = tmux.Cmd("set-option", "-p", "-u", "-t", paneID, "@tabby_pane_dim").Run()
 }
 
 func computeDimBG(terminalBG string, opacity float64) string {
@@ -578,7 +578,7 @@ func signalDaemon() {
 	if isSpawning() {
 		return
 	}
-	out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+	out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
 	if err != nil {
 		return
 	}
@@ -597,7 +597,7 @@ func signalDaemon() {
 }
 
 func applyBorderDim(cfg *config.Config) {
-	out, err := exec.Command("tmux", "show-options", "-gqv", "pane-active-border-style").Output()
+	out, err := tmux.Cmd("show-options", "-gqv", "pane-active-border-style").Output()
 	if err != nil {
 		return
 	}
@@ -617,7 +617,7 @@ func applyBorderDim(cfg *config.Config) {
 	}
 
 	dimFg := desaturateColor(fgColor, opacity, cfg.PaneHeader.TerminalBg)
-	_ = exec.Command("tmux", "set-option", "-g", "pane-border-style", "fg="+dimFg).Run()
+	_ = tmux.Cmd("set-option", "-g", "pane-border-style", "fg="+dimFg).Run()
 }
 
 func extractStyleColor(style, key string) string {

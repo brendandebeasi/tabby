@@ -34,7 +34,7 @@ const tmuxFieldSep = FieldSep
 func tmuxOutput(args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "tmux", args...)
+	cmd := CmdContext(ctx, args...)
 	out, err := cmd.Output()
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("tmux %s: timed out after %v", args[0], tmuxCmdTimeout)

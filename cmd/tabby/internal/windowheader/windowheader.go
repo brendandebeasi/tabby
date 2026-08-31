@@ -7,18 +7,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
 	"io"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -27,6 +27,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 var (
@@ -67,7 +68,7 @@ func initInputLog() {
 
 func isInputLogEnabled() bool {
 	if time.Since(inputLogCheckTime) > 10*time.Second {
-		out, err := exec.Command("tmux", "show-options", "-gqv", "@tabby_input_log").Output()
+		out, err := tmux.Cmd("show-options", "-gqv", "@tabby_input_log").Output()
 		if err != nil {
 			inputLogEnabled = false
 		} else {
@@ -200,7 +201,7 @@ func connectCmd() tea.Cmd {
 		// Resolve the tmux window id this header renders. No PID fallback.
 		winIDStr := *windowID
 		if winIDStr == "" {
-			if out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output(); err == nil {
+			if out, err := tmux.Cmd("display-message", "-p", "#{window_id}").Output(); err == nil {
 				winIDStr = strings.TrimSpace(string(out))
 			}
 		}
@@ -292,7 +293,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Check if target window still exists -- exit if it was closed
 		if *windowID != "" {
-			if _, err := exec.Command("tmux", "display-message", "-t", *windowID, "-p", "#{window_id}").Output(); err != nil {
+			if _, err := tmux.Cmd("display-message", "-t", *windowID, "-p", "#{window_id}").Output(); err != nil {
 				debugLog.Printf("Target window %s no longer exists, exiting", *windowID)
 				return m, tea.Quit
 			}
@@ -512,7 +513,7 @@ func (m rendererModel) processMouseClick(x, y int, button tea.MouseButton, isSim
 	// For window-header, target reference is the window ID.
 	paneIDStr := *windowID
 	if paneIDStr == "" {
-		out, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+		out, _ := tmux.Cmd("display-message", "-p", "#{window_id}").Output()
 		paneIDStr = strings.TrimSpace(string(out))
 	}
 
@@ -737,7 +738,7 @@ func Run(args []string) int {
 
 	// Get session ID from environment if not provided
 	if *sessionID == "" {
-		out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+		out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
 		if err == nil {
 			*sessionID = strings.TrimSpace(string(out))
 		}

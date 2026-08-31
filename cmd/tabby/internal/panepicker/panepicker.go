@@ -7,9 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -63,7 +63,7 @@ func loadPanes(winID string) ([]paneInfo, string, error) {
 	if winID != "" {
 		args = append(args, "-t", winID)
 	}
-	out, err := exec.Command("tmux", args...).Output()
+	out, err := tmux.Cmd(args...).Output()
 	if err != nil {
 		return nil, "", err
 	}
@@ -153,7 +153,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if len(m.filtered) > 0 {
 				chosen := m.filtered[m.cursor]
-				exec.Command("tmux", "select-pane", "-t", chosen.id).Run()
+				tmux.Cmd("select-pane", "-t", chosen.id).Run()
 			}
 			return m, tea.Quit
 
@@ -236,7 +236,7 @@ func Run(args []string) int {
 
 	// If window not specified, use current window
 	if *windowID == "" {
-		out, err := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+		out, err := tmux.Cmd("display-message", "-p", "#{window_id}").Output()
 		if err == nil {
 			*windowID = strings.TrimSpace(string(out))
 		}

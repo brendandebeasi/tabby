@@ -2,11 +2,11 @@ package daemon
 
 import (
 	"context"
-	"os/exec"
 	"sync"
 	"time"
 
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/tmuxhooks"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // Hook muting: stop the daemon's own tmux mutations from firing tabby's hooks
@@ -217,7 +217,7 @@ func setHookMute(on bool) {
 	v := hookMuteValue(on)
 	ctx, cancel := context.WithTimeout(context.Background(), hookMuteCmdTimeout)
 	defer cancel()
-	if err := exec.CommandContext(ctx, "tmux", "set-option", "-g", tmuxhooks.MuteOption, v).Run(); err != nil && coordinatorDebugLog != nil {
+	if err := tmux.CmdContext(ctx, "set-option", "-g", tmuxhooks.MuteOption, v).Run(); err != nil && coordinatorDebugLog != nil {
 		coordinatorDebugLog.Printf("hookmute: set %s=%s failed: %v", tmuxhooks.MuteOption, v, err)
 	}
 }

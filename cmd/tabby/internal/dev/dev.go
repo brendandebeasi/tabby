@@ -17,6 +17,7 @@ import (
 	"time"
 
 	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 func Run(args []string) int {
@@ -53,7 +54,7 @@ func Run(args []string) int {
 func doReload(exe, baseDir string) int {
 	enabled := os.Getenv("TABBY_DEV_RELOAD")
 	if enabled == "" {
-		out, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_dev_reload_enabled").Output()
+		out, _ := tmux.Cmd("show-option", "-gqv", "@tabby_dev_reload_enabled").Output()
 		enabled = strings.TrimSpace(string(out))
 	}
 	if enabled != "1" && enabled != "true" {
@@ -62,7 +63,7 @@ func doReload(exe, baseDir string) int {
 	}
 
 	sessionID, _ := currentSession()
-	sidebarState, _ := exec.Command("tmux", "show-options", "-qv", "@tabby_sidebar").Output()
+	sidebarState, _ := tmux.Cmd("show-options", "-qv", "@tabby_sidebar").Output()
 	state := strings.TrimSpace(string(sidebarState))
 
 	tmuxMsg("Tabby: rebuilding binaries...", 2000)
@@ -132,7 +133,7 @@ func doStatus(exe, sessionArg string) int {
 	}
 
 	if sessionName == "" || sessionName == sessionID {
-		out, _ := exec.Command("tmux", "display-message", "-p", "-t", sessionID, "#{session_name}").Output()
+		out, _ := tmux.Cmd("display-message", "-p", "-t", sessionID, "#{session_name}").Output()
 		sessionName = strings.TrimSpace(string(out))
 	}
 
@@ -247,17 +248,17 @@ func printStatusSnapshot(sessionID string) {
 func resolveSession(target string) (string, string) {
 	if target != "" {
 		if strings.HasPrefix(target, "$") {
-			name, _ := exec.Command("tmux", "display-message", "-p", "-t", target, "#{session_name}").Output()
+			name, _ := tmux.Cmd("display-message", "-p", "-t", target, "#{session_name}").Output()
 			return target, strings.TrimSpace(string(name))
 		}
-		id, _ := exec.Command("tmux", "display-message", "-p", "-t", target, "#{session_id}").Output()
+		id, _ := tmux.Cmd("display-message", "-p", "-t", target, "#{session_id}").Output()
 		return strings.TrimSpace(string(id)), target
 	}
 
 	sid, sname := currentSession()
 
 	if sid == "" {
-		out, _ := exec.Command("tmux", "list-sessions", "-F", "#{session_id} #{session_name}").Output()
+		out, _ := tmux.Cmd("list-sessions", "-F", "#{session_id} #{session_name}").Output()
 		first := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)
 		if len(first) > 0 {
 			parts := strings.SplitN(first[0], " ", 2)
@@ -305,12 +306,12 @@ func run(args ...string) {
 }
 
 func tmuxGet(args ...string) string {
-	out, _ := exec.Command("tmux", args...).Output()
+	out, _ := tmux.Cmd(args...).Output()
 	return strings.TrimSpace(string(out))
 }
 
 func tmuxMsg(msg string, durationMs int) {
-	exec.Command("tmux", "display-message", "-d", fmt.Sprintf("%d", durationMs), msg).Run()
+	tmux.Cmd("display-message", "-d", fmt.Sprintf("%d", durationMs), msg).Run()
 }
 
 func fileExists(path string) bool {
@@ -330,7 +331,7 @@ func killFromPidFile(pidFile string) {
 }
 
 func gracefulKillAuxPanes() {
-	out, _ := exec.Command("tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{pane_id}|#{pane_pid}").Output()
+	out, _ := tmux.Cmd("list-panes", "-s", "-F", "#{pane_current_command}|#{pane_id}|#{pane_pid}").Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.SplitN(line, "|", 3)
 		if len(parts) != 3 {
@@ -347,7 +348,7 @@ func gracefulKillAuxPanes() {
 }
 
 func killAuxPanes() {
-	out, _ := exec.Command("tmux", "list-panes", "-s", "-F", "#{pane_current_command}|#{pane_id}").Output()
+	out, _ := tmux.Cmd("list-panes", "-s", "-F", "#{pane_current_command}|#{pane_id}").Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.SplitN(line, "|", 2)
 		if len(parts) != 2 {
@@ -355,7 +356,7 @@ func killAuxPanes() {
 		}
 		cmd := strings.ToLower(parts[0])
 		if strings.HasPrefix(cmd, "sidebar") || strings.HasPrefix(cmd, "pane-header") || strings.HasPrefix(cmd, "tabby-daemon") || strings.HasPrefix(cmd, "tabby") {
-			exec.Command("tmux", "kill-pane", "-t", parts[1]).Run()
+			tmux.Cmd("kill-pane", "-t", parts[1]).Run()
 		}
 	}
 }

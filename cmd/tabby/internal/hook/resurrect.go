@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // doResurrectSave replaces resurrect_save_hook.sh:
@@ -70,7 +71,7 @@ func doResurrectRestore(args []string) {
 
 	// 2. Reset mouse escape sequences on all client TTYs
 	resetSeq := "\033[?1000l\033[?1002l\033[?1003l\033[?1004l\033[?1006l\033[?1015l"
-	out, _ := exec.Command("tmux", "list-clients", "-F", "#{client_tty}").Output()
+	out, _ := tmux.Cmd("list-clients", "-F", "#{client_tty}").Output()
 	for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if tty == "" {
 			continue
@@ -100,7 +101,7 @@ func doResurrectRestore(args []string) {
 	}
 
 	// 4. Kill zombie Tabby panes
-	paneOut, _ := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_current_command}|#{pane_id}").Output()
+	paneOut, _ := tmux.Cmd("list-panes", "-a", "-F", "#{pane_current_command}|#{pane_id}").Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(paneOut)), "\n") {
 		parts := strings.SplitN(line, "|", 2)
 		if len(parts) != 2 {
@@ -108,7 +109,7 @@ func doResurrectRestore(args []string) {
 		}
 		cmd := parts[0]
 		if cmd == "sidebar-renderer" || cmd == "sidebar" || cmd == "tabby-daemon" || cmd == "pane-header" {
-			exec.Command("tmux", "kill-pane", "-t", parts[1]).Run()
+			tmux.Cmd("kill-pane", "-t", parts[1]).Run()
 		}
 	}
 
@@ -116,10 +117,10 @@ func doResurrectRestore(args []string) {
 	time.Sleep(500 * time.Millisecond)
 
 	// 6. Re-initialize based on saved mode
-	mode, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_sidebar").Output()
+	mode, _ := tmux.Cmd("show-option", "-gqv", "@tabby_sidebar").Output()
 	if strings.TrimSpace(string(mode)) == "enabled" {
-		sessionID, _ := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
-		windowID, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+		sessionID, _ := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
+		windowID, _ := tmux.Cmd("display-message", "-p", "#{window_id}").Output()
 		sid := strings.TrimSpace(string(sessionID))
 		wid := strings.TrimSpace(string(windowID))
 		if sid != "" {

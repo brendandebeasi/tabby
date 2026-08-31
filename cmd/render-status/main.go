@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -13,7 +12,7 @@ import (
 )
 
 func getTerminalWidth() int {
-	cmd := exec.Command("tmux", "display-message", "-p", "#{window_width}")
+	cmd := tmux.Cmd("display-message", "-p", "#{window_width}")
 	out, err := cmd.Output()
 	if err != nil {
 		return 80

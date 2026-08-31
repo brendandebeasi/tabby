@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -653,7 +652,7 @@ func (l *Loop) updateActiveWindow() {
 	} else {
 		args = l.coord.displayMessageArgs("#{window_id}")
 	}
-	if out, err := exec.CommandContext(ctx, "tmux", args...).Output(); err == nil {
+	if out, err := tmux.CmdContext(ctx, args...).Output(); err == nil {
 		newID := strings.TrimSpace(string(out))
 		if newID != "" {
 			logEvent("UPDATE_ACTIVE_WINDOW_TMUX_QUERY daemon_old=%s tmux_new=%s coordinator_active=%s", l.activeWindowID, newID, coordActive)

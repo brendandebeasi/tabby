@@ -17,10 +17,11 @@ package tmuxhooks
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // Definition is one global tmux hook: the hook name and the command body that
@@ -49,7 +50,7 @@ func Install(exe string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			exec.Command("tmux", "set-hook", "-gu", name).Run()
+			tmux.Cmd("set-hook", "-gu", name).Run()
 		}()
 	}
 	wg.Wait()
@@ -57,7 +58,7 @@ func Install(exe string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			exec.Command("tmux", "set-hook", "-g", h.Name, h.Cmd).Run()
+			tmux.Cmd("set-hook", "-g", h.Name, h.Cmd).Run()
 		}()
 	}
 	wg.Wait()
@@ -158,14 +159,14 @@ const DaemonOption = "@tabby_daemon"
 // MarkDaemonPresent opens daemonGate for sessionID. Called once at daemon
 // startup; the value is unread, only its emptiness matters.
 func MarkDaemonPresent(sessionID string) {
-	exec.Command("tmux", "set-option", "-t", sessionID, DaemonOption, "1").Run()
+	tmux.Cmd("set-option", "-t", sessionID, DaemonOption, "1").Run()
 }
 
 // ClearDaemonPresent closes daemonGate for sessionID, on the daemon's way out.
 // Best-effort: a daemon that dies without reaching this leaves the gate open,
 // which costs the pointless fires this gate saves and nothing else.
 func ClearDaemonPresent(sessionID string) {
-	exec.Command("tmux", "set-option", "-t", sessionID, "-u", DaemonOption).Run()
+	tmux.Cmd("set-option", "-t", sessionID, "-u", DaemonOption).Run()
 }
 
 // ClearMute forces the hook gate open. The option lives on the server, so a
@@ -174,7 +175,7 @@ func ClearDaemonPresent(sessionID string) {
 // Install calls this, which covers plugin load, `tabby toggle` and every
 // watchdog restart; the daemon also calls it at startup.
 func ClearMute() {
-	exec.Command("tmux", "set-option", "-g", MuteOption, clearedMuteValue).Run()
+	tmux.Cmd("set-option", "-g", MuteOption, clearedMuteValue).Run()
 }
 
 // ungatedJob is job() without the mute gate, for hooks whose suppression the

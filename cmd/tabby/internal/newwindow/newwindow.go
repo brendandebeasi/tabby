@@ -17,6 +17,7 @@ import (
 
 	tabbycfg "github.com/brendandebeasi/tabby/pkg/config"
 	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 	tmuxpkg "github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -438,7 +439,7 @@ func firingPaneIsRemote(cfg *config) bool {
 
 // readTmuxWindowOption returns a window-scoped tmux option value, or "" if unset.
 func readTmuxWindowOption(windowID, name string) string {
-	out, err := exec.Command("tmux", "show-options", "-wqv", "-t", windowID, name).Output()
+	out, err := tmux.Cmd("show-options", "-wqv", "-t", windowID, name).Output()
 	if err != nil {
 		return ""
 	}
@@ -446,7 +447,7 @@ func readTmuxWindowOption(windowID, name string) string {
 }
 
 func readTmuxOption(name string) string {
-	out, _ := exec.Command("tmux", "show-option", "-gqv", name).Output()
+	out, _ := tmux.Cmd("show-option", "-gqv", name).Output()
 	return strings.TrimSpace(string(out))
 }
 
@@ -479,7 +480,7 @@ func runTmuxTrimmedOrEmpty(cfg *config, args ...string) string {
 }
 
 func runTmuxOutput(cfg *config, args ...string) (string, error) {
-	cmd := exec.Command("tmux", args...)
+	cmd := tmux.Cmd(args...)
 	out, err := cmd.Output()
 	trimmed := strings.TrimSpace(string(out))
 	if err != nil {

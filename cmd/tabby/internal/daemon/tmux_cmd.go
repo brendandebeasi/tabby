@@ -4,6 +4,8 @@ import (
 	"context"
 	"os/exec"
 	"time"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // tmuxCmd builds a tmux *exec.Cmd bounded by tmuxCmdTimeout.
@@ -24,7 +26,7 @@ func tmuxCmd(args ...string) *exec.Cmd {
 	// build then immediately run, and muting early is the safe direction.
 	noteTmuxMutation(args)
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
-	cmd := exec.CommandContext(ctx, "tmux", args...)
+	cmd := tmux.CmdContext(ctx, args...)
 	cmd.Cancel = func() error {
 		defer cancel()
 		return cmd.Process.Kill()

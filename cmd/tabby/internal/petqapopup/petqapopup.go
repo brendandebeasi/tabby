@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -37,6 +36,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // confirmDelay is how long the success screen sits on-screen when nothing new
@@ -562,7 +562,7 @@ func Run(args []string) int {
 
 	sessionID := *sessionFlag
 	if sessionID == "" {
-		out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+		out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
 		if err == nil {
 			sessionID = strings.TrimSpace(string(out))
 		}

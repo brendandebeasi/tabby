@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -92,7 +91,7 @@ func flushOpsBatched(ops []ResizeOp, reason string) {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		out, err := exec.CommandContext(ctx, "tmux", args...).CombinedOutput()
+		out, err := tmux.CmdContext(ctx, args...).CombinedOutput()
 		cancel()
 		if err != nil {
 			logEvent("RECONCILE_FLUSH_ERR reason=%s chunk_start=%d chunk_size=%d err=%v out=%s",
@@ -110,7 +109,7 @@ func flushOpsBatched(ops []ResizeOp, reason string) {
 					continue
 				}
 				rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
-				rerr := exec.CommandContext(rctx, "tmux", "resize-window", "-A", "-t", op.Target).Run()
+				rerr := tmux.CmdContext(rctx, "resize-window", "-A", "-t", op.Target).Run()
 				rcancel()
 				logEvent("RECONCILE_OP_FALLBACK_AUTO target=%s err=%v", op.Target, rerr)
 			}
@@ -224,7 +223,7 @@ func listWindowGeoms() []windowGeom {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	args := sessionScopedListWindowsArgs("#{window_id}|#{window_width}|#{window_height}")
-	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	out, err := tmux.CmdContext(ctx, args...).Output()
 	if err != nil {
 		return nil
 	}
@@ -263,7 +262,7 @@ func listPanesGroupedByWindow() map[string][]panesRow {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	args := sessionScopedListPanesArgs("#{window_id}|||#{pane_id}|||#{pane_dead}|||#{pane_current_command}|||#{pane_start_command}")
-	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	out, err := tmux.CmdContext(ctx, args...).Output()
 	if err != nil {
 		return nil
 	}
@@ -298,7 +297,7 @@ func listPanesWithPipe() map[string]bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	args := sessionScopedListPanesArgs("#{pane_id}|||#{pane_pipe}")
-	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	out, err := tmux.CmdContext(ctx, args...).Output()
 	if err != nil {
 		return nil
 	}
@@ -323,7 +322,7 @@ func listSidebarPanesByWindow() map[string]string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	args := sessionScopedListPanesArgs("#{pane_id}|#{window_id}|#{pane_current_command}|#{pane_start_command}")
-	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	out, err := tmux.CmdContext(ctx, args...).Output()
 	if err != nil {
 		return nil
 	}
@@ -364,7 +363,7 @@ func listHeaderPanes() []headerPaneInfo {
 	// ResizeOps in the same batch. It also reaches windows this daemon does not
 	// own, resizing another session's headers against this session's config.
 	args := sessionScopedListPanesArgs("#{pane_id}|||#{pane_height}|||#{pane_current_command}|||#{pane_start_command}|||#{window_width}")
-	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	out, err := tmux.CmdContext(ctx, args...).Output()
 	if err != nil {
 		return nil
 	}
@@ -418,7 +417,7 @@ func snapshotWindowLayouts() []windowLayoutSnapshot {
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	args := sessionScopedListWindowsArgs("#{window_id}|||#{window_width}|||#{window_panes}|||#{window_layout}")
-	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	out, err := tmux.CmdContext(ctx, args...).Output()
 	if err != nil {
 		return nil
 	}

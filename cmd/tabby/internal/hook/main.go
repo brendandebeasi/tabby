@@ -16,6 +16,7 @@ import (
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/navtrace"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 func Run(allArgs []string) (code int) {
@@ -240,12 +241,12 @@ func Run(allArgs []string) (code int) {
 		// display-message which uses tmux's default-client heuristic.
 		invokingTTY := strings.TrimSpace(os.Getenv("TABBY_INVOKING_TTY"))
 		if invokingTTY == "" {
-			if out, err := exec.Command("tmux", "display-message", "-p", "#{client_tty}").Output(); err == nil {
+			if out, err := tmux.Cmd("display-message", "-p", "#{client_tty}").Output(); err == nil {
 				invokingTTY = strings.TrimSpace(string(out))
 			}
 		}
 		mostActiveTTY := ""
-		if out, err := exec.Command("tmux", "list-clients", "-F", "#{client_activity}|#{client_tty}").Output(); err == nil {
+		if out, err := tmux.Cmd("list-clients", "-F", "#{client_activity}|#{client_tty}").Output(); err == nil {
 			bestAct := int64(-1)
 			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 				parts := strings.SplitN(strings.TrimSpace(line), "|", 2)
@@ -330,7 +331,7 @@ func doOnPaneResize(args []string) {
 		return
 	}
 	hookPane := args[0]
-	out, err := exec.Command("tmux", "display", "-p", "-t", hookPane,
+	out, err := tmux.Cmd("display", "-p", "-t", hookPane,
 		"#{pane_current_command}|#{pane_start_command}|#{pane_width}").Output()
 	if err != nil {
 		return
@@ -369,7 +370,7 @@ func doOnPaneResize(args []string) {
 				if target < snapMin {
 					target = snapMin
 				}
-				exec.Command("tmux",
+				tmux.Cmd(
 					"set-option", "-g", "@tabby_spawning", "1", ";",
 					"resize-pane", "-t", hookPane, "-x", strconv.Itoa(target), ";",
 					"set-option", "-g", "@tabby_spawning", "0",
@@ -384,7 +385,7 @@ func doOnPaneResize(args []string) {
 // readIntTmuxOption returns the int value of a tmux option, or fallback
 // when the option is missing or unparsable.
 func readIntTmuxOption(name string, fallback int) int {
-	out, err := exec.Command("tmux", "show-option", "-gqv", name).Output()
+	out, err := tmux.Cmd("show-option", "-gqv", name).Output()
 	if err != nil {
 		return fallback
 	}
@@ -442,7 +443,7 @@ func doStabilizeClientResize(args []string) {
 	}
 
 	if windowID == "" {
-		out, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+		out, _ := tmux.Cmd("display-message", "-p", "#{window_id}").Output()
 		windowID = strings.TrimSpace(string(out))
 	}
 
@@ -456,13 +457,13 @@ func doStabilizeClientResize(args []string) {
 		doSignalClientResize([]string{clientWidth, clientHeight})
 	}
 
-	exec.Command("tmux", "refresh-client", "-S").Run()
+	tmux.Cmd("refresh-client", "-S").Run()
 }
 
 // doRestoreInputFocus replaces restore_input_focus.sh: find a content
 // pane and select it (avoids focus landing on sidebar/header panes).
 func doRestoreInputFocus(args []string) {
-	spawning, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output()
+	spawning, _ := tmux.Cmd("show-option", "-gqv", "@tabby_spawning").Output()
 	if strings.TrimSpace(string(spawning)) == "1" {
 		return
 	}
@@ -487,24 +488,24 @@ func doRestoreInputFocus(args []string) {
 	// the "input is dead until you reattach" symptom. The care getSessionID
 	// takes to identify the right session is worth nothing if the very next
 	// read ignores it.
-	curWin, _ := exec.Command("tmux", "display-message", "-t", sessionID, "-p", "#{window_id}").Output()
+	curWin, _ := tmux.Cmd("display-message", "-t", sessionID, "-p", "#{window_id}").Output()
 	windowID := strings.TrimSpace(string(curWin))
 	if windowID == "" {
-		out, _ := exec.Command("tmux", "list-windows", "-t", sessionID, "-F", "#{window_id}").Output()
+		out, _ := tmux.Cmd("list-windows", "-t", sessionID, "-F", "#{window_id}").Output()
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 		if len(lines) > 0 {
 			windowID = lines[0]
 		}
 	}
 
-	curPane, _ := exec.Command("tmux", "display-message", "-t", sessionID, "-p", "#{pane_id}").Output()
+	curPane, _ := tmux.Cmd("display-message", "-t", sessionID, "-p", "#{pane_id}").Output()
 	paneID := strings.TrimSpace(string(curPane))
 
 	targetPane := ""
 
 	// If current pane is a content pane, use it
 	if paneID != "" {
-		curCmd, _ := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{pane_current_command}").Output()
+		curCmd, _ := tmux.Cmd("display-message", "-p", "-t", paneID, "#{pane_current_command}").Output()
 		cmd := strings.TrimSpace(string(curCmd))
 		if !isAuxCmd(cmd) {
 			targetPane = paneID
@@ -518,7 +519,7 @@ func doRestoreInputFocus(args []string) {
 
 	// Search all session panes
 	if targetPane == "" {
-		out, _ := exec.Command("tmux", "list-panes", "-t", sessionID, "-F", "#{pane_id}|#{pane_current_command}").Output()
+		out, _ := tmux.Cmd("list-panes", "-t", sessionID, "-F", "#{pane_id}|#{pane_current_command}").Output()
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			parts := strings.SplitN(line, "|", 2)
 			if len(parts) != 2 {
@@ -533,7 +534,7 @@ func doRestoreInputFocus(args []string) {
 
 	if targetPane != "" {
 		// Get the window containing this pane and select it
-		tw, _ := exec.Command("tmux", "display-message", "-p", "-t", targetPane, "#{window_id}").Output()
+		tw, _ := tmux.Cmd("display-message", "-p", "-t", targetPane, "#{window_id}").Output()
 		if w := strings.TrimSpace(string(tw)); w != "" {
 			// Qualify the window id with the session. Grouped sessions share
 			// their windows, so a bare `select-window -t @23` leaves tmux to
@@ -541,25 +542,25 @@ func doRestoreInputFocus(args []string) {
 			// current client, which can be the other one. Verified: with $1 and
 			// $2 sharing @28, `-t '$1:@28'` and `-t '$2:@28'` each resolve to
 			// their own session.
-			exec.Command("tmux", "select-window", "-t", sessionID+":"+w).Run()
+			tmux.Cmd("select-window", "-t", sessionID+":"+w).Run()
 		}
 		// select-pane needs no session: the active pane is a property of the
 		// window itself, which the sharing sessions hold in common.
-		exec.Command("tmux", "select-pane", "-t", targetPane).Run()
+		tmux.Cmd("select-pane", "-t", targetPane).Run()
 	}
 
 	// Mouse reset to clear any stuck state
-	exec.Command("tmux", "set", "-g", "mouse", "off").Run()
+	tmux.Cmd("set", "-g", "mouse", "off").Run()
 	time.Sleep(50 * time.Millisecond)
-	exec.Command("tmux", "set", "-g", "mouse", "on").Run()
+	tmux.Cmd("set", "-g", "mouse", "on").Run()
 
 	// Refresh the clients attached to this session. Unscoped, list-clients
 	// answers for the whole server, so a reload of one session would redraw
 	// every client of every other session too.
-	out, _ := exec.Command("tmux", "list-clients", "-t", sessionID, "-F", "#{client_tty}").Output()
+	out, _ := tmux.Cmd("list-clients", "-t", sessionID, "-F", "#{client_tty}").Output()
 	for _, tty := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if tty != "" {
-			exec.Command("tmux", "refresh-client", "-t", tty, "-S").Run()
+			tmux.Cmd("refresh-client", "-t", tty, "-S").Run()
 		}
 	}
 }
@@ -567,7 +568,7 @@ func doRestoreInputFocus(args []string) {
 // doEnsureSidebar replaces ensure_sidebar.sh: check daemon is running,
 // start via watchdog if needed, signal for renderer spawning.
 func doEnsureSidebar(args []string) {
-	spawning, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_spawning").Output()
+	spawning, _ := tmux.Cmd("show-option", "-gqv", "@tabby_spawning").Output()
 	if strings.TrimSpace(string(spawning)) == "1" {
 		return
 	}
@@ -582,7 +583,7 @@ func doEnsureSidebar(args []string) {
 		windowID = args[1]
 	}
 	if windowID == "" {
-		out, _ := exec.Command("tmux", "display-message", "-p", "#{window_id}").Output()
+		out, _ := tmux.Cmd("display-message", "-p", "#{window_id}").Output()
 		windowID = strings.TrimSpace(string(out))
 	}
 
@@ -596,10 +597,10 @@ func ensureSidebar(sessionID, windowID string) {
 	}
 
 	// Check mode
-	mode, _ := exec.Command("tmux", "show-options", "-gqv", "@tabby_sidebar").Output()
+	mode, _ := tmux.Cmd("show-options", "-gqv", "@tabby_sidebar").Output()
 	modeStr := strings.TrimSpace(string(mode))
 	if modeStr == "" {
-		mode2, _ := exec.Command("tmux", "show-options", "-qv", "@tabby_sidebar").Output()
+		mode2, _ := tmux.Cmd("show-options", "-qv", "@tabby_sidebar").Output()
 		modeStr = strings.TrimSpace(string(mode2))
 	}
 	if modeStr == "" {
@@ -614,14 +615,14 @@ func ensureSidebar(sessionID, windowID string) {
 		return
 	}
 
-	exec.Command("tmux", "set-option", "-g", "status", "off").Run()
+	tmux.Cmd("set-option", "-g", "status", "off").Run()
 
 	// Check if current window already has a sidebar renderer THIS session owns.
 	// Grouped sessions share panes, so a peer's renderer is visible here too;
 	// treating that as "already handled" left a reattached session with no
 	// daemon of its own and every nav keybinding failing on a dead socket.
 	if windowID != "" {
-		out, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_current_command}|#{pane_start_command}").Output()
+		out, _ := tmux.Cmd("list-panes", "-t", windowID, "-F", "#{pane_current_command}|#{pane_start_command}").Output()
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			if !strings.Contains(line, "sidebar-renderer") && !strings.Contains(line, "sidebar") {
 				continue
@@ -687,7 +688,7 @@ func ensureSidebar(sessionID, windowID string) {
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		exec.Command("tmux", "set-option", "-gu", "@tabby_spawning").Run()
+		tmux.Cmd("set-option", "-gu", "@tabby_spawning").Run()
 	}
 }
 
@@ -801,7 +802,7 @@ func doDashBorderClick(args []string) {
 		logf("  abort: parse error mx=%v my=%v pleft=%v ptop=%v", err1, err2, err3, err4)
 		return
 	}
-	out, _ := exec.Command("tmux", "show-options", "-wqv", "-t", paneID, "@tabby_dashboard").Output()
+	out, _ := tmux.Cmd("show-options", "-wqv", "-t", paneID, "@tabby_dashboard").Output()
 	dashFlag := strings.TrimSpace(string(out))
 	// pane-border-status=top renders one row ABOVE pane_top, so the button row
 	// is my == ptop-1 (not ptop). Also accept ptop for forgiveness in case the
@@ -809,7 +810,7 @@ func doDashBorderClick(args []string) {
 	btnRow := ptop - 1
 	logf("  pane=%s mx=%d my=%d pleft=%d ptop=%d btnRow=%d dash=%q", paneID, mx, my, pleft, ptop, btnRow, dashFlag)
 	if dashFlag != "1" || (my != btnRow && my != ptop) {
-		err := exec.Command("tmux", "select-pane", "-t", paneID).Run()
+		err := tmux.Cmd("select-pane", "-t", paneID).Run()
 		logf("  pass-through: select-pane err=%v (dash=%q on-btn-row=%v)", err, dashFlag, my == btnRow || my == ptop)
 		return
 	}
@@ -833,7 +834,7 @@ func doDashBorderClick(args []string) {
 		logf("  no hit: col=%d outside button zone (0-11)", col)
 		return
 	}
-	err := exec.Command("tmux", cmdArgs...).Run()
+	err := tmux.Cmd(cmdArgs...).Run()
 	logf("  hit=%s col=%d cmd=tmux %v err=%v", btn, col, cmdArgs, err)
 }
 
@@ -852,25 +853,25 @@ func doDashMenu(args []string) {
 	// pane-border-style isn't really pane-scoped in tmux (the -p flag falls
 	// through to window scope), so per-pane overrides recolour every pane.
 	// active-vs-inactive gives us a true single-pane highlight.
-	_ = exec.Command("tmux", "select-pane", "-t", paneID).Run()
-	prevStyle, _ := exec.Command("tmux", "show-window-options", "-vt", paneID, "pane-active-border-style").Output()
+	_ = tmux.Cmd("select-pane", "-t", paneID).Run()
+	prevStyle, _ := tmux.Cmd("show-window-options", "-vt", paneID, "pane-active-border-style").Output()
 	prev := strings.TrimSpace(string(prevStyle))
 	if prev == "" {
 		// Empty means the window has no per-window override. Restore to empty
 		// (unset) by clearing the option so the global default reasserts.
 		prev = ""
 	}
-	_ = exec.Command("tmux", "set-window-option", "-t", paneID, "pane-active-border-style", "fg=#1a1a1a,bg=#fcd34d,bold").Run()
+	_ = tmux.Cmd("set-window-option", "-t", paneID, "pane-active-border-style", "fg=#1a1a1a,bg=#fcd34d,bold").Run()
 	defer func() {
 		if prev == "" {
-			_ = exec.Command("tmux", "set-window-option", "-u", "-t", paneID, "pane-active-border-style").Run()
+			_ = tmux.Cmd("set-window-option", "-u", "-t", paneID, "pane-active-border-style").Run()
 		} else {
-			_ = exec.Command("tmux", "set-window-option", "-t", paneID, "pane-active-border-style", prev).Run()
+			_ = tmux.Cmd("set-window-option", "-t", paneID, "pane-active-border-style", prev).Run()
 		}
 	}()
 	// Window count drives the conditional items (swap up/down only useful when
 	// multiple panes exist; break-pane likewise).
-	panesOut, _ := exec.Command("tmux", "list-panes", "-t", paneID, "-F", "x").Output()
+	panesOut, _ := tmux.Cmd("list-panes", "-t", paneID, "-F", "x").Output()
 	multi := strings.Count(string(panesOut), "x") > 1
 	menu := []string{
 		"-T", " Pane actions ",
@@ -891,7 +892,7 @@ func doDashMenu(args []string) {
 		)
 	}
 	menu = append(menu, "", "", "", "Cancel", "q", "")
-	_ = exec.Command("tmux", append([]string{"display-menu"}, menu...)...).Run()
+	_ = tmux.Cmd(append([]string{"display-menu"}, menu...)...).Run()
 }
 
 // sendHook dials the daemon socket and sends a MsgHook envelope. Mirrors
@@ -928,7 +929,7 @@ func sendHook(kind string, args map[string]string) error {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 func signalDaemon(sig string) {
-	out, _ := exec.Command("tmux", "show-option", "-gqv", "@tabby_daemon_pid").Output()
+	out, _ := tmux.Cmd("show-option", "-gqv", "@tabby_daemon_pid").Output()
 	pid := strings.TrimSpace(string(out))
 	if pid == "" {
 		// Fallback: read PID file
@@ -957,7 +958,7 @@ func isAuxCmd(cmd string) bool {
 }
 
 func findFirstContentPane(windowID string) string {
-	out, _ := exec.Command("tmux", "list-panes", "-t", windowID, "-F", "#{pane_id}|#{pane_current_command}").Output()
+	out, _ := tmux.Cmd("list-panes", "-t", windowID, "-F", "#{pane_id}|#{pane_current_command}").Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.SplitN(line, "|", 2)
 		if len(parts) != 2 {
@@ -1057,7 +1058,7 @@ func getSessionID() (string, error) {
 			return sid, nil
 		}
 	}
-	out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+	out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
 	if err != nil {
 		return "", err
 	}
@@ -1069,7 +1070,7 @@ func getSessionID() (string, error) {
 // each client's own session, so this is unambiguous where display-message is
 // not.
 func sessionIDForTTY(tty string) string {
-	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_tty}|#{session_id}").Output()
+	out, err := tmux.Cmd("list-clients", "-F", "#{client_tty}|#{session_id}").Output()
 	if err != nil {
 		return ""
 	}
@@ -1086,7 +1087,7 @@ func sessionIDForTTY(tty string) string {
 // Grouped peers see the same windows, so a daemon on any of them can service a
 // request when our own session's daemon is down.
 func peerSessionIDs(sessionID string) []string {
-	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_id}|#{session_group}").Output()
+	out, err := tmux.Cmd("list-sessions", "-F", "#{session_id}|#{session_group}").Output()
 	if err != nil {
 		return nil
 	}

@@ -2,12 +2,13 @@ package daemon
 
 import (
 	"fmt"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 // ElectionResult is what ClientElector.Elect returns: the elected active client
@@ -147,7 +148,7 @@ func (e *ClientElector) Pin(tty, reason string) {
 func (e *ClientElector) Elect() ElectionResult {
 	const idleWindow = int64(1500)
 	now := time.Now().Unix()
-	out, err := exec.Command("tmux", e.listClientsArgs(
+	out, err := tmux.Cmd(e.listClientsArgs(
 		"#{client_tty}|||#{client_width}|||#{client_height}|||#{client_flags}|||#{client_activity}")...).Output()
 	if err != nil {
 		return ElectionResult{Attached: -1}
@@ -346,7 +347,7 @@ func (e *ClientElector) reportMultiFocus(focused []focusedClientRef, elected str
 // when we know we want "whoever just did something" rather than "whoever is
 // active right now" — subtly different after heuristic kicks in.
 func (e *ClientElector) LatestAttachedTTY() string {
-	out, err := exec.Command("tmux", e.listClientsArgs(
+	out, err := tmux.Cmd(e.listClientsArgs(
 		"#{client_tty}|||#{client_flags}|||#{client_activity}")...).Output()
 	if err != nil {
 		return ""

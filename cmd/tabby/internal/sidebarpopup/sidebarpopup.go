@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
 	"github.com/brendandebeasi/tabby/pkg/textwidth"
+	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
 var sessionID *string
@@ -466,7 +466,7 @@ func Run(args []string) int {
 
 	// Get session ID from environment if not provided
 	if *sessionID == "" {
-		out, err := exec.Command("tmux", "display-message", "-p", "#{session_id}").Output()
+		out, err := tmux.Cmd("display-message", "-p", "#{session_id}").Output()
 		if err == nil {
 			*sessionID = strings.TrimSpace(string(out))
 		}
