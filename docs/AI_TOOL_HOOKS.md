@@ -145,6 +145,86 @@ already covers for the whole turn.
 
 ---
 
+### Droid CLI (Factory)
+
+**Config**: `~/.factory/hooks.json` (user scope) or `.factory/hooks.json`
+(project scope). Hooks also work inside the `"hooks"` key of
+`~/.factory/settings.json`.
+
+The events are Claude-compatible, but note the shape: in `hooks.json` the event
+names are the **top level** of the file, with no `"hooks"` wrapper around them --
+a wrapped file parses and then fires nothing. The wrapper belongs only in
+`settings.json`, where the events sit under its `"hooks"` key. `$T` is the guard
+from [Remote AI panes](#remote-ssh--mosh-ai-panes).
+
+```json
+{
+  "UserPromptSubmit": [
+    { "hooks": [ { "type": "command", "timeout": 5,
+      "command": "$T hook set-indicator input 0; $T hook set-indicator bell 0; $T hook set-indicator busy 1" } ] }
+  ],
+  "Notification": [
+    { "hooks": [ { "type": "command", "timeout": 5,
+      "command": "p=$(cat); case \"$p\" in *auth_success*) : ;; *) $T hook set-indicator input 1 ;; esac" } ] }
+  ],
+  "Stop": [
+    { "hooks": [ { "type": "command", "timeout": 5,
+      "command": "$T hook set-indicator busy 0; $T hook set-indicator bell 1" } ] }
+  ],
+  "SessionStart": [
+    { "hooks": [ { "type": "command", "timeout": 5,
+      "command": "$T hook set-indicator busy 0; $T hook set-indicator input 0; $T hook set-indicator bell 0" } ] }
+  ],
+  "SessionEnd": [
+    { "hooks": [ { "type": "command", "timeout": 5,
+      "command": "$T hook set-indicator busy 0; $T hook set-indicator input 0; $T hook set-indicator bell 0" } ] }
+  ]
+}
+```
+
+State mapping:
+
+| State           | Event                | Indicator          |
+|-----------------|----------------------|--------------------|
+| working         | `UserPromptSubmit`   | spinner (`busy 1`) |
+| has question    | `Notification`       | ? (`input 1`)      |
+| done working    | `Stop`               | diamond (`bell 1`) |
+
+**`matcher` is optional** on non-tool events; omit it rather than passing `"*"`.
+`commandRegex` narrows a `PreToolUse`/`PostToolUse` group further, which
+indicators don't need.
+
+**Filter the notification type.** `Notification` covers `permission_prompt`,
+`idle_prompt`, `elicitation_dialog` and `auth_success`. The first three all mean
+"answer me"; `auth_success` doesn't, hence the `case` on the stdin payload
+above. Drop the filter if you never authenticate mid-session.
+
+**Do not hook `PreToolUse` / `PostToolUse`** for indicators, for the same reason
+as Claude Code: two spawns per tool call to set a state the turn already has.
+
+**`droid` has to be in `busy_detection.ai_tools`** or the hooks look broken: the
+daemon clears `@tabby_busy` on a pane it doesn't consider an AI pane, so
+`UserPromptSubmit` sets the spinner and the next reconcile takes it straight
+back off. `Stop`'s bell survives either way, which makes the symptom look like a
+missing start event rather than a config gap.
+
+**Events available**: `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop`, `PreCompact`,
+`Notification`
+
+**Context**: JSON on stdin, Claude-shaped (`session_id`, `cwd`,
+`hook_event_name`, and per-event fields such as `prompt` / `has_images` on
+`UserPromptSubmit`).
+
+**Exit codes**: 0 = success, 2 = blocking error; other non-zero codes are
+recorded as a non-blocking error and the session continues.
+
+Hooks can be turned off wholesale in Droid's settings (Settings -> Hooks), and
+`/hooks` in the TUI edits the same file. If indicators stop moving, check that
+switch before the JSON.
+
+---
+
 ### Gemini CLI
 
 **Config**: `~/.gemini/settings.json`
@@ -579,6 +659,7 @@ changes that aren't work-related.
 | Tool        | Hook events | Busy start | Busy end | Input | Bell  | Notes                          |
 |-------------|-------------|------------|----------|-------|-------|--------------------------------|
 | Claude Code | 13          | Yes        | Yes      | Yes   | Yes   | Most comprehensive             |
+| Droid CLI   | 9           | Yes        | Yes      | Yes   | Yes   | Claude-compatible hooks.json   |
 | Gemini CLI  | 11          | Yes        | Yes      | Yes   | Yes   | Must echo '{}' to stdout       |
 | Antigravity (`agy`) | statusLine | Yes | Yes  | Yes   | No    | statusLine->title bridge; add to ai_tools |
 | Codex CLI   | 1           | No*        | Yes      | Yes   | No*   | Use shell wrapper for start    |

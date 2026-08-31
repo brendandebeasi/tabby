@@ -100,7 +100,7 @@ More in the [Quick Start](docs/wiki/Quick-Start.md) guide.
 | Pane headers | Per-pane titles with clickable controls, inactive-pane dimming, and border styling. |
 | Deep links | Click a notification to land on the exact session, window, and pane. |
 | Activity indicators | Bell, activity, silence, busy, input, and SSH hooks, forwarded over OSC 7700. |
-| AI tool detection | Recognises when opencode, gemini, codex, aider, cursor, copilot, or grok is working and marks the window busy. |
+| AI tool detection | Recognises when opencode, gemini, codex, aider, cursor, copilot, grok, or droid is working and marks the window busy. |
 | Responsive layout | Separate mobile, tablet, and desktop profiles. Narrow windows get a compact sidebar; phones get a window header with nav buttons. |
 | Widgets | Clock, pet, git, session, stats, and Claude and Kimi quota, pinnable in the sidebar. |
 | Themes | Fifteen built in, paired for a `prefix + T` light/dark toggle that works locally and over SSH. |
@@ -136,7 +136,7 @@ The [wiki](docs/wiki/Home.md) is the full reference.
 
 | Page | Covers |
 |---|---|
-| [Notifications and Deep Links](docs/wiki/Notifications-and-Deep-Links.md) | Click-to-focus, Claude Code, OpenCode, Grok CLI |
+| [Notifications and Deep Links](docs/wiki/Notifications-and-Deep-Links.md) | Click-to-focus, Claude Code, OpenCode, Grok CLI, Droid CLI |
 | [AI Tool Indicators](docs/wiki/AI-Tool-Indicators.md) | Busy detection and driving indicators from scripts |
 | [SSH and Remote Hosts](docs/wiki/SSH-and-Remote-Hosts.md) | Remote bells, themes, and clipboard |
 | [Session Persistence](docs/wiki/Session-Persistence.md) | tmux-resurrect setup and coexistence |

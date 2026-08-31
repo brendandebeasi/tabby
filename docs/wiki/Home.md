@@ -42,7 +42,7 @@ deep-link back to the exact pane that sent them.
 | Page | What it covers |
 |---|---|
 | [Notifications and Deep Links](Notifications-and-Deep-Links.md) | Click a notification, land on the pane |
-| [AI Tool Indicators](AI-Tool-Indicators.md) | Claude Code, OpenCode, Grok, and passive detection |
+| [AI Tool Indicators](AI-Tool-Indicators.md) | Claude Code, OpenCode, Grok, Droid, and passive detection |
 | [SSH and Remote Hosts](SSH-and-Remote-Hosts.md) | Remote host colours, bell notifications, mosh limits |
 | [Session Persistence](Session-Persistence.md) | tmux-resurrect save and restore |
 

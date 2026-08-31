@@ -251,6 +251,41 @@ identical. The file is `~/.grok/user-settings.json` instead:
 Point `Stop` and `Notification` at the same notify script you use for Claude
 Code; the stdin contract and the `TMUX_PANE` rule are the same.
 
+## Droid CLI
+
+Factory's Droid uses the same hook schema, in `~/.factory/hooks.json` (or
+`.factory/hooks.json` for one project). The event names are the top level of
+that file -- no `"hooks"` wrapper, unlike `settings.json` -- and `matcher` is
+optional, so each group is just a `hooks` array:
+
+```json
+{
+  "UserPromptSubmit": [
+    { "hooks": [
+      { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator busy 1" },
+      { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator input 0" }
+    ] }
+  ],
+  "Stop": [
+    { "hooks": [
+      { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator busy 0" },
+      { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator bell 1" },
+      { "type": "command", "command": "<tabby-dir>/bin/droid-stop-notify.sh" }
+    ] }
+  ],
+  "Notification": [
+    { "hooks": [
+      { "type": "command", "command": "<tabby-dir>/bin/tabby hook set-indicator input 1" }
+    ] }
+  ]
+}
+```
+
+Droid's `Notification` fires for `permission_prompt`, `idle_prompt`,
+`elicitation_dialog` and `auth_success`, all through the one event, so a notify
+script here should read the type off stdin and skip `auth_success` rather than
+banner every login. The `TMUX_PANE` rule for deep links is unchanged.
+
 ## Making notifications persist
 
 macOS banners vanish after about five seconds, which is no use for a deep link

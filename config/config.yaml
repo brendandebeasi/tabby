@@ -232,4 +232,5 @@ busy_detection:
   ai_tools:
     - opencode
     - claude
+    - droid
   idle_timeout: 5

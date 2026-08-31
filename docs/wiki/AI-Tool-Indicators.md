@@ -92,6 +92,7 @@ busy_detection:
     - cursor
     - copilot
     - grok
+    - droid
   idle_timeout: 10
   # extra_idle: []
 ```
@@ -136,7 +137,7 @@ Clear an indicator by switching to the window, or with `0`.
 
 ## Per-tool hook setup
 
-Claude Code, OpenCode and Grok configurations are in
+Claude Code, OpenCode, Grok and Droid configurations are in
 [Notifications and Deep Links](Notifications-and-Deep-Links.md), alongside the
 notification wiring, because in practice you set both up at once.
 
