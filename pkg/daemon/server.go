@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1021,11 +1022,40 @@ func (s *Server) sendMessage(conn net.Conn, msg Message) (err error) {
 	if conn == nil {
 		return fmt.Errorf("nil connection")
 	}
-	data, err := json.Marshal(msg)
-	if err != nil {
+	enc := msgEncoders.Get().(*msgEncoder)
+	defer func() {
+		// One outsized message should not pin its buffer in the pool forever.
+		if enc.buf.Cap() <= maxPooledMsgBuf {
+			msgEncoders.Put(enc)
+		}
+	}()
+	enc.buf.Reset()
+	if err := enc.enc.Encode(msg); err != nil { // Encode writes the trailing newline itself
 		return err
 	}
+
 	conn.SetWriteDeadline(time.Now().Add(time.Second))
-	_, err = conn.Write(append(data, '\n'))
+	_, err = conn.Write(enc.buf.Bytes())
 	return err
 }
+
+// msgEncoder pairs a buffer with the encoder writing into it so both survive
+// from one send to the next.
+type msgEncoder struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+// msgEncoders keeps the wire buffers alive between sends. json.Marshal hands
+// back an exactly-sized slice, so every render payload cost one allocation to
+// build and a second to copy it again when the newline was appended. Rendered
+// sidebars run to a few KB and go out on every frame to every client, which put
+// this among the daemon's largest sources of garbage.
+// maxPooledMsgBuf is comfortably above a full-height sidebar payload, so the
+// steady state keeps its buffers and only an outlier gets dropped.
+const maxPooledMsgBuf = 1 << 20
+
+var msgEncoders = sync.Pool{New: func() any {
+	buf := &bytes.Buffer{}
+	return &msgEncoder{buf: buf, enc: json.NewEncoder(buf)}
+}}

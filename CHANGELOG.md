@@ -28,6 +28,8 @@
 
 ### Changed
 
+- The daemon reuses its wire buffers instead of allocating one per message. `sendMessage` called `json.Marshal`, which returns an exactly-sized slice, then appended a newline, which copied the whole payload a second time. Rendered sidebars run to a few KB and go out on every frame to every client. A pooled `json.Encoder` writing into a pooled buffer takes a 2 KB payload from 2929 bytes per send to 240. Buffers over 1 MB are dropped rather than pooled, so one outsized message cannot pin memory.
+
 - Widget rows no longer recompute their gradient on every frame. `applyGradientFill` derived a colour per column, and each column cost two hex parses, a blend and a `Sprintf`, for a result that only moves when the theme or the sidebar width does. The per-column escapes are now memoized on `(fromHex, toHex, width)`: 10us and 59 allocations per row down to 31ns and none. The cache is dropped whole past 128 entries, the same way the small-button cache is.
 
 - `constrainWidgetWidth` stopped rebuilding frames that already fit. It split the content, measured every line and reassembled a byte-identical copy even when nothing overflowed, which is the common case by a wide margin. It now scans for an overflowing line in place and hands back the caller's string when there isn't one: 704 bytes and 6 allocations per widget down to none.
