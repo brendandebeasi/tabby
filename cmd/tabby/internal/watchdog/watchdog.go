@@ -52,6 +52,13 @@ func Run(args []string) int {
 		return 1
 	}
 
+	// However this supervisor leaves — clean stop, session gone, or giving up
+	// after too many crashes — it must not leave the hook gate closed behind it.
+	// @tabby_mute lives on the server, so a daemon killed mid-batch would
+	// otherwise silence every tabby hook for the life of that server. A deferred
+	// clear covers every exit path; the restart path is covered by registerHooks.
+	defer tmuxhooks.ClearMute()
+
 	if sessionID == "" {
 		fmt.Fprintln(os.Stderr, "watchdog: -session required")
 		// Fall through to exec daemon directly
@@ -259,10 +266,5 @@ func fileExists(path string) bool {
 // every real size change. Removing them eliminates a redundant resize storm
 // (4-8 RESIZE_ALL_WINDOWS per opencode launch → 1).
 func registerHooks(exe string) {
-	for _, name := range tmuxhooks.Retired() {
-		exec.Command("tmux", "set-hook", "-gu", name).Run()
-	}
-	for _, h := range tmuxhooks.Definitions(exe) {
-		exec.Command("tmux", "set-hook", "-g", h.Name, h.Cmd).Run()
-	}
+	tmuxhooks.Install(exe)
 }

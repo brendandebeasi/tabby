@@ -221,18 +221,7 @@ func enable(sessionID, exe, pidFile, sockPath, watchdogPidFile, stateFile string
 	// Register hooks in parallel. Bodies live in package tmuxhooks, shared
 	// with the watchdog so the two registration paths cannot drift apart or
 	// from tabby.tmux.
-	var hookWg sync.WaitGroup
-	for _, name := range tmuxhooks.Retired() {
-		run("tmux", "set-hook", "-gu", name)
-	}
-	for _, h := range tmuxhooks.Definitions(exe) {
-		hookWg.Add(1)
-		go func(name, cmd string) {
-			defer hookWg.Done()
-			run("tmux", "set-hook", "-g", name, cmd)
-		}(h.Name, h.Cmd)
-	}
-	hookWg.Wait()
+	tmuxhooks.Install(exe)
 
 	// Wait for renderers
 	for i := 0; i < 10; i++ {

@@ -91,6 +91,7 @@ const tmuxCmdTimeout = 5 * time.Second
 
 // tmuxRun executes a tmux command with a timeout. Fire-and-forget.
 func tmuxRun(args ...string) error {
+	noteTmuxMutation(args)
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
 	defer cancel()
 	return exec.CommandContext(ctx, "tmux", args...).Run()

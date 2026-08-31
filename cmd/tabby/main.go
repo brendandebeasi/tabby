@@ -35,6 +35,7 @@ import (
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/renderdispatch"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/setup"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/theme"
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/tmuxhooks"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/toggle"
 	"github.com/brendandebeasi/tabby/cmd/tabby/internal/watchdog"
 )
@@ -56,6 +57,7 @@ var subcommands = []subcommand{
 	{"dashboard-layout", "open the dashboard layout-style picker popup", dashboardlayout.Run},
 	{"dev", "developer commands: reload, status", dev.Run},
 	{"hook", "tmux hook dispatcher (split-pane, kill-pane, resize, etc.)", hook.Run},
+	{"install-hooks", "register tabby's global tmux hooks (called from tabby.tmux)", tmuxhooks.Run},
 	{"landing", "full-pane new-tab launcher over landing.yaml", landing.Run},
 	{"manage-group", "edit window-group entries in the tabby config file", managegroup.Run},
 	{"new-window", "create a new tmux window with sidebar", newwindow.Run},
@@ -68,6 +70,76 @@ var subcommands = []subcommand{
 	{"watchdog", "supervise the tabby daemon, restarting on crash", watchdog.Run},
 }
 
+// batch is registered from init rather than as a literal in the subcommands
+// initializer: runBatch reads subcommands, and a var whose initializer
+// references a function that reads that same var is an initialization cycle.
+func init() {
+	subcommands = append(subcommands, subcommand{
+		"batch", "run several subcommands in one process, separated by --", runBatch,
+	})
+}
+
+func lookup(name string) *subcommand {
+	for i := range subcommands {
+		if subcommands[i].name == name {
+			return &subcommands[i]
+		}
+	}
+	return nil
+}
+
+// runBatch runs several subcommands in a single process. Segments are
+// separated by `--`:
+//
+//	tabby batch -- hook after-select-window '@9' -- cycle-pane --ensure-content
+//
+// This exists to collapse tmux hook bodies. A hook like after-select-window
+// fires once per session a window is linked into, so in an 8-session grouped
+// set its three separate `tabby` invocations cost 24 process spawns per window
+// switch. Batching makes that 8. The fork itself is the expense — the work each
+// segment does is unchanged.
+//
+// Segments are independent housekeeping: a failing one is logged to stderr and
+// the rest still run, matching the `; true` guard the hook bodies already carry.
+// The batch's own exit status is always 0 for the same reason.
+func runBatch(args []string) int {
+	for _, seg := range splitSegments(args) {
+		sc := lookup(seg[0])
+		switch {
+		case sc == nil:
+			fmt.Fprintf(os.Stderr, "tabby batch: unknown subcommand %q\n", seg[0])
+		case sc.name == "batch":
+			fmt.Fprintln(os.Stderr, "tabby batch: cannot nest batch")
+		default:
+			if code := sc.run(seg[1:]); code != 0 {
+				fmt.Fprintf(os.Stderr, "tabby batch: %s exited %d\n", seg[0], code)
+			}
+		}
+	}
+	return 0
+}
+
+// splitSegments cuts args on `--` into non-empty segments. A leading `--` is
+// optional, so both `batch -- a -- b` and `batch a -- b` parse the same way.
+func splitSegments(args []string) [][]string {
+	var segs [][]string
+	var cur []string
+	for _, a := range args {
+		if a == "--" {
+			if len(cur) > 0 {
+				segs = append(segs, cur)
+			}
+			cur = nil
+			continue
+		}
+		cur = append(cur, a)
+	}
+	if len(cur) > 0 {
+		segs = append(segs, cur)
+	}
+	return segs
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage(os.Stderr)
@@ -78,10 +150,8 @@ func main() {
 		usage(os.Stdout)
 		os.Exit(0)
 	}
-	for _, sc := range subcommands {
-		if sc.name == name {
-			os.Exit(sc.run(os.Args[2:]))
-		}
+	if sc := lookup(name); sc != nil {
+		os.Exit(sc.run(os.Args[2:]))
 	}
 	fmt.Fprintf(os.Stderr, "tabby: unknown subcommand %q\n\n", name)
 	usage(os.Stderr)

@@ -18,7 +18,19 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/navtrace"
 )
 
-func Run(allArgs []string) int {
+func Run(allArgs []string) (code int) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		f, ok := r.(fatalPanic)
+		if !ok {
+			panic(r)
+		}
+		fmt.Fprintln(os.Stderr, f.msg)
+		code = 1
+	}()
 	if len(allArgs) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: tabby hook <action> [args...]")
 		return 1
@@ -1102,7 +1114,14 @@ func peerSessionIDs(sessionID string) []string {
 	return peers
 }
 
+// fatalPanic is what fatal raises. Run recovers it and returns 1, so the
+// caller's exit status is what it always was — but a `tabby batch` running this
+// hook alongside other steps keeps going instead of taking the whole process
+// down with os.Exit. Every fatal is a usage error on a hook body, and a hook
+// body that has drifted from this binary is exactly when the remaining steps
+// still need to run.
+type fatalPanic struct{ msg string }
+
 func fatal(msg string) {
-	fmt.Fprintln(os.Stderr, msg)
-	os.Exit(1)
+	panic(fatalPanic{msg})
 }

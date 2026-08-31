@@ -16,8 +16,11 @@ package tmuxhooks
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Definition is one global tmux hook: the hook name and the command body that
@@ -27,33 +30,157 @@ type Definition struct {
 	Cmd  string
 }
 
-// okGuard terminates every hook body. tmux prints "'<cmd>' returned N" into
-// every attached client when a run-shell body exits nonzero, so one failing
-// step — most often refresh-client firing with no current client — becomes a
-// screenful of noise on every window switch. Hook bodies are best-effort
-// housekeeping and nothing consumes their exit status.
-const okGuard = "; true"
+// Install unsets every Retired hook and registers every Definition, in
+// parallel. This is the only way these hooks reach tmux: `tabby toggle` and the
+// watchdog call it when a daemon starts, and tabby.tmux shells out to
+// `tabby install-hooks` at plugin load rather than repeating the bodies in
+// shell. They used to be written twice — once here and once in the config — and
+// `set-hook -g` replaces rather than merges, so the daemon's copy silently won
+// and the config's diverged unnoticed.
+//
+// exe is an absolute path to the tabby binary; see Definitions.
+func Install(exe string) {
+	// Any daemon that died holding the gate closed is unstuck here, before the
+	// hooks that gate reads are (re)registered.
+	ClearMute()
 
-// bg wraps one command body in a backgrounded run-shell that always reports
-// success to tmux.
-func bg(cmd string) string {
-	return fmt.Sprintf("run-shell -b '%s%s'", cmd, okGuard)
+	var wg sync.WaitGroup
+	for _, name := range Retired() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			exec.Command("tmux", "set-hook", "-gu", name).Run()
+		}()
+	}
+	wg.Wait()
+	for _, h := range Definitions(exe) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			exec.Command("tmux", "set-hook", "-g", h.Name, h.Cmd).Run()
+		}()
+	}
+	wg.Wait()
 }
 
-// bgQuoted is bg for a body that itself contains single quotes, which tmux's
-// own single-quoted string cannot hold. tmux does no shell-variable expansion,
-// so double-quoting the body at the tmux level is equivalent for everything
-// except the quote character.
+// Run implements the `tabby install-hooks` subcommand, which is how tabby.tmux
+// registers these at plugin load.
+// Symlinks are deliberately not resolved: the hook bodies must keep naming the
+// binary by the path tabby was invoked through, because sibling scripts resolve
+// against it (see Definitions) and the plugin directory is commonly a symlink
+// to a checkout elsewhere.
+func Run(_ []string) int {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "install-hooks: %v\n", err)
+		return 1
+	}
+	Install(exe)
+	return 0
+}
+
+// okGuard terminates every hook body. Hook bodies are best-effort housekeeping
+// and nothing consumes their exit status, so a failing step — most often
+// refresh-client firing with no current client — must not surface.
+const okGuard = "; true"
+
+// muteGate wraps a hook body so it is skipped while the daemon is mutating tmux
+// itself. The condition is an -F format, evaluated inside the server, so a muted
+// hook spawns no socketpair and forks no shell — the saving has to happen here,
+// because by the time a script could check the flag tmux has already forked it.
 //
-// A body needs this when it passes a session id. tmux expands #{session_id} to
-// text like `$246`, and the shell that runs the body then reads that as a
-// positional parameter and substitutes it away — to the empty string, or for
-// session $0 to the shell's own name. Double quotes do not stop it; only
-// single quotes at the shell level do. `#{window_id}`, `#{pane_id}` and
-// `#{client_tty}` expand to `@N`, `%N` and a path, none of which the shell
-// touches, so those stay in the cheaper bg form.
-func bgQuoted(cmd string) string {
-	return fmt.Sprintf("run-shell -b \"%s%s\"", cmd, okGuard)
+// The gate is SESSION-SCOPED, and that is the whole design. tmux options are
+// per-server but daemons are per-session, so a plain boolean flag silenced every
+// daemon in the group, not just the one doing the mutating: the peers never
+// heard about the window-list changes and their models went stale (observed as
+// minimize leaving state mixed across windows). So the muting daemon writes its
+// OWN session id into the option, and a hook is dropped only where it fired in
+// that same session — which is exactly the daemon that caused it and already
+// knows. hook-notify.sh signals the daemon of #{session_id}, so every peer's
+// notification still gets through.
+//
+// Both no-daemon values read as "run": unset expands to empty and ClearMute
+// writes "0", neither of which can equal a #{session_id} (always `$N`). The
+// comparison fails open in every direction — an unknown or stale id in the
+// option mutes nothing.
+const muteGate = "#{?#{==:#{" + MuteOption + "},#{session_id}},0,1}"
+
+// MuteOption is the server option the daemon closes around its own tmux
+// mutations, holding its own session id for the duration. Exported so the
+// daemon and watchdog name it from one place.
+const MuteOption = "@tabby_mute"
+
+// clearedMuteValue is what an open gate reads. It is written rather than
+// unsetting the option so the gate stays a plain string comparison, and it must
+// never look like a tmux session id (`$N`) or it would mute that session for
+// good. ClearedMuteValue is the exported spelling for the daemon.
+const clearedMuteValue = "0"
+
+// ClearedMuteValue is clearedMuteValue for callers outside this package.
+const ClearedMuteValue = clearedMuteValue
+
+// ClearMute forces the hook gate open. The option lives on the server, so a
+// daemon killed mid-batch leaves it set and every tabby hook stays silent for
+// the life of the server — tabby looks frozen and nothing in the logs says why.
+// Install calls this, which covers plugin load, `tabby toggle` and every
+// watchdog restart; the daemon also calls it at startup.
+func ClearMute() {
+	exec.Command("tmux", "set-option", "-g", MuteOption, clearedMuteValue).Run()
+}
+
+// ungatedJob is job() without the mute gate, for hooks whose suppression the
+// user can see. The gate exists to stop the window-list churn a daemon batch
+// replays to every session in a grouped set; a selection fires one hook in one
+// session and is not part of that. Gating them anyway cost a visible bug: the
+// window you clicked drew the previous window's contents inside its own border,
+// because the daemon does window-list work as part of servicing the click, and
+// the refresh-client -S below was collateral damage of the gate that work closed.
+func ungatedJob(steps ...string) string {
+	return fmt.Sprintf("if-shell -b \"%s%s\" \"\"", strings.Join(steps, "; "), okGuard)
+}
+
+// job wraps a hook's steps in a single backgrounded tmux job that runs them in
+// order and reports nothing.
+//
+// Two properties matter, and both are why this is one job rather than several.
+//
+// if-shell, not run-shell: tmux prints "'<cmd>' returned N" into every attached
+// client when a *run-shell* body exits nonzero. if-shell runs the same job and
+// silently takes its (empty) else branch instead. Neither form can suppress
+// tmux's own "failed to run command" — that is raised by job_run() before any
+// job exists, when socketpair() or fork() fails.
+//
+// One job, not several: every backgrounded body in a hook is a separate tmux
+// job, and each job costs a socketpair in the server plus a forked shell. Hooks
+// fire once per session a window is linked into, so in an 8-session grouped set
+// a three-body after-select-window is 24 socketpairs and 24 forks per window
+// switch. Against the server's default soft RLIMIT_NOFILE of 256 that is enough
+// to exhaust it, at which point socketpair() fails and tmux drops the command.
+// Chaining the steps into one body makes it 8, and gives them a real execution
+// order — five concurrent jobs have none.
+//
+// The body is double-quoted at the tmux level so it can contain shell-level
+// single quotes. tmux does no shell-variable expansion, so the two quoting
+// styles are equivalent to tmux for everything except the quote character, and
+// a step passing #{session_id} has no choice: tmux expands it to text like
+// `$246`, which the shell running the body would otherwise read as a positional
+// parameter and substitute away — to the empty string, or for session $0 to the
+// shell's own name. Only single quotes at the shell level stop that.
+func job(steps ...string) string {
+	body := fmt.Sprintf("if-shell -b \"%s%s\" \"\"", strings.Join(steps, "; "), okGuard)
+	// No -b on the gate: -F evaluates a format inside the server, so there is no
+	// shell to background and -b would only defer the body by a queue turn. The
+	// body's own if-shell -b is what keeps the work off the server's critical
+	// path; deferring the gate as well would reorder steps that are meant to run
+	// before it (see after-kill-pane in tabby.tmux).
+	return fmt.Sprintf("if-shell -F '%s' '%s' ''", muteGate, escapeSingle(body))
+}
+
+// escapeSingle makes body safe to embed in the single-quoted branch of the
+// outer if-shell. tmux uses shell-style quoting, so a literal single quote must
+// leave and re-enter the quoted run.
+func escapeSingle(s string) string {
+	return strings.ReplaceAll(s, "'", `'\''`)
 }
 
 // Retired lists hook names earlier versions registered and that must now be
@@ -61,8 +188,13 @@ func bgQuoted(cmd string) string {
 // daemon restarts and plugin reloads for the life of the tmux server — so
 // dropping a name from Definitions only stops new registrations; clearing it
 // from a server already running takes an explicit `set-hook -gu`.
+//
+// client-active and client-focus-in fire on focus shifts that change no
+// geometry; client-resized already covers every real size change. They were
+// dropped here but kept being re-registered by tabby.tmux, so each focus change
+// still paid three jobs per session.
 func Retired() []string {
-	return []string{"after-rename-window"}
+	return []string{"after-rename-window", "client-active", "client-focus-in"}
 }
 
 // Definitions returns the hooks to register for the given tabby executable.
@@ -75,39 +207,54 @@ func Retired() []string {
 // sets @tabby_name_locked in the user-facing rename paths instead precisely so
 // this hook is not needed.
 func Definitions(exe string) []Definition {
-	hookCmd := fmt.Sprintf("%s hook", exe)
-	cycleCmd := fmt.Sprintf("%s cycle-pane", exe)
 	ensureDaemon := filepath.Join(filepath.Dir(filepath.Dir(exe)), "scripts", "ensure-daemon.sh")
 
-	ensureSidebar := fmt.Sprintf("%s ensure-sidebar '#{session_id}' '#{window_id}'", hookCmd)
-	ensureContent := fmt.Sprintf("%s --ensure-content", cycleCmd)
+	// batch runs several tabby subcommands in one process. Each step here is a
+	// subcommand and its arguments, without the binary path — see runBatch in
+	// cmd/tabby/main.go. A hook that ran three tabby commands cost three
+	// fork/execs on every fire, and hooks fire once per session a window is
+	// linked into; one exec does the same work.
+	batch := func(steps ...string) string {
+		return fmt.Sprintf("%s batch -- %s", exe, strings.Join(steps, " -- "))
+	}
 
-	join := func(parts ...string) string { return strings.Join(parts, "; ") }
+	// Formats are single-quoted uniformly. Only #{session_id} strictly needs it
+	// (see job), but a merged body is only safe to reason about if every step
+	// quotes the same way, and no path or format here contains a single quote.
+	ensureSidebar := "hook ensure-sidebar '#{session_id}' '#{window_id}'"
+	ensureContent := "cycle-pane --ensure-content"
 
 	return []Definition{
-		{"after-resize-pane", bg(fmt.Sprintf("%s on-pane-resize \"#{hook_pane}\"", hookCmd))},
-		{"after-resize-window", bg(fmt.Sprintf("%s on-pane-resize \"#{pane_id}\"", hookCmd))},
-		{"client-resized", join(
-			bg(fmt.Sprintf("%s client-resized \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"", hookCmd)),
-			bgQuoted(ensureSidebar),
-		)},
+		{"after-resize-pane", job(fmt.Sprintf("%s hook on-pane-resize '#{hook_pane}'", exe))},
+		{"after-resize-window", job(fmt.Sprintf("%s hook on-pane-resize '#{pane_id}'", exe))},
+		{"client-resized", job(batch(
+			"hook client-resized '#{client_tty}' '#{client_width}' '#{client_height}'",
+			ensureSidebar,
+		))},
 		// refresh-client -S is what repaints the client after a window switch.
 		// Without it the client keeps serving the previous window's layout, so
 		// mouse coordinates map to stale pane boundaries and clicks land on the
 		// wrong pane or are dropped entirely.
-		{"after-select-window", join(
-			bg(fmt.Sprintf("%s after-select-window \"#{window_id}\"; tmux refresh-client -S 2>/dev/null", hookCmd)),
-			bgQuoted(ensureSidebar),
-			bg(ensureContent),
+		{"after-select-window", ungatedJob(
+			batch(
+				"hook after-select-window '#{window_id}'",
+				ensureSidebar,
+				ensureContent,
+			),
+			"tmux refresh-client -S 2>/dev/null",
 		)},
 		// A reattaching client can land on a session whose daemon has already
-		// idle-quit, so ensure-daemon runs before the steps that need one.
-		{"client-attached", join(
-			bg(fmt.Sprintf("%s \"\" \"\" \"#{client_tty}\"", ensureDaemon)),
-			bg(fmt.Sprintf("%s client-attached", hookCmd)),
-			bgQuoted(ensureSidebar),
-			bgQuoted(fmt.Sprintf("%s stabilize-client-resize '#{session_id}' '#{window_id}' '#{client_tty}' '#{client_width}' '#{client_height}'", hookCmd)),
-			bg(ensureContent),
+		// idle-quit, so ensure-daemon runs before the steps that need one. That
+		// ordering is only real because these share one job: as separate
+		// backgrounded bodies they raced.
+		{"client-attached", job(
+			fmt.Sprintf("%s '' '' '#{client_tty}'", ensureDaemon),
+			batch(
+				"hook client-attached",
+				ensureSidebar,
+				"hook stabilize-client-resize '#{session_id}' '#{window_id}' '#{client_tty}' '#{client_width}' '#{client_height}'",
+				ensureContent,
+			),
 		)},
 	}
 }

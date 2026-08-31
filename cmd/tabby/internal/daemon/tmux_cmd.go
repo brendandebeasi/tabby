@@ -19,6 +19,10 @@ import (
 // bounds the tail case where the process dies but an inherited pipe is
 // still held open by a child.
 func tmuxCmd(args ...string) *exec.Cmd {
+	// Close the hook gate before a mutating command can fire tabby's hooks
+	// back at this daemon. Done at build time rather than at Run time: callers
+	// build then immediately run, and muting early is the safe direction.
+	noteTmuxMutation(args)
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCmdTimeout)
 	cmd := exec.CommandContext(ctx, "tmux", args...)
 	cmd.Cancel = func() error {

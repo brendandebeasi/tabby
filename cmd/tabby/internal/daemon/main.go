@@ -2953,6 +2953,12 @@ func Run(args []string) int {
 	// Check if previous daemon died abnormally (before we claim the PID file)
 	checkPreviousCrash(*sessionID)
 
+	// A daemon killed mid-batch leaves the hook gate closed, and the option
+	// outlives the process: every tabby hook on the server stays silent until
+	// something reopens it. Do that before running anything that depends on a
+	// hook firing.
+	ClearHookMute()
+
 	// Scope tmux queries to this session
 	tmux.SetSessionTarget(*sessionID)
 

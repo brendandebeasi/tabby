@@ -487,9 +487,8 @@ REFRESH_STATUS_SCRIPT="tmux refresh-client -S"
 # All lifecycle scripts now handled by Go binaries via `tabby hook`
 HOOK_BIN="$CURRENT_DIR/bin/tabby hook"
 ENSURE_SIDEBAR_CMD="$HOOK_BIN ensure-sidebar"
-RESTORE_SIDEBAR_CMD="$HOOK_BIN ensure-sidebar"
-STABILIZE_CLIENT_RESIZE_CMD="$HOOK_BIN stabilize-client-resize"
-SIGNAL_CLIENT_RESIZE_CMD="$HOOK_BIN signal-client-resize"
+# ensure-sidebar, stabilize-client-resize and signal-client-resize are no
+# longer named here: their hooks moved to `tabby install-hooks` (see below).
 FOCUS_RECOVERY_CMD="$HOOK_BIN restore-input-focus"
 
 # Apply group to new window: now handled by daemon (createNewWindowInCurrentGroup)
@@ -502,28 +501,91 @@ EXIT_IF_NO_MAIN_WINDOWS_CMD="$CURRENT_DIR/bin/tabby hook exit-if-no-main"
 # Most hooks now signal the daemon (USR1) which handles all state internally:
 # pane dimming, window history, layout save, border color, status exclusivity,
 # sidebar spawning, and renderer management.
-# hook-notify.sh signals the daemon and repaints the client, and always exits
-# 0: tmux prints '<command> returned N' into every attached client when a hook
-# body exits nonzero, so a single missing client used to turn into a screenful
-# of noise on every window switch.
+# hook-notify.sh signals the daemon and repaints the client. tmux prints
+# '<command> returned N' into every attached client when a hook body exits
+# nonzero, so a single missing client used to turn into a screenful of noise on
+# every window switch.
 NOTIFY_CMD="$CURRENT_DIR/scripts/hook-notify.sh"
 ENSURE_DAEMON_CMD="$CURRENT_DIR/scripts/ensure-daemon.sh"
 # Hook bodies are best-effort housekeeping and nothing consumes their status,
-# so any step run outside hook-notify.sh ends in `true`.
+# so every step ends in `true` — hook-notify.sh included, whose own `exit 0`
+# covers a step that fails but not a shell that never reaches the last line.
+#
+# `; true` is still not enough on its own. tmux forks per run-shell, and the
+# child exits 1 through fatal() if anything between that fork and the exec goes
+# wrong — the chdir, a dup2, opening /dev/null, the exec of the shell itself.
+# The body never runs, so nothing written inside it can suppress the report,
+# which is why `'…/hook-notify.sh; true' returned 1` still reached the screen.
+# run-shell is the only form that reports at all: if-shell runs the same job
+# and takes its else branch on a nonzero status, silently. So the notify hooks
+# are `if-shell -b '<body>' ''` — an empty else, meaning do nothing at all when
+# the body, or the shell that was to run it, failed.
+#
+# One failure that guard cannot cover: `failed to run command: <body>`. That is
+# raised before any job exists — job_run() returns NULL when socketpair() or
+# fork() fails in the server — so no hook body, in any form, can suppress it.
+# The only defence is not to run the server out of fds. These hooks fire once
+# per session a window is linked into, so an 8-session group runs the body
+# eight times over for one new-window, and every `tmux` call inside a body is a
+# client connection holding a server fd until it exits. Measured live, one
+# new-window took the server from 41 open fds to 234 against a soft
+# RLIMIT_NOFILE of 256. So bodies pass #{session_id} and #{session_attached} in
+# as formats — free, expanded by the server as it dispatches the hook —
+# instead of paying for a `tmux display-message` and a `tmux refresh-client`
+# per fire. Keep it that way: every client call added here is multiplied by the
+# number of sessions in the group.
 HOOK_OK="true"
 
-# Steps taking a #{session_id} must be single-quoted AT THE SHELL LEVEL and so
-# get their own run-shell: tmux expands the format to text like `$246`, which
-# the shell then reads as a positional parameter and substitutes away to the
-# empty string (or, for session $0, to the shell's own name). Double quotes do
-# not help — only single quotes stop the expansion. Chaining such a step inside
-# a shared body would force the whole body into one quoting style, so each gets
-# its own command instead.
-tmux set-hook -g window-linked "run-shell -b '$NOTIFY_CMD'"
-tmux set-hook -g window-unlinked "run-shell -b '$NOTIFY_CMD' ; run-shell -b '$EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK'"
-tmux set-hook -g after-new-window "run-shell -b '$NOTIFY_CMD'"
-tmux set-hook -g after-resize-pane "run-shell -b '$HOOK_BIN on-pane-resize \"#{hook_pane}\"; $HOOK_OK'"
-tmux set-hook -g after-select-window "run-shell -b '$NOTIFY_CMD' ; run-shell -b \"$ENSURE_SIDEBAR_CMD '#{session_id}' '#{window_id}'; $HOOK_OK\" ; run-shell -b '$CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
+# The daemon closes @tabby_mute around its own tmux mutations, and every hook
+# body is gated on it. This is not an optimisation, it is a loop-breaker: a
+# move-window fires window-linked and window-unlinked ONCE PER SESSION in the
+# group, each fire signals the daemon, and the daemon answers with more moves.
+# Measured live on a 9-session group, one new-window produced ~400 window-linked
+# fires, 280 of them the same session and window over and over.
+#
+# The condition must be -F. A -F condition is a format the server evaluates
+# itself, so a gated-off hook spawns no socketpair and forks no shell. Testing
+# the flag inside the body would be far too late — tmux has already forked by
+# the time a script can look at anything. An unset @tabby_mute reads as empty,
+# which #{?...} treats as false, so hooks run normally before any daemon starts.
+# The gate the daemon closes around its own tmux mutations. @tabby_mute holds
+# the muting daemon's SESSION ID, not a boolean, so a fire is dropped only in
+# the session that caused it; every peer daemon in a grouped set still gets its
+# notification. An unset option and the cleared "0" both compare unequal to any
+# #{session_id} (always `$N`), so hooks run normally with no daemon around.
+MUTE_GATE='#{?#{==:#{@tabby_mute},#{session_id}},0,1}'
+
+# gated_hook <hook-name> <body> — install a hook body behind MUTE_GATE.
+# The body goes in the single-quoted true-branch, so any single quote it
+# contains (every #{session_id} carries a pair) has to leave and re-enter the
+# quoted run as '\''.
+gated_hook() {
+    _gh_body=$(printf '%s' "$2" | sed "s/'/'\\\\''/g")
+    # No -b on the gate. -F evaluates a format inside the server, so there is no
+    # shell to background and -b would only defer the body by a queue turn —
+    # enough to reorder after-kill-pane's deliberately synchronous first step
+    # (pane ratios must be recorded before the reflow) behind the rest.
+    tmux set-hook -g "$1" "if-shell -F '$MUTE_GATE' '$_gh_body' ''"
+}
+
+# Every backgrounded body in a hook is a separate tmux job, costing a
+# socketpair in the server and a forked shell, so a hook's steps are chained
+# into ONE body rather than getting one command each. In an 8-session group a
+# three-body hook is 24 socketpairs and 24 forks for a single window switch —
+# most of the way to the 256-fd ceiling on its own. Chaining also gives the
+# steps a real order; separate backgrounded bodies are concurrent jobs with
+# none, which is what let ensure-daemon race the steps that needed it.
+#
+# The whole body is tmux-double-quoted so it can hold shell-level single
+# quotes. Steps taking a #{session_id} require them: tmux expands the format to
+# text like `$246`, which the shell would otherwise read as a positional
+# parameter and substitute away to the empty string (or, for session $0, to the
+# shell's own name). Shell double quotes do not stop it. #{window_id} and
+# #{client_tty} are safe either way, but quoting every format the same way is
+# what makes a merged body possible to reason about.
+gated_hook window-linked "if-shell -b \"$NOTIFY_CMD '#{session_id}' '#{session_attached}'; $HOOK_OK\" \"\""
+gated_hook window-unlinked "if-shell -b \"$NOTIFY_CMD '#{session_id}' '#{session_attached}'; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK\" \"\""
+gated_hook after-new-window "if-shell -b \"$NOTIFY_CMD '#{session_id}' '#{session_attached}'; $HOOK_OK\" \"\""
 
 # prefix+, opens the per-pane actions menu (close, zoom, splits, break-pane,
 # swap, mark). Works in any window — the menu picks items based on whether the
@@ -544,22 +606,20 @@ tmux bind-key r command-prompt -I "#W" "rename-window '%%' ; set-window-option @
 # In the dashboard we instead run cycle-pane --main-follow, which only acts when
 # the layout is an "-auto" mode (Main+stack/row, active) — keeping the focused
 # pane in the big slot as focus moves; it's a cheap no-op for other layouts.
-tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' 'run-shell -b \"$CYCLE_PANE_BIN --main-follow; $HOOK_OK\"' 'run-shell -b \"$NOTIFY_CMD --no-refresh\"'"
+# Not gated. The mute gate is for the window-list churn a daemon batch replays to
+# every session in the group; selecting a pane fires one hook in one session and
+# is not part of that. Gating a selection hook is visible to you — the daemon does
+# window-list work while servicing a click, which closes the gate, and the
+# selection's own hook then never runs.
+tmux set-hook -g after-select-pane "if-shell -bF '#{@tabby_dashboard}' 'if-shell -b \"$CYCLE_PANE_BIN --main-follow; $HOOK_OK\" \"\"' 'if-shell -b \"$NOTIFY_CMD --no-refresh; $HOOK_OK\" \"\"'"
 # after-split-window: daemon handles window name preservation (PreserveWindowNames)
-tmux set-hook -g after-split-window "run-shell -b '$NOTIFY_CMD --no-refresh'"
+gated_hook after-split-window "if-shell -b \"$NOTIFY_CMD --no-refresh '#{session_id}'; $HOOK_OK\" \"\""
 
 # When a pane is killed: preserve ratios synchronously (must happen before tmux
 # reflows), then signal daemon in background. The daemon's USR1 handler takes
 # care of orphan cleanup and sidebar spawning.
 PRESERVE_RATIOS_CMD="$HOOK_BIN preserve-pane-ratios"
-tmux set-hook -g after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"; $HOOK_OK'; run-shell -b '$NOTIFY_CMD --no-refresh' ; run-shell -b '$EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK'"
-
-# Restore sidebar when client reattaches to session
-tmux set-hook -g client-attached "run-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"; $HOOK_OK';run-shell '$RESTORE_SIDEBAR_CMD; $HOOK_OK'; run-shell '$STABILIZE_CLIENT_RESIZE_CMD \"#{session_id}\" \"#{window_id}\" \"#{client_tty}\" \"#{client_width}\" \"#{client_height}\"; $HOOK_OK'; run-shell -b '$CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
-
-# Client resize: resize windows to client geometry, signal daemon
-tmux set-hook -g client-active "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"; $HOOK_OK'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $HOOK_OK'; run-shell -b '$CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
-tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"; $HOOK_OK'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $HOOK_OK'; run-shell -b '$CYCLE_PANE_BIN --ensure-content; $HOOK_OK'"
+gated_hook after-kill-pane "run-shell '$PRESERVE_RATIOS_CMD \"#{window_id}\"; $HOOK_OK'; if-shell -b \"$NOTIFY_CMD --no-refresh '#{session_id}'; $EXIT_IF_NO_MAIN_WINDOWS_CMD; $HOOK_OK\" \"\""
 
 # session-created: ensure the new session has a daemon before signalling. A
 # session created after plugin load (most easily a grouped clone, which shares
@@ -567,16 +627,30 @@ tmux set-hook -g client-focus-in "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{clien
 # works via the shared windows' renderer panes while every input hook derives
 # its socket from the current session id and drops the keypress.
 # Sidebar spawning itself is handled by the daemon via USR1.
-tmux set-hook -g session-created "run-shell -b '$ENSURE_DAEMON_CMD; $HOOK_OK' ; run-shell -b '$NOTIFY_CMD --no-refresh'"
+gated_hook session-created "if-shell -b \"$ENSURE_DAEMON_CMD; $NOTIFY_CMD --no-refresh '#{session_id}'; $HOOK_OK\" \"\""
 
 # client-session-changed: a client moving between sessions (switch-client, or
 # detach/attach onto a grouped peer) leaves the session it entered possibly
 # daemonless — the old session's daemon idle-quits 30s after going clientless,
 # and nothing else fires for the session being entered.
-tmux set-hook -g client-session-changed "run-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"; $HOOK_OK'"
+gated_hook client-session-changed "if-shell -b '$ENSURE_DAEMON_CMD \"\" \"\" \"#{client_tty}\"; $HOOK_OK' ''"
 
-# Maintain sidebar width after terminal resize
-tmux set-hook -g client-resized "run-shell '$SIGNAL_CLIENT_RESIZE_CMD \"#{client_width}\" \"#{client_height}\"; $HOOK_OK'; run-shell '$ENSURE_SIDEBAR_CMD \"#{session_id}\" \"#{window_id}\"; $HOOK_OK'"
+# after-resize-pane, after-resize-window, after-select-window, client-attached
+# and client-resized are NOT defined here. They live in Go, in package
+# tmuxhooks, and `install-hooks` registers them — including unsetting the names
+# it has retired (client-active and client-focus-in among them).
+#
+# They used to be written twice, once here and once there, with the Go copy
+# re-registered on every daemon start. `set-hook -g` replaces rather than
+# merges, so the Go copy silently won every time and this file's version drifted
+# unnoticed: it was still installing `run-shell -b` bodies that tmux reports
+# failures for, and three separate jobs where one would do.
+#
+# No guard on the binary is needed beyond -x: every one of those hook bodies
+# invokes bin/tabby, so without it there is nothing for them to run.
+if [ -x "$CURRENT_DIR/bin/tabby" ]; then
+    "$CURRENT_DIR/bin/tabby" install-hooks
+fi
 
 # tmux-resurrect integration (options are inert if resurrect is not installed)
 RESURRECT_SAVE_CMD="$HOOK_BIN resurrect-save"
@@ -857,3 +931,36 @@ tmux set-option -g copy-command "$CURRENT_DIR/scripts/osc52-copy"
 # target whichever pane tmux last considered current.
 # -----------------------------------------------------------------------------
 tmux bind-key 'Y' run-shell -b "$CURRENT_DIR/bin/tabby clip send --pane '#{pane_id}' --tty '#{pane_tty}' --quiet && tmux display-message 'tabby: pane sent to your clipboard'"
+
+# -----------------------------------------------------------------------------
+# fd budget check.
+#
+# Every hook body is a job the server forks, and every `tmux` call inside one is
+# a client connection holding a server fd until it exits. Hooks fire once per
+# session a window is linked into, so the cost of a single new-window scales
+# with the size of the session group: measured on an 8-session group, one
+# new-window fires hook-notify.sh 16 times and took a live server from 41 open
+# fds to 234.
+#
+# The ceiling is the server's soft RLIMIT_NOFILE, which is whatever the shell
+# that started it had. On macOS that is 256 by default (`launchctl limit
+# maxfiles`), and tmux does not raise it. Cross it and socketpair() fails inside
+# job_run(), which reports `failed to run command: <body>` into every attached
+# client — a failure no hook body can suppress, because the job never exists.
+#
+# This runs as a child of the server, so `ulimit -n` here IS the server's limit.
+# Warn once per server rather than every load; the fix is a `ulimit -n` in the
+# shell rc and a fresh server, which only the user can do.
+_NOFILE=$(ulimit -n 2>/dev/null || echo "")
+case "$_NOFILE" in
+    ''|*[!0-9]*) : ;;  # unlimited, or unreadable — nothing to warn about
+    *)
+        if [ "$_NOFILE" -lt 1024 ] && \
+           [ -z "$(tmux show-option -gqv @tabby_fd_warned 2>/dev/null)" ]; then
+            tmux set-option -g @tabby_fd_warned 1 2>/dev/null || true
+            tmux display-message -d 4000 \
+                "tabby: tmux server file limit is $_NOFILE; add 'ulimit -n 8192' to your shell rc and restart tmux" \
+                2>/dev/null || true
+        fi
+        ;;
+esac
