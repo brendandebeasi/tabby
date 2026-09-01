@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3719,6 +3721,70 @@ func savePetStateData(pet petState) {
 	if atomic.LoadInt32(&petWriteAllowed) == 0 {
 		return
 	}
+	petSaveMu.Lock()
+	if petSaveTimer == nil && time.Since(petSaveLastAt) >= petSaveInterval {
+		petSaveLastAt = time.Now()
+		petSaveMu.Unlock()
+		writePetStateData(pet)
+		return
+	}
+	petSavePending = clonePetState(pet)
+	if petSaveTimer == nil {
+		petSaveTimer = time.AfterFunc(petSaveInterval-time.Since(petSaveLastAt), flushPetStateData)
+	}
+	petSaveMu.Unlock()
+}
+
+// petSaveInterval throttles pet.json. The cat animates several times a
+// second and every tick used to marshal the whole 2.5KB state and rewrite the
+// file; none of the animation fields (position, frame, camera) are worth
+// persisting at that rate. The first save after a quiet period still goes out
+// immediately, so a feed or a click is durable at once -- only the bursts
+// behind it collapse into one trailing write.
+const petSaveInterval = time.Second
+
+var (
+	petSaveMu      sync.Mutex
+	petSaveLastAt  time.Time
+	petSavePending *petState
+	petSaveTimer   *time.Timer
+)
+
+// clonePetState deep-copies the reference fields. A parked snapshot shares its
+// slices and maps with the live pet, which keeps mutating while the write
+// waits, so the copy has to be its own.
+func clonePetState(pet petState) *petState {
+	pet.PoopPositions = slices.Clone(pet.PoopPositions)
+	pet.FloatingItems = slices.Clone(pet.FloatingItems)
+	pet.Presents = slices.Clone(pet.Presents)
+	pet.AnsweredQuestions = slices.Clone(pet.AnsweredQuestions)
+	pet.Traits = slices.Clone(pet.Traits)
+	pet.Stats.TimeByStateSec = maps.Clone(pet.Stats.TimeByStateSec)
+	if pet.Adventure.Wildlife != nil {
+		w := *pet.Adventure.Wildlife
+		pet.Adventure.Wildlife = &w
+	}
+	if pet.PendingQuestion != nil {
+		q := *pet.PendingQuestion
+		q.Choices = slices.Clone(q.Choices)
+		pet.PendingQuestion = &q
+	}
+	return &pet
+}
+
+func flushPetStateData() {
+	petSaveMu.Lock()
+	pending := petSavePending
+	petSavePending = nil
+	petSaveTimer = nil
+	petSaveLastAt = time.Now()
+	petSaveMu.Unlock()
+	if pending != nil {
+		writePetStateData(*pending)
+	}
+}
+
+func writePetStateData(pet petState) {
 	data, _ := json.Marshal(pet)
 	os.WriteFile(petStatePath(), data, 0644)
 }
