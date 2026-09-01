@@ -237,6 +237,10 @@ func DefaultGroupWithIndex(name string, groupIndex int) Group {
 }
 
 func applyDefaults(cfg *Config) {
+	// Drop colours that would panic a client renderer before anything reads
+	// them; the defaults below then fill the holes.
+	sanitizeColors(cfg)
+
 	// Top-level layout defaults
 	if cfg.Position == "" {
 		cfg.Position = "top"
