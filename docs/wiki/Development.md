@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Go 1.21 or newer
+- Go 1.24 or newer, matching the `go` directive in `go.mod`
 - tmux 3.2 or newer
 - GNU Make
 

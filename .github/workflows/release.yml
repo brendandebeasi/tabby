@@ -63,7 +63,9 @@ jobs:
             tar -czf "dist/tabby_${goos}_${goarch}.tar.gz" -C "$stage" bin
             rm -rf "$stage"
           done
-          cd dist && sha256sum ./*.tar.gz > SHA256SUMS
+          # Plain filenames, no ./ prefix, so the installer can grep the line
+          # for the one asset it downloaded and feed it straight to -c.
+          cd dist && sha256sum tabby_*.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
       - name: Publish

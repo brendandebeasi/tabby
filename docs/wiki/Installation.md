@@ -6,7 +6,10 @@
 
 - tmux 3.2 or newer. Extended keys, needed for the `Cmd+Shift+\` collapse
   binding, landed in 3.2.
-- Go 1.21 or newer, to build the binaries.
+- No Go toolchain. Tabby downloads prebuilt binaries for macOS and Linux on
+  x86_64, arm64 and armv7. Go 1.24 or newer is needed only if you are on a
+  platform with no prebuilt binaries, or you want to build from source
+  yourself — see [Development](Development.md).
 - A terminal that reports mouse events. Ghostty, iTerm2, kitty, Alacritty,
   WezTerm and Terminal.app all work. Mosh does not; see
   [Troubleshooting](Troubleshooting.md#mouse-clicks-do-nothing).
@@ -63,6 +66,24 @@ tabby setup
 
 The wizard writes group patterns, a light/dark theme pair, and the terminal app
 used for [deep links](Notifications-and-Deep-Links.md).
+
+## Where the binaries come from
+
+On first start `tabby.tmux` runs `scripts/install.sh` when `bin/` is empty. It
+downloads the release tarball matching your platform, checks it against the
+release's `SHA256SUMS`, and unpacks it. If the download fails, the checksum does
+not match, or your platform has no prebuilt asset, it compiles from source
+instead — so a Go toolchain is a fallback rather than a requirement.
+
+It also compiles rather than downloads whenever the checkout has uncommitted
+changes to tracked files, so working on Tabby does not silently replace your
+build with someone else's binaries. To force that from a clean tree:
+
+```bash
+TABBY_INSTALL_FROM_SOURCE=1 ~/.tmux/plugins/tabby/scripts/install.sh
+```
+
+The log goes to `/tmp/tabby-install.log`, and each run says which path it took.
 
 ## Recommended tmux settings
 
