@@ -1182,3 +1182,41 @@ func ListWindowsWithPanes() ([]Window, error) {
 
 	return windows, nil
 }
+
+// DisplayedWindowIDs returns the window IDs that some attached client is
+// currently looking at — one per attached session, deduplicated.
+//
+// ListWindows can't answer this. It is scoped to this daemon's own session, so
+// its window_active flag names exactly one window. When several sessions are
+// grouped onto the same windows (the shape you get from `new-session -t`, or
+// from attaching a second terminal), each session has its own current window,
+// and a caller that only knows its own is blind to the others.
+//
+// In a list-sessions format the context is the session's current window, so
+// #{window_id} there is that session's active window. Detached sessions are
+// skipped: nobody is looking at them, so nothing needs to be painted for them.
+func DisplayedWindowIDs() ([]string, error) {
+	t := perf.Start("tmux.DisplayedWindowIDs")
+	defer t.Stop()
+
+	out, err := DefaultRunner.Run("list-sessions", "-F",
+		strings.Join([]string{"#{session_attached}", "#{window_id}"}, tmuxFieldSep))
+	if err != nil {
+		return nil, fmt.Errorf("tmux list-sessions failed: %w", err)
+	}
+
+	var ids []string
+	seen := make(map[string]struct{}, 4)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.Split(line, tmuxFieldSep)
+		if len(parts) != 2 || parts[0] == "" || parts[0] == "0" || parts[1] == "" {
+			continue
+		}
+		if _, dup := seen[parts[1]]; dup {
+			continue
+		}
+		seen[parts[1]] = struct{}{}
+		ids = append(ids, parts[1])
+	}
+	return ids, nil
+}

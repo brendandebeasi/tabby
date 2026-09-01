@@ -181,6 +181,8 @@ type Loop struct {
 	lastStaleClientPrune time.Time
 	lastWindowCheck      string
 	lastSlowFrame        int
+	displayedWins        []string  // windows some attached client is looking at
+	displayedWinsAt      time.Time // when displayedWins was last refreshed
 	lastWindowCount      int       // count of coordinator windows last seen by signal_refresh
 	lastFullRefresh      time.Time // last time signal_refresh ran the heavy spawn/cleanup path
 	lastReadyWindowID    string    // last new-window-ready windowID observed (for tmux-active suppression)
@@ -509,6 +511,10 @@ func (l *Loop) handleRendererInput(e RendererInputEvent) {
 const (
 	loopNewWindowReadyHold    = 900 * time.Millisecond
 	loopNewWindowReadyTimeout = 3 * time.Second
+
+	// How long the set of on-screen windows is reused before asking tmux
+	// again. Keeps the animation tick fork-free at 10 Hz.
+	displayedWindowsTTL = time.Second
 	// loopNewWindowInFlightTimeout bounds the "inFlight" half of the
 	// new-window handshake, which had no expiry at all while "ready" has had
 	// one since the start. See NewWindowStatus for why an unbounded inFlight
@@ -584,6 +590,30 @@ func newWindowFlowActive(coord *Coordinator) bool {
 		return true
 	}
 	return false
+}
+
+// displayedWindowIDs returns every window an attached client is looking at,
+// for the animation tick to paint.
+//
+// The answer only changes when somebody switches window, attaches or detaches,
+// so it is cached: the tick runs at 10 Hz and asking tmux that often would put
+// a fork on the hot path to save nothing. A second of staleness costs at worst
+// a few frames on a sidebar that was just switched to, and the window-change
+// hook repaints it anyway.
+//
+// Falls back to this session's own active window, which is the pre-existing
+// behaviour and always correct for a single attached terminal.
+func (l *Loop) displayedWindowIDs() []string {
+	if time.Since(l.displayedWinsAt) < displayedWindowsTTL && l.displayedWins != nil {
+		return l.displayedWins
+	}
+	ids, err := tmux.DisplayedWindowIDs()
+	if err != nil || len(ids) == 0 {
+		return []string{l.ActiveWindowID()}
+	}
+	l.displayedWins = ids
+	l.displayedWinsAt = time.Now()
+	return ids
 }
 
 func (l *Loop) coordinatorActiveWindowID() string {
@@ -1387,10 +1417,14 @@ func (l *Loop) handleAnimationTick() {
 			return
 		}
 		l.lastSlowFrame = slowFrame
-		logRenderEvent("ANIMATION_TICK_RENDER spinner=%v pet=%v indicator=%v frame=%d",
-			spinnerVisible, petChanged, indicatorAnimated, slowFrame)
+		// Every on-screen sidebar is painted from this one frame index, so a
+		// second attached terminal stays in step with the first instead of
+		// running its own clock.
+		displayed := l.displayedWindowIDs()
+		logRenderEvent("ANIMATION_TICK_RENDER spinner=%v pet=%v indicator=%v frame=%d windows=%v",
+			spinnerVisible, petChanged, indicatorAnimated, slowFrame, displayed)
 		perf.Log("animationTick (render)")
-		l.server.RenderActiveWindowOnly(l.ActiveWindowID())
+		l.server.RenderWindowsOnly(displayed...)
 	})
 }
 

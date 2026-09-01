@@ -655,13 +655,38 @@ func (s *Server) RenderActiveWindowOnly(activeWindowID string) {
 	t := perf.Start("RenderActiveOnly")
 	defer t.Stop()
 
+	s.RenderWindowsOnly(activeWindowID)
+}
+
+// RenderWindowsOnly sends a render to the sidebars of the given windows and to
+// nothing else. Callers pass every window a client is actually looking at, so
+// that a second attached terminal is not left painting a frozen frame; the
+// per-window sidebars are still the only clients touched, and headers (which
+// are keyed per pane) are still skipped.
+//
+// One call per animation frame, not one per window per frame: the frame index
+// is read once by the caller and every sidebar in windowIDs is sent the same
+// one, so two attached terminals stay on the same beat and cost one extra send
+// rather than a second animation clock.
+func (s *Server) RenderWindowsOnly(windowIDs ...string) {
+	t := perf.Start("RenderActiveOnly")
+	defer t.Stop()
+
+	if len(windowIDs) == 0 {
+		return
+	}
+
 	s.clientsMu.RLock()
 	var matches []string
 	for id, client := range s.clients {
-		// Sidebar renderers are keyed per-window; render only the one for the active window.
-		// Headers are per-pane; animation-tick updates are not sent to them.
-		if client.Target.Kind == TargetSidebar && client.Target.WindowID == activeWindowID {
-			matches = append(matches, id)
+		if client.Target.Kind != TargetSidebar {
+			continue
+		}
+		for _, w := range windowIDs {
+			if client.Target.WindowID == w {
+				matches = append(matches, id)
+				break
+			}
 		}
 	}
 	s.clientsMu.RUnlock()
