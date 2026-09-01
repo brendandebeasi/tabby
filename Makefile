@@ -1,4 +1,4 @@
-.PHONY: build test test-e2e test-unit test-race test-cover vet ci capture-visual compare-visual update-baseline clean install
+.PHONY: build print-bins test test-e2e test-unit test-race test-cover vet ci capture-visual compare-visual update-baseline clean install
 
 # Go parameters
 GOCMD=go
@@ -20,6 +20,11 @@ all: build
 # binaries stay separate because tmux invokes them per-frame from format
 # strings, where subcommand dispatch would add measurable latency.
 TABBY_BINS := tabby render-tab render-status
+
+# Single source of truth for the release workflow, so adding a binary here is
+# enough to get it into the release tarballs.
+print-bins:
+	@echo $(TABBY_BINS)
 
 # Build all binaries from cmd/
 build:

@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach assets to"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      # Cross-compiling from one runner is safe here because the tree is pure
+      # Go: no cgo, no platform-split source files. Windows is deliberately
+      # absent -- cyclepane.go uses syscall.SIGUSR1, and tmux does not run
+      # there anyway.
+      - name: Build every platform
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for platform in \
+            darwin/arm64 darwin/amd64 \
+            linux/amd64 linux/arm64 linux/arm
+          do
+            goos=${platform%/*}
+            goarch=${platform#*/}
+            stage="dist/tabby_${goos}_${goarch}"
+            mkdir -p "$stage/bin"
+            for name in $(make -s print-bins); do
+              echo "building $name for $goos/$goarch"
+              # -s -w strips the symbol table and DWARF, which roughly halves
+              # each binary. Go's own tracebacks survive it; they read pclntab,
+              # not DWARF. Local `make build` stays unstripped for debugging.
+              GOOS="$goos" GOARCH="$goarch" go build \
+                -trimpath -ldflags "-s -w" \
+                -o "$stage/bin/$name" "./cmd/$name"
+            done
+            # The tarball carries bin/ at its root so the installer can
+            # unpack it straight over the plugin directory.
+            tar -czf "dist/tabby_${goos}_${goarch}.tar.gz" -C "$stage" bin
+            rm -rf "$stage"
+          done
+          cd dist && sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
+              --title "$TAG" --generate-notes
+          fi
