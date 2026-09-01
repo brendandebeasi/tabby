@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [v0.1.0] — 2026-09-01
+
+First tagged release. Everything below was already on `main`; the tag exists so an install can name a version, and so the TPM installer fix has something to point at. Pre-1.0 is deliberate — the config format and the key bindings are still moving.
 
 ### Added
 
@@ -27,6 +29,10 @@
 - `auto_theme.sync_claude_code` mirrors the light/dark toggle into Claude Code's own theme setting in `~/.claude/settings.json`. Off by default. Preserves the `-ansi` and `-daltonized` variant of whatever theme is already set. Claude Code reloads the file, so running sessions repaint without a restart.
 
 ### Changed
+
+- Each colour's escape sequence is derived once rather than on every render. The renderers converted a colour to its terminal escape every time they drew with it, which for a full sidebar is several hundred identical conversions per frame; the sequences are now built when the palette is resolved and the row renderers read them straight off the cache. The buttons also came off lipgloss's wrapping path, which was measuring and re-wrapping strings already known to fit.
+
+- The pet stops rewriting `pet.json` on every animation tick. Its state was flushed to disk at frame rate, which is a file write several times a second for a value that changes far more rarely than that.
 
 - The daemon reuses its wire buffers instead of allocating one per message. `sendMessage` called `json.Marshal`, which returns an exactly-sized slice, then appended a newline, which copied the whole payload a second time. Rendered sidebars run to a few KB and go out on every frame to every client. A pooled `json.Encoder` writing into a pooled buffer takes a 2 KB payload from 2929 bytes per send to 240. Buffers over 1 MB are dropped rather than pooled, so one outsized message cannot pin memory.
 
@@ -61,6 +67,24 @@
   The tick itself also backs off now, from 250ms to a ceiling of 2 seconds, after twelve consecutive passes that find nothing to do. Any priority event resets it, meaning any renderer input or tmux hook, so a client the user is touching pulls the poll back to full rate before that action's consequences need noticing. That is what makes backing off safe with several clients attached, since the case the poll uniquely catches is the active-client election flipping between them. A resize arrives through tmux's own `client-resized` hook regardless. On an idle daemon the subprocess rate drops from 2.3/s to 0.8/s; while you are working it correctly stays at the base rate.
 
 ### Fixed
+
+- Installing through TPM no longer leaves `bin/` empty. `scripts/install.sh` built `"$PLUGIN_DIR/cmd/$name"`, and an absolute package path does not help: `go build` resolves the module from the working directory and ignores the path it is handed for that purpose. TPM runs the hook with tmux's working directory, which is essentially never the repo, so the first build died on `go.mod file not found in current directory or any parent directory` and every binary after it was skipped. The script now `cd`s into the plugin directory and builds `./cmd/$name`, with output paths left absolute.
+
+  This shipped broken in April and went unnoticed for four and a half months because a development checkout cannot reach it — `make` runs from the repo root, so the working directory is correct by construction, and a first-time TPM install is the only path that touches the bug. Reported in [#66](https://github.com/brendandebeasi/tabby/issues/66), with the cause and the fix both correctly identified there.
+
+  The failure also pointed at the wrong thing. With `bin/` empty the next message tmux prints is `tabby: No such file or directory`, which reads like a bad plugin path, and the real error was left in `/tmp/tabby-install.log` for you to go and find. `tabby.tmux` now quotes the last line of that log in the message it displays.
+
+- The active-window arrow animates in every attached terminal, not just one of them. `RenderActiveWindowOnly` sent frames to the single client matching the daemon's one `ActiveWindowID`, which is right for one terminal and wrong for two: with grouped sessions attached from two terminals sitting on different windows, one daemon owns all the renderer clients and only one of the two visible windows was fed. The other held whatever frame it had when the clients last re-homed, and since a daemon restart moves them, which terminal animated came down to restart order. The daemon now asks tmux which windows are actually being looked at — `list-sessions` with a `window_id` in the format string reports each session's current window — skips detached sessions, dedupes and caches the answer for a second.
+
+  The animation clock was never at fault, which took a while to establish. The frame index is still read once per tick and shared across every send, so the terminals stay on the same beat and this adds sends rather than a second clock. Measured before: 17 distinct frames in three seconds on the window that won, 3 on the one that lost. After: 15 and 16.
+
+- The bell indicator survives focusing the window. Both window renderers gated bell, activity and silence together behind one `!isActive` check, so the `◆` vanished the moment you looked at the window asking for attention. That grouping suits the other two — they mean "something happened while you were not watching", so they are noise on the focused window — but a bell is a deliberate alert and tmux holds the flag until it clears it itself. Bell is now its own branch ahead of that group; activity and silence are unchanged.
+
+- A colour the client renderers cannot draw is dropped instead of taken. termenv's ANSI profile indexes a 256-entry table without a bounds check, so a palette index past the end of it panicked all eight client binaries at startup — a one-character typo in `config.yaml` took out the whole sidebar, and the daemon's own pinned TrueColor profile meant it kept running and looked fine. Loading now walks the config and blanks any colour value that would not survive being drawn, which is the same thing as leaving it unset. Checked against a real config: 83 colour values reached, none altered.
+
+  Worth recording that the obvious half of this was wrong. A negative index does not panic — termenv computes `30 + i` and emits a nonsense SGR code, so `-1` renders as "not crossed out". They are still rejected as typos, but the test asks termenv where it actually breaks rather than asserting a constant.
+
+- The widget-zone height cache is keyed per client. One cache shared across clients of different heights handed a sidebar the layout computed for a differently sized one.
 
 - The OSC handler on each piped pane no longer costs more than the pane it is watching. `tabby hook osc-handler` reads every byte a pane prints, looking for the four `OSC 7700` sequences the indicators and the remote-cwd reporter send. It read that stream one byte at a time, and for each byte converted its whole 4KB sliding window to a string — a fresh allocation and copy of up to 4KB, per byte — then ran four substring searches across all of it. Scanning a megabyte of build output cost 5.5 seconds and 2.58GB of allocation, at 0.19 MB/s. Reading in 32KB chunks and searching the bytes in place makes the same megabyte 2.6ms at 408 MB/s, with no allocation at all in the steady state. On the machine this was found on, seven handlers had accumulated 159MB of RSS between them and two had burned 9 and 14 minutes of CPU over three days.
 
