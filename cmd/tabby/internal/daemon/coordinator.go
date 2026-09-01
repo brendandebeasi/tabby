@@ -811,6 +811,14 @@ type Coordinator struct {
 	activeClient      atomic.Pointer[daemon.ActiveClient]
 	activeClientWidth atomic.Int64
 
+	// Size of the last main-content render, used to allocate the next one in
+	// a single shot rather than growing a strings.Builder through a dozen
+	// doublings. Consecutive frames are nearly always the same size, so the
+	// hint is right almost every time -- and when it is wrong, or racy, the
+	// cost is one resize and never a wrong render.
+	mainContentBytes   atomic.Int64
+	mainContentRegions atomic.Int64
+
 	// Mobile border hide state: tracks whether tmux pane-border-style has been
 	// overridden to the terminal background (invisible) because a narrow client
 	// is active. Set by syncMobileBorders() — currently dead code, but the
@@ -14359,8 +14367,9 @@ func (c *Coordinator) appendDashboardRow(s *strings.Builder, regions *[]daemon.C
 // the tab area instead of hugging the last real group.
 func (c *Coordinator) generateMainContent(clientID string, width, height int) (string, []daemon.ClickableRegion, int) {
 	var s strings.Builder
+	s.Grow(int(c.mainContentBytes.Load()))
 	floatLine := -1
-	var regions []daemon.ClickableRegion
+	regions := make([]daemon.ClickableRegion, 0, c.mainContentRegions.Load())
 
 	currentLine := 0
 
@@ -15206,8 +15215,15 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		}
 	}
 
+	c.mainContentBytes.Store(int64(min(s.Len(), maxContentSizeHint)))
+	c.mainContentRegions.Store(int64(min(len(regions), maxContentSizeHint)))
 	return s.String(), regions, floatLine
 }
+
+// maxContentSizeHint caps the remembered render size so one freak frame --
+// a pathologically wide client, a burst of panes -- cannot leave every later
+// render over-allocating.
+const maxContentSizeHint = 1 << 18
 
 // generatePrefixModeContent creates a flat window list with group prefixes (e.g., "SD| WindowName")
 // In this mode, windows are not grouped hierarchically, but panes still show tree structure
