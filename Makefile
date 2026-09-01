@@ -19,7 +19,7 @@ all: build
 # lives in cmd/tabby/ as subcommands; the render-tab*/render-status* format
 # binaries stay separate because tmux invokes them per-frame from format
 # strings, where subcommand dispatch would add measurable latency.
-TABBY_BINS := tabby render-tab render-tab-v2 render-tab-dark-text render-status render-status-window input-logger mousetest
+TABBY_BINS := tabby render-tab render-status
 
 # Build all binaries from cmd/
 build:

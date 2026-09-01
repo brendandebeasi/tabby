@@ -41,8 +41,6 @@ credentials.json
 *.dylib
 
 # Local binaries (anchored to root to avoid matching source directories)
-/input-logger
-/mousetest
 /sidebar-renderer
 /tabby-daemon
 /tabby-web-bridge
