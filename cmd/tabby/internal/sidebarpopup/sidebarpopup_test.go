@@ -97,12 +97,12 @@ func TestResolveClickReachesLastVisibleRow(t *testing.T) {
 // the Close button). Every row the View emits must fit the popup width.
 func TestViewClampsOverwideLines(t *testing.T) {
 	m := popupModel{
-		width:       43,
-		height:      34,
-		connected:   true,
-		content:     "short\nwide:" + strings.Repeat("x", 100) + "\n🐈 emoji line " + strings.Repeat("y", 60),
-		sidebarBg:   "#223344",
-		sendMu:      &sync.Mutex{},
+		width:        43,
+		height:       34,
+		connected:    true,
+		content:      "short\nwide:" + strings.Repeat("x", 100) + "\n🐈 emoji line " + strings.Repeat("y", 60),
+		sidebarBg:    "#223344",
+		sendMu:       &sync.Mutex{},
 		pinnedHeight: 0,
 	}
 	out := m.View()
