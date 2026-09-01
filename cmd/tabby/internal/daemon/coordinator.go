@@ -14843,12 +14843,18 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				} else {
 					alertIcon = paintFull(inputIcon, alertFg, "", false, alertFaint)
 				}
-			} else if !isActive {
-				if ind.Bell.Enabled && win.Bell {
-					alertFg, alertFaint := ind.Bell.Color, false
+			} else if ind.Bell.Enabled && win.Bell {
+				// A bell is not gated on !isActive the way activity and
+				// silence are: those describe "something happened while you
+				// were not looking", so they are noise on the window you are
+				// looking at. A bell is a deliberate alert, and tmux keeps the
+				// flag set until it decides to clear it, so hiding it on focus
+				// only made the indicator vanish out from under the user.
+				alertFg, alertFaint := ind.Bell.Color, false
 
-					alertIcon = paintFull(c.getIndicatorIcon(ind.Bell), alertFg, "", false, alertFaint)
-				} else if ind.Activity.Enabled && win.Activity {
+				alertIcon = paintFull(c.getIndicatorIcon(ind.Bell), alertFg, "", false, alertFaint)
+			} else if !isActive {
+				if ind.Activity.Enabled && win.Activity {
 					alertFg, alertFaint := ind.Activity.Color, false
 
 					alertIcon = paintFull(c.getIndicatorIcon(ind.Activity), alertFg, "", false, alertFaint)
@@ -15511,12 +15517,14 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 			} else {
 				alertIcon = paintFull(inputIcon, alertFg, "", false, alertFaint)
 			}
-		} else if !isActive {
-			if ind.Bell.Enabled && win.Bell {
-				alertFg, alertFaint := ind.Bell.Color, false
+		} else if ind.Bell.Enabled && win.Bell {
+			// See the sibling renderer above: the bell indicator is
+			// deliberately not gated on !isActive.
+			alertFg, alertFaint := ind.Bell.Color, false
 
-				alertIcon = paintFull(c.getIndicatorIcon(ind.Bell), alertFg, "", false, alertFaint)
-			} else if ind.Activity.Enabled && win.Activity {
+			alertIcon = paintFull(c.getIndicatorIcon(ind.Bell), alertFg, "", false, alertFaint)
+		} else if !isActive {
+			if ind.Activity.Enabled && win.Activity {
 				alertFg, alertFaint := ind.Activity.Color, false
 
 				alertIcon = paintFull(c.getIndicatorIcon(ind.Activity), alertFg, "", false, alertFaint)
