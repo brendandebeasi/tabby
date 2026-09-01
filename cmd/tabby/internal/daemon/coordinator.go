@@ -14502,9 +14502,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	disclosureW := disclosureCellWidth(expandedIcon, collapsedIcon)
 
 	// Tree color
-	treeStyle := lipgloss.NewStyle()
 	treeFg := c.getTreeFgWithFallback(c.config.Sidebar.Colors.TreeFg)
-	treeStyle = treeStyle.Foreground(lipgloss.Color(treeFg))
 	treeBg := c.config.Sidebar.Colors.TreeBg
 	if treeBg == "" && c.theme != nil {
 		treeBg = c.theme.TreeBg
@@ -14522,9 +14520,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	// explicit bg on every cell, so without this they'd stay at the raw theme
 	// color and stripe the tinted background.
 	treeBg = c.tintedChromeBGLocked(clientID, treeBg)
-	if treeBg != "" {
-		treeStyle = treeStyle.Background(lipgloss.Color(treeBg))
-	}
 
 	inactiveFg := c.getInactiveTextColorWithFallback(c.config.Sidebar.Colors.InactiveFg)
 
@@ -14540,7 +14535,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	activeIndBgConfig := c.config.Sidebar.Colors.ActiveIndicatorBg
 
 	if c.config.Sidebar.PrefixMode {
-		pc, pr := c.generatePrefixModeContent(clientID, width, height, treeBranchChar, treeBranchLastChar, treeContinueChar, treeConnectorChar, expandedIcon, collapsedIcon, treeStyle, disclosureColor, activeIndicator, activeIndFgConfig, activeIndBgConfig)
+		pc, pr := c.generatePrefixModeContent(clientID, width, height, treeBranchChar, treeBranchLastChar, treeContinueChar, treeConnectorChar, expandedIcon, collapsedIcon, treeFg, treeBg, disclosureColor, activeIndicator, activeIndFgConfig, activeIndBgConfig)
 		return pc, pr, -1
 	}
 
@@ -14573,10 +14568,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 		collapseIcon := expandedIcon
 		if isCollapsed {
 			collapseIcon = collapsedIcon
-		}
-		collapseStyle := lipgloss.NewStyle()
-		if disclosureColor != "" {
-			collapseStyle = collapseStyle.Foreground(lipgloss.Color(disclosureColor))
 		}
 
 		// Build header
@@ -14615,7 +14606,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if iconPad < 0 {
 					iconPad = 0
 				}
-				prefix := collapseStyle.Render(collapseIcon + strings.Repeat(" ", iconPad))
+				prefix := paintFg(collapseIcon+strings.Repeat(" ", iconPad), disclosureColor)
 				prefixW := uniseg.StringWidth(stripAnsi(prefix))
 				menuBtnW := 2 // " ⋮"
 				restW := width - prefixW - menuBtnW
@@ -14836,35 +14827,35 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			ind := c.config.Indicators
 
 			if ind.Busy.Enabled && win.Busy {
-				alertStyle := indicatorStyle(ind.Busy.Color, win.Minimized, bgColor, theme.Bg)
+				alertFg, alertFaint := indicatorColor(ind.Busy.Color, win.Minimized, bgColor, theme.Bg)
 
 				busyFrames := c.getBusyFrames()
-				alertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
+				alertIcon = paintFull(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)], alertFg, "", false, alertFaint)
 			} else if ind.Input.Enabled && win.Input {
 				inputIcon := ind.Input.Icon
 				if inputIcon == "" {
 					inputIcon = "?"
 				}
-				alertStyle := indicatorStyle(ind.Input.Color, win.Minimized, bgColor, theme.Bg)
+				alertFg, alertFaint := indicatorColor(ind.Input.Color, win.Minimized, bgColor, theme.Bg)
 
 				if len(ind.Input.Frames) > 0 {
-					alertIcon = alertStyle.Render(ind.Input.Frames[c.getSlowSpinnerFrame()%len(ind.Input.Frames)])
+					alertIcon = paintFull(ind.Input.Frames[c.getSlowSpinnerFrame()%len(ind.Input.Frames)], alertFg, "", false, alertFaint)
 				} else {
-					alertIcon = alertStyle.Render(inputIcon)
+					alertIcon = paintFull(inputIcon, alertFg, "", false, alertFaint)
 				}
 			} else if !isActive {
 				if ind.Bell.Enabled && win.Bell {
-					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
+					alertFg, alertFaint := ind.Bell.Color, false
 
-					alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Bell))
+					alertIcon = paintFull(c.getIndicatorIcon(ind.Bell), alertFg, "", false, alertFaint)
 				} else if ind.Activity.Enabled && win.Activity {
-					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
+					alertFg, alertFaint := ind.Activity.Color, false
 
-					alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Activity))
+					alertIcon = paintFull(c.getIndicatorIcon(ind.Activity), alertFg, "", false, alertFaint)
 				} else if ind.Silence.Enabled && win.Silence {
-					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
+					alertFg, alertFaint := ind.Silence.Color, false
 
-					alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Silence))
+					alertIcon = paintFull(c.getIndicatorIcon(ind.Silence), alertFg, "", false, alertFaint)
 				}
 			}
 
@@ -14947,10 +14938,6 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 			}
 
 			// Styles for window collapse icon
-			windowCollapseStyle := lipgloss.NewStyle()
-			if disclosureColor != "" {
-				windowCollapseStyle = windowCollapseStyle.Foreground(lipgloss.Color(disclosureColor))
-			}
 
 			contentStyle := style
 			if bgColor != "" {
@@ -14965,7 +14952,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if hasPanes {
 					treeBranchRunes := []rune(treeBranch)
 					treeBranchFirst := string(treeBranchRunes[0])
-					prefix = indicatorPart + treeStyle.Render(treeBranchFirst) + windowCollapseStyle.Render(windowCollapseIcon)
+					prefix = indicatorPart + paintOn(treeBranchFirst, treeFg, treeBg) + paintFg(windowCollapseIcon, disclosureColor)
 					content = contentText
 				} else if isActive {
 					treeBranchRunes := []rune(treeBranch)
@@ -14991,14 +14978,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						indicatorFg = activeIndFgConfig
 					}
 
-					activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Bold(true)
-					if indicatorBg != "" && !strings.EqualFold(indicatorBg, "transparent") {
-						activeIndStyle = activeIndStyle.Background(lipgloss.Color(indicatorBg))
+					if strings.EqualFold(indicatorBg, "transparent") {
+						indicatorBg = ""
 					}
-					prefix = indicatorPart + treeStyle.Render(treeBranchFirst) + activeIndStyle.Render(c.getAnimatedActiveIndicator(activeIndicator))
+					prefix = indicatorPart + paintOn(treeBranchFirst, treeFg, treeBg) + paint(c.getAnimatedActiveIndicator(activeIndicator), indicatorFg, indicatorBg, true)
 					content = contentText
 				} else {
-					prefix = indicatorPart + treeStyle.Render(treeBranch)
+					prefix = indicatorPart + paintOn(treeBranch, treeFg, treeBg)
 					content = contentText
 				}
 
@@ -15040,7 +15026,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if row == "" {
 					continue
 				}
-				c.writeRemoteNameRow(&s, row, width, bgColor, fgColor, treeStyle, treeContinueChar, win.Minimized, isLastInGroup)
+				c.writeRemoteNameRow(&s, row, width, bgColor, fgColor, treeFg, treeBg, treeContinueChar, win.Minimized, isLastInGroup)
 				currentLine++
 			}
 
@@ -15118,7 +15104,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				if isLastInGroup {
 					treeContinue = " "
 				} else {
-					treeContinue = treeStyle.Render(treeContinueChar)
+					treeContinue = paintOn(treeContinueChar, treeFg, treeBg)
 				}
 
 				numPanes := len(contentPanes)
@@ -15187,25 +15173,25 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					paneAlertIcon := ""
 					pInd := c.config.Indicators
 					if pane.AIBusy && pInd.Busy.Enabled {
-						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
+						alertFg, alertFaint := pInd.Busy.Color, false
 						busyFrames := c.getBusyFrames()
-						paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
+						paneAlertIcon = paintFull(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)], alertFg, "", false, alertFaint)
 					} else if pane.AIInput && pInd.Input.Enabled {
 						inputIcon := pInd.Input.Icon
 						if inputIcon == "" {
 							inputIcon = "?"
 						}
-						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Input.Color))
+						alertFg, alertFaint := pInd.Input.Color, false
 						if len(pInd.Input.Frames) > 0 {
-							paneAlertIcon = alertStyle.Render(pInd.Input.Frames[c.getSlowSpinnerFrame()%len(pInd.Input.Frames)])
+							paneAlertIcon = paintFull(pInd.Input.Frames[c.getSlowSpinnerFrame()%len(pInd.Input.Frames)], alertFg, "", false, alertFaint)
 						} else {
-							paneAlertIcon = alertStyle.Render(inputIcon)
+							paneAlertIcon = paintFull(inputIcon, alertFg, "", false, alertFaint)
 						}
 					} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) && !anyAIBusyA {
 						// Non-AI pane with foreground process; suppress when AI is busy in same window
-						alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
+						alertFg, alertFaint := pInd.Busy.Color, false
 						busyFrames := c.getBusyFrames()
-						paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
+						paneAlertIcon = paintFull(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)], alertFg, "", false, alertFaint)
 					}
 
 					paneLeadChar := " "
@@ -15243,14 +15229,13 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 						} else {
 							paneIndicatorFg = activeIndFgConfig
 						}
-						paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
-						if paneIndicatorBg != "" && !strings.EqualFold(paneIndicatorBg, "transparent") {
-							paneIndStyle = paneIndStyle.Background(lipgloss.Color(paneIndicatorBg))
+						if strings.EqualFold(paneIndicatorBg, "transparent") {
+							paneIndicatorBg = ""
 						}
-						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar) + paneIndStyle.Render(c.getAnimatedActiveIndicator(paneActiveIndicator))
+						panePrefix = paneLeadChar + treeContinue + paintOn(" "+paneBranchChar, treeFg, treeBg) + paint(c.getAnimatedActiveIndicator(paneActiveIndicator), paneIndicatorFg, paneIndicatorBg, true)
 						paneContent = activePaneStyle.Render(paneText)
 					} else {
-						panePrefix = paneLeadChar + treeContinue + treeStyle.Render(" "+paneBranchChar+treeConnectorChar)
+						panePrefix = paneLeadChar + treeContinue + paintOn(" "+paneBranchChar+treeConnectorChar, treeFg, treeBg)
 						paneContent = paneStyle.Render(paneText)
 					}
 
@@ -15391,7 +15376,7 @@ const maxContentSizeHint = 1 << 18
 
 // generatePrefixModeContent creates a flat window list with group prefixes (e.g., "SD| WindowName")
 // In this mode, windows are not grouped hierarchically, but panes still show tree structure
-func (c *Coordinator) generatePrefixModeContent(clientID string, width, height int, treeBranchChar, treeBranchLastChar, treeContinueChar, treeConnectorChar, expandedIcon, collapsedIcon string, treeStyle lipgloss.Style, disclosureColor, activeIndicator, activeIndFgConfig, activeIndBgConfig string) (string, []daemon.ClickableRegion) {
+func (c *Coordinator) generatePrefixModeContent(clientID string, width, height int, treeBranchChar, treeBranchLastChar, treeContinueChar, treeConnectorChar, expandedIcon, collapsedIcon string, treeFg, treeBg string, disclosureColor, activeIndicator, activeIndFgConfig, activeIndBgConfig string) (string, []daemon.ClickableRegion) {
 	var s strings.Builder
 	var regions []daemon.ClickableRegion
 	currentLine := 0
@@ -15510,35 +15495,35 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		ind := c.config.Indicators
 
 		if ind.Busy.Enabled && win.Busy {
-			alertStyle := indicatorStyle(ind.Busy.Color, win.Minimized, bgColor, theme.Bg)
+			alertFg, alertFaint := indicatorColor(ind.Busy.Color, win.Minimized, bgColor, theme.Bg)
 
 			busyFrames := c.getBusyFrames()
-			alertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
+			alertIcon = paintFull(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)], alertFg, "", false, alertFaint)
 		} else if ind.Input.Enabled && win.Input {
 			inputIcon := ind.Input.Icon
 			if inputIcon == "" {
 				inputIcon = "?"
 			}
-			alertStyle := indicatorStyle(ind.Input.Color, win.Minimized, bgColor, theme.Bg)
+			alertFg, alertFaint := indicatorColor(ind.Input.Color, win.Minimized, bgColor, theme.Bg)
 
 			if len(ind.Input.Frames) > 0 {
-				alertIcon = alertStyle.Render(ind.Input.Frames[c.getSlowSpinnerFrame()%len(ind.Input.Frames)])
+				alertIcon = paintFull(ind.Input.Frames[c.getSlowSpinnerFrame()%len(ind.Input.Frames)], alertFg, "", false, alertFaint)
 			} else {
-				alertIcon = alertStyle.Render(inputIcon)
+				alertIcon = paintFull(inputIcon, alertFg, "", false, alertFaint)
 			}
 		} else if !isActive {
 			if ind.Bell.Enabled && win.Bell {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Bell.Color))
+				alertFg, alertFaint := ind.Bell.Color, false
 
-				alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Bell))
+				alertIcon = paintFull(c.getIndicatorIcon(ind.Bell), alertFg, "", false, alertFaint)
 			} else if ind.Activity.Enabled && win.Activity {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Activity.Color))
+				alertFg, alertFaint := ind.Activity.Color, false
 
-				alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Activity))
+				alertIcon = paintFull(c.getIndicatorIcon(ind.Activity), alertFg, "", false, alertFaint)
 			} else if ind.Silence.Enabled && win.Silence {
-				alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ind.Silence.Color))
+				alertFg, alertFaint := ind.Silence.Color, false
 
-				alertIcon = alertStyle.Render(c.getIndicatorIcon(ind.Silence))
+				alertIcon = paintFull(c.getIndicatorIcon(ind.Silence), alertFg, "", false, alertFaint)
 			}
 		}
 
@@ -15614,10 +15599,6 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 		}
 
 		// Styles for window collapse icon
-		windowCollapseStyle := lipgloss.NewStyle()
-		if disclosureColor != "" {
-			windowCollapseStyle = windowCollapseStyle.Foreground(lipgloss.Color(disclosureColor))
-		}
 
 		// Render window line
 		{
@@ -15629,7 +15610,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 
 			var lineContent string
 			if hasPanes {
-				lineContent = indicatorPart + " " + windowCollapseStyle.Render(windowCollapseIcon+" ") + style.Render(contentText)
+				lineContent = indicatorPart + " " + paintFg(windowCollapseIcon+" ", disclosureColor) + style.Render(contentText)
 			} else if isActive {
 				var indicatorBg, indicatorFg string
 				if activeIndBgConf == "" || activeIndBgConf == "auto" {
@@ -15651,8 +15632,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					indicatorFg = activeIndFgConf
 				}
 
-				activeIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(indicatorFg)).Bold(true)
-				lineContent = indicatorPart + " " + activeIndStyle.Render(c.getAnimatedActiveIndicator(activeIndicator)) + style.Render(contentText)
+				lineContent = indicatorPart + " " + paint(c.getAnimatedActiveIndicator(activeIndicator), indicatorFg, indicatorBg, true) + style.Render(contentText)
 			} else {
 				lineContent = indicatorPart + "  " + style.Render(contentText)
 			}
@@ -15674,7 +15654,7 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				if row == "" {
 					continue
 				}
-				c.writeRemoteNameRow(&s, row, width, rowBg, fgColor, treeStyle, treeContinueChar, win.Minimized, isLastWindow)
+				c.writeRemoteNameRow(&s, row, width, rowBg, fgColor, treeFg, treeBg, treeContinueChar, win.Minimized, isLastWindow)
 				currentLine++
 			}
 		}
@@ -15793,25 +15773,25 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 				paneAlertIcon := ""
 				pInd := c.config.Indicators
 				if pane.AIBusy && pInd.Busy.Enabled {
-					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
+					alertFg, alertFaint := pInd.Busy.Color, false
 					busyFrames := c.getBusyFrames()
-					paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
+					paneAlertIcon = paintFull(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)], alertFg, "", false, alertFaint)
 				} else if pane.AIInput && pInd.Input.Enabled {
 					inputIcon := pInd.Input.Icon
 					if inputIcon == "" {
 						inputIcon = "?"
 					}
-					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Input.Color))
+					alertFg, alertFaint := pInd.Input.Color, false
 					if len(pInd.Input.Frames) > 0 {
-						paneAlertIcon = alertStyle.Render(pInd.Input.Frames[c.getSlowSpinnerFrame()%len(pInd.Input.Frames)])
+						paneAlertIcon = paintFull(pInd.Input.Frames[c.getSlowSpinnerFrame()%len(pInd.Input.Frames)], alertFg, "", false, alertFaint)
 					} else {
-						paneAlertIcon = alertStyle.Render(inputIcon)
+						paneAlertIcon = paintFull(inputIcon, alertFg, "", false, alertFaint)
 					}
 				} else if pane.Busy && pInd.Busy.Enabled && !tmux.IsAITool(pane.Command) && !anyAIBusyB {
 					// Non-AI pane with foreground process; suppress when AI is busy in same window
-					alertStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pInd.Busy.Color))
+					alertFg, alertFaint := pInd.Busy.Color, false
 					busyFrames := c.getBusyFrames()
-					paneAlertIcon = alertStyle.Render(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)])
+					paneAlertIcon = paintFull(busyFrames[c.getSlowSpinnerFrame()%len(busyFrames)], alertFg, "", false, alertFaint)
 				}
 
 				paneLeadChar := " "
@@ -15847,16 +15827,15 @@ func (c *Coordinator) generatePrefixModeContent(clientID string, width, height i
 					} else {
 						paneIndicatorFg = activeIndFgConf
 					}
-					paneIndStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(paneIndicatorFg)).Bold(true)
 					fullWidthPaneStyle := activePaneStyle.Width(paneContentWidth)
-					lineContent := paneLeadChar + "  " + treeStyle.Render(paneBranchChar+treeConnectorChar) + paneIndStyle.Render(c.getAnimatedActiveIndicator(paneActiveIndicator)) + fullWidthPaneStyle.Render(paneText)
+					lineContent := paneLeadChar + "  " + paintOn(paneBranchChar+treeConnectorChar, treeFg, treeBg) + paint(c.getAnimatedActiveIndicator(paneActiveIndicator), paneIndicatorFg, paneIndicatorBg, true) + fullWidthPaneStyle.Render(paneText)
 					renderedPane := paneLineStyle.Render(lineContent)
 					if paneLineBg != "" {
 						renderedPane = c.applyBackgroundFill(renderedPane, paneLineBg, width)
 					}
 					s.WriteString(renderedPane + "\n")
 				} else {
-					lineContent := paneLeadChar + "  " + treeStyle.Render(paneBranchChar+treeConnectorChar+treeConnectorChar) + paneStyle.Render(paneText)
+					lineContent := paneLeadChar + "  " + paintOn(paneBranchChar+treeConnectorChar+treeConnectorChar, treeFg, treeBg) + paneStyle.Render(paneText)
 					renderedPane := paneLineStyle.Render(lineContent)
 					if paneLineBg != "" {
 						renderedPane = c.applyBackgroundFill(renderedPane, paneLineBg, width)
@@ -23177,7 +23156,7 @@ func composeTabMarker(sshGlyph, marker string) string {
 // with one bg-only column before the name and extending to the right edge.
 // When isLast is true (last sibling in its group), the column-1 pipe is
 // replaced with a blank so the tree doesn't continue into nothing.
-func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width int, bgColor, fgColor string, treeStyle lipgloss.Style, treeContinueChar string, faint, isLast bool) {
+func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width int, bgColor, fgColor string, treeFg, treeBg string, treeContinueChar string, faint, isLast bool) {
 	col1 := treeContinueChar
 	if isLast {
 		col1 = " "
@@ -23215,9 +23194,8 @@ func (c *Coordinator) writeRemoteNameRow(s *strings.Builder, name string, width 
 	}
 	if faint {
 		nameStyle = nameStyle.Faint(true)
-		treeStyle = treeStyle.Faint(true)
 	}
-	leadingRendered := " " + treeStyle.Render(col1) + " "
+	leadingRendered := " " + paintFull(col1, treeFg, treeBg, false, faint) + " "
 	chip := nameStyle.Render(chipText)
 	if bgColor != "" {
 		// Gradient-fill the continuation row (not a flat solid) so a wrapped tab's
@@ -23741,19 +23719,22 @@ func dimColor(hexColor string, opacity float64) string {
 // When the window is minimized ("muted"), the glyph is dimmed toward the row
 // background (the same 0.55 blend used for minimized tab text) and fainted, so
 // the ?/spinner reads as muted instead of standing out at full brightness.
-func indicatorStyle(color string, minimized bool, bgColor, themeBg string) lipgloss.Style {
-	s := lipgloss.NewStyle()
-	if minimized {
-		blendBg := bgColor
-		if blendBg == "" {
-			blendBg = themeBg
-		}
-		if d := blendHexToward(color, blendBg, 0.55); d != "" {
-			color = d
-		}
-		s = s.Faint(true)
+// indicatorColor resolves an indicator's foreground and dim flag. A minimized
+// window blends its indicator toward the background and dims it, so the row
+// recedes without losing the signal. Returns colours rather than a style so
+// callers can go through paint.
+func indicatorColor(color string, minimized bool, bgColor, themeBg string) (fg string, faint bool) {
+	if !minimized {
+		return color, false
 	}
-	return s.Foreground(lipgloss.Color(color))
+	blendBg := bgColor
+	if blendBg == "" {
+		blendBg = themeBg
+	}
+	if d := blendHexToward(color, blendBg, 0.55); d != "" {
+		color = d
+	}
+	return color, true
 }
 
 // HeaderColors holds the fg/bg colors for a pane header border.

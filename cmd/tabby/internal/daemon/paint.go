@@ -28,6 +28,7 @@ type paintKey struct {
 	profile termenv.Profile
 	fg, bg  string
 	bold    bool
+	faint   bool
 }
 
 // paintWrap is the escape sequence that goes around the text, split at the
@@ -65,6 +66,9 @@ func paintStyle(k paintKey) lipgloss.Style {
 	if k.bold {
 		style = style.Bold(true)
 	}
+	if k.faint {
+		style = style.Faint(true)
+	}
 	return style
 }
 
@@ -100,7 +104,13 @@ func paintWrapFor(k paintKey) (paintWrap, bool) {
 // lipgloss: Render styles each line separately and rewrites tabs, so a single
 // wrapper would not reproduce it. Those are rare in a sidebar row.
 func paint(text, fg, bg string, bold bool) string {
-	k := paintKey{profile: lipgloss.ColorProfile(), fg: fg, bg: bg, bold: bold}
+	return paintFull(text, fg, bg, bold, false)
+}
+
+// paintFull is paint with the dim attribute as well, for the indicator colours
+// that fade when a window is minimised.
+func paintFull(text, fg, bg string, bold, faint bool) string {
+	k := paintKey{profile: lipgloss.ColorProfile(), fg: fg, bg: bg, bold: bold, faint: faint}
 	if strings.ContainsAny(text, "\n\r\t") {
 		return paintStyle(k).Render(text)
 	}
