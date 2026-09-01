@@ -21,9 +21,13 @@ fi
 # deploying to a remote host) used to sail past a render-status-only check.
 if [ ! -x "$CURRENT_DIR/bin/tabby" ] || [ ! -x "$CURRENT_DIR/bin/render-status" ]; then
     if ! "$CURRENT_DIR/scripts/install.sh" >/tmp/tabby-install.log 2>&1; then
-        # Don't leave the user with a silently dead plugin. install.sh already
-        # says what went wrong (usually: no Go toolchain on this machine).
-        tmux display-message "tabby: build failed, see /tmp/tabby-install.log" 2>/dev/null || true
+        # Don't leave the user with a silently dead plugin. Quote the last line
+        # of the log in the message itself: pointing at a log file is not much
+        # help when the next thing tmux prints is "tabby: No such file or
+        # directory", which reads like a broken install path rather than a
+        # build that failed a moment earlier.
+        _ERR=$(tail -n 1 /tmp/tabby-install.log 2>/dev/null)
+        tmux display-message "tabby: build failed (${_ERR:-see /tmp/tabby-install.log})" 2>/dev/null || true
         exit 0
     fi
 fi
