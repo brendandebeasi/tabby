@@ -825,7 +825,8 @@ type Coordinator struct {
 	// the only thing the fit decision needs. Cleared whenever the config is
 	// reloaded, since that is the one thing that can change a zone's height
 	// at a fixed width.
-	widgetZoneHeights sync.Map // widgetZoneKey -> widgetZoneHeight
+	widgetZoneHeights  sync.Map // widgetZoneKey -> widgetZoneHeight
+	widgetZoneHeightsN atomic.Int64
 
 	// Mobile border hide state: tracks whether tmux pane-border-style has been
 	// overridden to the terminal background (invisible) because a narrow client
@@ -12291,12 +12292,12 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	// more than a handful of tabs -- this is what stops every frame rendering
 	// the pet's zone in full only to measure it, throw it away, and render
 	// the zones again without it.
-	hidePet, hideDebugBar := c.predictWidgetEscalation(width, height, headerLines, mainContentLines)
+	hidePet, hideDebugBar := c.predictWidgetEscalation(clientID, width, height, headerLines, mainContentLines)
 
 	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(clientID, width, hidePet, hideDebugBar)
 	topWidgetLines := strings.Count(topWidgets, "\n")
 	bottomWidgetLines := strings.Count(bottomWidgets, "\n")
-	c.rememberWidgetZoneHeight(width, hidePet, hideDebugBar, topWidgetLines, bottomWidgetLines)
+	c.rememberWidgetZoneHeight(clientID, width, hidePet, hideDebugBar, topWidgetLines, bottomWidgetLines)
 
 	maxMainLines := height - headerLines - topWidgetLines - bottomWidgetLines
 	if maxMainLines < 0 {
@@ -12317,7 +12318,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(clientID, width, false, true)
 		topWidgetLines = strings.Count(topWidgets, "\n")
 		bottomWidgetLines = strings.Count(bottomWidgets, "\n")
-		c.rememberWidgetZoneHeight(width, false, true, topWidgetLines, bottomWidgetLines)
+		c.rememberWidgetZoneHeight(clientID, width, false, true, topWidgetLines, bottomWidgetLines)
 		maxMainLines = height - headerLines - topWidgetLines - bottomWidgetLines
 		if maxMainLines < 0 {
 			maxMainLines = 0
@@ -12331,7 +12332,7 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(clientID, width, true, false)
 		topWidgetLines = strings.Count(topWidgets, "\n")
 		bottomWidgetLines = strings.Count(bottomWidgets, "\n")
-		c.rememberWidgetZoneHeight(width, true, false, topWidgetLines, bottomWidgetLines)
+		c.rememberWidgetZoneHeight(clientID, width, true, false, topWidgetLines, bottomWidgetLines)
 		maxMainLines = height - headerLines - topWidgetLines - bottomWidgetLines
 		if maxMainLines < 0 {
 			maxMainLines = 0
@@ -15247,8 +15248,12 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 }
 
 // widgetZoneKey identifies one widget-zone variant: the escalation level, at
-// a width. Height depends on neither the client nor the frame's content.
+// a width, for one client. A zone's height does not depend on the frame's
+// content, but it can depend on the client -- so the key carries clientID
+// rather than let a tall client's measurement talk a short one into hiding
+// its pet, which nothing downstream would undo.
 type widgetZoneKey struct {
+	clientID     string
 	width        int
 	hidePet      bool
 	hideDebugBar bool
@@ -15257,11 +15262,20 @@ type widgetZoneKey struct {
 // widgetZoneHeight is how many lines a variant's top and bottom zones took.
 type widgetZoneHeight struct{ top, bottom int }
 
-func (c *Coordinator) rememberWidgetZoneHeight(width int, hidePet, hideDebugBar bool, top, bottom int) {
-	c.widgetZoneHeights.Store(
-		widgetZoneKey{width: width, hidePet: hidePet, hideDebugBar: hideDebugBar},
-		widgetZoneHeight{top: top, bottom: bottom},
-	)
+// widgetZoneHeightsMax bounds the cache: a few variants per width per live
+// client, so reaching this means clients or widths have been churning. Drop
+// the map whole rather than track every geometry the daemon has ever seen.
+const widgetZoneHeightsMax = 256
+
+func (c *Coordinator) rememberWidgetZoneHeight(clientID string, width int, hidePet, hideDebugBar bool, top, bottom int) {
+	if c.widgetZoneHeightsN.Load() >= widgetZoneHeightsMax {
+		c.widgetZoneHeights.Clear()
+		c.widgetZoneHeightsN.Store(0)
+	}
+	key := widgetZoneKey{clientID: clientID, width: width, hidePet: hidePet, hideDebugBar: hideDebugBar}
+	if _, loaded := c.widgetZoneHeights.Swap(key, widgetZoneHeight{top: top, bottom: bottom}); !loaded {
+		c.widgetZoneHeightsN.Add(1)
+	}
 }
 
 // predictWidgetEscalation picks the widget-zone variant to render first,
@@ -15272,14 +15286,14 @@ func (c *Coordinator) rememberWidgetZoneHeight(width int, hidePet, hideDebugBar 
 // whenever it has nothing measured to go on -- so the very first frame at a
 // width behaves exactly as it did before this cache existed, and the
 // escalation checks in RenderForClient still have the final say.
-func (c *Coordinator) predictWidgetEscalation(width, height, headerLines, mainContentLines int) (hidePet, hideDebugBar bool) {
+func (c *Coordinator) predictWidgetEscalation(clientID string, width, height, headerLines, mainContentLines int) (hidePet, hideDebugBar bool) {
 	if !c.config.Widgets.Pet.Enabled {
 		return false, false
 	}
 	// fits reports whether a measured variant leaves room for every tab.
 	// An unmeasured variant reports false for "measured" and is never chosen.
 	fits := func(hidePet, hideDebugBar bool) (ok, measured bool) {
-		v, found := c.widgetZoneHeights.Load(widgetZoneKey{width: width, hidePet: hidePet, hideDebugBar: hideDebugBar})
+		v, found := c.widgetZoneHeights.Load(widgetZoneKey{clientID: clientID, width: width, hidePet: hidePet, hideDebugBar: hideDebugBar})
 		if !found {
 			return false, false
 		}

@@ -8,6 +8,8 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
+const zoneTestClient = "/dev/ttys000"
+
 // escalationCoordinator returns a coordinator with the pet enabled and the
 // widget-zone height cache empty.
 func escalationCoordinator(t *testing.T, debugBar bool) *Coordinator {
@@ -24,26 +26,26 @@ func escalationCoordinator(t *testing.T, debugBar bool) *Coordinator {
 // escalate for real.
 func TestPredictWidgetEscalationDefersWhenNothingIsMeasured(t *testing.T) {
 	c := escalationCoordinator(t, false)
-	if hidePet, hideDebug := c.predictWidgetEscalation(30, 24, 3, 40); hidePet || hideDebug {
+	if hidePet, hideDebug := c.predictWidgetEscalation(zoneTestClient, 30, 24, 3, 40); hidePet || hideDebug {
 		t.Fatalf("unmeasured width predicted (%v, %v), want (false, false)", hidePet, hideDebug)
 	}
 }
 
 func TestPredictWidgetEscalationKeepsThePetWhenItFits(t *testing.T) {
 	c := escalationCoordinator(t, false)
-	c.rememberWidgetZoneHeight(30, false, false, 4, 6)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, false, false, 4, 6)
 	// 40 - 3 header - 10 widgets = 27 lines for 20 tabs.
-	if hidePet, hideDebug := c.predictWidgetEscalation(30, 40, 3, 20); hidePet || hideDebug {
+	if hidePet, hideDebug := c.predictWidgetEscalation(zoneTestClient, 30, 40, 3, 20); hidePet || hideDebug {
 		t.Fatalf("predicted (%v, %v) for a viewport with room to spare, want (false, false)", hidePet, hideDebug)
 	}
 }
 
 func TestPredictWidgetEscalationHidesThePetWhenItDoesNot(t *testing.T) {
 	c := escalationCoordinator(t, false)
-	c.rememberWidgetZoneHeight(30, false, false, 4, 6)
-	c.rememberWidgetZoneHeight(30, true, false, 1, 3)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, false, false, 4, 6)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, true, false, 1, 3)
 	// 24 - 3 header - 10 widgets = 11 lines for 20 tabs: does not fit.
-	hidePet, hideDebug := c.predictWidgetEscalation(30, 24, 3, 20)
+	hidePet, hideDebug := c.predictWidgetEscalation(zoneTestClient, 30, 24, 3, 20)
 	if !hidePet || hideDebug {
 		t.Fatalf("predicted (%v, %v) for an overflowing viewport, want (true, false)", hidePet, hideDebug)
 	}
@@ -53,12 +55,12 @@ func TestPredictWidgetEscalationHidesThePetWhenItDoesNot(t *testing.T) {
 // over hiding the pet outright.
 func TestPredictWidgetEscalationDropsTheDebugBarFirst(t *testing.T) {
 	c := escalationCoordinator(t, true)
-	c.rememberWidgetZoneHeight(30, false, false, 4, 9)
-	c.rememberWidgetZoneHeight(30, false, true, 4, 6)
-	c.rememberWidgetZoneHeight(30, true, false, 1, 3)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, false, false, 4, 9)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, false, true, 4, 6)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, true, false, 1, 3)
 	// 24 - 3 header: 13 rows available. With the debug bar the widgets take
 	// 13 and nothing is left; without it they take 10, leaving 11 for 11 tabs.
-	hidePet, hideDebug := c.predictWidgetEscalation(30, 24, 3, 11)
+	hidePet, hideDebug := c.predictWidgetEscalation(zoneTestClient, 30, 24, 3, 11)
 	if hidePet || !hideDebug {
 		t.Fatalf("predicted (%v, %v), want (false, true): the debug bar goes before the pet", hidePet, hideDebug)
 	}
@@ -69,18 +71,18 @@ func TestPredictWidgetEscalationDropsTheDebugBarFirst(t *testing.T) {
 // the pet on a viewport where dropping the debug bar alone would have done.
 func TestPredictWidgetEscalationWillNotSkipAnUnmeasuredStep(t *testing.T) {
 	c := escalationCoordinator(t, true)
-	c.rememberWidgetZoneHeight(30, false, false, 4, 9)
-	c.rememberWidgetZoneHeight(30, true, false, 1, 3)
-	if hidePet, hideDebug := c.predictWidgetEscalation(30, 24, 3, 20); hidePet || hideDebug {
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, false, false, 4, 9)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, true, false, 1, 3)
+	if hidePet, hideDebug := c.predictWidgetEscalation(zoneTestClient, 30, 24, 3, 20); hidePet || hideDebug {
 		t.Fatalf("predicted (%v, %v) with the debug-bar variant unmeasured, want (false, false)", hidePet, hideDebug)
 	}
 }
 
 func TestPredictWidgetEscalationIgnoresOtherWidths(t *testing.T) {
 	c := escalationCoordinator(t, false)
-	c.rememberWidgetZoneHeight(30, false, false, 4, 6)
-	c.rememberWidgetZoneHeight(30, true, false, 1, 3)
-	if hidePet, hideDebug := c.predictWidgetEscalation(45, 24, 3, 20); hidePet || hideDebug {
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, false, false, 4, 6)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, true, false, 1, 3)
+	if hidePet, hideDebug := c.predictWidgetEscalation(zoneTestClient, 45, 24, 3, 20); hidePet || hideDebug {
 		t.Fatalf("a measurement at width 30 drove the prediction at width 45: (%v, %v)", hidePet, hideDebug)
 	}
 }
@@ -88,8 +90,8 @@ func TestPredictWidgetEscalationIgnoresOtherWidths(t *testing.T) {
 func TestPredictWidgetEscalationLeavesADisabledPetAlone(t *testing.T) {
 	c := escalationCoordinator(t, false)
 	c.config.Widgets.Pet.Enabled = false
-	c.rememberWidgetZoneHeight(30, false, false, 4, 6)
-	if hidePet, hideDebug := c.predictWidgetEscalation(30, 24, 3, 99); hidePet || hideDebug {
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, false, false, 4, 6)
+	if hidePet, hideDebug := c.predictWidgetEscalation(zoneTestClient, 30, 24, 3, 99); hidePet || hideDebug {
 		t.Fatalf("predicted (%v, %v) with the pet disabled, want (false, false)", hidePet, hideDebug)
 	}
 }
@@ -129,7 +131,7 @@ func TestRenderForClientIsStableOnceTheCacheIsWarm(t *testing.T) {
 				t.Errorf("debugBar=%v height=%d: warm frame differs from cold frame\ncold:\n%s\nwarm:\n%s",
 					debugBar, height, cold.Content, warm.Content)
 			}
-			if _, hid := c.widgetZoneHeights.Load(widgetZoneKey{width: 30, hidePet: true}); hid {
+			if _, hid := c.widgetZoneHeights.Load(widgetZoneKey{clientID: "client", width: 30, hidePet: true}); hid {
 				escalated = true
 			}
 		}
@@ -138,5 +140,36 @@ func TestRenderForClientIsStableOnceTheCacheIsWarm(t *testing.T) {
 	// escalation the cache exists to skip.
 	if !escalated {
 		t.Fatal("no viewport in the sweep was tight enough to hide the pet, so the test proved nothing")
+	}
+}
+
+// A zone's height can differ between clients at the same width, and nothing
+// downstream de-escalates, so one client's measurement must never talk
+// another into hiding its pet.
+func TestPredictWidgetEscalationIgnoresOtherClients(t *testing.T) {
+	c := escalationCoordinator(t, false)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, false, false, 4, 6)
+	c.rememberWidgetZoneHeight(zoneTestClient, 30, true, false, 1, 3)
+	if hidePet, hideDebug := c.predictWidgetEscalation("/dev/ttys001", 30, 24, 3, 20); hidePet || hideDebug {
+		t.Fatalf("another client's measurement drove the prediction: (%v, %v)", hidePet, hideDebug)
+	}
+}
+
+func TestWidgetZoneHeightsStayBounded(t *testing.T) {
+	c := escalationCoordinator(t, false)
+	c.widgetZoneHeightsN.Store(0)
+	for i := range widgetZoneHeightsMax * 2 {
+		c.rememberWidgetZoneHeight(zoneTestClient, i, false, false, 4, 6)
+	}
+	if got := c.widgetZoneHeightsN.Load(); got > widgetZoneHeightsMax {
+		t.Fatalf("cache holds %d entries, want at most %d", got, widgetZoneHeightsMax)
+	}
+	live := 0
+	c.widgetZoneHeights.Range(func(any, any) bool {
+		live++
+		return true
+	})
+	if live > widgetZoneHeightsMax {
+		t.Fatalf("map holds %d entries, want at most %d", live, widgetZoneHeightsMax)
 	}
 }
