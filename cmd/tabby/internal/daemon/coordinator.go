@@ -16500,6 +16500,34 @@ func quotaBarColor(pct int, override string) string {
 	}
 }
 
+// quotaBarKey is the full set of inputs the *styled* half of a quota bar
+// depends on. It deliberately keys on the already-formatted label rather than
+// on the raw reset timestamp: resetMs is an absolute epoch that changes on
+// every frame, so keying on it would never hit, while the label it renders to
+// only changes once a minute.
+type quotaBarKey struct {
+	txt     string
+	pct     int
+	bw      int
+	barFg   string
+	labelFg string
+	termBg  string
+}
+
+// quotaBarCache memoizes quotaBarBody. Each bar costs two lipgloss Render
+// calls (each borrowing and re-growing a pooled ANSI parser) plus a
+// desaturateHex, and the sidebar redraws the same handful of bars many times
+// per second between the once-a-minute label changes.
+var (
+	quotaBarCache  sync.Map // key: quotaBarKey, value: string
+	quotaBarCacheN atomic.Int64
+)
+
+// quotaBarCacheMax bounds the cache. The countdown text ticks once a minute
+// per bar, so the key set grows slowly and forever; dropping the whole map at
+// the cap keeps the ceiling at a few hundred short strings.
+const quotaBarCacheMax = 256
+
 // renderQuotaBar renders one bar of exactly bw cells with the percentage (and,
 // when it fits, the time until that window resets) centered inside it. The
 // filled fraction is a solid colored block (dark text); the empty track is a
@@ -16524,6 +16552,25 @@ func renderQuotaBar(f *float64, resetMs int64, bw int, barFgOverride, labelFg, t
 	if runewidth.StringWidth(txt) > bw {
 		txt = runewidth.Truncate(txt, bw, "")
 	}
+	key := quotaBarKey{txt: txt, pct: pct, bw: bw, barFg: barFgOverride, labelFg: labelFg, termBg: termBg}
+	if v, ok := quotaBarCache.Load(key); ok {
+		return v.(string)
+	}
+	out := quotaBarBody(txt, pct, bw, barFgOverride, labelFg, termBg)
+	if quotaBarCacheN.Load() >= quotaBarCacheMax {
+		quotaBarCache.Clear()
+		quotaBarCacheN.Store(0)
+	}
+	if _, loaded := quotaBarCache.LoadOrStore(key, out); !loaded {
+		quotaBarCacheN.Add(1)
+	}
+	return out
+}
+
+// quotaBarBody paints an already-sized, already-formatted bar label into the
+// bw-cell bar. Split out of renderQuotaBar so the expensive half can be
+// memoized on inputs that hold still between countdown ticks.
+func quotaBarBody(txt string, pct, bw int, barFgOverride, labelFg, termBg string) string {
 	// Center the text within the bar width.
 	pad := bw - runewidth.StringWidth(txt)
 	left := pad / 2
