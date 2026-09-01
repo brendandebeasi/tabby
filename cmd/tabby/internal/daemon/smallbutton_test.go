@@ -1,84 +1,82 @@
 package daemon
 
 import (
-	"strings"
+	"runtime"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/brendandebeasi/tabby/cmd/tabby/internal/ansi"
+	"github.com/charmbracelet/lipgloss"
 )
 
-func resetSmallButtonCache() {
-	smallButtonCache.Clear()
-	smallButtonCacheN.Store(0)
+// smallButtonBodySlow is the body renderSmallButton used before the manual
+// padding: lipgloss doing the centering. The fuzz target below holds the fast
+// path to producing byte-identical output.
+func smallButtonBodySlow(width int, label, bgColor, fgColor string) string {
+	return lipgloss.NewStyle().
+		Background(lipgloss.Color(bgColor)).
+		Foreground(lipgloss.Color(fgColor)).
+		Bold(true).
+		Width(width).
+		Align(lipgloss.Center).
+		Render(label)
 }
 
-func TestRenderSmallButtonReturnsSameOutputFromCache(t *testing.T) {
-	resetSmallButtonCache()
-	first := renderSmallButton(12, "New Tab", "#1f6feb", "#ffffff")
-	second := renderSmallButton(12, "New Tab", "#1f6feb", "#ffffff")
-	if first != second {
-		t.Fatalf("cached render differs from first render:\n%q\n%q", first, second)
+func FuzzSmallButtonBody(f *testing.F) {
+	for _, label := range []string{"", "+ Tab", "x Close Tab", "<", "▲", "◐ Dark", "日本", "🐈"} {
+		for _, w := range []int{0, 1, 2, 5, 11, 30} {
+			f.Add(w, label)
+		}
 	}
-	if !strings.Contains(first, "New Tab") {
-		t.Fatalf("render dropped the label: %q", first)
-	}
-	if got := smallButtonCacheN.Load(); got != 1 {
-		t.Fatalf("repeat render stored %d entries, want 1", got)
-	}
-}
-
-func TestRenderSmallButtonKeysOnEveryInput(t *testing.T) {
-	resetSmallButtonCache()
-	base := renderSmallButton(12, "Close", "#1f6feb", "#ffffff")
-	// Under a test binary lipgloss sees no TTY and drops color, so bg and fg
-	// legitimately render the same bytes here. Their contribution to the key
-	// is checked through the entry count instead.
-	if got := renderSmallButton(14, "Close", "#1f6feb", "#ffffff"); got == base {
-		t.Errorf("a different width produced the same output as the base render")
-	}
-	if got := renderSmallButton(12, "Split", "#1f6feb", "#ffffff"); got == base {
-		t.Errorf("a different label produced the same output as the base render")
-	}
-	renderSmallButton(12, "Close", "#da3633", "#ffffff")
-	renderSmallButton(12, "Close", "#1f6feb", "#000000")
-	if got := smallButtonCacheN.Load(); got != 5 {
-		t.Fatalf("five distinct keys stored %d entries, want 5", got)
-	}
-}
-
-func TestRenderSmallButtonCacheStaysBounded(t *testing.T) {
-	resetSmallButtonCache()
-	for i := range smallButtonCacheMax * 2 {
-		renderSmallButton(i, "Tab", "#1f6feb", "#ffffff")
-	}
-	if got := smallButtonCacheN.Load(); got > smallButtonCacheMax {
-		t.Fatalf("cache holds %d entries, want at most %d", got, smallButtonCacheMax)
-	}
-	live := 0
-	smallButtonCache.Range(func(any, any) bool {
-		live++
-		return true
+	f.Fuzz(func(t *testing.T, width int, label string) {
+		if !utf8.ValidString(label) || width < 0 || width > 200 {
+			t.Skip()
+		}
+		got := smallButtonBody(width, label, "#27ae60", "#ffffff")
+		want := smallButtonBodySlow(width, label, "#27ae60", "#ffffff")
+		// Not byte-identical by design: lipgloss's Align emits the padding as
+		// its own background-only run, while padding before the Render puts
+		// the whole button in one run. What has to match is the button the
+		// terminal draws, so compare the visible cells.
+		if ansi.Strip(got) != ansi.Strip(want) {
+			t.Fatalf("smallButtonBody(%d, %q) drew %q, want %q", width, label, ansi.Strip(got), ansi.Strip(want))
+		}
+		if len(got) > len(want) {
+			t.Fatalf("smallButtonBody(%d, %q) emitted %d bytes, more than lipgloss's %d", width, label, len(got), len(want))
+		}
 	})
-	if live > smallButtonCacheMax {
-		t.Fatalf("map holds %d entries, want at most %d", live, smallButtonCacheMax)
+}
+
+// The point of the manual padding is to keep the button off cellbuf.Wrap,
+// whose pooled 32KB parser buffer was the daemon's single biggest allocation
+// source. A miss has to be cheap, not just a hit.
+func TestSmallButtonBodyIsCheapOnAMiss(t *testing.T) {
+	smallButtonBody(30, "warmup", "#27ae60", "#ffffff")
+	var a, b runtime.MemStats
+	runtime.ReadMemStats(&a)
+	const n = 200
+	for i := range n {
+		smallButtonBody(30, "+ New Tab", "#27ae60", "#ffffff")
+		_ = i
+	}
+	runtime.ReadMemStats(&b)
+	if per := (b.TotalAlloc - a.TotalAlloc) / n; per > 4096 {
+		t.Fatalf("an uncached button allocated %d bytes, want well under a pooled parser's 32KB", per)
 	}
 }
 
-func TestRenderSmallButtonSurvivesCacheEviction(t *testing.T) {
-	resetSmallButtonCache()
-	want := renderSmallButton(12, "New Tab", "#1f6feb", "#ffffff")
-	for i := range smallButtonCacheMax * 2 {
-		renderSmallButton(i, "Tab", "#1f6feb", "#ffffff")
-	}
-	if got := renderSmallButton(12, "New Tab", "#1f6feb", "#ffffff"); got != want {
-		t.Fatalf("render after eviction differs:\n%q\n%q", want, got)
-	}
-}
-
-func BenchmarkRenderSmallButton(b *testing.B) {
-	resetSmallButtonCache()
-	labels := []string{"New Tab", "New Group", "Close", "Touch", "Wider", "Narrower"}
+func BenchmarkSmallButtonBody(b *testing.B) {
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; b.Loop(); i++ {
-		renderSmallButton(12, labels[i%len(labels)], "#1f6feb", "#ffffff")
+	for b.Loop() {
+		sinkString = smallButtonBody(30, "+ New Tab", "#27ae60", "#ffffff")
 	}
 }
+
+func BenchmarkSmallButtonBodySlow(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkString = smallButtonBodySlow(30, "+ New Tab", "#27ae60", "#ffffff")
+	}
+}
+
+var sinkString string

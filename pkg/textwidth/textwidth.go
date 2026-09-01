@@ -172,3 +172,12 @@ func Pad(s string, w int) string {
 	}
 	return s + strings.Repeat(" ", w-cur)
 }
+
+// IsPlainASCII reports whether every byte is printable ASCII, which is the
+// case where a string's column count is provably len(s) and every width
+// implementation agrees on it. Callers that must match another library's
+// measurement byte for byte can use it to gate a fast path.
+func IsPlainASCII(s string) bool {
+	_, ok := asciiCells(s)
+	return ok
+}

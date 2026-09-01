@@ -18482,19 +18482,33 @@ var (
 // hundred short strings and costs one re-render per live button.
 const smallButtonCacheMax = 256
 
+// smallButtonBody centers the label itself instead of handing the job to
+// lipgloss's Width/Align. A styled Render with a width set runs the string
+// through cellbuf.Wrap, which borrows an ansi.Parser from a pool and regrows
+// its 32KB data buffer -- and the pool is drained by every GC, so the miss is
+// the common case. Padding first and rendering a string that already fits
+// skips that path entirely. Labels too wide to fit still go the long way
+// round, where lipgloss's wrapping is the whole point.
+func smallButtonBody(width int, label, bgColor, fgColor string) string {
+	style := lipgloss.NewStyle().
+		Background(lipgloss.Color(bgColor)).
+		Foreground(lipgloss.Color(fgColor)).
+		Bold(true)
+	pad := width - textwidth.Cells(label)
+	if pad < 0 || !textwidth.IsPlainASCII(label) {
+		return style.Width(width).Align(lipgloss.Center).Render(label)
+	}
+	left := pad / 2
+	return style.Render(strings.Repeat(" ", left) + label + strings.Repeat(" ", pad-left))
+}
+
 // renderSmallButton renders a single-line flat button with background color.
 func renderSmallButton(width int, label string, bgColor, fgColor string) string {
 	key := smallButtonKey{width: width, label: label, bgColor: bgColor, fgColor: fgColor}
 	if v, ok := smallButtonCache.Load(key); ok {
 		return v.(string)
 	}
-	out := lipgloss.NewStyle().
-		Background(lipgloss.Color(bgColor)).
-		Foreground(lipgloss.Color(fgColor)).
-		Bold(true).
-		Width(width).
-		Align(lipgloss.Center).
-		Render(label)
+	out := smallButtonBody(width, label, bgColor, fgColor)
 	if smallButtonCacheN.Load() >= smallButtonCacheMax {
 		smallButtonCache.Clear()
 		smallButtonCacheN.Store(0)
