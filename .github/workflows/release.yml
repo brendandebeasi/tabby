@@ -20,6 +20,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # On a tag push this is the tag already. On workflow_dispatch it must
+          # be stated explicitly, or the job would build whatever branch the
+          # dispatch was made from and attach it under the tag's name.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
