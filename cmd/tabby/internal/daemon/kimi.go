@@ -136,10 +136,6 @@ func (c *Coordinator) renderKimiWidget(clientID string, width int) string {
 	}
 
 	labelFg := c.getInactiveTextColorWithFallback(kCfg.Fg)
-	labelStyle := lipgloss.NewStyle()
-	if labelFg != "" {
-		labelStyle = labelStyle.Foreground(lipgloss.Color(labelFg))
-	}
 
 	style := kCfg.Style
 	if style == "" {
@@ -169,13 +165,13 @@ func (c *Coordinator) renderKimiWidget(clientID string, width int) string {
 	}
 	header := icon + "Kimi [" + strings.Join(legendParts, "/") + "]"
 	headerText := textwidth.Truncate(header, width, "")
-	result.WriteString(labelStyle.Render(headerText) + "\n")
+	result.WriteString(paintFg(headerText, labelFg) + "\n")
 
 	switch {
 	case usages == nil && fetchErr != nil:
-		result.WriteString(labelStyle.Render("  unreachable") + "\n")
+		result.WriteString(paintFg("  unreachable", labelFg) + "\n")
 	case usages == nil:
-		result.WriteString(labelStyle.Render("  …") + "\n")
+		result.WriteString(paintFg("  …", labelFg) + "\n")
 	default:
 		termBg := c.chromeBGForClientLocked(clientID)
 		inBar := func(f *float64, resetMs int64, bw int) string {
@@ -188,7 +184,7 @@ func (c *Coordinator) renderKimiWidget(clientID string, width int) string {
 		if showWeekly {
 			cells = append(cells, kimiQuotaCell(usages.Weekly()))
 		}
-		result.WriteString(renderQuotaCells(cells, width, labelStyle, inBar))
+		result.WriteString(renderQuotaCells(cells, width, labelFg, inBar))
 	}
 
 	for i := 0; i < kCfg.PaddingBot; i++ {

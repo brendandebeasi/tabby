@@ -14652,7 +14652,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				// Render hamburger menu button with the gradient's DARK tail colour so
 				// the row's right edge continues the shadow instead of popping back to
 				// the base colour.
-				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
+				menuBtn := paintFg(" ⋮", inactiveFg)
 				if bg != "" {
 					menuBtn = c.applyBackgroundFill(menuBtn, gradientTailColor(bg), menuBtnW)
 				}
@@ -14691,7 +14691,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				// Render hamburger menu button with the gradient's DARK tail colour so
 				// the row's right edge continues the shadow instead of popping back to
 				// the base colour.
-				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
+				menuBtn := paintFg(" ⋮", inactiveFg)
 				if bg != "" {
 					menuBtn = c.applyBackgroundFill(menuBtn, gradientTailColor(bg), menuBtnW)
 				}
@@ -15024,7 +15024,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 				}
 
 				// Render hamburger menu button with matching background
-				menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
+				menuBtn := paintFg(" ⋮", inactiveFg)
 				if bgColor != "" {
 					menuBtn = c.applyBackgroundFill(menuBtn, rowEndBg, menuBtnW)
 				}
@@ -15272,7 +15272,7 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 					}
 
 					var paneBtns string
-					menuBtn := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Render(" ⋮")
+					menuBtn := paintFg(" ⋮", inactiveFg)
 					paneBtns = menuBtn
 					if paneLineBg != "" {
 						paneBtns = c.applyBackgroundFill(paneBtns, paneRowEndBg, paneMenuW)
@@ -16225,25 +16225,11 @@ func (c *Coordinator) renderClockWidget(clientID string, width int) string {
 
 	// Use clock's Fg, fall back to background-aware default for visibility
 	fgColor := c.getInactiveTextColorWithFallback(clock.Fg)
-	style := lipgloss.NewStyle()
-	if fgColor != "" {
-		style = style.Foreground(lipgloss.Color(fgColor))
-	}
 	// Paint bg explicitly so trailing/inter-widget cells don't revert to
 	// terminal default after a theme flip. Uses the coordinator's resolved
 	// terminal bg (config override > theme > detector).
-	if bg := c.chromeBGForClientLocked(clientID); bg != "" {
-		style = style.Background(lipgloss.Color(bg))
-	}
-
-	dividerStyle := lipgloss.NewStyle()
+	bgColor := c.chromeBGForClientLocked(clientID)
 	dividerFg := c.getInactiveTextColorWithFallback(clock.DividerFg)
-	if dividerFg != "" {
-		dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
-	}
-	if bg := c.chromeBGForClientLocked(clientID); bg != "" {
-		dividerStyle = dividerStyle.Background(lipgloss.Color(bg))
-	}
 
 	var result strings.Builder
 
@@ -16257,7 +16243,7 @@ func (c *Coordinator) renderClockWidget(clientID string, width int) string {
 			dividerWidth = 1
 		}
 		dividerLine := strings.Repeat(clock.Divider, width/dividerWidth)
-		result.WriteString(dividerStyle.Render(dividerLine) + "\n")
+		result.WriteString(paintOn(dividerLine, dividerFg, bgColor) + "\n")
 	}
 
 	for i := 0; i < clock.PaddingTop; i++ {
@@ -16269,7 +16255,7 @@ func (c *Coordinator) renderClockWidget(clientID string, width int) string {
 	if timePadding < 0 {
 		timePadding = 0
 	}
-	result.WriteString(style.Render(strings.Repeat(" ", timePadding)+timeStr) + "\n")
+	result.WriteString(paintOn(strings.Repeat(" ", timePadding)+timeStr, fgColor, bgColor) + "\n")
 
 	if clock.ShowDate {
 		dateFormat := clock.DateFmt
@@ -16281,7 +16267,7 @@ func (c *Coordinator) renderClockWidget(clientID string, width int) string {
 		if datePadding < 0 {
 			datePadding = 0
 		}
-		result.WriteString(style.Render(strings.Repeat(" ", datePadding)+dateStr) + "\n")
+		result.WriteString(paintOn(strings.Repeat(" ", datePadding)+dateStr, fgColor, bgColor) + "\n")
 	}
 
 	for i := 0; i < clock.PaddingBot; i++ {
@@ -16294,7 +16280,7 @@ func (c *Coordinator) renderClockWidget(clientID string, width int) string {
 			dividerWidth = 1
 		}
 		dividerLine := strings.Repeat(clock.DividerBottom, width/dividerWidth)
-		result.WriteString(dividerStyle.Render(dividerLine) + "\n")
+		result.WriteString(paintOn(dividerLine, dividerFg, bgColor) + "\n")
 	}
 
 	for i := 0; i < clock.MarginBot; i++ {
@@ -16796,23 +16782,26 @@ func quotaBarBody(txt string, pct, bw int, barFgOverride, labelFg, termBg string
 // constrainWidgetWidth's non-ANSI-aware truncation. Available bar columns =
 // width - left indent(1) - right pad(1) - joins(n-1); distributed evenly with
 // the remainder going to the leftmost bars.
-func renderQuotaCells(cells []quotaCell, width int, labelStyle lipgloss.Style, inBar func(f *float64, resetMs int64, bw int) string) string {
+func renderQuotaCells(cells []quotaCell, width int, labelFg string, inBar func(f *float64, resetMs int64, bw int) string) string {
 	n := len(cells)
 	if n == 0 {
 		return ""
 	}
+	// The indent and the joins are the same painted space every time; render
+	// it once rather than once per cell.
+	sp := paintFg(" ", labelFg)
 	avail := width - 2 - (n - 1)
 	if avail < n { // too narrow for bars: just show percentages
 		var b strings.Builder
-		b.WriteString(labelStyle.Render(" "))
+		b.WriteString(sp)
 		for i, c := range cells {
 			if i > 0 {
-				b.WriteString(labelStyle.Render(" "))
+				b.WriteString(sp)
 			}
 			if c.frac == nil {
-				b.WriteString(labelStyle.Render("--"))
+				b.WriteString(paintFg("--", labelFg))
 			} else {
-				b.WriteString(labelStyle.Render(fmt.Sprintf("%d%%", int(*c.frac*100+0.5))))
+				b.WriteString(paintFg(fmt.Sprintf("%d%%", int(*c.frac*100+0.5)), labelFg))
 			}
 		}
 		return b.String() + "\n"
@@ -16820,10 +16809,10 @@ func renderQuotaCells(cells []quotaCell, width int, labelStyle lipgloss.Style, i
 	base := avail / n
 	rem := avail % n
 	var b strings.Builder
-	b.WriteString(labelStyle.Render(" "))
+	b.WriteString(sp)
 	for i, c := range cells {
 		if i > 0 {
-			b.WriteString(labelStyle.Render(" "))
+			b.WriteString(sp)
 		}
 		bw := base
 		if i < rem {
@@ -16963,12 +16952,8 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 		divider = "-"
 	}
 	dividerFg := c.getInactiveTextColorWithFallback(tcCfg.DividerFg)
-	dividerStyle := lipgloss.NewStyle()
-	if dividerFg != "" {
-		dividerStyle = dividerStyle.Foreground(lipgloss.Color(dividerFg))
-	}
 	if dw := lipgloss.Width(divider); dw > 0 {
-		result.WriteString(dividerStyle.Render(strings.Repeat(divider, width/dw)) + "\n")
+		result.WriteString(paintFg(strings.Repeat(divider, width/dw), dividerFg) + "\n")
 	}
 
 	for i := 0; i < tcCfg.PaddingTop; i++ {
@@ -16976,10 +16961,6 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 	}
 
 	labelFg := c.getInactiveTextColorWithFallback(tcCfg.Fg)
-	labelStyle := lipgloss.NewStyle()
-	if labelFg != "" {
-		labelStyle = labelStyle.Foreground(lipgloss.Color(labelFg))
-	}
 
 	// Header icon by style.
 	style := tcCfg.Style
@@ -17036,16 +17017,16 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 	// correct; zone.Mark's bytes are zero-width and stripped before
 	// constrainWidgetWidth.
 	headerText := textwidth.Truncate(header, width, "")
-	headerStyle := labelStyle
+	headerFg, headerBold := labelFg, false
 	switch {
 	case degraded:
-		headerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd93d")).Bold(true)
+		headerFg, headerBold = "#ffd93d", true
 	case extraActive:
 		// Amber-but-not-bold so it's clearly a "heads up" without screaming as
 		// loudly as a degraded model.
-		headerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd93d"))
+		headerFg = "#ffd93d"
 	}
-	renderedHeader := headerStyle.Render(headerText)
+	renderedHeader := paint(headerText, headerFg, "", headerBold)
 	if degraded {
 		renderedHeader = zone.Mark("teamclaude:open_degraded", renderedHeader)
 	}
@@ -17053,9 +17034,9 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 
 	switch {
 	case status == nil && fetchErr != nil:
-		result.WriteString(labelStyle.Render("  unreachable") + "\n")
+		result.WriteString(paintFg("  unreachable", labelFg) + "\n")
 	case status == nil:
-		result.WriteString(labelStyle.Render("  …") + "\n")
+		result.WriteString(paintFg("  …", labelFg) + "\n")
 	default:
 		// Compact layout: the shown quota windows on one line under the account
 		// name, with the percentage drawn INSIDE each bar so the bars can use the
@@ -17068,7 +17049,7 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 			return renderQuotaBar(f, resetMs, bw, tcCfg.BarFg, labelFg, termBg)
 		}
 		quotaLine := func(cells []quotaCell) string {
-			return renderQuotaCells(cells, width, labelStyle, inBar)
+			return renderQuotaCells(cells, width, labelFg, inBar)
 		}
 
 		// Detect duplicate accounts (same email surfacing as both a personal and
@@ -17163,41 +17144,40 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 			// The active state is carried by a green LEFT marker (below), not by
 			// coloring the name. Extra-usage amber (paid territory) still tints the
 			// whole row so it reads as a clear heads-up.
-			nameStyle := labelStyle
+			nameFg, nameBold := labelFg, false
 			if a.IsActiveExtraUsage {
-				nameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd93d")).Bold(true)
+				nameFg, nameBold = "#ffd93d", true
 			}
 			// Marker color precedence: extra-usage amber wins, then an actively-
 			// serving (non-rate-limited) account goes green so multiple live accounts
 			// stand out at a glance.
-			markerStyle := nameStyle
+			markerFg, markerBold := nameFg, nameBold
 			switch {
 			case a.IsActiveExtraUsage:
-				// keep amber (already set via nameStyle)
+				// keep amber (already set via nameFg)
 			case active && !a.RateLimited():
-				markerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6bcb77")).Bold(true)
+				markerFg, markerBold = "#6bcb77", true
 			}
 
 			// Dim separators / tier; conns green when actively serving (amber under
 			// extra usage), dim otherwise. dividerStyle carries the (dim) divider
 			// color when configured; it renders plain when not, which is fine.
-			sepStyle := dividerStyle
 			var b strings.Builder
-			b.WriteString(markerStyle.Render(marker))
-			b.WriteString(nameStyle.Render(nameText))
+			b.WriteString(paint(marker, markerFg, "", markerBold))
+			b.WriteString(paint(nameText, nameFg, "", nameBold))
 			if connsSeg != "" {
-				connStyle := labelStyle
+				connFg := labelFg
 				// Green only when more than one request is genuinely in flight.
 				if a.ActiveRequests > 1 {
-					connStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6bcb77"))
+					connFg = "#6bcb77"
 				}
 				if a.IsActiveExtraUsage {
-					connStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd93d"))
+					connFg = "#ffd93d"
 				}
-				b.WriteString(sepStyle.Render(sep) + connStyle.Render(connsSeg))
+				b.WriteString(paintFg(sep, dividerFg) + paintFg(connsSeg, connFg))
 			}
 			if tierSeg != "" {
-				b.WriteString(sepStyle.Render(sep) + nameStyle.Render(tierSeg))
+				b.WriteString(paintFg(sep, dividerFg) + paint(tierSeg, nameFg, "", nameBold))
 			}
 			result.WriteString(b.String() + "\n")
 
@@ -17241,7 +17221,7 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 				if textwidth.Cells(budgetText) > avail {
 					budgetText = textwidth.Truncate(budgetText, avail, "")
 				}
-				result.WriteString(labelStyle.Render(indent) + bStyle.Render(budgetText) + "\n")
+				result.WriteString(paintFg(indent, labelFg) + bStyle.Render(budgetText) + "\n")
 			}
 
 			var cells []quotaCell
@@ -17416,7 +17396,7 @@ func colorStatusBar(bar string, value int) string {
 	} else {
 		color = "#6bcb77" // Green - good
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(bar)
+	return paintFg(bar, color)
 }
 
 // buildSpriteRow builds a row with sprites placed at their positions
@@ -23263,17 +23243,12 @@ func (c *Coordinator) applyBackgroundFill(content string, bgColor string, width 
 		return content
 	}
 
-	// Use lipgloss to generate a profile-aware background escape sequence
-	// rather than hardcoding TrueColor (\x1b[48;2;R;G;Bm). This lets
-	// 256-color clients (e.g. Mosh) receive the correct escape format.
-	bgStyle := lipgloss.NewStyle().Background(lipgloss.Color(bgColor))
-	// Render a null-byte probe to extract just the opening escape sequence.
-	rendered := bgStyle.Render("\x00")
-	parts := strings.SplitN(rendered, "\x00", 2)
-	bgEsc := ""
-	if len(parts) >= 1 {
-		bgEsc = parts[0]
-	}
+	// A profile-aware background escape rather than a hardcoded TrueColor
+	// \x1b[48;2;R;G;Bm, so 256-colour clients (e.g. Mosh) get the right format.
+	// paintOpen derives it the same way this used to -- render a probe, keep
+	// what precedes it -- but keeps the answer instead of re-parsing bgColor
+	// through fmt.Sscanf on every filled line of every frame.
+	bgEsc := paintOpen("", bgColor, false)
 	resetEsc := "\x1b[0m"
 
 	lines := strings.Split(content, "\n")
