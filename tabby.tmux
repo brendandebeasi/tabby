@@ -6,6 +6,7 @@
 #   Phase 1 (sync):  pre-start daemon + split sidebar pane (~20ms)
 #   Phase 2 (async): hooks, bindings, options via TABBY_DEFERRED=1 re-entry
 
+# shellcheck disable=SC1007  # `CDPATH=` deliberately clears CDPATH for this cd.
 CURRENT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Optional kill-switch for troubleshooting.
@@ -43,6 +44,7 @@ if [ "${TABBY_DEFERRED:-}" != "1" ]; then
     # there and spawns a daemon+sidebar scoped to it — whose sidebar shows ONLY the
     # minimized windows (the "switching to a minimized window shows only minimized"
     # bug).
+    # shellcheck disable=SC2317  # `exit` is the fallback when not sourced.
     case "$_SESSION_NAME" in
         _tabby_*) return 0 2>/dev/null || exit 0 ;;
     esac
@@ -92,6 +94,7 @@ fi
 # ============================================================
 
 # Resolve config path (only needed for deferred init, not fast path)
+# shellcheck source=scripts/_config_path.sh
 source "$CURRENT_DIR/scripts/_config_path.sh"
 CONFIG_FILE="$TABBY_CONFIG_FILE"
 
@@ -440,7 +443,7 @@ fi
 if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
     # Clear any existing status-format settings that would override window-status
     for i in {0..10}; do
-        tmux set-option -gu status-format[$i] 2>/dev/null || true
+        tmux set-option -gu "status-format[$i]" 2>/dev/null || true
     done
     tmux set-option -gu status-format 2>/dev/null || true
 
@@ -480,9 +483,6 @@ if [[ "$POSITION" == "top" ]] || [[ "$POSITION" == "bottom" ]]; then
     tmux bind-key -T root MouseDown3Status command-prompt -I "#W" "rename-window '%%' ; set-window-option @tabby_name_locked 1"
     tmux bind-key -T root MouseDown1StatusRight new-window
 fi
-
-# Refresh status bar: trivial inline command (replaces refresh_status.sh)
-REFRESH_STATUS_SCRIPT="tmux refresh-client -S"
 
 # All lifecycle scripts now handled by Go binaries via `tabby hook`
 HOOK_BIN="$CURRENT_DIR/bin/tabby hook"
@@ -722,11 +722,11 @@ tmux bind-key -T root DoubleClick1Pane \
 
 normalize_global_key() {
 	local key="$1"
-	if [[ "$key" == cmd+shift+[ ]] || [[ "$key" == cmd+[ ]]; then
+	if [[ "$key" == "cmd+shift+[" ]] || [[ "$key" == "cmd+[" ]]; then
 		echo "M-{"
 		return
 	fi
-	if [[ "$key" == cmd+shift+] ]] || [[ "$key" == cmd+] ]]; then
+	if [[ "$key" == "cmd+shift+]" ]] || [[ "$key" == "cmd+]" ]]; then
 		echo "M-}"
 		return
 	fi
