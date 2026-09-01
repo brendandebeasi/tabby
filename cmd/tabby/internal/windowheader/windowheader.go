@@ -22,11 +22,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
 	"github.com/brendandebeasi/tabby/pkg/renderer"
+	"github.com/brendandebeasi/tabby/pkg/textwidth"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -561,7 +561,7 @@ func (m rendererModel) View() string {
 		lines := strings.Split(m.content, "\n")
 		out := make([]string, 0, len(lines))
 		for _, row := range lines {
-			rowWidth := runewidth.StringWidth(stripAnsi(row))
+			rowWidth := textwidth.Cells(stripAnsi(row))
 			if rowWidth < m.width {
 				row += strings.Repeat(" ", m.width-rowWidth)
 			}
@@ -575,7 +575,7 @@ func (m rendererModel) View() string {
 	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
 		line = line[:idx]
 	}
-	lineWidth := runewidth.StringWidth(stripAnsi(line))
+	lineWidth := textwidth.Cells(stripAnsi(line))
 	if lineWidth < m.width {
 		line += strings.Repeat(" ", m.width-lineWidth)
 	}

@@ -40,6 +40,7 @@ import (
 	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/perf"
 	"github.com/brendandebeasi/tabby/pkg/teamclaude"
+	"github.com/brendandebeasi/tabby/pkg/textwidth"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -12514,7 +12515,7 @@ func abbreviatePath(path string, maxWidth int) string {
 			// Too long, use previous iteration
 			if len(components) == 1 {
 				// Even one component is too long, truncate it
-				return runewidth.Truncate(result+components[0], maxWidth, "")
+				return textwidth.Truncate(result+components[0], maxWidth, "")
 			}
 			components = components[1:] // Remove the component we just tried to add
 			break
@@ -12610,7 +12611,7 @@ func (c *Coordinator) renderPhoneCarousel(windowID string, width int, headerBg s
 		style := styleFor(base, pressed)
 		gw := uniseg.StringWidth(glyph)
 		if gw > cellW {
-			return style.Render(runewidth.Truncate(glyph, cellW, ""))
+			return style.Render(textwidth.Truncate(glyph, cellW, ""))
 		}
 		padTotal := cellW - gw
 		leftPad := padTotal / 2
@@ -13011,7 +13012,7 @@ func (c *Coordinator) RenderHeaderForClient(clientID string, width, height int) 
 
 	// Truncate label if needed (shouldn't be necessary with our path abbreviation, but just in case)
 	if uniseg.StringWidth(labelText) > availWidth {
-		labelText = runewidth.Truncate(labelText, availWidth, "~")
+		labelText = textwidth.Truncate(labelText, availWidth, "~")
 	}
 
 	// Style: active pane bold+bright, others dimmed
@@ -13556,7 +13557,7 @@ func (c *Coordinator) RenderPaneHeaderForClient(clientID string, width, height i
 	labelText := prefixText + " " + hostSeg + pathSeg + titleSeg
 
 	if uniseg.StringWidth(labelText) > availWidth {
-		labelText = runewidth.Truncate(labelText, availWidth, "~")
+		labelText = textwidth.Truncate(labelText, availWidth, "~")
 	}
 
 	isActive := foundPane.Active && isWindowActive
@@ -16544,13 +16545,13 @@ func renderQuotaBar(f *float64, resetMs int64, bw int, barFgOverride, labelFg, t
 		txt = fmt.Sprintf("%d%%", pct)
 		// Append reset countdown (e.g. "90% 2h") only if it fits.
 		if d := shortResetDur(resetMs); d != "" {
-			if full := txt + " " + d; runewidth.StringWidth(full) <= bw {
+			if full := txt + " " + d; textwidth.Cells(full) <= bw {
 				txt = full
 			}
 		}
 	}
-	if runewidth.StringWidth(txt) > bw {
-		txt = runewidth.Truncate(txt, bw, "")
+	if textwidth.Cells(txt) > bw {
+		txt = textwidth.Truncate(txt, bw, "")
 	}
 	key := quotaBarKey{txt: txt, pct: pct, bw: bw, barFg: barFgOverride, labelFg: labelFg, termBg: termBg}
 	if v, ok := quotaBarCache.Load(key); ok {
@@ -16572,7 +16573,7 @@ func renderQuotaBar(f *float64, resetMs int64, bw int, barFgOverride, labelFg, t
 // memoized on inputs that hold still between countdown ticks.
 func quotaBarBody(txt string, pct, bw int, barFgOverride, labelFg, termBg string) string {
 	// Center the text within the bar width.
-	pad := bw - runewidth.StringWidth(txt)
+	pad := bw - textwidth.Cells(txt)
 	left := pad / 2
 	content := strings.Repeat(" ", left) + txt + strings.Repeat(" ", pad-left)
 	runes := []rune(content)
@@ -16738,17 +16739,17 @@ func teamClaudeTruncateName(name string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	if runewidth.StringWidth(name) <= max {
+	if textwidth.Cells(name) <= max {
 		return name
 	}
 	if i := strings.LastIndex(name, " ("); i >= 0 && strings.HasSuffix(name, ")") {
 		suffix := name[i:] // " (Gunpowder)"
-		sw := runewidth.StringWidth(suffix)
+		sw := textwidth.Cells(suffix)
 		if max-sw >= 2 { // room for at least one head char + ellipsis + suffix
-			return runewidth.Truncate(name[:i], max-sw, "…") + suffix
+			return textwidth.Truncate(name[:i], max-sw, "…") + suffix
 		}
 	}
-	return runewidth.Truncate(name, max, "…")
+	return textwidth.Truncate(name, max, "…")
 }
 
 // renderTeamClaudeWidget renders per-account Claude quota left, from the cached
@@ -16854,7 +16855,7 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 	// Truncate on the PLAIN text (markers/ANSI added afterward) so width math is
 	// correct; zone.Mark's bytes are zero-width and stripped before
 	// constrainWidgetWidth.
-	headerText := runewidth.Truncate(header, width, "")
+	headerText := textwidth.Truncate(header, width, "")
 	headerStyle := labelStyle
 	switch {
 	case degraded:
@@ -16956,8 +16957,8 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 			}
 
 			const sep = "|" // compact, no surrounding spaces
-			sepW := runewidth.StringWidth(sep)
-			markerW := runewidth.StringWidth(marker)
+			sepW := textwidth.Cells(sep)
+			markerW := textwidth.Cells(marker)
 			availForName := width - markerW
 
 			// Reserve the conns segment (rightmost) first, then the tier segment.
@@ -16965,13 +16966,13 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 			// is truncated (with an ellipsis) to whatever's left, down to 1 col.
 			connsSeg, tierSeg := "", ""
 			if conns != "" {
-				if w := sepW + runewidth.StringWidth(conns); availForName-w >= 1 {
+				if w := sepW + textwidth.Cells(conns); availForName-w >= 1 {
 					connsSeg = conns
 					availForName -= w
 				}
 			}
 			if tierTok != "" {
-				if w := sepW + runewidth.StringWidth(tierTok); availForName-w >= 1 {
+				if w := sepW + textwidth.Cells(tierTok); availForName-w >= 1 {
 					tierSeg = tierTok
 					availForName -= w
 				}
@@ -17053,12 +17054,12 @@ func (c *Coordinator) renderTeamClaudeWidget(clientID string, width int) string 
 				}
 				// Truncate to fit width (indent + text); the leading "$" makes the
 				// purpose obvious even if the trailing limit is cut.
-				avail := width - runewidth.StringWidth(indent)
+				avail := width - textwidth.Cells(indent)
 				if avail < 1 {
 					avail = 1
 				}
-				if runewidth.StringWidth(budgetText) > avail {
-					budgetText = runewidth.Truncate(budgetText, avail, "")
+				if textwidth.Cells(budgetText) > avail {
+					budgetText = textwidth.Truncate(budgetText, avail, "")
 				}
 				result.WriteString(labelStyle.Render(indent) + bStyle.Render(budgetText) + "\n")
 			}
@@ -17125,7 +17126,7 @@ func constrainWidgetWidth(content string, maxWidth int) string {
 		if lineWidth > maxWidth {
 			if !hadOverflow {
 				coordinatorDebugLog.Printf("OVERFLOW DETECTED: line width %d > max %d", lineWidth, maxWidth)
-				coordinatorDebugLog.Printf("  Line preview: %s", runewidth.Truncate(stripped, 50, "..."))
+				coordinatorDebugLog.Printf("  Line preview: %s", textwidth.Truncate(stripped, 50, "..."))
 				hadOverflow = true
 			}
 			// Truncate to the same metric the overflow check used.

@@ -27,10 +27,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 
 	"github.com/brendandebeasi/tabby/pkg/renderer"
+	"github.com/brendandebeasi/tabby/pkg/textwidth"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 )
 
@@ -264,12 +264,12 @@ func renderButton(label, key, bg, bgSel string, rows, width int, selected bool) 
 	if selected {
 		text = ">  " + text + "  <"
 	}
-	lw := runewidth.StringWidth(text)
+	lw := textwidth.Cells(text)
 	pad := width - lw
 	if pad < 0 {
 		pad = 0
-		text = runewidth.Truncate(text, width, "")
-		lw = runewidth.StringWidth(text)
+		text = textwidth.Truncate(text, width, "")
+		lw = textwidth.Cells(text)
 		pad = width - lw
 		if pad < 0 {
 			pad = 0
@@ -294,10 +294,10 @@ func renderButton(label, key, bg, bgSel string, rows, width int, selected bool) 
 // centerOnCard centers s across width using the given style, padding the
 // remainder with card-bg spaces so the whole row is painted.
 func centerOnCard(s string, width int, style lipgloss.Style) string {
-	lw := runewidth.StringWidth(s)
+	lw := textwidth.Cells(s)
 	if lw > width {
-		s = runewidth.Truncate(s, width, "")
-		lw = runewidth.StringWidth(s)
+		s = textwidth.Truncate(s, width, "")
+		lw = textwidth.Cells(s)
 	}
 	pad := width - lw
 	left := pad / 2

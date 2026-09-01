@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/brendandebeasi/tabby/pkg/kimicode"
+	"github.com/brendandebeasi/tabby/pkg/textwidth"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 // kimiURL resolves the coding API base URL from config, falling back to an
@@ -168,7 +168,7 @@ func (c *Coordinator) renderKimiWidget(clientID string, width int) string {
 		legendParts = append(legendParts, "W")
 	}
 	header := icon + "Kimi [" + strings.Join(legendParts, "/") + "]"
-	headerText := runewidth.Truncate(header, width, "")
+	headerText := textwidth.Truncate(header, width, "")
 	result.WriteString(labelStyle.Render(headerText) + "\n")
 
 	switch {

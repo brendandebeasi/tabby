@@ -18,7 +18,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 
 	"github.com/brendandebeasi/tabby/pkg/daemon"
@@ -341,7 +340,7 @@ func (m popupModel) closeButtonRows() string {
 	blank := st.Render(strings.Repeat(" ", max0(m.width)))
 
 	label := "☰  Close" // hamburger, echoing the button that opened it
-	lw := runewidth.StringWidth(label)
+	lw := textwidth.Cells(label)
 	pad := m.width - lw
 	if pad < 0 {
 		pad = 0
