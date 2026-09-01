@@ -819,6 +819,14 @@ type Coordinator struct {
 	mainContentBytes   atomic.Int64
 	mainContentRegions atomic.Int64
 
+	// How tall each widget-zone variant rendered, keyed by widgetZoneKey.
+	// The zones' *content* changes every frame -- clocks tick, quota bars
+	// move -- but their line count almost never does, and the line count is
+	// the only thing the fit decision needs. Cleared whenever the config is
+	// reloaded, since that is the one thing that can change a zone's height
+	// at a fixed width.
+	widgetZoneHeights sync.Map // widgetZoneKey -> widgetZoneHeight
+
 	// Mobile border hide state: tracks whether tmux pane-border-style has been
 	// overridden to the terminal background (invisible) because a narrow client
 	// is active. Set by syncMobileBorders() — currently dead code, but the
@@ -5184,6 +5192,7 @@ func (c *Coordinator) applyRefreshSnapshot(snap *refreshSnapshot) {
 	if newCfg != nil {
 		c.config = newCfg
 		applyContrastConfig(newCfg)
+		c.widgetZoneHeights.Clear()
 	}
 
 	// Note: collapsed groups state is managed in-memory and synced to tmux options
@@ -12274,12 +12283,20 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	headerContent, headerRegions := c.generateSidebarHeader(width, clientID)
 	headerLines := strings.Count(headerContent, "\n")
 
-	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(clientID, width, false, false)
-	topWidgetLines := strings.Count(topWidgets, "\n")
-	bottomWidgetLines := strings.Count(bottomWidgets, "\n")
-
 	mainContent, mainRegions, floatLine := c.generateMainContent(clientID, width, height)
 	mainContentLines := strings.Count(mainContent, "\n")
+
+	// Start from the variant that fit last time. On a viewport that is
+	// permanently too tight for the pet -- the common case once a session has
+	// more than a handful of tabs -- this is what stops every frame rendering
+	// the pet's zone in full only to measure it, throw it away, and render
+	// the zones again without it.
+	hidePet, hideDebugBar := c.predictWidgetEscalation(width, height, headerLines, mainContentLines)
+
+	topWidgets, topWRegions, bottomWidgets, bottomWRegions := c.generateWidgetZones(clientID, width, hidePet, hideDebugBar)
+	topWidgetLines := strings.Count(topWidgets, "\n")
+	bottomWidgetLines := strings.Count(bottomWidgets, "\n")
+	c.rememberWidgetZoneHeight(width, hidePet, hideDebugBar, topWidgetLines, bottomWidgetLines)
 
 	maxMainLines := height - headerLines - topWidgetLines - bottomWidgetLines
 	if maxMainLines < 0 {
@@ -12290,10 +12307,17 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 	// pet entirely. Debug bar costs 3 lines (divider + 2 status lines), so
 	// suppressing it often keeps Whiskers visible when tabs are otherwise
 	// just barely overflowing.
-	if maxMainLines < mainContentLines && c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.DebugBar {
+	//
+	// These two blocks now only run when the prediction above was wrong --
+	// the first frame at a given width, or the frame on which the fit
+	// changes. Each one refreshes the cache it just disagreed with, so the
+	// next frame predicts correctly.
+	if maxMainLines < mainContentLines && c.config.Widgets.Pet.Enabled && c.config.Widgets.Pet.DebugBar && !hidePet && !hideDebugBar {
+		hideDebugBar = true
 		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(clientID, width, false, true)
 		topWidgetLines = strings.Count(topWidgets, "\n")
 		bottomWidgetLines = strings.Count(bottomWidgets, "\n")
+		c.rememberWidgetZoneHeight(width, false, true, topWidgetLines, bottomWidgetLines)
 		maxMainLines = height - headerLines - topWidgetLines - bottomWidgetLines
 		if maxMainLines < 0 {
 			maxMainLines = 0
@@ -12302,10 +12326,12 @@ func (c *Coordinator) RenderForClient(clientID string, width, height int) *daemo
 
 	// Auto-hide pet when viewport is too small to show all tabs even after
 	// dropping the debug bar.
-	if maxMainLines < mainContentLines && c.config.Widgets.Pet.Enabled {
+	if maxMainLines < mainContentLines && c.config.Widgets.Pet.Enabled && !hidePet {
+		hidePet, hideDebugBar = true, false
 		topWidgets, topWRegions, bottomWidgets, bottomWRegions = c.generateWidgetZones(clientID, width, true, false)
 		topWidgetLines = strings.Count(topWidgets, "\n")
 		bottomWidgetLines = strings.Count(bottomWidgets, "\n")
+		c.rememberWidgetZoneHeight(width, true, false, topWidgetLines, bottomWidgetLines)
 		maxMainLines = height - headerLines - topWidgetLines - bottomWidgetLines
 		if maxMainLines < 0 {
 			maxMainLines = 0
@@ -15218,6 +15244,64 @@ func (c *Coordinator) generateMainContent(clientID string, width, height int) (s
 	c.mainContentBytes.Store(int64(min(s.Len(), maxContentSizeHint)))
 	c.mainContentRegions.Store(int64(min(len(regions), maxContentSizeHint)))
 	return s.String(), regions, floatLine
+}
+
+// widgetZoneKey identifies one widget-zone variant: the escalation level, at
+// a width. Height depends on neither the client nor the frame's content.
+type widgetZoneKey struct {
+	width        int
+	hidePet      bool
+	hideDebugBar bool
+}
+
+// widgetZoneHeight is how many lines a variant's top and bottom zones took.
+type widgetZoneHeight struct{ top, bottom int }
+
+func (c *Coordinator) rememberWidgetZoneHeight(width int, hidePet, hideDebugBar bool, top, bottom int) {
+	c.widgetZoneHeights.Store(
+		widgetZoneKey{width: width, hidePet: hidePet, hideDebugBar: hideDebugBar},
+		widgetZoneHeight{top: top, bottom: bottom},
+	)
+}
+
+// predictWidgetEscalation picks the widget-zone variant to render first,
+// using the heights the previous frames measured.
+//
+// It only ever predicts a more escalated variant when a measured height says
+// the gentler one will not fit, and it returns the un-escalated variant
+// whenever it has nothing measured to go on -- so the very first frame at a
+// width behaves exactly as it did before this cache existed, and the
+// escalation checks in RenderForClient still have the final say.
+func (c *Coordinator) predictWidgetEscalation(width, height, headerLines, mainContentLines int) (hidePet, hideDebugBar bool) {
+	if !c.config.Widgets.Pet.Enabled {
+		return false, false
+	}
+	// fits reports whether a measured variant leaves room for every tab.
+	// An unmeasured variant reports false for "measured" and is never chosen.
+	fits := func(hidePet, hideDebugBar bool) (ok, measured bool) {
+		v, found := c.widgetZoneHeights.Load(widgetZoneKey{width: width, hidePet: hidePet, hideDebugBar: hideDebugBar})
+		if !found {
+			return false, false
+		}
+		h := v.(widgetZoneHeight)
+		return max(height-headerLines-h.top-h.bottom, 0) >= mainContentLines, true
+	}
+
+	ok, measured := fits(false, false)
+	if ok || !measured {
+		return false, false
+	}
+	if c.config.Widgets.Pet.DebugBar {
+		if ok, measured := fits(false, true); ok {
+			return false, true
+		} else if !measured {
+			return false, false
+		}
+	}
+	if _, measured := fits(true, false); !measured {
+		return false, false
+	}
+	return true, false
 }
 
 // maxContentSizeHint caps the remembered render size so one freak frame --
@@ -21648,6 +21732,7 @@ func (c *Coordinator) setGroupMarkerExact(groupName, marker string) bool {
 	c.stateMu.Lock()
 	c.config = cfg
 	applyContrastConfig(cfg)
+	c.widgetZoneHeights.Clear()
 	c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 	c.stateMu.Unlock()
 	return true
@@ -22747,6 +22832,7 @@ func (c *Coordinator) handleKeyInput(clientID string, input *daemon.InputPayload
 			c.stateMu.Lock()
 			c.config = cfg
 			applyContrastConfig(cfg)
+			c.widgetZoneHeights.Clear()
 			c.grouped = grouping.GroupWindowsWithOptions(c.windows, c.config.Groups, c.config.Sidebar.ShowEmptyGroups)
 			c.computeVisualPositions()
 			moves := c.syncWindowIndices()
