@@ -1,0 +1,57 @@
+name: Auto-tag
+
+# Tags the next patch release on every push to main, then dispatches the
+# release workflow against it. The tag push alone would not fire release.yml:
+# events from GITHUB_TOKEN do not cascade into other workflows.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: write # needed to workflow-dispatch release.yml
+
+concurrency:
+  # Serialize so two quick pushes never race for the same next tag.
+  group: autotag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag next patch and release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags must be local to compute the next one
+
+      - name: Tag next patch
+        id: tag
+        run: |
+          set -euo pipefail
+          # HEAD already carrying a tag means this push is a retag or a
+          # branch-sync; pushing another patch would be noise.
+          if git tag --points-at HEAD | grep -q '^v'; then
+            echo "skipped=already-tagged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          latest=${latest:-v0.0.0}
+          ver=${latest#v}
+          IFS=. read -r major minor patch <<< "$ver"
+          next="v${major}.${minor}.$((patch + 1))"
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
+            tag -a "$next" -m "$next"
+          git push origin "$next"
+          echo "skipped=" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the release build
+        if: steps.tag.outputs.skipped == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.next }}
+        run: gh workflow run release.yml -f tag="$TAG"

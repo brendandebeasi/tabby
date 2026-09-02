@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [v0.2.1] — 2026-09-01
+
+### Changed
+
+- Every push to `main` now tags the next patch release (`vX.Y.Z+1`) and kicks off the release build, so `releases/latest/download` always serves current `main` and installs stop waiting for a hand-cut tag.
 
 ### Fixed
 
