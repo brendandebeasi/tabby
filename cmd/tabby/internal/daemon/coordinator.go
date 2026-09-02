@@ -579,7 +579,17 @@ func restoreWindowFocus(windowID string) {
 		firingTTY = strings.TrimSpace(globalCoordinator.NewWindowStatus().FiringTTY)
 	}
 	if firingTTY != "" {
-		if err := tmuxRun("switch-client", "-c", firingTTY, "-t", windowID); err != nil {
+		// Qualify the target with the firing client's OWN session. Grouped
+		// sessions share every window, and tmux resolves a bare `@id` to the
+		// newest session in the group — an unqualified switch-client drags the
+		// firing client into a peer session and the new window never receives
+		// focus in the session the user is actually looking at (same failure
+		// window nav's per-client switch qualifies against).
+		target := windowID
+		if sess := sessionIDForClientTTY(firingTTY); sess != "" {
+			target = sess + ":" + windowID
+		}
+		if err := tmuxRun("switch-client", "-c", firingTTY, "-t", target); err != nil {
 			logEvent("RESTORE_WINDOW_FOCUS_PERCLIENT_ERR target=%s tty=%s err=%v", windowID, firingTTY, err)
 			// Fall through to global path so we still attempt recovery.
 		} else {
@@ -11189,6 +11199,22 @@ func clientDisplayedWindowID() string {
 	return windowIDForClientTTY(tty)
 }
 
+// sessionIDForClientTTY returns the $N session id the client on this tty is
+// attached to, for qualifying switch-client targets under grouped sessions.
+func sessionIDForClientTTY(tty string) string {
+	tty = strings.TrimSpace(tty)
+	if tty == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	out, err := tmux.CmdContext(ctx, "display-message", "-c", tty, "-p", "#{session_id}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // windowIDForClientTTY answers "which window is the client on this tty
 // showing?". Callers that have already elected a client pass its tty directly
 // rather than going through clientDisplayedWindowID, which would re-run the
@@ -14432,15 +14458,25 @@ func (c *Coordinator) sidebarRenderGroups() []grouping.GroupedWindows {
 // (action dashboard_toggle). It is highlighted while the dashboard is active.
 func (c *Coordinator) appendDashboardRow(s *strings.Builder, regions *[]daemon.ClickableRegion, currentLine *int, clientID string, width int, inactiveFg, activeIndicator string) {
 	active := c.dashboardWindowID != ""
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color(inactiveFg)).Bold(true)
 	label := " 0. Dashboard"
 	if active {
 		label = " 0. Dashboard " + activeIndicator
 	}
-	if bg := c.chromeBGForClientLocked(clientID); bg != "" {
-		style = style.Background(lipgloss.Color(bg))
+	// Render through paint + applyBackgroundFill like every other row: the
+	// row must carry the tinted chrome bg on every cell to width, or it shows
+	// up as an untinted stripe. The fg must be contrast-aware too: inactiveFg
+	// is chosen to sit on group color chips, and on the light chrome bg it is
+	// near-white-on-near-white.
+	bg := c.chromeBGForClientLocked(clientID)
+	fg := inactiveFg
+	if bg != "" {
+		fg = contrastFg(bg, active)
 	}
-	s.WriteString(style.Render(label) + "\n")
+	row := paintFgBold(label, fg)
+	if bg != "" {
+		row = c.applyBackgroundFill(row, bg, width)
+	}
+	s.WriteString(row + "\n")
 	*regions = append(*regions, daemon.ClickableRegion{
 		StartLine: *currentLine,
 		EndLine:   *currentLine,

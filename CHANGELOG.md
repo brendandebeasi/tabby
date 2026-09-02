@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- A new window created from a grouped session (`new-session -t`) now actually takes focus. The post-spawn focus restore ran `switch-client -c <tty> -t @<window>` with a bare window id, and tmux resolves a bare `@id` to the newest session in the group — the firing client was dragged into a peer session and the new tab never came forward in the session the user was looking at. The restore now qualifies the target with the firing client's own session, the same form window navigation already uses.
+- The sidebar's `0. Dashboard` row is readable again under the tab-color tint. It was the only row still drawn with a raw lipgloss style, landing as near-white bold text with no background on the light tinted chrome. It now renders through the same `paint` + `applyBackgroundFill` path as every other row, with a contrast-aware foreground instead of the chip-tuned `inactive_fg`.
+
 ## [v0.1.0] — 2026-09-01
 
 First tagged release. Everything below was already on `main`; the tag exists so an install can name a version, and so the TPM installer fix has something to point at. Pre-1.0 is deliberate — the config format and the key bindings are still moving.
