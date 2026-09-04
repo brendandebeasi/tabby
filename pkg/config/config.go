@@ -507,6 +507,8 @@ type Sidebar struct {
 	NewTabButton         bool             `yaml:"new_tab_button"`
 	CloseButton          bool             `yaml:"close_button"`
 	NewGroupButton       bool             `yaml:"new_group_button"`
+	ResizeButtons        *bool            `yaml:"resize_buttons,omitempty"` // Show the < > resize buttons pinned at the sidebar bottom (default: true)
+	NavButtons           *bool            `yaml:"nav_buttons,omitempty"`    // Show the ▲ ▼ prev/next window buttons pinned at the sidebar bottom (default: true)
 	ShowEmptyGroups      bool             `yaml:"show_empty_groups"`
 	SortBy               string           `yaml:"sort_by"`
 	Debug                bool             `yaml:"debug"`                  // Enable debug logging to /tmp/tabby-debug.log

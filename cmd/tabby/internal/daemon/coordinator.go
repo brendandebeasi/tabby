@@ -16023,7 +16023,8 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 	// On phone, the window-header button bar already provides prev/next navigation
 	// (with matching up/down arrows), so the sidebar's dedicated nav buttons would
 	// be redundant.
-	if c.ActiveClientProfile() != "phone" {
+	showNav := c.config.Sidebar.NavButtons == nil || *c.config.Sidebar.NavButtons
+	if showNav && c.ActiveClientProfile() != "phone" {
 		entries = append(entries, widgetEntry{
 			name:     "nav_buttons",
 			zone:     "bottom",
@@ -16221,7 +16222,8 @@ func (c *Coordinator) generateWidgetZones(clientID string, width int, skipPet, s
 	// Add resize buttons to bottom (always last). Hidden on phone where the
 	// sidebar has no room to shrink/grow and the < / > glyphs would look like
 	// navigation arrows that duplicate the window-header button bar.
-	if c.ActiveClientProfile() != "phone" {
+	showResize := c.config.Sidebar.ResizeButtons == nil || *c.config.Sidebar.ResizeButtons
+	if showResize && c.ActiveClientProfile() != "phone" {
 		bottomEntries = append(bottomEntries, widgetEntry{
 			name:     "resize_buttons",
 			zone:     "bottom",
