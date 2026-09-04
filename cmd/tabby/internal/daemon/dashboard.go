@@ -50,7 +50,10 @@ func paneBorderFormat() string {
 		fromActivePane("#{b:pane_current_path}"))
 
 	contentPane := "#{?" + narrowWindow + "," + emptyStrip + "," + direct + "}"
-	chromePane := "#{?#{&&:" + narrowWindow + "," + windowHeaderMatch + "}," + active + "," + blankStrip + "}"
+	// Local change: an empty label instead of blankStrip so tmux draws its
+	// border line unbroken above the sidebar; blankStrip's single centred space
+	// punched a one-cell gap into the line.
+	chromePane := "#{?#{&&:" + narrowWindow + "," + windowHeaderMatch + "}," + active + ",}"
 	return "#{?" + chromeMatch + "," + chromePane + "," + contentPane + "}"
 }
 
