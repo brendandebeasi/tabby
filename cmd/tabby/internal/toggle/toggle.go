@@ -146,12 +146,17 @@ func disable(sessionID, pidFile, sockPath, sentinel, watchdogPidFile, stateFile 
 
 	os.WriteFile(stateFile, []byte("disabled"), 0644)
 	run("tmux", "set-option", "@tabby_sidebar", "disabled")
+	// tabby.tmux's fast path, ensure-daemon.sh and `tabby new-window` all read
+	// the GLOBAL option (show-options -g). Leaving the global at "enabled" lets
+	// the next new window respawn the daemon and sidebar we just tore down.
+	run("tmux", "set-option", "-g", "@tabby_sidebar", "disabled")
 	run("tmux", "set-option", "-g", "status", "on")
 }
 
 func enable(sessionID, exe, pidFile, sockPath, watchdogPidFile, stateFile string) {
 	os.WriteFile(stateFile, []byte("enabled"), 0644)
 	run("tmux", "set-option", "@tabby_sidebar", "enabled")
+	run("tmux", "set-option", "-g", "@tabby_sidebar", "enabled")
 
 	windowIDs := listWindowIDs()
 
