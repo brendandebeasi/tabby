@@ -30,9 +30,19 @@ func TestPaneBorderFormatPhoneDividerDescribesTheActivePane(t *testing.T) {
 	assert.Contains(t, f, "#{P:#{?pane_active,#{pane_current_command},}}",
 		"the divider label must read across to the active pane")
 	assert.Contains(t, f, windowHeaderMatch,
-		"only the button-bar pane carries the phone label, not the sidebar")
-	assert.Contains(t, f, emptyStrip,
-		"the content pane's unlabelled strip must blank rather than rule the top row")
+		"the button-bar pane carries the bottom phone label, not the sidebar")
+}
+
+// The phone shows the label twice: on the content pane's own strip at the top
+// of the screen, and above the button bar at the bottom. The top one is the
+// plain pane-scoped label, with no narrow-window guard blanking it.
+func TestPaneBorderFormatLabelsContentPaneAtEveryWidth(t *testing.T) {
+	f := paneBorderFormat()
+
+	direct := paneBorderLabel("#{pane_title}", "#{pane_current_command}", "#{b:pane_current_path}")
+	assert.Contains(t, f, direct)
+	assert.Equal(t, 1, strings.Count(f, narrowWindow),
+		"the only width test left is the one picking the button bar's label source")
 }
 
 // fromActivePane is the one piece with no plain-text fallback: a typo yields a

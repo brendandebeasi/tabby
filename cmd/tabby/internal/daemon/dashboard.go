@@ -39,31 +39,23 @@ import (
 //
 // `#,` is the literal escape for a comma inside #{?…} branches.
 func paneBorderFormat() string {
-	// Wide windows: every content pane's own strip describes that pane.
-	// Narrow windows: the only strip that carries a label is the one above the
-	// phone button bar, and it describes the window's ACTIVE pane rather than
-	// the button-bar pane it physically sits on.
+	// Every content pane's own strip describes that pane, at every width. On a
+	// phone that strip is the top row of the screen; the strip above the button
+	// bar carries a second copy at the bottom, sourced from the window's ACTIVE
+	// pane rather than the button-bar pane it physically sits on.
 	direct := paneBorderLabel("#{pane_title}", "#{pane_current_command}", "#{b:pane_current_path}")
 	active := paneBorderLabel(
 		fromActivePane("#{pane_title}"),
 		fromActivePane("#{pane_current_command}"),
 		fromActivePane("#{b:pane_current_path}"))
 
-	contentPane := "#{?" + narrowWindow + "," + emptyStrip + "," + direct + "}"
 	chromePane := "#{?#{&&:" + narrowWindow + "," + windowHeaderMatch + "}," + active + "," + blankStrip + "}"
-	return "#{?" + chromeMatch + "," + chromePane + "," + contentPane + "}"
+	return "#{?" + chromeMatch + "," + chromePane + "," + direct + "}"
 }
 
 // blankStrip is a colour-neutral empty border row: it blends with the terminal
 // default bg so no visible divider is drawn above the pane.
 const blankStrip = "#[align=centre#,fg=default#,bg=default] "
-
-// emptyStrip blanks a border row outright, where blankStrip only overlays a
-// single space and leaves tmux's line drawn either side of it. Used for the
-// content pane's strip on a phone, which carries no label and would otherwise
-// draw a full-width rule across the top of the screen. The pad is any width
-// past the widest plausible window; tmux truncates it to the row.
-const emptyStrip = "#[align=left#,fg=default#,bg=default]#{p200: }"
 
 // narrowWindow is the format-level equivalent of computeProfile's phone test,
 // evaluated per window so a resize re-decides without a tmux write from Go.

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- On a phone the pane title now appears at the top of the screen as well as above the button bar. The content pane's own border strip was blanked below 100 columns to avoid ruling a line across the top row; it carries the same `<icon> <tab name> | <pane title>` label the bottom strip does, so the tab you are on is identifiable without looking to the foot of the screen. Costs no rows — the strip was already drawn, just empty.
+
+## [v0.2.2] — 2026-09-06
+
 ### Added
 
 - Widgets fold away. Name any of `clock`, `pet`, `git`, `session`, `claude`, `teamclaude`, `kimi` in `sidebar.collapsible_widgets` (or `[all]`) and each one gets a disclosure icon at its top-left, the same `⊟` / `⊞` control tab groups use. Click it and the widget collapses to a single row, click again and it comes back. While the widget is open the icon rides on the widget's existing first row, so the affordance costs no vertical space. A collapsed widget is not rendered at all, so a sidebar with teamclaude and the clock folded costs two rows instead of nine. The state lives in the `@tabby_collapsed_widgets` tmux option, so it survives a daemon restart and every client on the server sees the same thing.
