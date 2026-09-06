@@ -674,7 +674,10 @@ type Coordinator struct {
 	windowVisualPos map[string]int // window ID -> visual position in sidebar
 	config          *config.Config
 	collapsedGroups map[string]bool
-	spinnerFrame    int
+	// collapsedWidgets holds the sidebar widgets the user has collapsed to
+	// their single disclosure row; persisted in @tabby_collapsed_widgets.
+	collapsedWidgets map[string]bool
+	spinnerFrame     int
 
 	// Git state (cached)
 	gitBranch string
@@ -1695,6 +1698,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		cwdColors:          make(map[string]CWDColorMapping),
 		gitTopCache:        make(map[string]string),
 		collapsedGroups:    make(map[string]bool),
+		collapsedWidgets:   make(map[string]bool),
 		clientWidths:       make(map[string]int),
 		clientHeights:      make(map[string]int),
 		clientPrevWidth:    make(map[string]int),
@@ -1750,6 +1754,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 
 	// Load collapsed groups from tmux option
 	c.loadCollapsedGroups()
+	c.loadCollapsedWidgets()
 
 	// Load pet state from shared file
 	c.loadPetState()
@@ -14205,6 +14210,7 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 	hdr := c.config.Sidebar.Header
 	headerText := hdr.ResolvedText()
 	headerHeight := hdr.ResolvedHeight()
+	paddingTop := hdr.ResolvedPaddingTop()
 	paddingBottom := hdr.ResolvedPaddingBottom()
 	centered := headerBoolDefault(hdr.Centered)
 	activeColor := headerBoolDefault(hdr.ActiveColor)
@@ -14315,6 +14321,11 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 	// Render header rows. When the header has a bg colour, fill each row with the
 	// same lighter -> base gradient the live tab rows use so the TABBY header reads
 	// as part of the same surface; otherwise keep the flat/transparent layout.
+	// Transparent padding rows above the header (no bg color)
+	for i := 0; i < paddingTop; i++ {
+		s.WriteString(strings.Repeat(" ", width) + "\n")
+	}
+
 	for line := 0; line < headerHeight; line++ {
 		// Build the row's text portion (may carry fg ANSI); the fill pads the rest.
 		rowContent := ""
@@ -14351,7 +14362,7 @@ func (c *Coordinator) generateSidebarHeader(width int, clientID string) (string,
 	// window list below.
 	if headerHeight > 0 {
 		regions = append(regions, daemon.ClickableRegion{
-			StartLine: 0, EndLine: headerHeight - 1,
+			StartLine: paddingTop, EndLine: paddingTop + headerHeight - 1,
 			Action: "sidebar_header_area", Target: "",
 		})
 	}
@@ -15932,7 +15943,9 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 			name:     "clock",
 			zone:     pos,
 			priority: c.config.Widgets.Clock.Priority,
-			content:  constrainWidgetWidth(c.renderClockWidget(clientID, width), width),
+			content: c.collapsibleWidget(clientID, "clock", width, func() string {
+				return constrainWidgetWidth(c.renderClockWidget(clientID, width), width)
+			}),
 		})
 	}
 
@@ -15946,7 +15959,9 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 			name:     "pet",
 			zone:     pos,
 			priority: c.config.Widgets.Pet.Priority,
-			content:  c.renderPetWidget(clientID, width, skipDebugBar),
+			content: c.collapsibleWidget(clientID, "pet", width, func() string {
+				return c.renderPetWidget(clientID, width, skipDebugBar)
+			}),
 		})
 	}
 
@@ -15960,7 +15975,9 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 			name:     "git",
 			zone:     pos,
 			priority: c.config.Widgets.Git.Priority,
-			content:  constrainWidgetWidth(c.renderGitWidget(width), width),
+			content: c.collapsibleWidget(clientID, "git", width, func() string {
+				return constrainWidgetWidth(c.renderGitWidget(width), width)
+			}),
 		})
 	}
 
@@ -15974,7 +15991,9 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 			name:     "session",
 			zone:     pos,
 			priority: c.config.Widgets.Session.Priority,
-			content:  constrainWidgetWidth(c.renderSessionWidget(width), width),
+			content: c.collapsibleWidget(clientID, "session", width, func() string {
+				return constrainWidgetWidth(c.renderSessionWidget(width), width)
+			}),
 		})
 	}
 
@@ -15988,7 +16007,9 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 			name:     "claude",
 			zone:     pos,
 			priority: c.config.Widgets.Claude.Priority,
-			content:  constrainWidgetWidth(c.renderClaudeWidget(width), width),
+			content: c.collapsibleWidget(clientID, "claude", width, func() string {
+				return constrainWidgetWidth(c.renderClaudeWidget(width), width)
+			}),
 		})
 	}
 
@@ -16002,7 +16023,9 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 			name:     "teamclaude",
 			zone:     pos,
 			priority: c.config.Widgets.TeamClaude.Priority,
-			content:  constrainWidgetWidth(c.renderTeamClaudeWidget(clientID, width), width),
+			content: c.collapsibleWidget(clientID, "teamclaude", width, func() string {
+				return constrainWidgetWidth(c.renderTeamClaudeWidget(clientID, width), width)
+			}),
 		})
 	}
 
@@ -16016,7 +16039,9 @@ func (c *Coordinator) collectWidgetEntries(clientID string, width int, skipPet, 
 			name:     "kimi",
 			zone:     pos,
 			priority: c.config.Widgets.Kimi.Priority,
-			content:  constrainWidgetWidth(c.renderKimiWidget(clientID, width), width),
+			content: c.collapsibleWidget(clientID, "kimi", width, func() string {
+				return constrainWidgetWidth(c.renderKimiWidget(clientID, width), width)
+			}),
 		})
 	}
 
@@ -16273,24 +16298,38 @@ func (c *Coordinator) renderClockWidget(clientID string, width int) string {
 		result.WriteString("\n")
 	}
 
-	timeStr := now.Format(timeFormat)
-	timePadding := (width - lipgloss.Width(timeStr)) / 2
-	if timePadding < 0 {
-		timePadding = 0
+	dateFormat := clock.DateFmt
+	if dateFormat == "" {
+		dateFormat = "Mon Jan 2"
 	}
-	result.WriteString(paintOn(strings.Repeat(" ", timePadding)+timeStr, fgColor, bgColor) + "\n")
 
-	if clock.ShowDate {
-		dateFormat := clock.DateFmt
-		if dateFormat == "" {
-			dateFormat = "Mon Jan 2"
+	centerRow := func(text string) string {
+		pad := (width - lipgloss.Width(text)) / 2
+		if pad < 0 {
+			pad = 0
 		}
-		dateStr := now.Format(dateFormat)
-		datePadding := (width - lipgloss.Width(dateStr)) / 2
-		if datePadding < 0 {
-			datePadding = 0
+		return paintOn(strings.Repeat(" ", pad)+text, fgColor, bgColor) + "\n"
+	}
+
+	timeStr := now.Format(timeFormat)
+
+	if clock.ShowDate && clock.SingleLine {
+		sep := clock.Separator
+		if sep == "" {
+			sep = "  "
 		}
-		result.WriteString(paintOn(strings.Repeat(" ", datePadding)+dateStr, fgColor, bgColor) + "\n")
+		// A narrow sidebar can't fit both halves; fall back to the time alone
+		// rather than letting the row wrap and eat a second line anyway.
+		combined := timeStr + sep + now.Format(dateFormat)
+		if lipgloss.Width(combined) > width {
+			combined = timeStr
+		}
+		result.WriteString(centerRow(combined))
+	} else {
+		result.WriteString(centerRow(timeStr))
+		if clock.ShowDate {
+			result.WriteString(centerRow(now.Format(dateFormat)))
+		}
 	}
 
 	for i := 0; i < clock.PaddingBot; i++ {
@@ -19381,6 +19420,19 @@ func (c *Coordinator) handleSemanticAction(clientID string, input *daemon.InputP
 		// Save async - don't block render on multiple tmux round-trips
 		go c.saveCollapsedGroups()
 		return false // No tmux window state change
+
+	case "toggle_widget":
+		c.stateMu.Lock()
+		name := input.ResolvedTarget
+		if c.collapsedWidgets[name] {
+			delete(c.collapsedWidgets, name)
+		} else {
+			c.collapsedWidgets[name] = true
+		}
+		c.stateMu.Unlock()
+		// Save async - don't block render on the tmux round-trip
+		go c.saveCollapsedWidgets()
+		return true // repaint now; the widget zone just changed height
 
 	case "open_degraded":
 		// Click on the TeamClaude widget's warning icon -> open the

@@ -85,8 +85,11 @@ tints the header with the active window's group colour, so the top of the
 sidebar tells you where you are at a glance.
 
 The banner itself is `text` (default `TABBY`), `height` in rows (default `3`),
-and `padding_bottom`, the blank rows under it (default `1`). Set `height: 0` to
-drop the banner and start the window list at the top of the sidebar:
+and `padding_top` / `padding_bottom`, the blank rows above and below it
+(default `0` and `1`). The text sits on the middle row when `centered`, so
+raising `height` pads the banner evenly; the padding rows are transparent and
+sit outside the coloured block. Set `height: 0` to drop the banner and start the
+window list at the top of the sidebar:
 
 ```yaml
 sidebar:

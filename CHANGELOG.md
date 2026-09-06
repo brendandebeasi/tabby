@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Widgets fold away. Name any of `clock`, `pet`, `git`, `session`, `claude`, `teamclaude`, `kimi` in `sidebar.collapsible_widgets` (or `[all]`) and each one gets a disclosure icon at its top-left, the same `⊟` / `⊞` control tab groups use. Click it and the widget collapses to a single row, click again and it comes back. While the widget is open the icon rides on the widget's existing first row, so the affordance costs no vertical space. A collapsed widget is not rendered at all, so a sidebar with teamclaude and the clock folded costs two rows instead of nine. The state lives in the `@tabby_collapsed_widgets` tmux option, so it survives a daemon restart and every client on the server sees the same thing.
+
+- `widgets.clock.single_line` puts the date beside the time instead of under it, with `separator` (default two spaces) between them. On a sidebar too narrow to fit both, the date drops rather than wrapping onto the row the setting exists to save.
+
+- `sidebar.header.padding_top` adds transparent rows above the TABBY banner, matching the `padding_bottom` that was already there. Together with `height`, the banner's total rows are now set from config in both directions; the click region moves with the padding, so the banner stays clickable where it is drawn.
+
+
 ## [v0.2.1] — 2026-09-01
 
 ### Changed

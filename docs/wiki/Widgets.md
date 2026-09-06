@@ -56,6 +56,36 @@ closer to the bottom edge, so priority 100 renders below priority 50.
 Divider characters worth trying: `─` light, `━` heavy, `=` double, `-` ASCII,
 `·` dots, or a space for pure spacing with no visible rule.
 
+## Collapsing widgets
+
+Name a widget in `sidebar.collapsible_widgets` and it gets a disclosure icon at
+its top-left corner, the same `⊟` / `⊞` control tab groups use. Clicking it
+folds the widget down to a single row, and clicking again brings it back:
+
+```yaml
+sidebar:
+  collapsible_widgets: [clock, teamclaude, kimi]   # or: [all]
+```
+
+```
+⊟──────────────    <- click the icon
+  3:04:05 PM
+  Mon Jan 2
+
+⊞ time             <- collapsed, 1 row
+```
+
+While the widget is open the icon sits on the widget's own first row (its margin
+or divider line), so turning collapsing on costs no vertical space.
+
+Collapsible names: `clock`, `pet`, `git`, `session`, `claude`, `teamclaude`,
+`kimi`. A collapsed widget is not rendered at all, though background polling
+(teamclaude, kimi) keeps running. The state lives in the
+`@tabby_collapsed_widgets` tmux option, so it survives a daemon restart and is
+shared by every client on the server. The icons follow
+`sidebar.colors.disclosure_expanded` / `disclosure_collapsed` /
+`disclosure_fg`.
+
 ## Clock
 
 ```yaml
@@ -65,7 +95,12 @@ widgets:
     format: "15:04:05"
     show_date: true
     date_format: "Mon Jan 2"
+    single_line: false      # true: date sits beside the time
+    separator: "  "         # gap between them when single_line
 ```
+
+`single_line` folds the clock into one row. On a sidebar too narrow for both,
+the date drops rather than wrapping onto the row it was meant to save.
 
 Both formats use Go's reference time, `Mon Jan 2 15:04:05 MST 2006`.
 

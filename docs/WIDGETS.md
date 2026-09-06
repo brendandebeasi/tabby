@@ -21,6 +21,8 @@ widgets:
     format: "15:04:05"       # Go time format string
     show_date: true
     date_format: "Mon Jan 2"
+    single_line: false       # true puts the date on the time's row
+    separator: "  "          # gap between time and date when single_line
     fg: "#888888"            # Text color
     bg: ""                   # Background color (optional)
     position: bottom         # "top" or "bottom"
@@ -74,7 +76,7 @@ Common divider options:
 [divider line]
 [padding_top lines]
 [time]
-[date if show_date]
+[date if show_date]          (same row as [time] when single_line)
 [padding_bottom lines]
 [divider_bottom line]
 [margin_bottom lines]

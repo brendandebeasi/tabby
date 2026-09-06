@@ -378,6 +378,8 @@ type ClockWidget struct {
 	Format        string `yaml:"format"`         // Go time format (default: "15:04:05")
 	ShowDate      bool   `yaml:"show_date"`      // Show date below time
 	DateFmt       string `yaml:"date_format"`    // Date format (default: "Mon Jan 2")
+	SingleLine    bool   `yaml:"single_line"`    // Render date on the same row as the time instead of below it
+	Separator     string `yaml:"separator"`      // Gap between time and date in single_line mode (default: "  ")
 	Fg            string `yaml:"fg"`             // Text color
 	Bg            string `yaml:"bg"`             // Background color
 	Position      string `yaml:"position"`       // "top" or "bottom" (default: bottom)
@@ -454,6 +456,7 @@ type SidebarHeader struct {
 	// and actually remove the banner.
 	Text          *string `yaml:"text,omitempty"`           // Header text (default: "TABBY")
 	Height        *int    `yaml:"height,omitempty"`         // Total header rows (default: 3, 0 hides the header)
+	PaddingTop    *int    `yaml:"padding_top,omitempty"`    // Transparent rows above header (default: 0)
 	PaddingBottom *int    `yaml:"padding_bottom,omitempty"` // Transparent rows below header (default: 1)
 	Centered      *bool   `yaml:"centered"`                 // Center text horizontally and vertically (default: true)
 	ActiveColor   *bool   `yaml:"active_color"`             // Color based on active window group (default: true)
@@ -487,6 +490,15 @@ func (h SidebarHeader) ResolvedHeight() int {
 	return *h.Height
 }
 
+// ResolvedPaddingTop returns the transparent rows above the header, or 0 when
+// the key is absent.
+func (h SidebarHeader) ResolvedPaddingTop() int {
+	if h.PaddingTop == nil || *h.PaddingTop < 0 {
+		return 0
+	}
+	return *h.PaddingTop
+}
+
 // ResolvedPaddingBottom returns the transparent rows below the header, or 1
 // when the key is absent. An explicit `padding_bottom: 0` removes the gap.
 func (h SidebarHeader) ResolvedPaddingBottom() int {
@@ -511,6 +523,7 @@ type Sidebar struct {
 	SortBy               string           `yaml:"sort_by"`
 	Debug                bool             `yaml:"debug"`                  // Enable debug logging to /tmp/tabby-debug.log
 	LineHeight           int              `yaml:"line_height"`            // Extra blank lines between items (0=compact, 1+=spaced)
+	CollapsibleWidgets   []string         `yaml:"collapsible_widgets"`    // Widgets that get a clickable disclosure icon at their top-left: clock, pet, git, session, claude, teamclaude, kimi. "all" covers every one. Collapsed state persists in @tabby_collapsed_widgets.
 	ActionZone           string           `yaml:"action_zone"`            // Widget zone for action buttons: "top" or "bottom" (default: "bottom")
 	ActionPriority       int              `yaml:"action_priority"`        // Priority within zone (default: 90)
 	PrefixMode           bool             `yaml:"prefix_mode"`            // Flat window list with group prefixes (SD| NAME) instead of hierarchy
