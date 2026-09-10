@@ -2934,7 +2934,7 @@ func (c *Coordinator) ApplyNewWindowGroup() {
 	if status.State != "ready" || status.WindowID == "" {
 		return
 	}
-	if status.Group == "" || status.Group == "Default" {
+	if status.Group == "" {
 		return
 	}
 	tmuxCmd("set-window-option", "-t", status.WindowID, "@tabby_group", status.Group).Run()
@@ -5039,6 +5039,33 @@ func (c *Coordinator) presetGroupForCWD(cwd string) string {
 		}
 	}
 	return best
+}
+
+// resolveDirColor returns the color associated with cwd (from remembered
+// appearance in cwdColors or a matching configured group's working_dir theme),
+// or "" if none is defined.
+func (c *Coordinator) resolveDirColor(cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return ""
+	}
+	top := c.gitToplevel(cwd)
+	if top != "" {
+		if mapping, ok := c.getCWDColorMapping(top); ok && strings.TrimSpace(mapping.Color) != "" {
+			return strings.TrimSpace(mapping.Color)
+		}
+	}
+	if mapping, ok := c.getCWDColorMapping(cwd); ok && strings.TrimSpace(mapping.Color) != "" {
+		return strings.TrimSpace(mapping.Color)
+	}
+	if presetGroup := c.presetGroupForCWD(cwd); presetGroup != "" && c.config != nil {
+		for _, g := range c.config.Groups {
+			if g.Name == presetGroup && strings.TrimSpace(g.Theme.Bg) != "" {
+				return strings.TrimSpace(g.Theme.Bg)
+			}
+		}
+	}
+	return ""
 }
 
 // expandWorkingDir normalizes a config working_dir for prefix matching: a leading
@@ -22504,20 +22531,10 @@ func (c *Coordinator) showGroupContextMenu(clientID string, groupName string, po
 }
 
 // createNewWindowDefault creates a plain new window (the sidebar "+", prefix-c,
-// M-n). The new tab opens in the CURRENT pane's directory and is born into the
-// group that DIRECTORY maps to — so a "+" from a tab in ~/git/studiodome lands in
-// the same group as its sibling, because they share a dir. Deriving the group up
-// front (rather than letting the window pop into Default and get re-filed on the
-// next refresh) matters for focus: Default sorts first, so a transient stop there
-// yanks the new tab — and the user's focus — to the top of the sidebar.
-//
-// Group resolution: (1) the configured group whose working_dir contains the
-// starting dir (presetGroupForCWD, most-specific wins); (2) else the current
-// tab's own group, so a same-dir tab still sits with its sibling even when the
-// dir maps to no configured working_dir — but only for a LOCAL current tab, since
-// a remote tab's group reflects an ssh host, not this new local dir; (3) else
-// Default. A group's dedicated "+" is a different path (createNewWindowWithOverrides
-// with an explicit group).
+// M-n). The new window is created in the same group the user is in (or Default),
+// with the same color as the current window (unless the directory has another
+// color from remembered appearance or configured working_dir), and appears below
+// the user's current window in the tab bar.
 //
 // Delegates to the bin/new-window binary for atomic creation: the sidebar
 // renderer is spawned BEFORE the user sees the window, eliminating the
@@ -22530,6 +22547,11 @@ func (c *Coordinator) createNewWindowDefault(clientID string) {
 	activeID := ""
 	if strings.HasPrefix(clientID, "window-header:") {
 		activeID = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+	} else if strings.HasPrefix(clientID, "sidebar:") {
+		activeID = strings.TrimSpace(strings.TrimPrefix(clientID, "sidebar:"))
+	}
+	if i := strings.IndexByte(activeID, '#'); i >= 0 {
+		activeID = activeID[:i]
 	}
 	if activeID == "" {
 		activeID = c.ActiveWindowID()
@@ -22563,28 +22585,33 @@ func (c *Coordinator) createNewWindowDefault(clientID string) {
 		}
 	}
 	inheritSSH := c.config == nil || c.config.Sidebar.NewTabInheritSSH == nil || *c.config.Sidebar.NewTabInheritSSH
-	group := c.presetGroupForCWD(cwd) // dir-driven (config read is safe under RLock)
 	c.stateMu.RUnlock()
 
-	// A new tab opened from an ssh/mosh session re-runs that connection so it
-	// lands on the SAME host. Give it its parent's group/color/icon up front so
-	// it's born in the right place instead of flickering through the local launch
-	// dir's identity until the daemon detects the ssh and
-	// restoreAppearanceOnTransition repaints it. When re-run is off it falls
-	// through to the local dir-driven grouping below.
-	//
-	// remoteCmd is resolved here (external ps/pgrep I/O, so after RUnlock) for the
-	// legacy fallback path; the bin/new-window spawner self-detects from the
-	// firing pane, so it doesn't need it passed in.
-	// The dir-driven group always wins when the cwd resolves one: inheriting over
-	// it hands the parent's identity to a tab that already knows its own, which
-	// then latches permanently via @tabby_color_seeded.
-	color, icon, remoteCmd := "", "", ""
-	if curRemote && inheritSSH {
-		if group == "" {
-			group = curGroup
+	group := curGroup
+	if group == "" {
+		group = "Default"
+	}
+
+	effectiveCurrentColor := curColor
+	if effectiveCurrentColor == "" && c.config != nil {
+		for _, g := range c.config.Groups {
+			if g.Name == group && strings.TrimSpace(g.Theme.Bg) != "" {
+				effectiveCurrentColor = strings.TrimSpace(g.Theme.Bg)
+				break
+			}
 		}
+	}
+
+	dirColor := c.resolveDirColor(cwd)
+	color := ""
+	if dirColor != "" && !strings.EqualFold(dirColor, effectiveCurrentColor) {
+		color = dirColor
+	} else if curColor != "" {
 		color = curColor
+	}
+
+	icon, remoteCmd := "", ""
+	if curRemote && inheritSSH {
 		icon = curIcon
 		if activePanePID > 0 {
 			remoteCmd = tmux.RemoteCommandForPane(activePanePID)
@@ -22648,61 +22675,74 @@ func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, worki
 	// avoid yanking other attached clients on every multi-client elector
 	// flip (which produced the "+ then cycles other windows" bug).
 	firingTTY := ""
+	sourceWindowID := ""
 	if strings.HasPrefix(clientID, "window-header:") {
-		sourceWindowID := strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+		sourceWindowID = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
+	} else if strings.HasPrefix(clientID, "sidebar:") {
+		sourceWindowID = strings.TrimSpace(strings.TrimPrefix(clientID, "sidebar:"))
+	}
+	if i := strings.IndexByte(sourceWindowID, '#'); i >= 0 {
+		sourceWindowID = sourceWindowID[:i]
+	}
+	if sourceWindowID == "" {
+		sourceWindowID = c.ActiveWindowID()
+	}
+	if sourceWindowID != "" {
 		firingTTY = strings.TrimSpace(clientTTYForWindow(sourceWindowID))
 	}
 
 	c.SetNewWindowInFlight(currentGroup, workingDir, firingTTY)
 
-	// Find the new-window binary (sibling of this daemon binary)
-	newWindowBin := ""
-	if exe, err := os.Executable(); err == nil {
-		newWindowBin = filepath.Join(filepath.Dir(exe), "new-window")
+	args := []string{"-session", c.sessionID, "-print-id"}
+	if firingTTY != "" {
+		args = append(args, "-client-tty", firingTTY)
+	}
+	if sourceWindowID != "" {
+		args = append(args, "-after", sourceWindowID)
+	}
+	if currentGroup != "" {
+		args = append(args, "-group", currentGroup)
+	}
+	if workingDir != "" {
+		args = append(args, "-path", workingDir)
+	}
+	if color != "" {
+		args = append(args, "-color", color)
+	}
+	if icon != "" {
+		args = append(args, "-icon", icon)
+	}
+	if c.sidebarHidden {
+		args = append(args, "-no-sidebar")
 	}
 
-	if newWindowBin != "" {
-		if _, err := os.Stat(newWindowBin); err == nil {
-			args := []string{"-session", c.sessionID}
-			sourceWindowID := ""
-			if strings.HasPrefix(clientID, "window-header:") {
-				sourceWindowID = strings.TrimSpace(strings.TrimPrefix(clientID, "window-header:"))
-			}
-			if sourceTTY := strings.TrimSpace(clientTTYForWindow(sourceWindowID)); sourceTTY != "" {
-				args = append(args, "-client-tty", sourceTTY)
-			}
-			if currentGroup != "" {
-				args = append(args, "-group", currentGroup)
-			}
-			if workingDir != "" {
-				args = append(args, "-path", workingDir)
-			}
-			if color != "" {
-				args = append(args, "-color", color)
-			}
-			if icon != "" {
-				args = append(args, "-icon", icon)
-			}
-			if c.sidebarHidden {
-				args = append(args, "-no-sidebar")
-			}
-			logEvent("NEW_WINDOW_BINARY bin=%s session=%s group=%s", newWindowBin, c.sessionID, currentGroup)
-			out, err := exec.Command(newWindowBin, args...).CombinedOutput()
-			if err != nil {
-				logEvent("NEW_WINDOW_BINARY_ERR err=%v (falling back to legacy)", err)
+	var cmd *exec.Cmd
+	newWindowBin := ""
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "new-window")
+		if _, err := os.Stat(candidate); err == nil {
+			newWindowBin = candidate
+			cmd = exec.Command(newWindowBin, args...)
+		} else {
+			newWindowBin = exe
+			cmd = exec.Command(exe, append([]string{"new-window"}, args...)...)
+		}
+	}
+
+	if cmd != nil {
+		logEvent("NEW_WINDOW_BINARY bin=%s session=%s group=%s", newWindowBin, c.sessionID, currentGroup)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			logEvent("NEW_WINDOW_BINARY_ERR err=%v (falling back to legacy)", err)
+			c.ClearNewWindowStatus()
+		} else {
+			newID := firstToken(strings.TrimSpace(string(out)), "@")
+			if newID == "" {
+				logEvent("NEW_WINDOW_BINARY_ERR err=empty_window_id (falling back to legacy)")
 				c.ClearNewWindowStatus()
-				// Fall through to legacy path below
-				newWindowBin = ""
 			} else {
-				newID := strings.TrimSpace(string(out))
-				if newID == "" {
-					logEvent("NEW_WINDOW_BINARY_ERR err=empty_window_id (falling back to legacy)")
-					c.ClearNewWindowStatus()
-					newWindowBin = ""
-				} else {
-					c.SetNewWindowReady(newID)
-					return
-				}
+				c.SetNewWindowReady(newID)
+				return
 			}
 		}
 	}
@@ -22710,25 +22750,26 @@ func (c *Coordinator) createNewWindowWithOverrides(clientID, currentGroup, worki
 	// Legacy fallback: create window (focused), assign group, let hook chain handle renderer.
 	// Used when bin/new-window is not built (e.g. fresh clone without install.sh).
 	logEvent("NEW_WINDOW_LEGACY session=%s group=%s", c.sessionID, currentGroup)
-	// The ssh/mosh re-run is send-keys'd into the new tab's interactive shell
-	// below, NOT passed as new-window's shell-command: a "cmd; exec $SHELL" wrapper
-	// runs ssh under a non-interactive shell with no foreground process group of
-	// its own, so tmux reports pane_current_command as the wrapper shell and the
-	// remote detection (which drives the ssh icon/host color) never fires.
-	args := []string{"new-window", "-P", "-F", "#{window_id}", "-t", c.sessionID + ":"}
+	argsTmux := []string{"new-window", "-P", "-F", "#{window_id}"}
+	if sourceWindowID != "" {
+		argsTmux = append(argsTmux, "-a", "-t", sourceWindowID)
+	} else {
+		argsTmux = append(argsTmux, "-t", c.sessionID+":")
+	}
 	if workingDir != "" {
-		args = append(args, "-c", workingDir)
+		argsTmux = append(argsTmux, "-c", workingDir)
 	}
 
-	out, err := tmuxCmd(args...).CombinedOutput()
-	newWindowIDLegacy := strings.TrimSpace(string(out))
+	out, err := tmuxCmd(argsTmux...).CombinedOutput()
+	newWindowIDLegacy := firstToken(strings.TrimSpace(string(out)), "@")
 	logEvent("NEW_WINDOW_LEGACY_RESULT id=%s err=%v", newWindowIDLegacy, err)
 
-	if newWindowIDLegacy != "" && currentGroup != "" && currentGroup != "Default" {
+	if newWindowIDLegacy != "" && currentGroup != "" {
 		tmuxCmd("set-window-option", "-t", newWindowIDLegacy, "@tabby_group", currentGroup).Run()
 	}
 	if newWindowIDLegacy != "" && color != "" {
 		tmuxCmd("set-window-option", "-t", newWindowIDLegacy, "@tabby_color", color).Run()
+		tmuxCmd("set-window-option", "-t", newWindowIDLegacy, "@tabby_color_seeded", "1").Run()
 	}
 	if newWindowIDLegacy != "" && icon != "" {
 		tmuxCmd("set-window-option", "-t", newWindowIDLegacy, "@tabby_icon", icon).Run()

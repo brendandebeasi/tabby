@@ -4,6 +4,7 @@
 package newwindow
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 
 	tabbycfg "github.com/brendandebeasi/tabby/pkg/config"
 	daemonpkg "github.com/brendandebeasi/tabby/pkg/daemon"
+	"github.com/brendandebeasi/tabby/pkg/paths"
 	"github.com/brendandebeasi/tabby/pkg/tmux"
 	tmuxpkg "github.com/brendandebeasi/tabby/pkg/tmux"
 )
@@ -27,8 +29,10 @@ type config struct {
 	path      string
 	color     string
 	icon      string
+	after     string
 	clientTTY string
 	noSidebar bool
+	printID   bool
 	debug     bool
 }
 
@@ -41,8 +45,10 @@ func Run(args []string) int {
 	fs.StringVar(&cfg.path, "path", "", "working directory for the new window")
 	fs.StringVar(&cfg.color, "color", "", "@tabby_color to seed on the new window (e.g. inherited from an ssh parent)")
 	fs.StringVar(&cfg.icon, "icon", "", "@tabby_icon to seed on the new window")
+	fs.StringVar(&cfg.after, "after", "", "window ID to insert the new window after")
 	fs.StringVar(&cfg.clientTTY, "client-tty", "", "client TTY for multi-client focus")
 	fs.BoolVar(&cfg.noSidebar, "no-sidebar", false, "skip sidebar creation (mobile/collapsed)")
+	fs.BoolVar(&cfg.printID, "print-id", false, "print created window ID to stdout")
 	fs.BoolVar(&cfg.debug, "debug", false, "enable debug logging")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -59,12 +65,14 @@ func Run(args []string) int {
 		return 1
 	}
 
-	// Group is only ever what the caller passed explicitly (-group, e.g. a
-	// group's dedicated "+"). We deliberately do NOT inherit the active window's
-	// @tabby_group here: a plain new tab (sidebar +, prefix-c, M-n) should be
-	// grouped by WHERE it opens, not by which tab launched it. The daemon's
-	// cwd->group preset (presetGroupForWindow) files it under the matching
-	// group's working_dir on the next refresh, or leaves it in Default.
+	afterWindowID := strings.TrimSpace(cfg.after)
+	if afterWindowID == "" {
+		afterWindowID = firingWindowID(cfg)
+	}
+	if i := strings.IndexByte(afterWindowID, '#'); i >= 0 {
+		afterWindowID = afterWindowID[:i]
+	}
+
 	group := strings.TrimSpace(cfg.group)
 	color := strings.TrimSpace(cfg.color)
 	icon := strings.TrimSpace(cfg.icon)
@@ -73,12 +81,47 @@ func Run(args []string) int {
 	if windowPath == "" && strings.TrimSpace(cfg.clientTTY) != "" {
 		windowPath = readTmuxDisplayForClient(cfg, strings.TrimSpace(cfg.clientTTY), "#{pane_current_path}")
 	}
+	if windowPath == "" && afterWindowID != "" {
+		windowPath = runTmuxTrimmedOrEmpty(cfg, "display-message", "-t", afterWindowID, "-p", "#{pane_current_path}")
+	}
 	if windowPath == "" {
 		windowPath = runTmuxTrimmedOrEmpty(cfg, "display-message", "-p", "#{pane_current_path}")
 	}
 
 	// Load config once (also reused for the native-borders check below).
 	tcfg, _ := tabbycfg.LoadConfig(tabbycfg.DefaultConfigPath())
+
+	// Inherit group from the window the user is currently in when not explicitly passed.
+	if group == "" && afterWindowID != "" {
+		group = readTmuxWindowOption(afterWindowID, "@tabby_group")
+	}
+	if group == "" {
+		group = "Default"
+	}
+
+	// Inherit color from the current window, unless dir has another color.
+	if color == "" {
+		curCustomColor := ""
+		if afterWindowID != "" {
+			curCustomColor = readTmuxWindowOption(afterWindowID, "@tabby_color")
+		}
+		effectiveCurrentColor := curCustomColor
+		if effectiveCurrentColor == "" && tcfg != nil {
+			for _, g := range tcfg.Groups {
+				if g.Name == group && strings.TrimSpace(g.Theme.Bg) != "" {
+					effectiveCurrentColor = strings.TrimSpace(g.Theme.Bg)
+					break
+				}
+			}
+		}
+
+		dirColor := resolveDirColor(windowPath, tcfg)
+		if dirColor != "" && !strings.EqualFold(dirColor, effectiveCurrentColor) {
+			color = dirColor
+		} else if curCustomColor != "" {
+			color = curCustomColor
+		}
+	}
 
 	// If the firing pane is currently in an ssh/mosh session, re-run that exact
 	// connection in the new tab so it lands on the same host, and treat the parent
@@ -97,35 +140,15 @@ func Run(args []string) int {
 		srcRemote = remoteCmd != "" || firingPaneIsRemote(cfg)
 	}
 
-	// Copy the parent tab's decorations (group/color/icon) so the new tab shares
-	// its visual identity — whenever the parent is a remote/ssh tab, even if the
-	// exact ssh command couldn't be captured to re-run. Caller-supplied values
-	// (the daemon "+" path passes -group/-color/-icon) always win. Read straight
-	// off the firing window's tmux options, since this subcommand (prefix-c / M-n)
-	// has no view of the daemon's in-memory appearance. The usual "grouped by where
-	// it opens" rule still holds for a plain (non-remote) new tab.
 	if srcRemote {
 		if fw := firingWindowID(cfg); fw != "" {
-			if group == "" {
-				group = readTmuxWindowOption(fw, "@tabby_group")
-			}
-			if color == "" {
-				color = readTmuxWindowOption(fw, "@tabby_color")
-			}
 			if icon == "" {
 				icon = readTmuxWindowOption(fw, "@tabby_icon")
 			}
 		}
 	}
 
-	// Register this spawn with the daemon BEFORE creating the window. Unlike the
-	// daemon's own "+"-click path (which sets the in-flight status in-process),
-	// this subcommand runs in a SEPARATE process, so the daemon otherwise never
-	// learns the firing client tty. Without it, the post-creation move-window
-	// renumber shuffle drops tmux's active marker and the focus re-assert
-	// (preferredWindowFocusTarget, gated on a "ready" status) is skipped — tmux's
-	// fallback election then lands on the FIRST window instead of the new one.
-	// Fire-and-forget: a down/absent daemon must never block window creation.
+	// Register this spawn with the daemon BEFORE creating the window.
 	sendDaemonHook(sessionID, "new-window-pending", map[string]string{
 		"tty":   strings.TrimSpace(cfg.clientTTY),
 		"group": group,
@@ -145,16 +168,12 @@ func Run(args []string) int {
 		}
 	}()
 
-	// NOTE: the ssh/mosh re-run is NOT passed as new-window's shell-command. A
-	// trailing "cmd; exec $SHELL" runs under a non-interactive `$SHELL -c`, which
-	// gives ssh no controlling foreground process group of its own, so tmux reports
-	// pane_current_command as the wrapper shell (e.g. "zsh"), not "ssh" — and the
-	// daemon's remote detection (which gates on pane_current_command) never fires,
-	// so the tab gets no ssh icon/host color. Instead we create a normal interactive
-	// shell and send-keys the command into it below, exactly mirroring a hand-typed
-	// ssh: ssh becomes the pane's foreground command and the tab returns to a shell
-	// on disconnect.
-	tmuxArgs := []string{"new-window", "-P", "-F", "#{window_id}", "-t", sessionID + ":"}
+	tmuxArgs := []string{"new-window", "-P", "-F", "#{window_id}"}
+	if afterWindowID != "" {
+		tmuxArgs = append(tmuxArgs, "-a", "-t", afterWindowID)
+	} else {
+		tmuxArgs = append(tmuxArgs, "-t", sessionID+":")
+	}
 	if windowPath != "" {
 		tmuxArgs = append(tmuxArgs, "-c", windowPath)
 	}
@@ -174,19 +193,17 @@ func Run(args []string) int {
 		"window": newWindowID,
 	})
 
-	if group != "" && group != "Default" {
+	if group != "" {
 		if _, err := runTmuxOutput(cfg, "set-window-option", "-t", newWindowID, "@tabby_group", group); err != nil {
 			debugLog(cfg, "failed setting @tabby_group on %s: %v", newWindowID, err)
 		}
 	}
 
-	// Seed inherited appearance (from an ssh parent tab) so the new tab is born
-	// with the host's look instead of flickering through the local launch dir's
-	// identity until the daemon detects the ssh.
 	if color != "" {
 		if _, err := runTmuxOutput(cfg, "set-window-option", "-t", newWindowID, "@tabby_color", color); err != nil {
 			debugLog(cfg, "failed setting @tabby_color on %s: %v", newWindowID, err)
 		}
+		_ = runTmuxTrimmedOrEmpty(cfg, "set-window-option", "-t", newWindowID, "@tabby_color_seeded", "1")
 	}
 	if icon != "" {
 		if _, err := runTmuxOutput(cfg, "set-window-option", "-t", newWindowID, "@tabby_icon", icon); err != nil {
@@ -284,6 +301,9 @@ func Run(args []string) int {
 	// a subshell that exits immediately.
 	if cmdToType := NewTabCommand(tcfg, remoteCmd); cmdToType != "" && contentPane != "" {
 		sendCommandToPane(cfg, contentPane, cmdToType)
+	}
+	if cfg.printID {
+		fmt.Println(newWindowID)
 	}
 	_ = filepath.Dir // silence unused import when code paths change
 	return 0
@@ -577,4 +597,90 @@ func debugLog(cfg *config, format string, a ...any) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[new-window] "+format+"\n", a...)
+}
+
+func resolveDirColor(dir string, tcfg *tabbycfg.Config) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	dir = filepath.Clean(dir)
+
+	// 1. Check ~/.local/state/tabby/cwd-colors.json
+	statePath := paths.StatePath("cwd-colors.json")
+	if data, err := os.ReadFile(statePath); err == nil {
+		var colorsMap map[string]struct {
+			Color string `json:"color"`
+		}
+		if err := json.Unmarshal(data, &colorsMap); err == nil {
+			top := gitToplevel(dir)
+			if top != "" {
+				if entry, ok := colorsMap[filepath.Clean(top)]; ok && strings.TrimSpace(entry.Color) != "" {
+					return strings.TrimSpace(entry.Color)
+				}
+			}
+			if entry, ok := colorsMap[dir]; ok && strings.TrimSpace(entry.Color) != "" {
+				return strings.TrimSpace(entry.Color)
+			}
+		}
+	}
+
+	// 2. Check configured groups matching working_dir
+	if tcfg != nil {
+		bestLen := -1
+		bestColor := ""
+		for _, g := range tcfg.Groups {
+			if g.Name == "" || g.Name == "Default" || strings.TrimSpace(g.Theme.Bg) == "" {
+				continue
+			}
+			wdir := expandWorkingDir(g.WorkingDir)
+			if wdir == "" {
+				continue
+			}
+			if dir == wdir || strings.HasPrefix(dir, wdir+string(filepath.Separator)) {
+				if len(wdir) > bestLen {
+					bestLen = len(wdir)
+					bestColor = strings.TrimSpace(g.Theme.Bg)
+				}
+			}
+		}
+		if bestColor != "" {
+			return bestColor
+		}
+	}
+
+	return ""
+}
+
+func gitToplevel(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(strings.TrimSpace(string(out)))
+}
+
+func expandWorkingDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	if dir == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Clean(home)
+		}
+		return ""
+	}
+	if strings.HasPrefix(dir, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Clean(filepath.Join(home, dir[2:]))
+		}
+	}
+	return filepath.Clean(dir)
 }
