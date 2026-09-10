@@ -113,7 +113,7 @@ fi
 # Bell monitoring for notifications (activity is too noisy - triggers on any output)
 tmux set-option -g monitor-activity off
 tmux set-option -g monitor-bell on
-tmux set-option -g bell-action other  # Flag bells from non-active windows
+tmux set-option -g bell-action none  # Do not forward bell to outer terminal (prevents dock icon bounce)
 
 # Window sizing: resize all windows/panes together when terminal resizes.
 # NOTE: `window-size manual` segfaults homebrew tmux inside
