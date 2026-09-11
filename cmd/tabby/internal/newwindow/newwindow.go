@@ -91,36 +91,25 @@ func Run(args []string) int {
 	// Load config once (also reused for the native-borders check below).
 	tcfg, _ := tabbycfg.LoadConfig(tabbycfg.DefaultConfigPath())
 
-	// Inherit group from the window the user is currently in when not explicitly passed.
-	if group == "" && afterWindowID != "" {
-		group = readTmuxWindowOption(afterWindowID, "@tabby_group")
-	}
+	// Resolve group and style: match configured working_dir if in a mapped folder,
+	// otherwise use Default group/style.
 	if group == "" {
-		group = "Default"
-	}
-
-	// Inherit color from the current window, unless dir has another color.
-	if color == "" {
-		curCustomColor := ""
-		if afterWindowID != "" {
-			curCustomColor = readTmuxWindowOption(afterWindowID, "@tabby_color")
-		}
-		effectiveCurrentColor := curCustomColor
-		if effectiveCurrentColor == "" && tcfg != nil {
-			for _, g := range tcfg.Groups {
-				if g.Name == group && strings.TrimSpace(g.Theme.Bg) != "" {
-					effectiveCurrentColor = strings.TrimSpace(g.Theme.Bg)
-					break
-				}
+		if dg := resolveDirGroup(windowPath, tcfg); dg != nil {
+			group = dg.Name
+			if color == "" && strings.TrimSpace(dg.Theme.Bg) != "" {
+				color = strings.TrimSpace(dg.Theme.Bg)
+			}
+			if icon == "" && strings.TrimSpace(dg.Theme.Icon) != "" {
+				icon = strings.TrimSpace(dg.Theme.Icon)
+			}
+		} else {
+			group = "Default"
+			if color == "" {
+				color = resolveDirColor(windowPath, tcfg)
 			}
 		}
-
-		dirColor := resolveDirColor(windowPath, tcfg)
-		if dirColor != "" && !strings.EqualFold(dirColor, effectiveCurrentColor) {
-			color = dirColor
-		} else if curCustomColor != "" {
-			color = curCustomColor
-		}
+	} else if color == "" {
+		color = resolveDirColor(windowPath, tcfg)
 	}
 
 	// If the firing pane is currently in an ssh/mosh session, re-run that exact
@@ -597,6 +586,34 @@ func debugLog(cfg *config, format string, a ...any) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[new-window] "+format+"\n", a...)
+}
+
+func resolveDirGroup(dir string, tcfg *tabbycfg.Config) *tabbycfg.Group {
+	dir = strings.TrimSpace(dir)
+	if dir == "" || tcfg == nil {
+		return nil
+	}
+	dir = filepath.Clean(dir)
+
+	var bestGroup *tabbycfg.Group
+	bestLen := -1
+	for i := range tcfg.Groups {
+		g := &tcfg.Groups[i]
+		if g.Name == "" || g.Name == "Default" {
+			continue
+		}
+		wdir := expandWorkingDir(g.WorkingDir)
+		if wdir == "" {
+			continue
+		}
+		if dir == wdir || strings.HasPrefix(dir, wdir+string(filepath.Separator)) {
+			if len(wdir) > bestLen {
+				bestLen = len(wdir)
+				bestGroup = g
+			}
+		}
+	}
+	return bestGroup
 }
 
 func resolveDirColor(dir string, tcfg *tabbycfg.Config) string {

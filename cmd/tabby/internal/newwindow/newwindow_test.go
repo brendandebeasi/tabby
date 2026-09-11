@@ -62,6 +62,49 @@ func TestResolveDirColor_CWDColorsJSON(t *testing.T) {
 	}
 }
 
+func TestResolveDirGroup_ConfigWorkingDir(t *testing.T) {
+	cfg := &tabbycfg.Config{
+		Groups: []tabbycfg.Group{
+			{
+				Name:       "Frontend",
+				WorkingDir: "/projects/frontend",
+				Theme: tabbycfg.Theme{
+					Bg:   "#ff5500",
+					Icon: "🌐",
+				},
+			},
+			{
+				Name:       "SubModule",
+				WorkingDir: "/projects/frontend/sub",
+				Theme: tabbycfg.Theme{
+					Bg:   "#00ff55",
+					Icon: "📦",
+				},
+			},
+		},
+	}
+
+	// Exact match
+	if g := resolveDirGroup("/projects/frontend", cfg); g == nil || g.Name != "Frontend" {
+		t.Errorf("resolveDirGroup(/projects/frontend) = %v, want group Frontend", g)
+	}
+
+	// Subdirectory match
+	if g := resolveDirGroup("/projects/frontend/src", cfg); g == nil || g.Name != "Frontend" {
+		t.Errorf("resolveDirGroup(/projects/frontend/src) = %v, want group Frontend", g)
+	}
+
+	// Nested match
+	if g := resolveDirGroup("/projects/frontend/sub/deep", cfg); g == nil || g.Name != "SubModule" {
+		t.Errorf("resolveDirGroup(/projects/frontend/sub/deep) = %v, want group SubModule", g)
+	}
+
+	// Unrelated directory -> returns nil (default)
+	if g := resolveDirGroup("/projects/backend", cfg); g != nil {
+		t.Errorf("resolveDirGroup(/projects/backend) = %v, want nil", g)
+	}
+}
+
 func TestResolveDirColor_ConfigWorkingDir(t *testing.T) {
 	cfg := &tabbycfg.Config{
 		Groups: []tabbycfg.Group{
