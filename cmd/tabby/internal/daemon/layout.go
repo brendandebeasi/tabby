@@ -75,7 +75,7 @@ func flushOpsBatched(ops []ResizeOp, reason string) {
 			}
 			switch op.Kind {
 			case OpResizeWindow:
-				args = append(args, "resize-window", "-t", op.Target, "-x", fmtInt(op.X), "-y", fmtInt(op.Y))
+				args = append(args, "resize-window", "-t", op.Target, "-x", fmtInt(op.X), "-y", fmtInt(op.Y), ";", "set-window-option", "-t", op.Target, "-u", "window-size")
 			case OpResizePaneX:
 				args = append(args, "resize-pane", "-t", op.Target, "-x", fmtInt(op.X))
 			case OpResizePaneY:

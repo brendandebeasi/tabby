@@ -1723,10 +1723,8 @@ func (l *Loop) runHousekeeping(start, t1 time.Time, activeWindowID string, sizes
 	}
 
 	var lockTo *daemon.ActiveClient
-	if structureChanged {
-		if w, h, tty, _, ok := activeClientGeometry(); ok {
-			lockTo = &daemon.ActiveClient{TTY: tty, Width: w, Height: h}
-		}
+	if w, h, tty, _, ok := activeClientGeometry(); ok {
+		lockTo = &daemon.ActiveClient{TTY: tty, Width: w, Height: h}
 	}
 	reason := "signal_refresh"
 	if structureChanged {
