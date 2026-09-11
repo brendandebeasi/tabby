@@ -7,6 +7,10 @@
 - Creating a new window now inherits the active window's group and color (unless the directory defines its own color), and inserts directly below the current window in the tab bar.
 - On a phone the pane title now appears at the top of the screen as well as above the button bar. The content pane's own border strip was blanked below 100 columns to avoid ruling a line across the top row; it carries the same `<icon> <tab name> | <pane title>` label the bottom strip does, so the tab you are on is identifiable without looking to the foot of the screen. Costs no rows — the strip was already drawn, just empty.
 
+### Fixed
+
+- Bell diamond indicators (`◆`) now clear reliably when viewed in grouped sessions and suppress stale alert flags from unattached peer sessions.
+
 ## [v0.2.2] — 2026-09-06
 
 ### Added

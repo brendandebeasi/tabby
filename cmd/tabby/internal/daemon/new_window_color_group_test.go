@@ -118,3 +118,58 @@ func TestNewWindow_GroupAndColorResolution(t *testing.T) {
 	assert.Equal(t, "#e74c3c", otherDirColor)
 	assert.NotEqual(t, effectiveColor, otherDirColor, "dir has another color")
 }
+
+func TestClientMatchesSessionGroup(t *testing.T) {
+	// Same session group matches
+	assert.True(t, clientMatchesSessionGroup("$288", "infras", "$274", "infras"))
+	// Different session group does not match
+	assert.False(t, clientMatchesSessionGroup("$999", "other", "$274", "infras"))
+
+	// Ungrouped session matches by session ID
+	assert.True(t, clientMatchesSessionGroup("$100", "", "$100", ""))
+	// Different ungrouped session does not match
+	assert.False(t, clientMatchesSessionGroup("$200", "", "$100", ""))
+
+	// Fallback when no daemon session is known
+	assert.True(t, clientMatchesSessionGroup("$100", "", "", ""))
+}
+
+func TestBellDismissalOnView(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.windows = []tmux.Window{
+		{
+			ID:    "@10",
+			Index: 1,
+			Bell:  true,
+		},
+	}
+
+	// Stub attachedClientWindows to simulate window @10 being viewed by an attached client
+	origAttached := attachedClientWindows
+	attachedClientWindows = func() map[string]bool {
+		return map[string]bool{"@10": true}
+	}
+	defer func() { attachedClientWindows = origAttached }()
+
+	// First pass: window is viewed -> bell should be dismissed
+	ops := c.processAIToolStates(nil)
+	assert.False(t, c.windows[0].Bell, "bell should be dismissed when viewed")
+	assert.True(t, c.bellDismissed["@10"], "bellDismissed should be recorded")
+	assert.Contains(t, ops, tmuxSetOption{windowID: "@10", key: "@tabby_bell", unset: true})
+
+	// Second pass: window is no longer viewed, but tmux list-windows reports stale bell=true
+	attachedClientWindows = func() map[string]bool {
+		return map[string]bool{} // client switched to another window
+	}
+	c.windows[0].Bell = true // simulates stale window_bell_flag from unattached tmux session
+
+	_ = c.processAIToolStates(nil)
+	assert.False(t, c.windows[0].Bell, "bellDismissed must suppress stale tmux window_bell_flag")
+
+	// Third pass: a new bell arrives via settleAIPane
+	pane := &tmux.Pane{ID: "%1"}
+	c.aiBusySince[pane.ID] = 100
+	_ = c.settleAIPane(pane, &c.windows[0], false, 200, nil)
+	assert.False(t, c.bellDismissed["@10"], "new bell event must clear bellDismissed")
+	assert.True(t, c.windows[0].Bell, "new bell should be active")
+}

@@ -121,12 +121,34 @@ func tmuxOutputTrimmed(args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// clientMatchesSessionGroup checks whether a client row (with sessionID and sessionGroup)
+// belongs to this daemon's session or session group.
+func clientMatchesSessionGroup(clientSessID, clientSessGroup, daemonSessID, daemonSessGroup string) bool {
+	if daemonSessGroup != "" && clientSessGroup == daemonSessGroup {
+		return true
+	}
+	if daemonSessID != "" && clientSessID == daemonSessID {
+		return true
+	}
+	if daemonSessGroup == "" && daemonSessID == "" {
+		return true
+	}
+	return false
+}
+
 func clientTTYForWindow(windowID string) string {
 	windowID = strings.TrimSpace(windowID)
 	if windowID == "" {
 		return ""
 	}
-	out, err := tmuxOutputCtx(listClientsArgs("#{client_tty}|||#{window_id}|||#{client_activity}")...)
+	mySess := daemonSessionID()
+	myGroup := ""
+	if mySess != "" {
+		myGroup = displayMessageIn(mySess, "#{session_group}")
+	}
+
+	// server-wide list-clients: query all clients and filter to our session or session group
+	out, err := tmuxOutputCtx("list-clients", "-F", "#{client_tty}|||#{session_id}|||#{session_group}|||#{window_id}|||#{client_activity}")
 	if err != nil {
 		return ""
 	}
@@ -138,19 +160,23 @@ func clientTTYForWindow(windowID string) string {
 			continue
 		}
 		parts := strings.Split(line, "|||")
-		if len(parts) < 2 {
+		if len(parts) < 5 {
 			continue
 		}
 		tty := strings.TrimSpace(parts[0])
-		win := strings.TrimSpace(parts[1])
+		sessID := strings.TrimSpace(parts[1])
+		sessGroup := strings.TrimSpace(parts[2])
+		win := strings.TrimSpace(parts[3])
 		if tty == "" || win != windowID {
 			continue
 		}
+		if !clientMatchesSessionGroup(sessID, sessGroup, mySess, myGroup) {
+			continue
+		}
+
 		activity := int64(0)
-		if len(parts) >= 3 {
-			if v, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64); err == nil {
-				activity = v
-			}
+		if v, err := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64); err == nil {
+			activity = v
 		}
 		if activity > bestActivity {
 			bestActivity = activity
@@ -164,26 +190,33 @@ func clientTTYForWindow(windowID string) string {
 // client is currently looking at. A window can be its session's "active" window
 // while the session is fully detached (nobody is actually watching), so this is
 // the real "the user can see it" signal — used to acknowledge AI input
-// indicators only once they've genuinely been seen.
-// attachedClientWindows is a var, not a plain func, so tests can stub it. It
-// asks the live tmux server which windows are on screen, and several unseen-
-// attention decisions turn on the answer — so left unstubbed it makes those
-// tests read the developer's own session. A test asserting on window "@1"
-// silently inverts whenever a real client happens to be sitting on @1.
+// indicators and clear finished bells once they've genuinely been seen.
+// attachedClientWindows is a var, not a plain func, so tests can stub it.
 var attachedClientWindows = func() map[string]bool {
 	set := map[string]bool{}
-	out, err := tmuxOutputCtx(listClientsArgs("#{client_tty}|||#{window_id}")...)
+	mySess := daemonSessionID()
+	myGroup := ""
+	if mySess != "" {
+		myGroup = displayMessageIn(mySess, "#{session_group}")
+	}
+
+	// server-wide list-clients: query all clients and filter to our session or session group
+	out, err := tmuxOutputCtx("list-clients", "-F", "#{client_tty}|||#{session_id}|||#{session_group}|||#{window_id}")
 	if err != nil {
 		return set
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.Split(strings.TrimSpace(line), "|||")
-		if len(parts) < 2 {
+		if len(parts) < 4 {
 			continue
 		}
-		tty := strings.TrimSpace(parts[0])
-		win := strings.TrimSpace(parts[1])
-		if tty != "" && win != "" {
+		sessID := strings.TrimSpace(parts[1])
+		sessGroup := strings.TrimSpace(parts[2])
+		win := strings.TrimSpace(parts[3])
+		if win == "" {
+			continue
+		}
+		if clientMatchesSessionGroup(sessID, sessGroup, mySess, myGroup) {
 			set[win] = true
 		}
 	}
@@ -924,8 +957,9 @@ type Coordinator struct {
 	// later landed on that index -- a notification about work the user never
 	// started. Every sibling AI map here is keyed by a stable id for the same
 	// reason.
-	aiBellUntil map[string]int64 // window ID → unix timestamp when bell expires (window-level)
-	aiWorking   map[string]bool  // pane ID → pane body showed a live progress line (cached, see paneWorking)
+	aiBellUntil   map[string]int64 // window ID → unix timestamp when bell expires (window-level)
+	bellDismissed map[string]bool  // window ID → bell viewed and dismissed; suppresses stale tmux window_bell_flag
+	aiWorking     map[string]bool  // pane ID → pane body showed a live progress line (cached, see paneWorking)
 	aiWorkingAt map[string]int64 // pane ID → unix timestamp aiWorking was last measured
 
 	// Callback to sync sidebar client widths in the server's client map.
@@ -1711,6 +1745,7 @@ func NewCoordinator(sessionID string) *Coordinator {
 		prevPaneBusy:       make(map[string]bool),
 		prevPaneTitle:      make(map[string]string),
 		aiBellUntil:        make(map[string]int64),
+		bellDismissed:      make(map[string]bool),
 		hookPaneActive:     make(map[string]bool),
 		hookPaneBusyIdleAt: make(map[string]int64),
 		aiQuestion:         make(map[string]bool),
@@ -3031,7 +3066,9 @@ func (c *Coordinator) HandleWindowSelect(activeWindowID string) {
 	// bell is an unseen-notification, and this is the user seeing it. The
 	// input "?" is deliberately left alone: it marks an unanswered question,
 	// and switching to the window doesn't answer it.
-	tmuxCmd("set-option", "-w", "-t", activeWindowID, "@tabby_bell", "").Run()
+	delete(c.aiBellUntil, activeWindowID)
+	c.bellDismissed[activeWindowID] = true
+	tmuxCmd("set-option", "-w", "-t", activeWindowID, "-u", "@tabby_bell").Run()
 
 	cfg := c.GetConfig()
 	if cfg == nil || !cfg.PaneHeader.BorderFromTab {
@@ -3385,16 +3422,33 @@ func (c *Coordinator) SelectPreviousWindow() {
 // empty result means the query failed and callers should not treat any client
 // as detached.
 func attachedClientTTYs() map[string]bool {
+	mySess := daemonSessionID()
+	myGroup := ""
+	if mySess != "" {
+		myGroup = displayMessageIn(mySess, "#{session_group}")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	out, err := tmux.CmdContext(ctx, listClientsArgs("#{client_tty}")...).Output()
+	// server-wide list-clients: query all clients and filter to our session or session group
+	out, err := tmux.CmdContext(ctx, "list-clients", "-F", "#{client_tty}|||#{session_id}|||#{session_group}").Output()
 	if err != nil {
 		return nil
 	}
 	set := make(map[string]bool, 4)
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if t := strings.TrimSpace(line); t != "" {
-			set[t] = true
+		parts := strings.Split(strings.TrimSpace(line), "|||")
+		if len(parts) < 3 {
+			continue
+		}
+		tty := strings.TrimSpace(parts[0])
+		sessID := strings.TrimSpace(parts[1])
+		sessGroup := strings.TrimSpace(parts[2])
+		if tty == "" {
+			continue
+		}
+		if clientMatchesSessionGroup(sessID, sessGroup, mySess, myGroup) {
+			set[tty] = true
 		}
 	}
 	return set
@@ -5576,12 +5630,20 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 		// already unsets @tabby_bell on select, but the in-memory expiry
 		// re-asserted win.Bell every cycle until it aged out — so the ◆ came
 		// straight back when you switched away. Drop both on view.
+		//
+		// In grouped sessions, unattached peer sessions retain a stale
+		// window_bell_flag in tmux's alerts.c indefinitely, which re-arms
+		// win.Bell on every list-windows. bellDismissed tracks that the user
+		// already viewed and dismissed the alert until a new bell event arrives.
 		if viewed {
 			delete(c.aiBellUntil, win.ID)
+			c.bellDismissed[win.ID] = true
 			if win.Bell {
 				win.Bell = false
 				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", unset: true})
 			}
+		} else if c.bellDismissed[win.ID] {
+			win.Bell = false
 		} else if expiry, ok := c.aiBellUntil[win.ID]; ok {
 			// Check for expiring bell indicators (window-level)
 			if now < expiry {
@@ -5615,6 +5677,7 @@ func (c *Coordinator) processAIToolStates(preloaded *processTree) []tmuxSetOptio
 			if anyPrevAI && !viewed {
 				win.Bell = true
 				win.Input = false
+				delete(c.bellDismissed, win.ID)
 				c.aiBellUntil[win.ID] = now + 30
 				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", value: "1"})
 				pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_input", value: ""})
@@ -6001,6 +6064,7 @@ func (c *Coordinator) paneWorking(paneID string, now int64) bool {
 // ever viewed.
 func (c *Coordinator) clearDoneBell(win *tmux.Window, pending []tmuxSetOption) []tmuxSetOption {
 	delete(c.aiBellUntil, win.ID)
+	c.bellDismissed[win.ID] = true
 	if win.Bell {
 		win.Bell = false
 		pending = append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", unset: true})
@@ -6047,6 +6111,7 @@ func (c *Coordinator) settleAIPane(pane *tmux.Pane, win *tmux.Window, viewed boo
 		return pending
 	}
 	win.Bell = true
+	delete(c.bellDismissed, win.ID)
 	c.aiBellUntil[win.ID] = now + aiDoneBellSeconds
 	logEvent("AI_DONE_BELL pane=%s window=%d", pane.ID, win.Index)
 	return append(pending, tmuxSetOption{windowID: win.ID, key: "@tabby_bell", value: "1"})
