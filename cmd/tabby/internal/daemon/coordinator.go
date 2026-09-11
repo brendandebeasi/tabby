@@ -11757,22 +11757,16 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_profile_clamp active=%s measured=%d global=%d clamp=%d", activeWindowID, effectiveActive, c.globalWidth, profileClamped)
 			} else if atKeyboardClamp {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=at_keyboard_clamp active=%s measured=%d global=%d clamp=%d hold=%v hold_expired=%v height=%d", activeWindowID, effectiveActive, c.globalWidth, keyboardWidth, keyboardHoldPending, keyboardHoldPending && now.After(keyboardHoldExpiry), activeHeight)
-			} else if multiClientSizes || measurementsDisagree {
-				// Ambiguous, not wrong. Two attached clients of different sizes
-				// make tmux reflow the window to whichever acted last, and a pass
-				// landing mid-resize reads a width that is still moving; neither
-				// measurement is authoritative on sight. Refusing outright was
-				// worse than useless though — the per-window loop below then
-				// pulled the active window back to the stale global, so every
-				// sidebar drag on a desktop with a second client attached snapped
-				// straight back (WIDTH_SYNC_ADOPT_SKIP reason=multi_client_sizes
-				// followed by current=35 target=15). Hold the measurement as a
-				// candidate, leave the active window at the width it has, and
-				// adopt once a second pass corroborates it.
+			} else if measurementsDisagree {
+				// Mid-reflow: the renderer and tmux list-panes disagree on width.
+				// This happens during initial window splits and geometry transitions;
+				// adopting it propagates transient garbage to every window.
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=measurements_disagree active=%s reported=%d measured=%d global=%d", activeWindowID, reportedActive, effectiveActive, c.globalWidth)
+			} else if multiClientSizes {
+				// Ambiguous: two attached clients of different sizes make tmux
+				// reflow the window to whichever acted last. Hold the measurement
+				// as a candidate and adopt once a second pass corroborates it.
 				reason := "multi_client_sizes"
-				if !multiClientSizes {
-					reason = "resize_in_flight"
-				}
 				confirmed, next := confirmWidthAdoptCandidate(prevAdoptCandidate, activeWindowID, effectiveActive, activeWinWidth, now)
 				c.pendingAdopt = next
 				if !confirmed {
