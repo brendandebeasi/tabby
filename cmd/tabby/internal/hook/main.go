@@ -617,22 +617,6 @@ func ensureSidebar(sessionID, windowID string) {
 
 	tmux.Cmd("set-option", "-g", "status", "off").Run()
 
-	// Check if current window already has a sidebar renderer THIS session owns.
-	// Grouped sessions share panes, so a peer's renderer is visible here too;
-	// treating that as "already handled" left a reattached session with no
-	// daemon of its own and every nav keybinding failing on a dead socket.
-	if windowID != "" {
-		out, _ := tmux.Cmd("list-panes", "-t", windowID, "-F", "#{pane_current_command}|#{pane_start_command}").Output()
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if !strings.Contains(line, "sidebar-renderer") && !strings.Contains(line, "sidebar") {
-				continue
-			}
-			if strings.Contains(line, "-session '"+sessionID+"'") {
-				return // this session's own sidebar already exists
-			}
-		}
-	}
-
 	sockPath := daemon.SocketPath(sessionID)
 	pidFile := daemon.PidPath(sessionID)
 
@@ -644,6 +628,19 @@ func ensureSidebar(sessionID, windowID string) {
 		if pid != "" {
 			if err := exec.Command("kill", "-0", pid).Run(); err == nil {
 				daemonRunning = true
+			}
+		}
+	}
+
+	if daemonRunning && windowID != "" {
+		// If daemon is alive and current window already has a sidebar renderer this session owns, return.
+		out, _ := tmux.Cmd("list-panes", "-t", windowID, "-F", "#{pane_current_command}|#{pane_start_command}").Output()
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if !strings.Contains(line, "sidebar-renderer") && !strings.Contains(line, "sidebar") {
+				continue
+			}
+			if strings.Contains(line, "-session '"+sessionID+"'") {
+				return
 			}
 		}
 	}

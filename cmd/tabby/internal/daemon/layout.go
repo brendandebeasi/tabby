@@ -87,7 +87,7 @@ func flushOpsBatched(ops []ResizeOp, reason string) {
 				reason, op.Kind, op.Target, op.X, op.Y, op.Subject, op.Reason)
 		}
 		if last {
-			args = append(args, ";", "set-option", "-g", "@tabby_spawning", "0")
+			args = append(args, ";", "set-option", "-g", "@tabby_spawning", "0", ";", "set-option", "-g", "window-size", "latest")
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

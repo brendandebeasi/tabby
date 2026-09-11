@@ -14,7 +14,7 @@ import (
 // left alone no matter how old it is -- a terminal left open overnight is
 // normal and detaching it would be hostile. Only idleness *combined* with a
 // size disagreement (see pruneStaleClients) makes a client a problem.
-const staleClientIdleThreshold = 8 * time.Hour
+const staleClientIdleThreshold = 5 * time.Minute
 
 // attachedClient is one row of `tmux list-clients`.
 type attachedClient struct {

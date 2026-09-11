@@ -118,6 +118,7 @@ type rendererModel struct {
 	width     int
 	height    int
 	connected bool
+	reconnectAttempts int
 
 	// Render state from daemon
 	content       string
@@ -207,6 +208,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.target = msg.target
 		m.clientID = msg.target.Key()
 		m.connected = true
+		m.reconnectAttempts = 0
 		debugLog.Printf("Connected as %s", m.clientID)
 
 		// Start receiver goroutine
@@ -218,7 +220,12 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case disconnectedMsg:
 		m.connected = false
-		debugLog.Printf("Disconnected from daemon")
+		m.reconnectAttempts++
+		if m.reconnectAttempts > 10 {
+			debugLog.Printf("Daemon dead after %d attempts, exiting paneheader", m.reconnectAttempts)
+			return m, tea.Quit
+		}
+		debugLog.Printf("Disconnected from daemon, attempt %d", m.reconnectAttempts)
 		// Try to reconnect after a delay
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
 			return connectCmd()()

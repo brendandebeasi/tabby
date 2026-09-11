@@ -140,13 +140,13 @@ func (e *ClientElector) Pin(tty, reason string) {
 // activity timestamp. OK is false if tmux reports no attached clients.
 //
 // The heuristic:
-//  1. Prefer clients with activity in the last 1.5s over idle ones.
+//  1. Prefer clients with activity in the last 3s over idle ones.
 //  2. Among the preferred group, take the most recently active.
 //  3. Ties broken by the `focused` flag.
 //  4. An active pin (set via Pin within preferredMaxAge) overrides the
 //     above entirely.
 func (e *ClientElector) Elect() ElectionResult {
-	const idleWindow = int64(1500)
+	const idleWindow = int64(3) // 3 seconds (was incorrectly 1500s)
 	now := time.Now().Unix()
 	out, err := tmux.Cmd(e.listClientsArgs(
 		"#{client_tty}|||#{client_width}|||#{client_height}|||#{client_flags}|||#{client_activity}")...).Output()

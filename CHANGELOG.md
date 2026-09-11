@@ -10,6 +10,12 @@
 ### Fixed
 
 - Bell diamond indicators (`◆`) now clear reliably when viewed in grouped sessions and suppress stale alert flags from unattached peer sessions.
+- Sidebar width flapping between window switches: removed passive renderer resize arming, gated `PlanWidthSync` on group layout ownership, and guarded against false adoption of mobile clamp presets on desktop windows.
+- Stale client active window election: fixed active elector idle window from 1500s to 3s so sleeping mobile clients are not treated as active peers competing with desktop input.
+- Stale client pruning: reduced idle detachment threshold on geometry-mismatched clients to 5 minutes so dropped mobile connections are cleanly pruned.
+- Manual window renames: preserved manual renames across directory sync and AI tab summarizer passes by recognizing disabled automatic-rename.
+- Dead renderer zombie recovery: `spawnRenderersForNewWindows` now verifies daemon socket connectivity and replaces unresponsive renderer panes instead of skipping with `skip_has_pane`.
+- Window size locking: reconcile passes re-assert `set-option -g window-size latest` to prevent windows from getting stuck in `manual` mode after window resizes.
 
 ## [v0.2.2] — 2026-09-06
 

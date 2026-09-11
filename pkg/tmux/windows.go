@@ -632,7 +632,7 @@ func ListWindows() ([]Window, error) {
 		args = append(args, "-t", sessionTarget)
 	}
 	args = append(args, "-F",
-		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}", "#{@tabby_ai_title}", "#{@tabby_color_seeded}", "#{@tabby_appearance_key}", "#{@tabby_appearance_auto}"}, tmuxFieldSep))
+		strings.Join([]string{"#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}", "#{window_activity_flag}", "#{window_bell_flag}", "#{window_silence_flag}", "#{window_last_flag}", "#{@tabby_color}", "#{@tabby_group}", "#{@tabby_busy}", "#{@tabby_bell}", "#{@tabby_activity}", "#{@tabby_silence}", "#{@tabby_collapsed}", "#{@tabby_input}", "#{@tabby_name_locked}", "#{@tabby_sync_width}", "#{session_id}", "#{@tabby_pinned}", "#{@tabby_icon}", "#{window_layout}", "#{@tabby_minimized}", "#{@tabby_ai_title}", "#{@tabby_color_seeded}", "#{@tabby_appearance_key}", "#{@tabby_appearance_auto}", "#{automatic-rename}"}, tmuxFieldSep))
 	out, err := DefaultRunner.Run(args...)
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-windows failed: %w", err)
@@ -702,11 +702,22 @@ func ListWindows() ([]Window, error) {
 			tabbyInput := strings.TrimSpace(parts[15])
 			input = tabbyInput == "1" || tabbyInput == "true"
 		}
-		// Name locked state from @tabby_name_locked option
+		// Name locked state from @tabby_name_locked option or explicit tmux rename
 		nameLocked := false
 		if len(parts) >= 17 {
 			tabbyNameLocked := strings.TrimSpace(parts[16])
-			nameLocked = tabbyNameLocked == "1" || tabbyNameLocked == "true"
+			if tabbyNameLocked == "1" || tabbyNameLocked == "true" {
+				nameLocked = true
+			} else if tabbyNameLocked == "0" || tabbyNameLocked == "false" {
+				nameLocked = false
+			} else if len(parts) >= 28 {
+				// If @tabby_name_locked is unset, check if automatic-rename is disabled
+				// (tmux automatically turns automatic-rename off when a user renames a window)
+				autoRename := strings.TrimSpace(parts[27])
+				if autoRename == "0" && !IsAITool(parts[2]) {
+					nameLocked = true
+				}
+			}
 		}
 		// Sync width state from @tabby_sync_width option (default true)
 		syncWidth := true

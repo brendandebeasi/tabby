@@ -63,7 +63,7 @@ func TestSelectStaleClientsKeepsSameSize(t *testing.T) {
 func TestSelectStaleClientsKeepsRecentlyActive(t *testing.T) {
 	now := time.Unix(1786930934, 0)
 	clients := []attachedClient{
-		{TTY: "/dev/ttys000", Width: 185, Height: 52, Activity: now.Add(-5 * time.Minute).Unix()},
+		{TTY: "/dev/ttys000", Width: 185, Height: 52, Activity: now.Add(-2 * time.Minute).Unix()},
 		{TTY: "/dev/ttys016", Width: 164, Height: 44, Activity: now.Unix()},
 	}
 	if stale := selectStaleClients(clients, now, staleClientIdleThreshold); stale != nil {

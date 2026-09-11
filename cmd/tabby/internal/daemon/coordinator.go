@@ -10935,7 +10935,7 @@ func (c *Coordinator) switchClientsOnWindow(sourceWindowID, targetWindowID strin
 	// server-wide list-clients: the clicking client can be attached to a peer
 	// session in the group (the sidebar pane is owned by one daemon but shared
 	// by every linked window), so rows must not be pre-filtered to our session.
-	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_session}|#{client_window}|#{session_id}").Output()
+	out, err := tmuxCmd("list-clients", "-F", "#{client_tty}|#{client_session}|#{client_window}|#{session_id}|#{client_activity}").Output()
 	if err != nil {
 		return nil
 	}
@@ -10950,15 +10950,17 @@ func (c *Coordinator) switchClientsOnWindow(sourceWindowID, targetWindowID strin
 	daemonSession := strings.TrimSpace(c.sessionID)
 
 	type ttyResolution struct {
-		tty     string
-		window  string
-		session string
+		tty      string
+		window   string
+		session  string
+		activity int64
 	}
 	var fallbackTTYs []string
 	ttySession := map[string]string{}
+	ttyActivity := map[string]int64{}
 	resolutions := []ttyResolution{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "|", 4)
+		parts := strings.Split(strings.TrimSpace(line), "|")
 		if len(parts) < 3 {
 			continue
 		}
@@ -10966,16 +10968,21 @@ func (c *Coordinator) switchClientsOnWindow(sourceWindowID, targetWindowID strin
 		sess := strings.TrimSpace(parts[1])
 		idx := strings.TrimSpace(parts[2])
 		sessID := sess
-		if len(parts) == 4 && strings.TrimSpace(parts[3]) != "" {
+		if len(parts) >= 4 && strings.TrimSpace(parts[3]) != "" {
 			sessID = strings.TrimSpace(parts[3])
+		}
+		var act int64
+		if len(parts) >= 5 {
+			act, _ = strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64)
 		}
 		if tty == "" {
 			continue
 		}
 		ttySession[tty] = sessID
+		ttyActivity[tty] = act
 		if sess == daemonSession || daemonSession == "" {
 			if winID, ok := idxToID[idx]; ok {
-				resolutions = append(resolutions, ttyResolution{tty: tty, window: winID, session: sessID})
+				resolutions = append(resolutions, ttyResolution{tty: tty, window: winID, session: sessID, activity: act})
 				continue
 			}
 		}
@@ -10991,17 +10998,31 @@ func (c *Coordinator) switchClientsOnWindow(sourceWindowID, targetWindowID strin
 			go func() {
 				defer wg.Done()
 				curOut, _ := tmuxCmd("display-message", "-p", "-c", tty, "#{window_id}").Output()
-				fallbackResults[i] = ttyResolution{tty: tty, window: strings.TrimSpace(string(curOut)), session: ttySession[tty]}
+				fallbackResults[i] = ttyResolution{tty: tty, window: strings.TrimSpace(string(curOut)), session: ttySession[tty], activity: ttyActivity[tty]}
 			}()
 		}
 		wg.Wait()
 		resolutions = append(resolutions, fallbackResults...)
 	}
 
+	idleLimit := int64(parkIdleSeconds())
+	now := time.Now().Unix()
+	anyActive := false
+	for _, r := range resolutions {
+		if r.window == src && r.activity > 0 && now-r.activity < idleLimit {
+			anyActive = true
+			break
+		}
+	}
+
 	ttys := []string{}
 	ttyTargets := map[string]string{}
 	for _, r := range resolutions {
 		if r.window != src {
+			continue
+		}
+		if anyActive && (r.activity == 0 || now-r.activity >= idleLimit) {
+			logEvent("SELECT_WINDOW_PERCLIENT_SKIP_IDLE tty=%s session=%s idle_s=%d", r.tty, r.session, now-r.activity)
 			continue
 		}
 		ttys = append(ttys, r.tty)
@@ -11271,12 +11292,14 @@ func distinctClientWidths(listClientsOutput string) int {
 	return len(seen)
 }
 
-// attachedClientWidthSpread reports whether the session currently has
-// attached clients of differing widths.
+// attachedClientWidthSpread reports whether the server currently has
+// attached clients of differing widths across sessions.
 func (c *Coordinator) attachedClientWidthSpread() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	out, err := tmux.CmdContext(ctx, listClientsArgs("#{client_width}")...).Output()
+	// server-wide list-clients: width differences between grouped session peers
+	// (e.g. desktop 188x53 vs mobile 55x45) must be detected across all sessions.
+	out, err := tmux.CmdContext(ctx, "list-clients", "-F", "#{client_width}").Output()
 	if err != nil {
 		return false
 	}
@@ -11378,6 +11401,10 @@ func (c *Coordinator) adoptGlobalSidebarWidth(activeWindowID string, width int) 
 // after layout changes).
 func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeOp {
 	start := time.Now()
+	if !c.OwnsGroupLayout() {
+		logEvent("WIDTH_SYNC_SKIP reason=not_layout_owner session=%s", c.sessionID)
+		return nil
+	}
 	if c.sidebarHidden {
 		logEvent("WIDTH_SYNC_SKIP reason=sidebar_collapsed active=%s force=%v", activeWindowID, force)
 		return nil
@@ -11609,6 +11636,8 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=switch_at_profile_clamp win=%s width=%d global=%d", prevAdoptCandidate.windowID, w, c.globalWidth)
 			} else if w == keyboardWidth && keyboardWidth < c.globalWidth {
 				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=switch_at_keyboard_clamp win=%s width=%d global=%d", prevAdoptCandidate.windowID, w, c.globalWidth)
+			} else if (w == 10 || w == 15 || w == 20) && c.globalWidth >= 25 {
+				logEvent("WIDTH_SYNC_ADOPT_SKIP reason=switch_at_tier_preset win=%s width=%d global=%d", prevAdoptCandidate.windowID, w, c.globalWidth)
 			} else {
 				logEvent("WIDTH_SYNC_ADOPT active=%s from=%d to=%d confirmed=switch", prevAdoptCandidate.windowID, c.globalWidth, w)
 				c.adoptGlobalSidebarWidth(prevAdoptCandidate.windowID, w)
@@ -11652,7 +11681,9 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 			// precisely because panes disagree with the global — would then
 			// clobber a legitimate wider width on every drift check.
 			profileClamped := c.boundedSidebarWidthForWindow(activeWindowID, c.globalWidth, clientHeightSnapshot[activeWindowID])
-			atProfileClamp := effectiveActive == profileClamped && profileClamped < c.globalWidth
+			activeWinWidth := windowWidths[activeWindowID]
+			atProfileClamp := (effectiveActive == profileClamped && profileClamped < c.globalWidth) ||
+				(activeWinWidth > sidebarTabletMaxWindowCols() && (effectiveActive <= 20 || effectiveActive == 15 || effectiveActive == 10))
 			// A sidebar is never legitimately the full window. A freshly
 			// spawned window is briefly all-sidebar before the content split
 			// lands, and a layout flip leaves it that way; the panel audit
@@ -11661,7 +11692,6 @@ func (c *Coordinator) PlanWidthSync(activeWindowID string, force bool) []ResizeO
 			// transient here and adopting it poisons globalWidth with the
 			// window width, which then yanks every other window on each audit
 			// tick. Use the same test so the two checks agree.
-			activeWinWidth := windowWidths[activeWindowID]
 			fullWidth := activeWinWidth > 0 && effectiveActive >= activeWinWidth-2
 			// Third clamp, same reasoning as atCap and atProfileClamp: a short
 			// client (an on-screen keyboard eating the viewport, or any client

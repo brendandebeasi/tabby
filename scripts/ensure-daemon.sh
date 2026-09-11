@@ -75,4 +75,5 @@ if [ -f "$WDF" ]; then
 fi
 
 rm -f "$SOCK" "$PIDF"
-"$CURRENT_DIR/bin/tabby" watchdog -session "$SESSION" &
+"$CURRENT_DIR/bin/tabby" watchdog -session "$SESSION" </dev/null >/dev/null 2>&1 &
+disown 2>/dev/null || true

@@ -119,6 +119,7 @@ type rendererModel struct {
 	width     int
 	height    int
 	connected bool
+	reconnectAttempts int
 
 	// Debounce generation counter for WindowSizeMsg (see resizeFlushMsg).
 	resizeGen int
@@ -230,6 +231,7 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.target = msg.target
 		m.clientID = msg.target.Key()
 		m.connected = true
+		m.reconnectAttempts = 0
 		debugLog.Printf("Connected as %s", m.clientID)
 		if inputLog != nil && isInputLogEnabled() {
 			inputLog.Printf("CONNECTED client=%s window=%s pane=%s", m.clientID, *windowID, m.headerPaneID)
@@ -244,9 +246,14 @@ func (m rendererModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case disconnectedMsg:
 		m.connected = false
-		debugLog.Printf("Disconnected from daemon")
+		m.reconnectAttempts++
+		if m.reconnectAttempts > 10 {
+			debugLog.Printf("Daemon dead after %d attempts, exiting windowheader", m.reconnectAttempts)
+			return m, tea.Quit
+		}
+		debugLog.Printf("Disconnected from daemon, attempt %d", m.reconnectAttempts)
 		if inputLog != nil && isInputLogEnabled() {
-			inputLog.Printf("DISCONNECTED client=%s window=%s pane=%s", m.clientID, *windowID, m.headerPaneID)
+			inputLog.Printf("DISCONNECTED client=%s window=%s pane=%s attempt=%d", m.clientID, *windowID, m.headerPaneID, m.reconnectAttempts)
 		}
 		// Try to reconnect after a delay
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {

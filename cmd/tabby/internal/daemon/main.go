@@ -752,6 +752,15 @@ func spawnRenderersForNewWindows(server *daemon.Server, sessionID string, window
 					tmuxCmd("kill-pane", "-t", paneID).Run()
 					continue
 				}
+
+				// If this renderer belongs to our session but is not connected to our daemon socket,
+				// it is a zombie/dead renderer process. Kill it so a fresh renderer can spawn.
+				if !connectedClients[windowID] {
+					logEvent("CLEANUP_DEAD_SOCKET_RENDERER window=%s pane=%s cmd=%s", windowID, paneID, curCmd)
+					tmuxCmd("kill-pane", "-t", paneID).Run()
+					continue
+				}
+
 				hasRenderer = true
 				break
 			}
@@ -3115,10 +3124,6 @@ func Run(args []string) int {
 	// loop on app launches.
 	server.OnResize = func(clientID string, width, height int, paneID string) {
 		coordinator.UpdateClientSizeSnapshot(clientID, width, height)
-		// Arm a drag candidate from the renderer's own report: the plan-time
-		// arm only ever sees the active window, so a drag followed by a fast
-		// window switch otherwise never arms and the drag is reverted.
-		coordinator.ArmWidthAdoptCandidate(clientID, width)
 		if paneID != "" {
 			coordinator.ApplyThemeToPane(paneID)
 		}
